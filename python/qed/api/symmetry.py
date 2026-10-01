@@ -76,9 +76,13 @@ class Symmetry:
         ``irrep_character``: ``{R: chi}`` keeps the little-co-group irreps with character
         chi on each given point-group element R (a coset representative, as listed by
         :meth:`groups`; the identity names the irrep dimension); a list keeps any of them.
-        Blocks whose little group lacks some R are dropped. Time reversal is not folded
-        under this selection, so each irrep is its own block.
-        ``k0`` / ``irrep``: the engine's own star and irrep indices, as reported on levels.
+        Blocks whose little group lacks some R are dropped. A star whose little co-group is
+        trivial has the one-dimensional trivial irrep (character 1 on the identity); an
+        element that acts on a small sector as a scalar c has character c there. Time
+        reversal is not folded under this selection, so each irrep is its own block.
+        ``k0`` / ``irrep``: the engine's own star and irrep indices, as reported on levels;
+        ``irrep`` names projected blocks only.
+        A selection that matches no block raises :class:`qed.errors.EmptySelection`.
         """
         out = self
         if sz is not None:
@@ -238,8 +242,10 @@ def momentum_of(level, spec, translations) -> tuple:
 
 def irrep_characters_of(level, spec, n_sites: int) -> dict:
     """{R: chi_sigma(R)} over the level's little co-group, R the coset representatives
-    (the identity included: its character is the irrep dimension); empty for a block
-    without a co-group decomposition."""
+    (the identity included: its character is the irrep dimension), and over the residues
+    that act on the level's sector as a multiple of a co-group element. A star with a trivial
+    co-group reports the trivial irrep ({identity: 1}); empty when the co-group could not be
+    projected (the block mixes irreps)."""
     ident = tuple(range(n_sites))
     return {(ident if e < 0 else tuple(spec.residues[e])): complex(c) for e, c in level.irrep_characters}
 

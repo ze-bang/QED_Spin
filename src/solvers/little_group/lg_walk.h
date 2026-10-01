@@ -40,6 +40,7 @@ engine_options(const Spec& s, const Subspace& sub, int dense_max_dim, int block_
     o.time_reversal = s.time_reversal;
     o.only_k0       = s.only_k0;
     o.only_irrep    = s.only_irrep;
+    o.only_irrep_chars = s.only_irrep_chars;
     o.dense_max_dim = dense_max_dim;
     o.block_size    = block_size;
     return o;
@@ -302,46 +303,62 @@ block_observable(const ::Operator& A, const ed::solvers::lg_detail::StarBuild& s
     return rep;
 }
 
-/// Whether a block meets any one of `any_of` (empty: always); `chi(i)` is its character on
-/// element i, or null when i is not in its group.
-template <class Chi>
-bool meets(const std::vector<Spec::CharConstraint>& any_of, Chi&& chi) {
-    if (any_of.empty()) return true;
-    for (const auto& c : any_of) {
-        bool ok = true;
-        for (const auto& [i, x] : c) {
-            const Complex* v = chi(i);
-            if (!v || std::abs(*v - x) > 1e-8) { ok = false; break; }
-        }
-        if (ok) return true;
+/// The co-group character table of block `irrep` of a star, as (elements, characters): a projected
+/// block's row; for a plain block of a trivial co-group the trivial irrep (the identity, character 1);
+/// for a declined non-trivial co-group, whose plain block mixes irreps, none (false).
+inline bool irrep_table(const ed::solvers::LittleGroupStarInfo& info, int irrep,
+                        const std::vector<int>*& elems, const std::vector<Complex>*& chars) {
+    using namespace ed::solvers::lg_detail;
+    if (irrep >= 0) {
+        if (static_cast<std::size_t>(irrep) >= info.little_characters.size()) return false;
+        elems = &info.little_elems;
+        chars = &info.little_characters[static_cast<std::size_t>(irrep)];
+        return true;
     }
-    return false;
+    if (!info.declined.empty()) return false;
+    elems = &trivial_elems();
+    chars = &trivial_chars();
+    return true;
 }
 
-/// chi_sigma(residue i) of block `irrep` of a star (-1: the identity), or null.
-inline const Complex* irrep_char(const ed::solvers::LittleGroupStarInfo& info, int irrep, int i) {
-    if (irrep < 0 || static_cast<std::size_t>(irrep) >= info.little_characters.size()) return nullptr;
-    for (std::size_t e = 0; e < info.little_elems.size(); ++e)
-        if (info.little_elems[e] == i) return &info.little_characters[static_cast<std::size_t>(irrep)][e];
-    return nullptr;
+/// chi_sigma(residue i) of block `irrep` of a star (-1: the identity), aliases included; nullopt when
+/// i is not in its group or the block has no character table.
+inline std::optional<Complex> irrep_char(const ed::solvers::LittleGroupStarInfo& info, int irrep, int i) {
+    const std::vector<int>* elems = nullptr;
+    const std::vector<Complex>* chars = nullptr;
+    if (!irrep_table(info, irrep, elems, chars)) return std::nullopt;
+    return ed::solvers::lg_detail::co_group_char(*elems, *chars, info.little_aliases, i);
 }
 
-/// The physical labels (momentum, co-group irrep characters) of a level of star `sb`.
+/// The physical labels (momentum, co-group irrep characters) of a level of star `sb`: every listed
+/// co-group element, then the aliased residues.
 inline void label(Level& L, const ed::solvers::lg_detail::StarBuild& sb) {
     const auto& info = sb.info;
     L.momentum = info.momentum;
     L.irrep_characters.clear();
-    const int s = L.tag.irrep;
-    if (s >= 0 && static_cast<std::size_t>(s) < info.little_characters.size())
-        for (std::size_t e = 0; e < info.little_elems.size(); ++e)
-            L.irrep_characters.emplace_back(info.little_elems[e],
-                                            info.little_characters[static_cast<std::size_t>(s)][e]);
+    const std::vector<int>* elems = nullptr;
+    const std::vector<Complex>* chars = nullptr;
+    if (!irrep_table(info, L.tag.irrep, elems, chars)) return;
+    for (std::size_t e = 0; e < elems->size(); ++e) L.irrep_characters.emplace_back((*elems)[e], (*chars)[e]);
+    for (const auto& [r, e, c] : info.little_aliases)
+        L.irrep_characters.emplace_back(r, c * (*chars)[static_cast<std::size_t>(e)]);
 }
 
-/// fn(cx, tr_on, star) for every star of one subspace, one star resident at a time.
+/// A verb whose selection (momentum, star, irrep, irrep character) matched no block raises
+/// EmptySelection instead of answering for an empty space.
+inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* verb) {
+    const bool selects = !s.only_k0.empty() || !s.only_irrep.empty() || !s.only_momentum.empty()
+                      || !s.only_irrep_chars.empty();
+    if (selects && n_blocks == 0)
+        throw ed::EmptySelection(std::string(verb) + ": the selection matches no block: no star of the "
+                                 "requested Sz sectors has that momentum, star index or little-group irrep");
+}
+
+/// fn(cx, tr_on, star) for every star of one subspace, one star resident at a time. Returns the
+/// number of blocks handed to fn, after the selection.
 template <class Fn>
-void walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::LittleGroupOptions& opt,
-          Fn&& fn) {
+std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::LittleGroupOptions& opt,
+                 Fn&& fn) {
     using namespace ed::solvers::lg_detail;
     EngineContext cx;
     bool tr_on = false;
@@ -352,12 +369,14 @@ void walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::Li
     auto momentum_of = [&](int k_ext) -> const std::vector<Complex>& {
         return cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
     };
+    std::size_t n_blocks = 0;
     for (const auto& [k0, members] : star_partition(cx, tr_on)) {
         if (!only.empty() && only.count(k0) == 0) continue;
         const bool hit = std::any_of(members.begin(), members.end(), [&](int m) {
             const auto& chi = momentum_of(m);
-            return meets(s.only_momentum, [&](int i) -> const Complex* {
-                return i >= 0 && static_cast<std::size_t>(i) < chi.size() ? &chi[static_cast<std::size_t>(i)] : nullptr;
+            return meets(s.only_momentum, [&](int i) -> std::optional<Complex> {
+                if (i >= 0 && static_cast<std::size_t>(i) < chi.size()) return chi[static_cast<std::size_t>(i)];
+                return std::nullopt;
             });
         });
         if (!hit) continue;
@@ -366,12 +385,15 @@ void walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::Li
                                          nullptr, nullptr, nullptr);
         sb.t_build = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_build).count();
         sb.info.momentum = momentum_of(k0);
+        // build_star_blocks solved only the wanted irreps already; the filter states the contract.
         if (!s.only_irrep_chars.empty())
             sb.blocks.erase(std::remove_if(sb.blocks.begin(), sb.blocks.end(), [&](const auto& bi) {
                 return !meets(s.only_irrep_chars, [&](int i) { return irrep_char(sb.info, bi->tag.irrep, i); });
             }), sb.blocks.end());
+        n_blocks += sb.blocks.size();
         fn(cx, tr_on, sb);
     }
+    return n_blocks;
 }
 
 }  // namespace ed::sectors::detail

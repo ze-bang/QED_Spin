@@ -76,10 +76,12 @@
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 namespace ed::solvers {
 
@@ -690,6 +692,57 @@ struct StarBuild {
     double t_orbit = 0.0;   // seconds in the star's own orbit table (group-sector path)
     double t_build = 0.0;   // seconds in build_star_blocks (set by the star walk)
 };
+
+// ---- naming irreps by character ---------------------------------------------
+using CharAliases = std::vector<std::tuple<int, int, Complex>>;
+
+/// chi_sigma(residue i) in a co-group table: elems[e] is the residue of element e (-1 the
+/// identity) and chars[e] its character; an alias (i, e, c) answers c chars[e]. nullopt when
+/// residue i is not in the group.
+[[nodiscard]] inline std::optional<Complex>
+co_group_char(const std::vector<int>& elems, const std::vector<Complex>& chars,
+              const CharAliases& aliases, int i) {
+    for (std::size_t e = 0; e < elems.size(); ++e)
+        if (elems[e] == i) return chars[e];
+    for (const auto& [r, e, c] : aliases)
+        if (r == i) return c * chars[static_cast<std::size_t>(e)];
+    return std::nullopt;
+}
+
+/// Whether a block meets any one of `any_of` (empty: always); chi(i) is its character on
+/// residue i, or nullopt when i is not in its group.
+template <class Chi>
+[[nodiscard]] bool meets(const std::vector<CharConstraint>& any_of, Chi&& chi) {
+    if (any_of.empty()) return true;
+    for (const auto& c : any_of) {
+        bool ok = true;
+        for (const auto& [i, x] : c) {
+            const std::optional<Complex> v = chi(i);
+            if (!v || std::abs(*v - x) > 1e-8) { ok = false; break; }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+/// Whether irrep `ii` of a co-group table passes opt.only_irrep and opt.only_irrep_chars.
+[[nodiscard]] inline bool wanted_irrep(const LittleGroupOptions& opt, int ii, const std::vector<int>& elems,
+                                       const std::vector<Complex>& chars, const CharAliases& aliases) {
+    if (!opt.only_irrep.empty()
+        && std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) == opt.only_irrep.end())
+        return false;
+    return meets(opt.only_irrep_chars, [&](int i) { return co_group_char(elems, chars, aliases, i); });
+}
+
+/// The character table of a star's plain block when its co-group is trivial: the identity alone.
+[[nodiscard]] inline const std::vector<int>& trivial_elems() {
+    static const std::vector<int> e{-1};
+    return e;
+}
+[[nodiscard]] inline const std::vector<Complex>& trivial_chars() {
+    static const std::vector<Complex> c{Complex(1, 0)};
+    return c;
+}
 
 // ---- helpers defined in the engine translation units ----------------------
 // lg_engine.cpp

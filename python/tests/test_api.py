@@ -222,10 +222,147 @@ def test_group_sectors_are_built_without_the_momentum_sector(caplog, monkeypatch
         with caplog.at_level(logging.INFO, logger="qed"):
             got = qed.spectrum(H, sym=qed.Symmetry(spatial=[T, R])).energies
     finally:
-        qed.set_log_level("off")
+        qed.set_log_level("warn")
     err = caplog.text
     assert "group-sector path," in err
     assert "do not tile" not in err
     monkeypatch.delenv("ED_SYM_PROFILE")
     ref = qed.spectrum(H, sym=qed.Symmetry.none()).energies
     np.testing.assert_allclose(np.sort(got), np.sort(ref), atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Selections: every block answers for its irrep; a selection matching nothing raises
+# ---------------------------------------------------------------------------
+
+def _reflection(n):
+    return [(-i) % n for i in range(n)]
+
+
+def _square_j1j2(L=4, j2=0.3):
+    """J1-J2 Heisenberg on the L x L square torus and its space group generators T_x, T_y, C_4, sigma."""
+    idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
+    xy = [(x, y) for y in range(L) for x in range(L)]
+    b = qed.input.HamiltonianBuilder(L * L)
+    b.heisenberg([(idx(x, y), idx(x + 1, y)) for x, y in xy] + [(idx(x, y), idx(x, y + 1)) for x, y in xy], J=1.0)
+    b.heisenberg([(idx(x, y), idx(x + 1, y + 1)) for x, y in xy]
+                 + [(idx(x, y), idx(x + 1, y - 1)) for x, y in xy], J=j2)
+    gens = ([idx(x + 1, y) for x, y in xy], [idx(x, y + 1) for x, y in xy],
+            [idx(-y, x) for x, y in xy], [idx(y, x) for x, y in xy])
+    return b.to_operator(), gens
+
+
+def _by_dimension(H, sym, n):
+    ident = tuple(range(n))
+    parts = []
+    for d in (1, 2, 3, 4, 6, 8, 12):
+        try:
+            parts.append(qed.spectrum(H, sym=sym.select(irrep_character={ident: d})).energies)
+        except qed.errors.EmptySelection:
+            pass
+    return np.sort(np.concatenate(parts))
+
+
+@pytest.mark.parametrize("case", ["ring", "open chain"])
+def test_irrep_dimension_partition_reassembles_the_spectrum(case):
+    # A star with a trivial little co-group carries the one-dimensional trivial irrep: generic
+    # momenta, and every star when the point group is absorbed into the abelian part (audit F-A-1).
+    if case == "ring":
+        n, H = 8, _ring(8, 0.37)
+        sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=4, spin_flip="off",
+                           time_reversal="off")
+    else:
+        n = 7
+        b = qed.input.HamiltonianBuilder(n)
+        b.heisenberg([(i, i + 1) for i in range(n - 1)], J=1.0)
+        b.heisenberg([(i, i + 2) for i in range(n - 2)], J=0.29)
+        H = b.to_operator()
+        sym = qed.Symmetry(spatial=[list(range(n))[::-1]], sz=3, spin_flip="off", time_reversal="off")
+    full = qed.spectrum(H, sym=sym)
+    np.testing.assert_allclose(_by_dimension(H, sym, n), np.sort(full.energies), atol=1e-10)
+    ident = tuple(range(n))
+    assert all(full.irrep_characters(i).get(ident) is not None for i in range(len(full.levels)))
+
+
+def test_a_residue_acting_as_a_scalar_keeps_its_character():
+    # On the small Sz sectors of a 7-site ring the reflection acts on k = 0 as a scalar; the states
+    # there still carry its character (audit F-DE-1: they were dropped from every selection).
+    n = 7
+    H = qed.Operator(n, 0.5)
+    for i in range(n):
+        j = (i + 1) % n
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.375)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.375)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0275)
+    T, R = _translations(n)[0], _reflection(n)
+    sym = qed.Symmetry(spatial=[T, R], spin_flip="off", time_reversal="off")
+    Rr = tuple(sym.groups(H)[1][0])
+    k0 = sym.select(momentum={tuple(T): 0})
+    whole = np.sort(qed.spectrum(H, sym=k0).energies)
+    split = np.concatenate([qed.spectrum(H, sym=k0.select(irrep_character={Rr: c})).energies for c in (1.0, -1.0)])
+    np.testing.assert_allclose(np.sort(split), whole, atol=1e-10)
+    polarised = qed.spectrum(H, sym=qed.Symmetry(spatial=[T, R], sz=0, spin_flip="off", time_reversal="off"))
+    assert len(polarised.levels) == 1 and abs(polarised.irrep_characters(0)[Rr] - 1) < 1e-12
+
+
+def test_irrep_index_selection_never_returns_plain_blocks():
+    # select(irrep=[i]) names projected blocks; stars with a trivial co-group have none
+    # (audit C04-engine-core-03: their whole k-sectors came back).
+    n = 12
+    sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=n // 2, spin_flip="off",
+                       time_reversal="off")
+    sel = qed.spectrum(_ring(n, 0.3), sym=sym.select(irrep=[1]))
+    assert sel.levels and all(int(L.irrep) == 1 for L in sel.levels)
+
+
+@pytest.mark.parametrize("verb", ["eigs", "spectrum", "thermal"])
+def test_a_selection_matching_nothing_raises(verb):
+    n = 12
+    H = _ring(n)
+    T = _translations(n)[0]
+    sym = qed.Symmetry(spatial=[T, _reflection(n)], sz=n // 2, spin_flip="off", time_reversal="off")
+    R = tuple(sym.groups(H)[1][0])
+    ident = tuple(range(n))
+    for nothing in (sym.select(momentum={tuple(T): 0.3}),                              # no such momentum
+                    sym.select(momentum={tuple(T): 0.25}, irrep_character={R: 1.0}),   # R does not fix k
+                    sym.select(irrep_character={ident: 5.0})):                          # no 5-dim irrep
+        with pytest.raises(qed.errors.EmptySelection):
+            if verb == "eigs":
+                qed.eigs(H, 1, sym=nothing)
+            elif verb == "spectrum":
+                qed.spectrum(H, sym=nothing)
+            else:
+                qed.thermal(H, [1.0], method="exact", sym=nothing)
+
+
+@pytest.mark.parametrize("n", [8, 9])
+def test_sz_parity_with_a_u1_hamiltonian(n):
+    # sz='even'/'odd' keeps the sectors whose set-bit count has that parity (audit C02-discovery-01:
+    # ignored for a U(1) H); the flip folds n with N - n only when both survive (N even).
+    H = _ring(n, 0.3)
+    for key, parity in (("even", 0), ("odd", 1)):
+        got = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=key)).energies)
+        want = np.concatenate([qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=m)).energies
+                               for m in range(n + 1) if m % 2 == parity])
+        np.testing.assert_allclose(got, np.sort(want), atol=1e-10)
+
+
+def test_one_dimensional_irreps_take_the_group_sector_path():
+    # Gamma of the 4x4 square torus has C4v's two-dimensional E next to A1, A2, B1, B2. A1 selected
+    # by character is a group sector (it went down the isotypic path with the whole star before:
+    # audit E10, P1-matvec-cpu-01); without a selection the star is split between the two paths.
+    H, (Tx, Ty, C4, sigma) = _square_j1j2()
+    sym = qed.Symmetry(spatial=[Tx, Ty, C4, sigma], sz=8, spin_flip="off", time_reversal="off")
+    A, residues = sym.groups(H)
+    assert len(A) == 16 and len(residues) == 7
+    gamma = sym.select(momentum={tuple(Tx): 0, tuple(Ty): 0})
+    a1 = qed.eigs(H, 1, sym=gamma.select(irrep_character={tuple(r): 1.0 for r in residues}), prune=False)
+    assert a1.block_stats and {b["kind"] for b in a1.block_stats} == {"group"}
+    split = qed.eigs(H, 40, sym=gamma, prune=False)
+    assert {b["kind"] for b in split.block_stats} == {"group", "isotypic"}
+    plain = qed.Symmetry(spatial=[Tx, Ty], point_group=False, sz=8, spin_flip="off", time_reversal="off")
+    ref = np.sort(qed.spectrum(H, sym=plain.select(momentum={tuple(Tx): 0, tuple(Ty): 0})).energies)
+    np.testing.assert_allclose(np.sort(qed.spectrum(H, sym=gamma).energies), ref, atol=1e-10)
+    a1_in_split = [split.levels[i].energy for i in range(len(split.levels))
+                   if all(abs(c - 1) < 1e-9 for c in split.irrep_characters(i).values())]
+    assert abs(a1.energies[0] - min(a1_in_split)) < 1e-10

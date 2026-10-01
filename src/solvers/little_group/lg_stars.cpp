@@ -60,9 +60,11 @@ namespace {
     return static_cast<std::uint64_t>(std::llround(dim));
 }
 
-// The group-sector fast path. Returns true when every wanted irrep of the star is one-dimensional and the star was
-// built here; false (with the reason under ED_SYM_PROFILE / verbose) sends the star down the isotypic W path,
-// unchanged. Everything the W path derives from monomials is derived here from permutations:
+// The group-sector fast path. Builds a group-sector block for every wanted ONE-dimensional irrep (wanted: passes
+// opt.only_irrep and opt.only_irrep_chars) and returns true; the wanted irreps of dimension > 1 go to `w_irreps`
+// for the isotypic W path, with `group_covered` the k-sector states the one-dimensional sectors hold. False (with
+// the reason under ED_SYM_PROFILE / verbose) sends the whole star down the W path, unchanged. Everything the W
+// path derives from monomials is derived here from permutations:
 //   little co-group  identity + one residue per coset of A (first in residue order, as same_coset keeps), fixing k0,
 //                    commuting with H at the TERM level (hamiltonian_commutes_with_permutation; the W path's
 //                    monomial_commutes needs an H_k0 apply, i.e. the full k-sector CSR);
@@ -76,9 +78,10 @@ namespace {
 [[nodiscard]] bool
 try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
                const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag, std::uint64_t dim_k,
-               StarBuild& sb, double* t_isotypic)
+               StarBuild& sb, std::vector<int>& w_irreps, std::uint64_t& group_covered, double* t_isotypic)
 {
     auto decline = [&](const std::string& why) {
+        w_irreps.clear();
         if (lg_diag)
             ED_LOG(Info, "[little_group] star k0=%d: group-sector path declined -- %s; isotypic (W) path.",
                    k0, why.c_str());
@@ -132,14 +135,19 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     try { giP = ed::symmetry::decompose_irreps_tables(mult); }
     catch (const std::exception& ex) { return decline(std::string("decompose_irreps_tables threw: ") + ex.what()); }
     const int nIr = static_cast<int>(giP.irreps.size());
+    // The wanted irreps: one-dimensional ones get group sectors here; larger ones, whose partners need the
+    // isotypic basis, go to the W path (Gamma of C6v: A1, A2, B1, B2 here, E1 and E2 there).
     std::vector<int> want;
-    for (int ii = 0; ii < nIr; ++ii)
-        if (opt.only_irrep.empty()
-            || std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) != opt.only_irrep.end())
-            want.push_back(ii);
-    for (int ii : want)
-        if (giP.irreps[static_cast<std::size_t>(ii)].dim != 1)
-            return decline("a two-dimensional irrep is wanted (partners need the isotypic basis)");
+    for (int ii = 0; ii < nIr; ++ii) {
+        const auto& ir = giP.irreps[static_cast<std::size_t>(ii)];
+        if (wanted_irrep(opt, ii, P_res, ir.character, {}))
+            (ir.dim == 1 ? want : w_irreps).push_back(ii);
+    }
+    if (want.empty() && !w_irreps.empty()) return decline("only irreps of dimension > 1 are wanted");
+    if (want.empty()) {                                  // nothing wanted in this star: no blocks
+        sb.info.little_order = nP;
+        return true;
+    }
 
     std::vector<std::vector<int>> Gp;
     Gp.reserve(cx.A.size() * static_cast<std::size_t>(nP));
@@ -254,10 +262,12 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     info.little_characters.clear();
     info.little_irrep_dims.clear();
     for (const auto& ir : giP.irreps) { info.little_characters.push_back(ir.character); info.little_irrep_dims.push_back(ir.dim); }
+    group_covered = one_dim_total;
     if (t_isotypic) *t_isotypic += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (lg_diag)
-        ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu",
-               k0, Gx, sb.blocks.size(), dim_k);
+        ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu%s",
+               k0, Gx, sb.blocks.size(), dim_k,
+               w_irreps.empty() ? "" : "; its irreps of dimension > 1 go to the isotypic (W) path");
     return true;
 }
 
@@ -297,9 +307,14 @@ build_star_blocks(const ::Operator&         op,
     base_tag.star_size   = m_star;
 
     // The group-sector path needs only the momentum sector's dimension (Burnside), so the sector itself -- the
-    // largest object of a star (3.8e8 representatives at N = 36, Gamma) -- is built only when the path declines.
-    // A star it solves has no k-sector operator (sb.hk stays null; its blocks carry their group sectors).
+    // largest object of a star (3.8e8 representatives at N = 36, Gamma) -- is built only when the path declines
+    // or leaves irreps of dimension > 1 to the W path. A star it solves alone has no k-sector operator (sb.hk
+    // stays null; its blocks carry their group sectors).
     std::uint64_t dim_k = 0;
+    // Hybrid star: the group-sector path solved the wanted one-dimensional irreps and left the larger ones
+    // (w_irreps) to the W path below, whose blocks then cover the k-sector together with group_covered states.
+    std::vector<int> w_irreps;
+    std::uint64_t group_covered = 0;
     if (group_sector_enabled(opt)) {
         dim_k = burnside_dim(cx, k0, opt.n_up);
         if (plan_print)
@@ -308,10 +323,12 @@ build_star_blocks(const ::Operator&         op,
         if (dim_k == 0) return sb;
         const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
                           || ed::logging::enabled(ed::logging::Level::Debug);
-        if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb,
-                           profile ? t_isotypic : nullptr))
+        if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb, w_irreps, group_covered,
+                           profile ? t_isotypic : nullptr)
+            && w_irreps.empty())
             return sb;
     }
+    bool hybrid = !w_irreps.empty();
 
     auto rd = build_k_sector(cx, k0, opt.n_up);
     if (plan_print && !group_sector_enabled(opt)) {
@@ -356,9 +373,9 @@ build_star_blocks(const ::Operator&         op,
         M.push_back(std::move(ident));
         M_res.push_back(-1);
     }
-    auto same_coset = [](const Monomial& a, const Monomial& b) {
+    // M_a = r M_b with one constant r: a and b act alike up to the factor r.
+    auto same_coset = [](const Monomial& a, const Monomial& b, Complex& r) {
         if (a.to != b.to) return false;
-        Complex r(0, 0);
         bool first = true;
         for (std::size_t i = 0; i < a.phase.size(); ++i) {
             const Complex ratio = a.phase[i] / b.phase[i];
@@ -367,18 +384,34 @@ build_star_blocks(const ::Operator&         op,
         }
         return true;
     };
+    // A residue whose monomial is a multiple of a kept element's (on a small sector a reflection may act as
+    // a scalar, a multiple of the identity) is not a new element, but it still has a character on every
+    // irrep: c times the element's. Kept as an alias, so labels and character selections see it.
+    CharAliases aliases;
+    // A residue fixing k0 that the checks below drop leaves the co-group incomplete: a plain block of this
+    // star is then not the trivial irrep, whatever M ends up holding.
+    std::string dropped;
+    const bool was_hybrid = hybrid;
     for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
         if (cx.irrep_map[rp][static_cast<std::size_t>(k0)] != k0) continue;
         Monomial m;
-        if (!build_monomial(cx, static_cast<int>(rp), rdr, m)) continue;
-        bool dup = false;
-        for (const auto& q : M)
-            if (same_coset(m, q)) { dup = true; break; }
-        if (dup) continue;
-        if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) continue;
+        if (!build_monomial(cx, static_cast<int>(rp), rdr, m)) {
+            dropped = "residue " + std::to_string(cx.residue_spec[rp]) + " has no monomial action on the sector";
+            continue;
+        }
+        int dup = -1;
+        Complex r(0, 0);
+        for (std::size_t q = 0; q < M.size() && dup < 0; ++q)
+            if (same_coset(m, M[q], r)) dup = static_cast<int>(q);
+        if (dup >= 0) { aliases.emplace_back(cx.residue_spec[rp], dup, r); continue; }
+        if (!monomial_commutes(hk, m, 0x51ED0000u + rp)) {
+            dropped = "residue " + std::to_string(cx.residue_spec[rp]) + " fails the [M_p, H] = 0 check";
+            continue;
+        }
         M.push_back(std::move(m));
         M_res.push_back(cx.residue_spec[rp]);
     }
+    info.little_aliases = aliases;
     if (profile) { *t_monomial += secs(t0, tick()); t0 = tick(); }
 
     bool projected = false;
@@ -387,18 +420,20 @@ build_star_blocks(const ::Operator&         op,
     // reduction -- and it forfeits the MOST at the high-symmetry momenta,
     // where the co-group is largest. Each path says WHY under
     // ED_SYM_PROFILE=1 / verbose, so "why is my Gamma block |P| times too
-    // big?" is answerable from the log.
+    // big?" is answerable from the log; with a non-trivial co-group the
+    // reason is also kept in info.declined.
     const bool lg_diag = [&] {
         return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
             || ed::logging::enabled(ed::logging::Level::Debug);
     }();
-    auto decline = [&](const char* why) {
+    auto decline = [&](const std::string& why) {
+        if (M.size() > 1) info.declined = why;
         if (lg_diag)
             ED_LOG(Info,
                 "[little_group] star k0=%d (dim=%zu, |little co-group|=%zu): "
                 "NOT projected -- %s. Correct, but this block keeps its "
                 "full k-sector size.",
-                k0, rdr.reps.size(), M.size(), why);
+                k0, rdr.reps.size(), M.size(), why.c_str());
     };
     if (M.size() > 1) {
         std::vector<std::vector<int>> multP;
@@ -409,21 +444,48 @@ build_star_blocks(const ::Operator&         op,
                 giP = ed::symmetry::decompose_irreps_tables(multP);
             } catch (const std::exception& e) {
                 gi_ok = false;
-                decline((std::string("decompose_irreps_tables threw: ")
-                         + e.what()).c_str());
+                decline(std::string("decompose_irreps_tables threw: ") + e.what());
+            }
+            const int nIr = gi_ok ? static_cast<int>(giP.irreps.size()) : 0;
+            auto irrep = [&](int ii) -> const ed::symmetry::IrrepData& {
+                return giP.irreps[static_cast<std::size_t>(ii)];
+            };
+            // A hybrid star's group-sector blocks carry the group path's co-group and irrep indices. The two
+            // lanes agree by construction (its label-parity guard); should they ever not, the W path solves
+            // the whole star.
+            if (gi_ok && hybrid) {
+                bool same = M_res == info.little_elems
+                         && static_cast<std::size_t>(nIr) == info.little_characters.size();
+                for (int ii = 0; same && ii < nIr; ++ii) {
+                    const auto& a = irrep(ii).character;
+                    const auto& b = info.little_characters[static_cast<std::size_t>(ii)];
+                    same = a.size() == b.size();
+                    for (std::size_t g = 0; same && g < a.size(); ++g) same = std::abs(a[g] - b[g]) < 1e-8;
+                }
+                if (!same) {
+                    ED_LOG(Warn, "[little_group] star k0=%d: the isotypic co-group differs from the "
+                                 "group-sector one; the isotypic path solves the whole star", k0);
+                    sb.blocks.clear();
+                    hybrid = false;
+                }
             }
             if (gi_ok) {
-                // Isotypic split; completeness guard sums the block dims.
-                const int nIr = static_cast<int>(giP.irreps.size());
+                // The irreps solved here: in a hybrid star the larger ones the group path left, else every
+                // wanted one.
+                std::vector<char> solve(static_cast<std::size_t>(nIr), 0);
+                for (int ii = 0; ii < nIr; ++ii)
+                    solve[static_cast<std::size_t>(ii)] =
+                        hybrid ? std::find(w_irreps.begin(), w_irreps.end(), ii) != w_irreps.end()
+                               : wanted_irrep(opt, ii, M_res, irrep(ii).character, aliases);
+                // Isotypic split; the completeness guard sums the block dims. A hybrid star needs the columns
+                // of its larger irreps only: its one-dimensional irreps hold the group_covered states.
                 std::vector<SparseColumns> Ws(static_cast<std::size_t>(nIr));
-                std::uint64_t covered = 0;
+                std::uint64_t covered = hybrid ? group_covered : 0;
                 for (int ii = 0; ii < nIr; ++ii) {
-                    Ws[static_cast<std::size_t>(ii)] = build_isotypic_columns(
-                        M, giP.irreps[static_cast<std::size_t>(ii)]);
-                    covered += static_cast<std::uint64_t>(
-                                   Ws[static_cast<std::size_t>(ii)].size())
-                             * static_cast<std::uint64_t>(
-                                   giP.irreps[static_cast<std::size_t>(ii)].dim);
+                    if (hybrid && irrep(ii).dim == 1) continue;
+                    Ws[static_cast<std::size_t>(ii)] = build_isotypic_columns(M, irrep(ii));
+                    covered += static_cast<std::uint64_t>(Ws[static_cast<std::size_t>(ii)].size())
+                             * static_cast<std::uint64_t>(irrep(ii).dim);
                 }
                 // sigma <-> sigma* pairing. Valid only when
                 // the k0 sector is REAL: chi_{k0} real => the monomial
@@ -438,7 +500,8 @@ build_star_blocks(const ::Operator&         op,
                 // multiplicity under the EARLIER member's label, so a
                 // caller who named the later member would get nothing back.
                 // Naming one irrep forfeits a 2x fold that is irrelevant
-                // beside the |P_k| the projection already bought.
+                // beside the |P_k| the projection already bought. (A
+                // character selection turns time reversal off in the walk.)
                 if (tr_on && opt.only_irrep.empty()) {
                     bool sector_real = true;
                     for (const Complex& c : rdr.characters)
@@ -451,17 +514,13 @@ build_star_blocks(const ::Operator&         op,
                     if (sector_real) {
                         for (int ii = 0; ii < nIr && sector_real; ++ii) {
                             if (pair_of[static_cast<std::size_t>(ii)] >= 0) continue;
-                            const auto& ci =
-                                giP.irreps[static_cast<std::size_t>(ii)].character;
+                            const auto& ci = irrep(ii).character;
                             for (int jj = ii + 1; jj < nIr; ++jj) {
-                                const auto& cj =
-                                    giP.irreps[static_cast<std::size_t>(jj)].character;
+                                const auto& cj = irrep(jj).character;
                                 bool conj_match = ci.size() == cj.size();
                                 for (std::size_t g = 0; conj_match && g < ci.size(); ++g)
                                     conj_match = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
-                                if (conj_match
-                                    && giP.irreps[static_cast<std::size_t>(ii)].dim
-                                           == giP.irreps[static_cast<std::size_t>(jj)].dim
+                                if (conj_match && irrep(ii).dim == irrep(jj).dim
                                     && Ws[static_cast<std::size_t>(ii)].size()
                                            == Ws[static_cast<std::size_t>(jj)].size()) {
                                     pair_of[static_cast<std::size_t>(ii)] = jj;
@@ -476,33 +535,24 @@ build_star_blocks(const ::Operator&         op,
                 if (covered == rdr.reps.size()) {
                     projected = true;
                     for (int ii = 0; ii < nIr; ++ii) {
-                        if (!opt.only_irrep.empty()
-                            && std::find(opt.only_irrep.begin(),
-                                         opt.only_irrep.end(), ii)
-                               == opt.only_irrep.end())
-                            continue;   // caller named other irreps
+                        if (!solve[static_cast<std::size_t>(ii)]) continue;
                         auto& W = Ws[static_cast<std::size_t>(ii)];
                         if (W.cols.empty()) continue;
-                        const int d =
-                            giP.irreps[static_cast<std::size_t>(ii)].dim;
+                        const int d = irrep(ii).dim;
                         const int jj = pair_of[static_cast<std::size_t>(ii)];
                         if (jj >= 0 && jj < ii) continue;  // partner solved
-                        const int mult = (jj > ii) ? 2 * m_star * d
-                                                   : m_star * d;
-                        auto Wsp = std::make_shared<const SparseColumns>(
-                            std::move(W));
+                        const int mult = (jj > ii) ? 2 * m_star * d : m_star * d;
+                        auto Wsp = std::make_shared<const SparseColumns>(std::move(W));
                         auto impl = std::make_shared<LittleGroupBlock::Impl>();
                         impl->tag              = base_tag;
                         impl->tag.irrep        = ii;
                         impl->tag.irrep_dim    = d;
                         impl->tag.tr_folded    = (jj > ii);
                         impl->tag.dim          = Wsp->cols.size();
-                        impl->tag.multiplicity =
-                            static_cast<std::uint64_t>(mult);
+                        impl->tag.multiplicity = static_cast<std::uint64_t>(mult);
                         impl->hk  = sb.hk;
                         impl->W   = Wsp;
-                        impl->pop = std::make_unique<ProjectedBlockOp>(
-                            sb.hk, Wsp);
+                        impl->pop = std::make_unique<ProjectedBlockOp>(sb.hk, Wsp);
                         sb.blocks.push_back(std::move(impl));
                     }
                     info.little_order = static_cast<int>(M.size());
@@ -515,24 +565,14 @@ build_star_blocks(const ::Operator&         op,
                     info.little_elems = M_res;
                     info.little_characters.clear();
                     info.little_irrep_dims.clear();
-                    info.little_characters.reserve(
-                        static_cast<std::size_t>(nIr));
-                    info.little_irrep_dims.reserve(
-                        static_cast<std::size_t>(nIr));
                     for (int ii = 0; ii < nIr; ++ii) {
-                        const auto& ir =
-                            giP.irreps[static_cast<std::size_t>(ii)];
-                        info.little_characters.push_back(ir.character);
-                        info.little_irrep_dims.push_back(ir.dim);
+                        info.little_characters.push_back(irrep(ii).character);
+                        info.little_irrep_dims.push_back(irrep(ii).dim);
                     }
                 } else {
-                    char buf[160];
-                    std::snprintf(buf, sizeof(buf),
-                        "isotypic columns cover %llu of %zu states (the "
-                        "irrep decomposition does not tile the sector)",
-                        static_cast<unsigned long long>(covered),
-                        rdr.reps.size());
-                    decline(buf);
+                    decline("isotypic columns cover " + std::to_string(covered) + " of "
+                            + std::to_string(rdr.reps.size())
+                            + " states (the irrep decomposition does not tile the sector)");
                 }
             }
         } else {
@@ -544,6 +584,27 @@ build_star_blocks(const ::Operator&         op,
                 "trivial) -- only the star fold applies here");
     }
     if (!projected) {
+        // One plain block holds the whole k-sector (a hybrid star's group-sector blocks go: they would
+        // count their states twice). Its irrep is the trivial one of a trivial co-group -- character 1,
+        // and the scalar of each aliased residue -- or, for a declined non-trivial co-group, a mixture.
+        sb.blocks.clear();
+        if (info.declined.empty() && !dropped.empty()) info.declined = dropped;
+        if (info.declined.empty() && was_hybrid)
+            info.declined = "the isotypic co-group did not match the group-sector one";
+        info.little_order = 1;
+        info.little_elems.clear();
+        info.little_characters.clear();
+        info.little_irrep_dims.clear();
+        if (!opt.only_irrep.empty()) return sb;           // irrep indices name projected blocks only
+        if (!opt.only_irrep_chars.empty()) {
+            if (!info.declined.empty())
+                throw ed::InvalidRequest(
+                    "star k0=" + std::to_string(k0) + ": its little co-group could not be projected ("
+                    + info.declined + "), so a selection by irrep character cannot be honoured there");
+            if (!meets(opt.only_irrep_chars, [&](int i) {
+                    return co_group_char(trivial_elems(), trivial_chars(), aliases, i); }))
+                return sb;
+        }
         auto impl = std::make_shared<LittleGroupBlock::Impl>();
         impl->tag              = base_tag;   // irrep = -1, irrep_dim = 1
         impl->tag.dim          = hk.dim();

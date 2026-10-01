@@ -28,11 +28,11 @@
 //      matvec -- memory O(#reps(k0)), never O(2^N). Eigenvalues carry
 //      multiplicity |star| × d_σ.
 //
-// Robustness contract: every reduction step degrades GRACEFULLY. A residue
-// that does not normalise A, a nontrivial (projective) factor system, a
-// monomial action that fails the numerical [M_p, H] = 0 check -- each just
-// falls back to solving the plain k0 block (correct, merely less reduced).
-// Correctness never depends on the little-group bookkeeping.
+// Robustness contract: a residue that does not normalise A is refused
+// (ed::InvalidRequest); every other reduction step degrades GRACEFULLY. A
+// nontrivial (projective) factor system or a monomial action that fails the
+// numerical [M_p, H] = 0 check falls back to solving the plain k0 block
+// (correct, merely less reduced; LittleGroupStarInfo::declined says why).
 // =============================================================================
 
 #include <ed/core/operator.h>
@@ -42,9 +42,16 @@
 #include <cstdint>
 #include <memory>
 #include <functional>
+#include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace ed::solvers {
+
+/// Irreps named by character: (residue index, chi) pairs that must all hold. Residue -1 is the
+/// identity, whose character is the irrep dimension.
+using CharConstraint = std::vector<std::pair<int, std::complex<double>>>;
 
 struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
@@ -88,6 +95,11 @@ struct LittleGroupOptions {
     /// irrep forfeits a 2x fold that is irrelevant next to the |P_k| the
     /// projection already bought.
     std::vector<int> only_irrep;
+    /// Solve ONLY the irreps meeting one of these character constraints (empty = every irrep).
+    /// Unlike ``only_irrep`` they mean the same in every star, and they reach the path
+    /// decision: a star whose wanted irreps are all one-dimensional takes the group-sector
+    /// path even when the co-group also has larger irreps.
+    std::vector<CharConstraint> only_irrep_chars;
     /// Lowest-k solves above the dense crossover: 1 (default) = single-vector
     /// Krylov-Schur with locking when k > 1 (the basis-free scan when k = 1);
     /// p >= 2 = block Krylov-Schur with block width p, which also resolves an
@@ -137,6 +149,13 @@ struct LittleGroupStarInfo {
     std::vector<int> little_elems;
     std::vector<std::vector<std::complex<double>>> little_characters;
     std::vector<int> little_irrep_dims;
+    /// Residues missing from little_elems because they act on this k-sector as a fixed multiple
+    /// of a listed element (M_p = c M_e; element 0, the identity: a scalar). Each is (residue
+    /// index, element e, c), and chi_sigma(residue) = c chi_sigma(element e).
+    std::vector<std::tuple<int, int, std::complex<double>>> little_aliases;
+    /// Why a NON-TRIVIAL little co-group could not be projected; empty when it was, or when the
+    /// co-group is trivial. A declined star has one plain block that mixes irreps.
+    std::string declined;
     /// chi_k0(a) over the RAW abelian group (the caller's order) for the representative.
     std::vector<std::complex<double>> momentum;
 };

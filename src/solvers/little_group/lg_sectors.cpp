@@ -72,11 +72,18 @@ void require_normal(const Spec& s, int n_sites) {
         for (const Perm& a : A) {
             for (std::size_t j = 0; j < c.size(); ++j)                  // p o a o p^-1
                 c[j] = p[static_cast<std::size_t>(a[static_cast<std::size_t>(p_inv[j])])];
-            if (!in_A.count(c))
-                throw ed::InvalidRequest(
-                    "sectors: residue " + std::to_string(i) + " does not normalise the abelian group; the "
-                    "abelian part must be a normal subgroup of the spatial group (qed.Symmetry chooses one "
-                    "when given the permutations as a list)");
+            if (in_A.count(c)) continue;
+            // A list that is not closed under composition fails here too: name the true cause.
+            for (const Perm& a1 : A)
+                for (const Perm& a2 : A) {
+                    for (std::size_t j = 0; j < c.size(); ++j) c[j] = a1[static_cast<std::size_t>(a2[j])];
+                    if (!in_A.count(c))
+                        throw ed::InvalidRequest("sectors: the abelian group is not closed under composition");
+                }
+            throw ed::InvalidRequest(
+                "sectors: residue " + std::to_string(i) + " does not normalise the abelian group; the "
+                "abelian part must be a normal subgroup of the spatial group (qed.Symmetry chooses one "
+                "when given the permutations as a list)");
         }
     }
 }
@@ -241,13 +248,19 @@ std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s)
     if (!s.use_sz || c == SzContent::None) {
         out.push_back({});
     } else if (c == SzContent::U1) {
+        if (s.n_up >= 0 && s.sz_parity >= 0 && s.n_up % 2 != s.sz_parity)
+            throw ed::InvalidRequest("sectors: n_up and sz_parity name disjoint sectors");
         if (s.n_up >= 0) {
             out.push_back({s.n_up, -1, 1});
         } else {
+            // sz_parity keeps the sectors whose set-bit count n has that parity. The flip pairs n with
+            // N - n, which has the same parity only when N is even: otherwise no sector is folded.
+            const bool pair = fold && (s.sz_parity < 0 || n_sites % 2 == 0);
             for (int n = 0; n <= n_sites; ++n) {
+                if (s.sz_parity >= 0 && n % 2 != s.sz_parity) continue;
                 const int m = n_sites - n;
-                if (fold && m < n) continue;                       // solved as its mirror
-                out.push_back({n, -1, (fold && m != n) ? 2 : 1});
+                if (pair && m < n) continue;                       // solved as its mirror
+                out.push_back({n, -1, (pair && m != n) ? 2 : 1});
             }
         }
     } else {
@@ -361,10 +374,11 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     struct Candidate { std::size_t sub; int k0, irrep, flip; double estimate; };
     std::vector<Candidate> candidates;
     const auto subs = subspaces(H, n_sites, s);
+    std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
         const Subspace& sub = subs[si];
         const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
-        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
@@ -380,6 +394,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
             }
         });
     }
+    detail::require_some_block(s, n_blocks, "eigs");
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) { return a.estimate < b.estimate; });
     for (const Candidate& c : candidates) {
@@ -459,9 +474,10 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
     detail::DenseBatch batch(device);
     struct Entry { std::size_t id; Level proto; detail::BlockOp filter; };
     std::vector<Entry> entries;
+    std::size_t n_blocks = 0;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
-        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
             for (const auto& bi : sb.blocks) {
@@ -477,6 +493,7 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
             }
         });
     }
+    detail::require_some_block(s, n_blocks, "spectrum");
     batch.solve();
     res.device_blocks = batch.device_blocks();
     for (const auto& en : entries)
