@@ -104,7 +104,8 @@ def _run(task, content, mname, device, monkeypatch):
 
     if task == "vectors":
         # Each vector must be an eigenvector (residual), its Rayleigh energy must be the
-        # eigenvalue reported at the same index, and the pair must be the lowest levels.
+        # eigenvalue reported at the same index, the pair must be the lowest levels, and the
+        # vectors must be orthonormal (a non-normal abelian part once broke that silently).
         evals, vecs = api.vectors(m, H, content, device, k=2)
         if len(vecs) < 2:
             return False, math.inf, f"{len(vecs)} vectors"
@@ -112,8 +113,11 @@ def _run(task, content, mname, device, monkeypatch):
         res = max(r for _, r in ray)
         pair = max(abs(e - float(ev)) for (e, _), ev in zip(ray, evals[:2]))
         low = float(np.max(np.abs(np.sort([e for e, _ in ray]) - ref_spec[:2])))
+        V = np.array([np.asarray(v, complex) for v in vecs])
+        orth = float(np.max(np.abs(V.conj() @ V.T - np.eye(len(V)))))
         err = max(res, pair, low)
-        return err < 1e-6, err, f"residual {res:.1e} pairing {pair:.1e} lowest {low:.1e}"
+        return err < 1e-6 and orth <= 1e-12, max(err, orth), \
+            f"residual {res:.1e} pairing {pair:.1e} lowest {low:.1e} |V^dag V - 1| {orth:.1e}"
 
     if task == "expect":
         # Per degenerate cluster, sum of multiplicity x <O> must be Tr(P_E O) for any partner
