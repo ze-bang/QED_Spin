@@ -106,16 +106,16 @@ def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
 
 def expect(m, H, content, device, ops, k):
     """[(energy, multiplicity, values per op)] for the levels of the lowest-k window."""
-    with _device_engaged(device):
-        r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
+    r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=(device == "cpu"),
+                dense_max_dim=_dense_max_dim(device))
     _on_device(device, r.eigs)
     return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
 
 
 def matrix_elements(m, H, content, device, O, k):
     """[(<v_i|O|v_j> from the API, v_i, v_j in the full basis)] over the first levels."""
-    with _device_engaged(device):
-        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=(device == "cpu"))
+    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=(device == "cpu"),
+              dense_max_dim=_dense_max_dim(device))
     n = min(3, len(r.levels))
     full = [r._raw.multiplet(r._spec, r._n_sites, i, -1)[0] for i in range(n)]
     return [(r.matrix_element(O, i, j), full[i], full[j]) for i in range(n) for j in range(n)]
