@@ -8,9 +8,13 @@ of the twin (bench/cases.py) builds the same Hamiltonian and block itself.
     python bench/xdiag/make_model.py <model> <out.txt>
 """
 import sys
+from pathlib import Path
 
 import qed
 from qed._groups import close_group
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python" / "tests"))
+from support.triangular import TriangularTorus  # noqa: E402
 
 model, path = sys.argv[1], sys.argv[2]
 if model.startswith("chain"):
@@ -18,7 +22,7 @@ if model.startswith("chain"):
     bonds = [(i, (i + 1) % N) for i in range(N)]
     gens = [list(qed.symmetry.translation(N, 1))]
 elif model == "tri36":
-    lat = qed.lattice.TriangularSupercell("36")
+    lat = TriangularTorus("36")
     N = lat.N
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     gens = [list(p) for p in lat.momentum_generators()] + [list(p) for _, p in lat.point_group()]

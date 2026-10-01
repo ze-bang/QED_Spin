@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased (0.6.0)
+
+Breaking changes so far:
+
+- **Errors.** Refusals raise the classes in `qed.errors` (`InvalidRequest`, `EmptySelection`,
+  `Unsupported`, `DeviceUnavailable`, `DeviceUnsupported`, `ResourceLimit`,
+  `ConvergenceError`); each also derives from the builtin it replaces (`ValueError`,
+  `NotImplementedError`, `RuntimeError`, `MemoryError`). A selection that matches no block
+  raises `EmptySelection` in every verb instead of returning an empty result.
+- **Logging.** The library prints nothing. Messages go to `logging.getLogger("qed")`;
+  `qed.set_log_level(level, stream=None)` or `QED_LOG_LEVEL` changes the level. Results
+  carry `diagnostics`, a list of `(code, message)` pairs.
+- **`device="gpu"` is strict.** It raises `DeviceUnavailable` without a usable device and
+  `DeviceUnsupported`, naming the block, for work that has no device lane, instead of
+  running on the host. `device="cpu"` never initialises CUDA. Results report `placement`
+  (`device_krylov`, `device_dense`, `host_krylov`, `host_dense`).
+- **Spatial symmetry.** The abelian part of a spatial group is always a normal subgroup
+  (the largest one found); a residue that does not normalise it raises `InvalidRequest`
+  instead of being dropped. Some levels are labelled differently as a result.
+  `find_symmetries(H)` returns `qed.Symmetries(abelian, residues, diagnostics)` with
+  `describe()`; `SymmetryReport`, `GeneratorSet` and the options `translation_only=` and
+  `lattice=` are gone. Graphs with more than 4096 automorphisms run without spatial symmetry
+  (with a diagnostic), and co-groups are capped at 128 elements.
+- **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
+  depend on the temperature grid, and a temperature colder than the trajectory reached is
+  refused instead of clamped.
+- **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
+  their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
+  are distance shells, and `from_cluster_file` parses strictly.
+- **Removed:** `Operator.conserves_sz`; `qed.lattice` (`TriangularSupercell` and its label helpers).
+
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 
 The library was rebuilt around one path from a Python call to the kernels (c438459..cf38fcd;

@@ -2,7 +2,7 @@
   {"id":"C01-pyapi-01","rep":"C01-pyapi-01","sev":"high","axis":"correctness","status":"open","dev":"cpu","seconds":30},
   {"id":"C01-pyapi-03","rep":"C01-pyapi-03","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C01-pyapi-09","rep":"C01-pyapi-09","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":30},
-  {"id":"C01-pyapi-12","rep":"C01-pyapi-12","sev":"low","axis":"correctness","status":"open","dev":"cpu","seconds":30},
+  {"id":"C01-pyapi-12","rep":"C01-pyapi-12","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C02-discovery-01","rep":"C02-discovery-01","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C02-discovery-02","rep":"C02-discovery-02","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C02-discovery-03","rep":"C02-discovery-03","sev":"high","axis":"robustness","status":"fixed","dev":"cpu","seconds":290},

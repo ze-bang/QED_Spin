@@ -46,7 +46,6 @@ _configure_log_from_env()
 
 from . import dssf  # observable builders for dynamics
 from . import input  # lattice + Hamiltonian DSL
-from . import lattice  # lattice geometries: space group + physical labels
 from . import symmetry  # programmatic site-permutation helpers
 from .discovery import Symmetries, find_symmetries
 
@@ -101,6 +100,6 @@ __all__ = [
     "dynamics", "DynamicsResult", "expect", "ExpectResult",
     "find_symmetries", "Symmetries",
     "has_cuda_build", "debug_env", "env_snapshot", "set_log_level", "get_log_level", "errors",
-    "dssf", "input", "lattice", "symmetry",
+    "dssf", "input", "symmetry",
     "__version__",
 ]

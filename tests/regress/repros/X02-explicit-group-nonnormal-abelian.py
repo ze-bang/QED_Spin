@@ -11,6 +11,7 @@ import itertools
 import numpy as np
 import qed
 from qed._groups import close_group
+from support.triangular import TriangularTorus
 
 
 def normal(A, G):
@@ -39,7 +40,7 @@ def dense_by_sz(bonds, N):
 
 bad = []
 for name in ("9", "12", "16"):
-    lat = qed.lattice.TriangularSupercell(name)
+    lat = TriangularTorus(name)
     N = lat.N
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     b = qed.input.HamiltonianBuilder(N)

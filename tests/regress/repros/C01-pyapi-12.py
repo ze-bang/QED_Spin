@@ -3,9 +3,16 @@
 # SECONDS: 30
 """Claim: TriangularSupercell.namer() reads level.momenta and level.characters, which no result level
 has (Level exposes momentum and irrep_characters), so the returned namer raises AttributeError on
-every level."""
+every level.
+Restated after P2.1, which removed qed.lattice (owner-approved): the namer no longer exists, so the
+claim holds only while the package still ships it."""
 import qed
-from qed.lattice.triangular import TriangularSupercell
+
+try:
+    from qed.lattice.triangular import TriangularSupercell
+except ImportError:
+    print(f"REPRO: NOT_REPRODUCED qed.lattice is removed (hasattr(qed, 'lattice')={hasattr(qed, 'lattice')})")
+    raise SystemExit(0)
 
 tri = TriangularSupercell("12")
 _, _, labels = tri.space_group()

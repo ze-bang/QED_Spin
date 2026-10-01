@@ -14,6 +14,7 @@ with an independent dense Sz = 0 spectrum."""
 import types
 import numpy as np
 import qed
+from support.triangular import TriangularTorus
 
 
 def build_H(N, bonds):
@@ -40,7 +41,7 @@ def dense_sz0(N, bonds):
 
 refused, mism, checked = [], [], 0
 for name in ("12", "16"):
-    lat = qed.lattice.TriangularSupercell(name)
+    lat = TriangularTorus(name)
     N = lat.N
     bonds = sorted({(min(i, j), max(i, j)) for (i, j, _) in lat.bonds()})
     H = build_H(N, bonds)

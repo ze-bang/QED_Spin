@@ -27,7 +27,8 @@ L, N_UP = 5, 12
 
 def worker(cfg):
     import qed
-    lat = qed.lattice.TriangularSupercell(((L, 0), (0, L)))
+    from support.triangular import TriangularTorus
+    lat = TriangularTorus(((L, 0), (0, L)))
     N = lat.N
     b = qed.input.HamiltonianBuilder(N)
     b.heisenberg([(i, j) for (i, j, _) in lat.bonds()], J=1.0)

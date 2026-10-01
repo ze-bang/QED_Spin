@@ -5,8 +5,13 @@ symmetry selections the cases use (a block named by momentum and irrep character
 from __future__ import annotations
 
 import itertools
+import sys
+from pathlib import Path
 
 import qed
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
+from support.triangular import TriangularTorus  # noqa: E402
 
 
 # ---- the XDiag-twin models --------------------------------------------------------------
@@ -20,7 +25,7 @@ def tri36():
     """(H, lattice, spatial): the 6x6 triangular torus, J1 Heisenberg; ``spatial`` names the
     space group p6m as the 36 translations (the momenta) times the site-centred point group
     (the residues), the split a plain permutation list of the same group also gets."""
-    lat = qed.lattice.TriangularSupercell("36")
+    lat = TriangularTorus("36")
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     H = qed.input.HamiltonianBuilder(lat.N).heisenberg(bonds, 1.0).to_operator()
     spatial = qed.Symmetries(abelian=[list(p) for p in lat.momentum_generators()],
@@ -131,7 +136,7 @@ def residue_namer(A, labelled):
     return lambda r: "E" if tuple(r) == ident else coset.get(tuple(r))
 
 
-# C6v characters at Gamma (labels of TriangularSupercell.point_group) and C3v at K.
+# C6v characters at Gamma (labels of TriangularTorus.point_group) and C3v at K.
 C6V_E1 = {"E": 2, "C6^1": 1, "C6^5": 1, "C6^2": -1, "C6^4": -1, "C6^3": -2}
 C3V_E = {"E": 2, "C6^2": -1, "C6^4": -1}
 

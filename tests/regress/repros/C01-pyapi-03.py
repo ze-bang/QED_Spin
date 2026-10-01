@@ -18,6 +18,7 @@ import signal
 import numpy as np
 
 import qed
+from support.triangular import TriangularTorus
 
 signal.alarm(240)
 problems = []
@@ -35,7 +36,7 @@ def comp(p, q):
 
 
 # ---------------- (a) triangular 3x3 with translations + C6 ----------------
-lat = qed.lattice.TriangularSupercell("9")
+lat = TriangularTorus("9")
 N = lat.N
 b = qed.input.HamiltonianBuilder(N)
 b.heisenberg([(i, j) for (i, j, _) in lat.bonds()], J=1.0)
