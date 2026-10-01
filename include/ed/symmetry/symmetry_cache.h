@@ -9,9 +9,8 @@
 // couplings deliberately excluded, which is why parameter sweeps hit):
 //
 //   1. In-process registry: a small FIFO of shared_ptr<const OrbitTable>.
-//      Repeated qed.eigs/thermal/spectrum calls in one process (and the
-//      GeneratorSet temp-dir round-trip, whose PATH changes but whose
-//      CONTENT does not) reuse the table without any rebuild. Always on;
+//      Repeated qed.eigs/thermal/spectrum calls in one process reuse the
+//      table without any rebuild. Always on;
 //      correctness-neutral (tables are immutable once built).
 //
 //   2. Disk cache: ``<cache_dir>/sym_v2/<hash>.otab`` -- a raw

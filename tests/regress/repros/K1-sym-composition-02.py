@@ -35,7 +35,7 @@ for i in range(N):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, jz)
 T = [(i + 1) % N for i in range(N)]
 R = [(-i) % N for i in range(N)]
-gs = types.SimpleNamespace(generators=[T], star_perms=[R])
+gs = types.SimpleNamespace(abelian=[T], residues=[R])
 sym = qed.Symmetry(spatial=gs) if model == "xyz" else qed.Symmetry(spatial=gs, sz=6)
 r = qed.spectrum(H, sym=sym)
 blocks = {(L.n_up, L.sz_parity, L.k0, L.irrep, L.flip_parity) for L in r.levels}
@@ -89,7 +89,7 @@ if ndev > 0:
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 0.8)
     T = [(i + 1) % N for i in range(N)]
     R = [(-i) % N for i in range(N)]
-    sym = qed.Symmetry(spatial=types.SimpleNamespace(generators=[T], star_perms=[R]))
+    sym = qed.Symmetry(spatial=types.SimpleNamespace(abelian=[T], residues=[R]))
     try:
         rg = qed.eigs(H, 2, sym=sym, device="gpu", prune=False)
     except qed.errors.DeviceUnsupported as ex:     # strict device='gpu' refuses the W blocks

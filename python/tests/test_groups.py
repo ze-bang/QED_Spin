@@ -202,8 +202,8 @@ def test_permutations_may_come_as_numpy_arrays():
     assert qed.symmetry.split_nonabelian(np.array([t, r])) == qed.symmetry.split_nonabelian([t, r])
     from types import SimpleNamespace
     H = _heisenberg(6, [(i, (i + 1) % 6) for i in range(6)])
-    A, residues = qed.Symmetry(spatial=SimpleNamespace(generators=np.array([t]),
-                                                       star_perms=np.array([r]))).groups(H)
+    A, residues = qed.Symmetry(spatial=SimpleNamespace(abelian=np.array([t]),
+                                                       residues=np.array([r]))).groups(H)
     assert len(A) == 6 and len(residues) == 1
 
 
@@ -212,7 +212,7 @@ def test_without_the_point_group_residues_are_not_checked():
     from types import SimpleNamespace
     t, _ = _ring_generators(4)
     H = _heisenberg(4, [(i, (i + 1) % 4) for i in range(4)])
-    gs = SimpleNamespace(generators=[t], star_perms=[[1, 0, 2, 3]])
+    gs = SimpleNamespace(abelian=[t], residues=[[1, 0, 2, 3]])
     A, residues = qed.Symmetry(spatial=gs, point_group=False).groups(H)
     assert len(A) == 4 and residues == []
     with pytest.raises(qed.errors.InvalidRequest, match="does not normalise"):

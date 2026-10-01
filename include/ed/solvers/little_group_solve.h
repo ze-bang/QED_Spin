@@ -5,11 +5,10 @@
 // FACTORIZED non-abelian reduction via little co-groups: never stores
 // symmetry-adapted amplitudes over the full space, so it scales to large N.
 //
-// Structure exploited: G = A ⋊ P with A the abelian clique (translations)
-// and P the retained residue (point-group coset representatives,
-// `GeneratorSet.star_perms`). The abelian irreps k of A are the momentum
-// sectors; residues permute them (χ_k → χ_k^p). Per STAR (residue orbit of
-// momenta):
+// Structure exploited: G = A ⋊ P with A the normal abelian part (translations)
+// and P the residues (point-group coset representatives, Spec::residues).
+// The abelian irreps k of A are the momentum sectors; residues permute them
+// (χ_k → χ_k^p). Per STAR (residue orbit of momenta):
 //
 //   1. Solve only the star representative k0; every member contributes the
 //      same spectrum (multiplicity |star|).

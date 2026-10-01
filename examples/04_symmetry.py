@@ -12,8 +12,8 @@ b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
 H = b.to_operator()
 
 # What H has: an abelian part (momenta) and point-group coset representatives.
-report = qed.find_symmetries(H, verbose=False)
-print(report.full_set.describe() if hasattr(report.full_set, "describe") else report.full_set)
+found = qed.find_symmetries(H, verbose=False)
+print(found.describe())
 
 # The same lowest levels under different symmetry requests.
 t = qed.symmetry.translation(N, 1)

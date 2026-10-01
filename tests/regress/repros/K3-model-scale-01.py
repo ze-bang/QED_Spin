@@ -61,7 +61,7 @@ def attempt(H):
 rb, eb = attempt(Hb)
 rm, em = attempt(Hm)
 info = (f"S+S+ records={len(pp)} S-S- records={len(mm)} max|sum per bond|={pp_sum:.1e} [H,Sz]={comm:.1e} "
-        f"conserves_sz(builder)={Hb.conserves_sz()} sz=4 builder -> {rb!r}; merged form diff={merged_diff:.1e}, "
+        f"sz_content(builder)={qed._core.sectors.sz_content(Hb)} sz=4 builder -> {rb!r}; merged form diff={merged_diff:.1e}, "
         f"sz=4 merged -> {rm} E={em} ref={E_ref:.12f}")
 if comm < 1e-12 and len(pp) > 0 and pp_sum < 1e-14 and rb != "ok" and merged_diff < 1e-12 \
         and em is not None and abs(em - E_ref) < 1e-8:

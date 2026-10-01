@@ -30,9 +30,9 @@ A_dm, R_dm = qed.Symmetry().groups(Hdm)
 A_h, R_h = qed.Symmetry().groups(Hh)
 T_in_dm = tuple(T) in {tuple(a) for a in A_dm}
 T_in_h = tuple(T) in {tuple(a) for a in A_h} or tuple(T) in {tuple(r) for r in R_h}
-fs = qed.find_symmetries(Hdm, verbose=False).full_set
+fs = qed.find_symmetries(Hdm, verbose=False)
 info = (f"T commutes with H_DM={commutes}; auto |A| (DM)={len(A_dm)} residues={len(R_dm)} "
-        f"T found={T_in_dm} full_set={'None' if fs is None else fs.group_size}; "
+        f"T found={T_in_dm} group={len(fs.abelian) * (len(fs.residues) + 1)}; "
         f"control Heisenberg |A|={len(A_h)} residues={len(R_h)}")
 if commutes and not T_in_dm and len(A_dm) < N:
     print("REPRO: CONFIRMED " + info)

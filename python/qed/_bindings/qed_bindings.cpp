@@ -159,33 +159,8 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
 
 
 // =============================================================================
-// Term iterators and the Sz-conservation check, read by symmetry discovery (qed.discovery).
+// Term iterators, read by symmetry discovery (qed.discovery).
 // =============================================================================
-
-// Returns true iff every (one-, two-, three-body) term commutes with total
-// Sz: a term preserves Sz iff its operator slots have a
-// net Sz-shift of zero (S+ = +1, S- = -1, Sz = 0).
-bool op_conserves_sz(const Operator& op) {
-    auto sz_shift = [](int op_type) {
-        if (op_type == 0) return  1;  // S+ raises by 1
-        if (op_type == 1) return -1;  // S- lowers by 1
-        return 0;                     // Sz is diagonal
-    };
-
-    for (const auto& t : op.transform_data_) {
-        if (std::abs(t.coefficient) < 1e-15) continue;
-        int delta = sz_shift(t.op_type);
-        if (t.is_two_body) delta += sz_shift(t.op_type_2);
-        if (delta != 0) return false;
-    }
-    for (const auto& t : op.three_body_data_) {
-        if (std::abs(t.coefficient) < 1e-15) continue;
-        int delta = sz_shift(t.op_type_1) + sz_shift(t.op_type_2) +
-                    sz_shift(t.op_type_3);
-        if (delta != 0) return false;
-    }
-    return true;
-}
 
 // Yields (op_type, site, coeff) tuples for every one-body term.
 py::list op_iter_one_body(const Operator& op) {
@@ -364,9 +339,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("vec"),
              "Compute H * v on a 1-D complex128 array.")
         // In-process introspection used by symmetry discovery (qed.discovery).
-        .def("conserves_sz", &op_conserves_sz,
-             "True iff every term commutes with total Sz (U(1) symmetry), "
-             "checked on the in-memory operator.")
         .def("iter_one_body_terms", &op_iter_one_body,
              "List of ``(op_type, site, coeff)`` tuples for every one-body "
              "term currently in the operator. ``op_type`` is one of "

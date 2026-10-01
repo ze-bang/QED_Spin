@@ -23,9 +23,8 @@ def tri36():
     lat = qed.lattice.TriangularSupercell("36")
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     H = qed.input.HamiltonianBuilder(lat.N).heisenberg(bonds, 1.0).to_operator()
-    spatial = qed.GeneratorSet(name="tri36_p6m", description="translations x C6v",
-                               generators=[list(p) for p in lat.momentum_generators()], orders=[6, 6],
-                               group_size=36, star_perms=[list(p) for _, p in lat.point_group()])
+    spatial = qed.Symmetries(abelian=[list(p) for p in lat.momentum_generators()],
+                             residues=[list(p) for _, p in lat.point_group()])
     return H, lat, spatial
 
 

@@ -4,10 +4,11 @@ A Symmetry is a request, resolved against a Hamiltonian by :meth:`Symmetry.resol
 into the engine's :class:`qed._core.sectors.Spec`:
 
 * ``spatial`` -- ``"auto"`` (the automorphisms of H that commute with it, found by
-  :func:`qed.find_symmetries`), a ``GeneratorSet``, a list of site permutations, or
-  ``None``. The group is split into its largest normal abelian subgroup (the momenta)
-  and one representative per coset of it (the point group); a ``GeneratorSet`` names
-  its own abelian part, which must be normal. With accidental symmetry (a cluster whose
+  :func:`qed.find_symmetries`), a list of site permutations, a :class:`qed.Symmetries`, or
+  ``None``. A list is closed and split into its largest normal abelian subgroup (the
+  momenta) and one representative per coset of it (the point group); a ``Symmetries``
+  is an explicit split: its ``abelian`` part (generators or the whole group) must be
+  abelian and every residue must normalise it. With accidental symmetry (a cluster whose
   graph has more automorphisms than its lattice) the abelian part need not be the lattice
   translations: pass the translations and point group as a list to label by them.
 * ``sz`` -- ``"auto"`` (decompose by Sz, or by Sz parity when H only conserves that),
@@ -116,8 +117,8 @@ class Symmetry:
             return identity, []
         if isinstance(spatial, str):
             if spatial.lower() != "auto":
-                raise InvalidRequest(f"spatial must be 'auto', a GeneratorSet, a permutation list "
-                                     f"or None, got {spatial!r}")
+                raise InvalidRequest(f"spatial must be 'auto', a permutation list, a Symmetries or None, "
+                                     f"got {spatial!r}")
             from ..discovery import find_symmetries
             try:
                 report = find_symmetries(H, verbose=False)
@@ -132,10 +133,10 @@ class Symmetry:
                 diagnostics.extend(report.diagnostics)
             A, residues = report.abelian or identity, report.residues
         else:
-            gens = getattr(spatial, "generators", None)
+            gens = getattr(spatial, "abelian", None)        # a Symmetries: an explicit split
             star = []
-            if gens is not None and self.point_group:   # else a GeneratorSet's residues go unchecked
-                sp = getattr(spatial, "star_perms", None)
+            if gens is not None and self.point_group:   # else its residues go unchecked
+                sp = getattr(spatial, "residues", None)
                 star = list(sp) if sp is not None else []
             perms = list(gens) + star if gens is not None else list(spatial)
             # Group arithmetic on a map that is not a bijection never closes (its powers never

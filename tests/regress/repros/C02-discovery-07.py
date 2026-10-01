@@ -72,7 +72,7 @@ ra = attempt(Ha, qed.Symmetry(spatial=None, sz=N // 2))
 rs = attempt(Ha, qed.Symmetry(spatial=None, total_spin=0))
 rb = attempt(Hb, qed.Symmetry(spatial=None, sz=N // 2))
 info = (f"(a) xyz(1,1,1): spec-vs-Heisenberg {specdiff:.1e}, [H,Sz]={comm_sz(Ma):.1e}, sz_content={ca}, "
-        f"conserves_sz={Ha.conserves_sz()}, sz=4 -> {ra!r}, total_spin=0 -> {rs!r}; "
+        f"sz=4 -> {ra!r}, total_spin=0 -> {rs!r}; "
         f"(b) builder Heis+Dz: [H,Sz]={comm_sz(Mb):.1e}, sz_content={cb}, sz=4 -> {rb!r}")
 true_u1 = comm_sz(Ma) < 1e-12 and comm_sz(Mb) < 1e-12 and specdiff < 1e-9
 if true_u1 and "U1" not in str(ca) and "U1" not in str(cb) and ra != "ok" and rb != "ok":

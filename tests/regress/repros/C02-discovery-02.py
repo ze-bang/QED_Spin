@@ -24,13 +24,12 @@ T2 = [(i + 2) % N for i in range(N)]
 c1, c2 = qed._core.check_generators_commute(H, [T1, T2])
 
 rep = qed.find_symmetries(H, verbose=False)
-fs = rep.full_set
-perms = [] if fs is None else [list(map(int, p)) for p in list(fs.generators) + list(fs.star_perms)]
+perms = [list(map(int, p)) for p in list(rep.abelian) + list(rep.residues)]
 bad = 0
 if perms:
     ok = qed._core.check_generators_commute(H, perms)
     bad = sum(1 for x in ok if not x)
-gsize = None if fs is None else fs.group_size
+gsize = len(rep.abelian) * (len(rep.residues) + 1)
 
 err = None
 try:
@@ -40,7 +39,7 @@ except Exception as e:  # expected
     err = f"{type(e).__name__}: {str(e)[:120]}"
 e_none = float(qed.eigs(H, 1, sym=qed.Symmetry(spatial=None)).energies[0])
 
-info = (f"T1_commutes={c1} T2_commutes={c2} full_set_group_size={gsize} "
+info = (f"T1_commutes={c1} T2_commutes={c2} group_size={gsize} "
         f"non_commuting_discovered={bad}/{len(perms)} default_eigs_error={err!r} E0(spatial=None)={e_none:.10f}")
 if (not c1) and bad > 0 and err is not None:
     print("REPRO: CONFIRMED " + info)

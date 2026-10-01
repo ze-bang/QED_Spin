@@ -51,7 +51,7 @@ for _ in range(5):
 assert sorted(R) == list(range(N)) and compose(rots[-1], R) == list(range(N))
 print("bonds", len(bonds), "| (x,y)->(y,x) maps L1=(4,1) into the lattice:", key(1, 4) == key(0, 0))
 
-gs = types.SimpleNamespace(generators=[T1, T2], star_perms=rots)
+gs = types.SimpleNamespace(abelian=[T1, T2], residues=rots)
 sym = qed.Symmetry(spatial=gs, sz=3)
 sp = qed.spectrum(H, sym=sym)
 blocks = defaultdict(list)

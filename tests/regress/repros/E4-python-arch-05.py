@@ -3,7 +3,9 @@
 # SECONDS: 60
 """Claim: find_symmetries(translation_only=True) is documented as 'skipping the full automorphism
 search', but _find_symmetries_impl runs _run_full_automorphism_pipeline (nauty + full group
-enumeration) unconditionally; translation_only only suppresses the clique step afterwards."""
+enumeration) unconditionally; translation_only only suppresses the clique step afterwards.
+Restated after P2.1, which removed the option (owner-approved): the call must now raise TypeError,
+and the one automorphism search must run once per operator (the memo), not once per call."""
 import signal
 
 signal.alarm(250)
@@ -30,22 +32,25 @@ def counting(*a, **k):
     return out
 
 
+try:
+    qed.find_symmetries(H, translation_only=True, verbose=False)
+    removed = False
+except TypeError:
+    removed = True
+
 disc._run_full_automorphism_pipeline = counting
 disc._FIND_SYM_MEMO.clear()
 try:
-    rep = qed.find_symmetries(H, translation_only=True, verbose=False)
+    reps = [qed.find_symmetries(H, verbose=False) for _ in range(3)]
 except ImportError as e:
     print(f"REPRO: INCONCLUSIVE pynauty/networkx missing: {e!r}")
-    raise SystemExit(0)
-except Exception as e:
-    print(f"REPRO: INCONCLUSIVE unexpected {type(e).__name__}: {e}")
     raise SystemExit(0)
 finally:
     disc._run_full_automorphism_pipeline = orig
 
-if calls["n"] >= 1:
-    print(f"REPRO: CONFIRMED translation_only=True still ran the full automorphism pipeline "
-          f"{calls['n']}x (|Aut|={calls['autos']}); report.full_set={rep.full_set!r}, "
-          f"generator_sets={[g.name for g in rep.generator_sets]}")
+info = (f"translation_only removed={removed}; 3 calls ran the automorphism search {calls['n']}x "
+        f"(|Aut|={calls['autos']}); split |A|={len(reps[0].abelian)} residues={len(reps[0].residues)}")
+if not removed:
+    print(f"REPRO: CONFIRMED {info}")
 else:
-    print("REPRO: NOT_REPRODUCED full pipeline was skipped under translation_only=True")
+    print(f"REPRO: NOT_REPRODUCED {info}")

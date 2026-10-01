@@ -45,8 +45,8 @@ for name in ("12", "16"):
     bonds = sorted({(min(i, j), max(i, j)) for (i, j, _) in lat.bonds()})
     H = build_H(N, bonds)
     pg = [list(p) for _, p in lat.point_group()]
-    spatial = types.SimpleNamespace(generators=[list(lat.translation(1, 0)), list(lat.translation(0, 1))],
-                                    star_perms=pg)
+    spatial = types.SimpleNamespace(abelian=[list(lat.translation(1, 0)), list(lat.translation(0, 1))],
+                                    residues=pg)
     base = qed.Symmetry(spatial=spatial, sz=N // 2, spin_flip="auto", time_reversal="off")
     A, res = base.groups(H)
     if len(res) == 0:

@@ -27,8 +27,8 @@ for i in range(N):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
 T = [(i + 1) % N for i in range(N)]
 R = [(-i) % N for i in range(N)]
-gs = types.SimpleNamespace(generators=[T], star_perms=[R])
-gsT = types.SimpleNamespace(generators=[T], star_perms=[])
+gs = types.SimpleNamespace(abelian=[T], residues=[R])
+gsT = types.SimpleNamespace(abelian=[T], residues=[])
 
 
 def k_dim(n, kfrac):

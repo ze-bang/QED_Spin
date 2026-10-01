@@ -64,8 +64,8 @@ Symmetry discovery
 ------------------
 
 .. autofunction:: qed.find_symmetries
-.. autoclass:: qed.GeneratorSet
-.. autoclass:: qed.SymmetryReport
+.. autoclass:: qed.Symmetries
+   :members: describe
 
 Build introspection
 -------------------

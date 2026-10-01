@@ -10,7 +10,7 @@ k-sector (irrep = -1, no little characters), and select(irrep_character=...) at 
 nothing.
 
 Test: 4x4 square J1-J2 Heisenberg, n_up=8, flip/TR off. Symmetry built from a
-GeneratorSet-like object (generators = Tx, Ty; star_perms = coset representatives, kept in
+Symmetries-like object (abelian = Tx, Ty; residues = coset representatives, kept in
 list order by split_nonabelian), once with pure point operations about site 0 ('good') and
 once with the C4 coset represented by Tx*C4 ('bad'). Compare the M-point levels of
 qed.spectrum and a select(momentum=M, irrep_character={C2: +1}) query."""
@@ -58,7 +58,7 @@ H = b.to_operator()
 
 
 def make_sym(c4_rep):
-    gs = SimpleNamespace(generators=[Tx, Ty], star_perms=[c4_rep, C2, C43, SX, SY, SD, SD2])
+    gs = SimpleNamespace(abelian=[Tx, Ty], residues=[c4_rep, C2, C43, SX, SY, SD, SD2])
     return qed.Symmetry(spatial=gs, sz=N // 2, spin_flip="off", time_reversal="off")
 
 

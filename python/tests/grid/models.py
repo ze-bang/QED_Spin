@@ -78,11 +78,9 @@ class Model:
         return H
 
     def generator_set(self):
+        """The translations as an explicit split (abelian part only)."""
         import qed
-        return qed.GeneratorSet(name=f"{self.name}_T", description="translations",
-                                generators=[list(t) for t in self.translations],
-                                orders=list(self.shape),
-                                group_size=int(np.prod(self.shape)))
+        return qed.Symmetries(abelian=[list(t) for t in self.translations])
 
 
 def _apply(ops, s):

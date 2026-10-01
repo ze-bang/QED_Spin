@@ -395,12 +395,13 @@ def split_nonabelian(symmetry_or_gens):
     """``(abelian_elements, residue_perms)`` for the sector engine, or a ``str`` saying why there is
     nothing to split.
 
-    * ``GeneratorSet``-like input (``generators`` + ``star_perms``): see :func:`split_generator_set`.
+    * a :class:`qed.Symmetries` (``abelian`` + ``residues``): an explicit split, see
+      :func:`split_generator_set`.
     * a permutation list: the group it generates, split by :func:`spatial_split`.
     """
-    gens = getattr(symmetry_or_gens, "generators", None)
+    gens = getattr(symmetry_or_gens, "abelian", None)
     if gens is not None:
-        star = _rows(getattr(symmetry_or_gens, "star_perms", None))
+        star = _rows(getattr(symmetry_or_gens, "residues", None))
         if len(gens) == 0 and not star:
             return "the symmetry has no spatial generators"
         A, residues = split_generator_set(gens, star)

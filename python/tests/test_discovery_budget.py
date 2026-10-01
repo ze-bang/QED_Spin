@@ -162,7 +162,7 @@ def test_huge_automorphism_group_is_not_enumerated():
     t0 = time.time()
     rep = qed.find_symmetries(H, verbose=False)
     assert time.time() - t0 < 10
-    assert rep.full_set is None and rep.abelian == [list(range(8))] and rep.residues == []
+    assert rep.abelian == [list(range(8))] and rep.residues == []
     assert _codes(rep.diagnostics) == ["aut_capped"]
 
 

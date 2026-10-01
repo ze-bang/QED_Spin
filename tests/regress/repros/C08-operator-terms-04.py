@@ -32,13 +32,13 @@ comm = float(np.max(np.abs(Hd @ Sz - Sz @ Hd)))
 herm = float(np.max(np.abs(Hd - Hd.conj().T)))
 print(f"||[H,Sz]||_max={comm:.2e}  hermiticity err={herm:.2e}")
 
-cs = bool(H.conserves_sz())
 try:
     content = str(qed._core.sectors.sz_content(H))
 except Exception as e:
     content = f"err {type(e).__name__}"
+cs = "U1" in content          # Operator.conserves_sz was removed (P2.1); sz_content is the engine's view
 pp = [t for t in H.iter_two_body_terms() if int(t[0]) == int(t[2]) and int(t[0]) in (0, 1)]
-print(f"conserves_sz={cs} sz_content={content} S+S+/S-S- records={len(pp)}")
+print(f"U1={cs} sz_content={content} S+S+/S-S- records={len(pp)}")
 try:
     e0 = float(np.asarray(qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, sz=N // 2)).energies)[0])
     ref = float(np.linalg.eigvalsh(Hd[np.ix_(pop == N // 2, pop == N // 2)])[0])
@@ -50,9 +50,9 @@ except Exception as e:
 print(eig_msg)
 
 if comm < 1e-10 and (not cs or eig_fail):
-    print(f"REPRO: CONFIRMED [H,Sz]={comm:.1e} but conserves_sz={cs}, sz_content={content}, "
+    print(f"REPRO: CONFIRMED [H,Sz]={comm:.1e} but sz_content={content}, "
           f"{len(pp)} cancelling S+S+/S-S- records; {eig_msg[:90]}")
 elif comm >= 1e-10:
     print(f"REPRO: INCONCLUSIVE dense H does not commute with Sz ({comm:.2e})")
 else:
-    print(f"REPRO: NOT_REPRODUCED conserves_sz={cs}; {eig_msg[:90]}")
+    print(f"REPRO: NOT_REPRODUCED sz_content={content}; {eig_msg[:90]}")
