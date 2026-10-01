@@ -366,3 +366,40 @@ def test_one_dimensional_irreps_take_the_group_sector_path():
     a1_in_split = [split.levels[i].energy for i in range(len(split.levels))
                    if all(abs(c - 1) < 1e-9 for c in split.irrep_characters(i).values())]
     assert abs(a1.energies[0] - min(a1_in_split)) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Lowest-k completeness: degenerate blocks and blocks smaller than k
+# ---------------------------------------------------------------------------
+
+def _ising(n, periodic=True, scale=1.0):
+    """H = scale sum Sz_i Sz_j over the chain's bonds, its diagonal (the exact spectrum) and the
+    set-bit count of each basis state."""
+    H = qed.Operator(n, 0.5)
+    bonds = [(i, (i + 1) % n) for i in range(n if periodic else n - 1)]
+    for i, j in bonds:
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, scale)
+    bits = (np.arange(1 << n)[:, None] >> np.arange(n)) & 1
+    diag = scale * sum(np.where(bits[:, i] == bits[:, j], 0.25, -0.25) for i, j in bonds)
+    return H, diag, bits.sum(axis=1)
+
+
+@pytest.mark.parametrize("scale", [1e-6, 1.0, 1e6])
+def test_krylov_blocks_with_few_distinct_levels_find_every_copy(scale):
+    # The N = 14 Ising ring has three distinct levels among its 14 lowest states, and its Sz
+    # blocks (3432, 3003, 2002 states) are above the dense crossover at k = 12: each Krylov-Schur
+    # cycle ends on an exact invariant subspace. The degenerate copies must still be found, at any
+    # scale of H (audit C10-krylov-02: a window missing them came back complete).
+    H, diag, _ = _ising(14, scale=scale)
+    r = qed.eigs(H, 12, sym=qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off"))
+    assert r.complete
+    np.testing.assert_allclose(np.asarray(r.energies), np.sort(diag)[:12], atol=1e-9 * scale)
+
+
+def test_a_block_smaller_than_k_returns_its_whole_spectrum():
+    # One 6-dim block with three doubly degenerate levels and k = 7 (audit F-B-2: raised that the
+    # block could not certify its levels).
+    H, diag, n_set = _ising(4, periodic=False)
+    r = qed.eigs(H, 7, sym=qed.Symmetry(spatial=None, sz=2, spin_flip="off", time_reversal="off"))
+    assert r.complete
+    np.testing.assert_allclose(np.asarray(r.energies), np.sort(diag[n_set == 2]), atol=1e-12)

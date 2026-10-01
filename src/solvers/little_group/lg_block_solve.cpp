@@ -144,6 +144,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     std::vector<double> ev;
     std::vector<std::vector<Complex>> vv;    // Ritz vectors (block coordinates)
     bool conv = false;
+    bool whole = false;      // every eigenvalue of the block was found (fewer than k when nb < k)
     if (block_size <= 1) {
         std::mt19937_64 gen(0x51ED0B70ULL);       // same stream as the k = 1 scan
         std::normal_distribution<double> nd(0.0, 1.0);
@@ -159,6 +160,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
         auto r = ed::krylov::krylov_schur_kernel(be, apply_H, nb, v0.data(), o);
         ev   = std::move(r.eigenvalues);
         conv = r.converged;
+        whole = r.exhausted;
         if (vecs_out)
             for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
     } else {
@@ -190,7 +192,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     }
     if (vecs_out) *vecs_out = std::move(vv_sorted);
     if (converged_out)
-        *converged_out = conv && ev_sorted.size() >= k && (!vecs_out || have_vecs);
+        *converged_out = (conv || whole) && (ev_sorted.size() >= k || whole) && (!vecs_out || have_vecs);
     return ev_sorted;
 }
 

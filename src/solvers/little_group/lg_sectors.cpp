@@ -335,9 +335,18 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 bool ghost_seen = false;
                 for (std::size_t i = 0; i < ev.size(); ++i)
                     if (bop.is_ghost(ev[i])) { ev.resize(i); if (o.vectors) vv.resize(i); ghost_seen = true; break; }
-                const bool short_ = !converged || (static_cast<int>(ev.size()) < want && !ghost_seen);
+                // A block that returned its whole spectrum owes nothing, however many levels were
+                // wanted from it.
+                const bool whole_block = ev.size() >= dim;
+                const bool short_ = !whole_block
+                                    && (!converged || (static_cast<int>(ev.size()) < want && !ghost_seen));
                 if (short_) ++res.partial_blocks;
-                ends.push_back({ev.empty() ? -std::numeric_limits<double>::infinity() : ev.back(), short_});
+                // Where an incomplete block's owed levels may lie: above its last level when the returned
+                // ones are certified from the bottom, anywhere from its lowest one when they are not (a
+                // skipped copy of a degenerate level sits below the last).
+                ends.push_back({ev.empty() ? -std::numeric_limits<double>::infinity()
+                                           : (converged ? ev.back() : ev.front()),
+                                short_});
                 for (std::size_t i = 0; i < ev.size(); ++i) {
                     Level L;
                     L.energy       = ev[i];

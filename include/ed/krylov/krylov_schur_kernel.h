@@ -16,7 +16,9 @@
 //        If below `tolerance`, reconstruct the Ritz vector
 //        (`V_local * y` --- a local linear combination of the basis)
 //        and append to the locked set.
-//     5. Re-seed with a non-locked Ritz vector and continue.
+//     5. Re-seed with a non-locked Ritz vector and continue -- or, once a cycle has
+//        locked its whole Krylov space (an exact invariant subspace), with a fresh
+//        random start; two such starts inside the locked span exhaust the space.
 //   then the degeneracy probe: one cycle from a fresh random start (see the body).
 //
 // The same body serves every Backend (CPU / CUDA); only the basis-vector
@@ -75,6 +77,9 @@ struct KrylovSchurResult {
     std::size_t                            iters_done = 0;
     std::size_t                            restarts   = 0;
     bool                                   converged  = false;
+    /// The locked vectors span the whole space: every eigenvalue was found (fewer than
+    /// num_eigs when the space is smaller).
+    bool                                   exhausted  = false;
 };
 
 namespace detail {
@@ -192,13 +197,35 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         }
         be.axpy_many(coefs.data(), basis_ptrs.data(), c.m, out, local_n);
     };
+    // A fresh Gaussian start (deflated in run_cycle): the way on past an exact invariant
+    // subspace. A cycle that ends on a breakdown spans one vector per distinct eigenvalue
+    // of its start; once those are locked every Ritz vector of it is locked too, so a
+    // re-seed from it deflates to zero, while a fresh start reaches the further copies of
+    // a degenerate level (the Ising ring: a few distinct levels, each thousands of times).
+    std::mt19937_64 fresh_gen(0xF8E5A7C3ULL);
+    std::normal_distribution<double> fresh_nd(0.0, 1.0);
+    std::vector<Complex> fresh_host;
+    auto fresh_seed = [&] {
+        fresh_host.resize(local_n);
+        for (auto& z : fresh_host) z = Complex(fresh_nd(fresh_gen), fresh_nd(fresh_gen));
+        be.copy_from_host(fresh_host.data(), v_seed.get(), local_n);
+    };
+    // Set when two fresh starts in a row lie in the locked span: the locked vectors span the
+    // whole space, so every eigenvalue has been found.
+    bool exhausted = false;
     // Restart cycles until `target` pairs are locked or `budget` cycles are spent. Pairs lock
     // strictly from the bottom of each cycle; the next cycle starts from the lowest unlocked
-    // Ritz vector.
+    // Ritz vector, or from a fresh start when the cycle locked all it had.
     auto lock_until = [&](std::size_t target, std::size_t budget) {
+        int null_starts = 0;
         for (std::size_t cycle = 0; cycle < budget && locked_evals.size() < target; ++cycle) {
             Cycle c;
-            if (!run_cycle(c)) return;
+            if (!run_cycle(c)) {
+                if (++null_starts >= 2) { exhausted = true; return; }
+                fresh_seed();
+                continue;
+            }
+            null_starts = 0;
             const std::size_t need = target - locked_evals.size();
             std::size_t newly_locked = 0;
             for (std::size_t r = 0; r < std::min(need, c.m); ++r) {
@@ -217,8 +244,8 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
                 ++newly_locked;
             }
             if (locked_evals.size() >= target) return;
-            ritz_vector(c, c.idx[std::min<std::size_t>(newly_locked, c.m - 1)], v_seed.get());
-            if (c.kres.iters_done == 0) return;
+            if (newly_locked >= c.m) fresh_seed();          // the cycle's whole Krylov space is locked
+            else ritz_vector(c, c.idx[newly_locked], v_seed.get());
         }
     };
 
@@ -230,8 +257,9 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
     // and a higher level can be locked in its place. A fresh random start deflated against
     // the locked set has a generic component on it; a Ritz value of that start below the
     // highest locked level is an upper bound on a level that was skipped. Lock it, keep the
-    // k lowest, and look again.
-    if (converged && opts.probe_degeneracy) {
+    // k lowest, and look again. Runs whenever something was locked and the space is not
+    // exhausted: an unconverged block can have skipped copies too.
+    if (!locked_evals.empty() && !exhausted && opts.probe_degeneracy) {
         std::mt19937_64 gen(0xDE6E4E7AULL);
         std::normal_distribution<double> nd(0.0, 1.0);
         std::vector<Complex> host(local_n);
@@ -271,6 +299,7 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         }
     }
     R.converged = converged;
+    R.exhausted = exhausted;
     return R;
 }
 
