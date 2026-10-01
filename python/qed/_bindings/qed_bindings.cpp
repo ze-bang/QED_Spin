@@ -19,14 +19,14 @@
 #include <pybind11/complex.h>
 #include <pybind11/functional.h>
 
-#include <ed/config/env_registry.h>
-#include <ed/core/construct_ham.h>
+#include <ed/core/config.h>
+#include <ed/ops/construct_ham.h>
 #include <ed/core/errors.h>
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
 #include <ed/dssf/operator_spec.h>
-#include <ed/symmetry/commute_check.h>
-#include <ed/symmetry/group.h>
+#include <ed/ops/commute_check.h>
+#include <ed/basis/group.h>
 
 #include "input_bindings.h"
 #include "sectors_bindings.h"
@@ -358,7 +358,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("prefix") = "",
           "Every registered ED_* / QED_* environment variable whose name starts with "
           "`prefix`: live value | default | meaning. The table is "
-          "include/ed/config/env_registry.h. Paste into bug reports.");
+          "include/ed/core/config.h. Paste into bug reports.");
     m.def("env_snapshot", [] {
               py::dict d;
               for (const auto& kv : ed::env::snapshot()) d[py::str(kv.first)] = kv.second;

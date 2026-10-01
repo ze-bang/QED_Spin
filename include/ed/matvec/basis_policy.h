@@ -41,8 +41,8 @@
 #include <utility>
 #include <vector>
 
-#include <ed/core/basis_utils.h>
-#include <ed/core/combinadic.h>   // BinomialTable, rank_state/unrank_to_state (tableless mode)
+#include <ed/basis/bits.h>
+#include <ed/basis/combinadic.h>   // BinomialTable, rank_state/unrank_to_state (tableless mode)
 
 namespace ed::matvec::basis {
 

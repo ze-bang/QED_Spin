@@ -3,7 +3,7 @@
 //
 // Exact S-resolved dimensions from the
 // highest-weight / Burnside-differencing trick
-// (include/ed/symmetry/su2_dims.h).
+// (include/ed/basis/su2_dims.h).
 //
 // Oracles (exact integer identities, the strongest kind in this repo):
 //   * multiplet counting sum rule: sum_S (2S+1) M(N,S) = 2^N and
@@ -12,7 +12,7 @@
 // =============================================================================
 #include "common/catch2_harness.h"
 
-#include <ed/symmetry/su2_dims.h>
+#include <ed/basis/su2_dims.h>
 
 #include <cstdint>
 #include <vector>

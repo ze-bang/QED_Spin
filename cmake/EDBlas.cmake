@@ -5,7 +5,7 @@
 #   FLEXIBLAS  the Alliance clusters (scripts/clusters/alliance.env): libflexiblas for BLAS and
 #              LAPACK, AMD libflame for LAPACKE
 #   OPENBLAS   OpenBLAS + liblapacke (CI, workstations)
-#   MKL        oneMKL, LP64, threaded; defines WITH_MKL (blas_lapack_wrapper.h includes mkl.h)
+#   MKL        oneMKL, LP64, threaded; defines WITH_MKL (lapack.h includes mkl.h)
 #   AUTO       whatever FindBLAS / FindLAPACK find, + liblapacke
 # Sets ED_LINALG_LIBRARIES in link order. The include directories are directory-wide SYSTEM.
 # =============================================================================

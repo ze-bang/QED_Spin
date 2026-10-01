@@ -4,7 +4,7 @@
 //
 // RepSymmetryBasisPolicy: the HOST twin of
 // ``ed::matvec::basis::DeviceRepSymmetryBasisPolicy``
-// (include/ed/matvec/device_basis_policy.cuh).
+// (include/ed/gpu/device_basis_policy.cuh).
 //
 // The CPU form of the on-the-fly representative SpMV. Like the device
 // policy it stores NO orbit
@@ -23,7 +23,7 @@
 //     C(n_sites, n_up)) the combinadic rank of the representative indexes it
 //     directly, exactly as the device policy does. The dense table costs
 //     C(N,n_up) int32, so it is built only within a memory budget (see
-//     ``rep_rank_table_enabled`` in rep_sector_data.h).
+//     ``rep_rank_table_enabled`` in rep_sector.h).
 //
 // Math (equivalent to the explicit orbit-sum formulation; see the device
 // policy header for the full derivation):
@@ -45,7 +45,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <ed/core/combinadic.h>
+#include <ed/basis/combinadic.h>
 
 namespace ed::matvec::basis {
 

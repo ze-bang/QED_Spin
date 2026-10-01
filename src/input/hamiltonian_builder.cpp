@@ -3,7 +3,7 @@
 //
 // Implementation of `ed::input::HamiltonianBuilder`. The builder
 // accumulates one-/two-/three-body terms in the canonical (S+, S-, Sz)
-// basis used by `class Operator` (see `include/ed/core/construct_ham.h`)
+// basis used by `class Operator` (see `include/ed/ops/construct_ham.h`)
 // and emits them into an in-process Operator.
 // =============================================================================
 
@@ -17,7 +17,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <ed/core/construct_ham.h>
+#include <ed/ops/construct_ham.h>
 #include <ed/core/errors.h>
 
 namespace ed::input {

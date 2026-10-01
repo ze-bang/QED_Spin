@@ -1,14 +1,14 @@
 // =============================================================================
 // ed/gpu/combinadic.cuh -- combinadic rank/unrank for fixed-Sz GPU lookups.
 //
-// The device basis policies (``ed/matvec/device_basis_policy.cuh``, driven
-// by ``streaming_symmetry_gpu_mirror.cu``) rank fixed-Sz states through a
+// The device basis policies (``ed/gpu/device_basis_policy.cuh``, driven
+// by ``rep_matvec.cu``) rank fixed-Sz states through a
 // constant-cache Pascal table. To stay within the 64 KiB per-TU
 // constant-memory budget (a single 65x65 Pascal table is already ~33 KiB),
 // ONE ``d_pascal_shared`` ``__constant__`` table is shared across all TUs
 // that need combinadic lookups:
 //
-//   * Defined in ``src/solvers/gpu/combinadic.cu`` together with its
+//   * Defined in ``src/gpu/combinadic.cu`` together with its
 //     uploader ``upload_pascal_shared``.
 //   * Declared ``extern __device__ __constant__`` in this header so
 //     downstream TUs read from the same constant memory.
@@ -31,7 +31,7 @@
 
 namespace ed::gpu::combinadic {
 
-// Shared Pascal table. Definition lives in ``src/solvers/gpu/combinadic.cu``.
+// Shared Pascal table. Definition lives in ``src/gpu/combinadic.cu``.
 // Downstream TUs reference this symbol via device linking.
 extern __device__ __constant__
 unsigned long long d_pascal_shared[65][65];

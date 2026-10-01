@@ -10,10 +10,10 @@
 // =============================================================================
 #include "common/catch2_harness.h"
 
-#include <ed/symmetry/compiled_group.h>
-#include <ed/symmetry/group.h>
-#include <ed/symmetry/orbit_table.h>
-#include <ed/symmetry/symmetry_cache.h>
+#include <ed/basis/compiled_group.h>
+#include <ed/basis/group.h>
+#include <ed/basis/orbit_table.h>
+#include <ed/basis/symmetry_cache.h>
 
 using namespace ed::symmetry;
 

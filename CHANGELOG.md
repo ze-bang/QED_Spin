@@ -152,6 +152,31 @@ C++ API (installed headers; nothing in Python changes):
   defaults to OFF, headers are reached only as `<ed/...>` (the flattened include directories
   are gone), and the never-read macros `USE_FLEXIBLAS`, `USE_AOCL_BLIS`, `WITH_SCALAPACK`,
   `TPQ_HAVE_CUDA` and `ENABLE_GPU` are no longer defined.
+- **Header layout** (`include/ed/`, new name, then the old one where it differs):
+  - `core/`: `config.h` (`config/env_registry.h`), `memory.h` (`core/mem_guard.h`),
+    `lapack.h` (`core/blas_lapack_wrapper.h`);
+  - `basis/`: `bits.h` (`core/basis_utils.h`), `combinadic.h` (`core/`), and from
+    `symmetry/`: `group.h`, `compiled_group.h`, `irreps.h`, `orbit_table.h`, `rep_sector.h`
+    (`rep_sector_data.h`), `gosper.h`, `su2_dims.h`, `symmetry_cache.h`, `sym_profile.h`;
+  - `ops/`: `operator.h`, `construct_ham.h`, `operator_builders.h`, `operator_types_detail.h`
+    (`core/`), `casimir.h` (`operators/`), and from `symmetry/`: `commute_check.h`,
+    `spin_flip.h`, `su2.h`, `time_reversal.h`, `casimir_projector.h`;
+  - `matvec/`: `linear_operator.h` (`core/`), `cpu_backend.h` (`matvec/backends/`),
+    `reduced_csr.h` (`reduced_symmetry_csr.h`), `batcher.h` (`matvec_batcher.h`),
+    `csr_policy.h` (`planner/sym_matvec_policy_hook.h`);
+  - `gpu/`: `cuda_backend.cuh` (`matvec/backends/`), `device_basis_policy.cuh`,
+    `term_kernels.cuh` (`matvec/term_kernels_gpu.cuh`), `device_csr.h` (`matvec/`),
+    `little_group.h` (`solvers/little_group_gpu.h`), `rep_matvec.h`
+    (`symmetry/sector_gpu_mirror.h`);
+  - `krylov/lanczos.h`, `krylov/krylov_schur.h`, `thermal/ftlm.h`, `thermal/mtpq.h` (the
+    `*_kernel.h` names);
+  - `dynamics/`: `cf.h` and `ftlm_dynamics.h` (`observables/*_kernel.h`), `cross_sector.h`
+    (`dssf/cross_sector_orbit_observable.h`);
+  - `sectors/`: `blocks.h` (`solvers/little_group_blocks.h`), `little_group.h`
+    (`solvers/little_group_solve.h`).
+
+  The engine's sources are `src/engine/` (the former `src/solvers/little_group/lg_*.cpp` and
+  `src/solvers/cpu/oftlm.cpp`), `src/basis/`, `src/dynamics/` and `src/gpu/`.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

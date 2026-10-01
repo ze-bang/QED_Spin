@@ -12,8 +12,8 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/symmetry/group.h>
-#include <ed/symmetry/irreps.h>
+#include <ed/basis/group.h>
+#include <ed/basis/irreps.h>
 
 #include <algorithm>
 #include <complex>

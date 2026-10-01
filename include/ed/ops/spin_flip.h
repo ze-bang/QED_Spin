@@ -1,0 +1,259 @@
+#pragma once
+// =============================================================================
+// include/ed/ops/spin_flip.h
+//
+// Global spin-flip Z2.
+//
+// The global flip X = prod_i sigma^x_i acts on the term algebra as
+//
+//     X Sz_i X = -Sz_i        X S+_i X = S-_i        X S-_i X = S+_i
+//
+// ``hamiltonian_is_spin_flip_symmetric`` checks [H, X] = 0 at the TERM
+// level on the canonical SoA storage:
+//
+//   * diag_one_body   (h Sz)         : image -h Sz    -> any Zeeman kills it
+//   * diag_two_body   (J Sz Sz)      : invariant      -> always fine
+//   * offdiag_one_body(c S+/-)       : image  c S-/+  -> needs the op-flipped
+//                                      partner with the SAME coefficient
+//                                      (transverse field hx*Sx passes: X Sx X = Sx)
+//   * mixed_two_body  (c Sz S+/-)    : image -c Sz S-/+ -> partner with the
+//                                      flipped op and NEGATED coefficient
+//   * offdiag_two_body(c S^a S^b)    : image  c S^a~ S^b~ (both ops flipped)
+//                                      -> partner with both ops flipped, same
+//                                      coefficient (site order either way)
+//   * three_body                     : partner with every S+/- flipped and
+//                                      coefficient times (-1)^{# Sz factors};
+//                                      a repeated site is conservatively
+//                                      rejected
+//
+// The check is exact multiset matching with a small tolerance on the
+// coefficients; term counts are O(bonds), so the O(n^2) partner search is
+// negligible next to any orbit scan.
+//
+// Physics consequence exploited by the sector walk:
+// X commutes with every site permutation (it acts on the internal spin
+// index, permutations on sites), so it maps the (n_up, irrep k) sector to
+// (N - n_up, SAME k) with an identical spectrum:
+//
+//     Z_{n_up, k}(beta) == Z_{N - n_up, k}(beta).
+//
+// The all-Sz thermal loop therefore solves only n_up <= N/2 and mirrors
+// the thermodynamic entries -- no projection, no new basis machinery.
+// Inside a flip-closed subspace (see ``flip_subspace_admissible``) the
+// flip can instead enter the symmetry group as an extra Z2 element that
+// halves the sector.
+// =============================================================================
+
+#include <ed/core/config.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <complex>
+#include <cstdlib>
+#include <vector>
+
+#include <ed/matvec/term_storage.h>
+
+namespace ed::symmetry {
+
+// -----------------------------------------------------------------------------
+// Diagonal (S^z-basis-diagonal) symmetry axis of H, from the term-level
+// Delta(n_up) content:
+//   * U1     -- every term conserves popcount (S+S- pairs, diagonals):
+//               the full U(1) tower of fixed-Sz sectors applies.
+//   * Parity -- every term changes popcount by an EVEN amount (adds
+//               S+S+ / S-S- pair terms, e.g. J_{+-+-}-type anisotropic
+//               exchange): U(1) is broken but (-1)^{n_up} = prod sigma^z
+//               is conserved -- the Hilbert space splits into two
+//               2^{N-1} halves.
+//   * None   -- some term changes popcount by an odd amount (lone S+-,
+//               Sz S+- mixed terms, transverse fields): no diagonal
+//               reduction.
+// ``Parity`` is the Z2 remnant of the broken U(1).
+// -----------------------------------------------------------------------------
+enum class SzAxis : std::uint8_t { None = 0, Parity = 1, U1 = 2 };
+
+[[nodiscard]] inline SzAxis
+sz_axis_of(const ed::matvec::TermStorage& t) noexcept {
+    // Net change of the set-bit count per term: S+ clears a bit (-1),
+    // S- sets one (+1), Sz none. U(1) iff every term has net 0; the Z2
+    // parity survives iff every net change is even; otherwise nothing.
+    // Three-body terms are classified by their net change too, so
+    // Sz-conserving chiral terms Sz_i S+_j S-_k keep U(1).
+    auto dnet = [](std::uint8_t op) -> int {
+        return (op == 0) ? -1 : (op == 1) ? +1 : 0;
+    };
+    bool u1 = true;
+    auto account = [&](int net) {
+        if (net % 2 != 0) return false;
+        if (net != 0) u1 = false;
+        return true;
+    };
+    for (const auto& tb : t.offdiag_one_body)
+        if (!account(dnet(tb.op_type))) return SzAxis::None;
+    for (const auto& tb : t.mixed_two_body)
+        if (!account(dnet(tb.flip_op_type))) return SzAxis::None;
+    for (const auto& tb : t.offdiag_two_body)
+        if (!account(dnet(tb.op_type_1) + dnet(tb.op_type_2))) return SzAxis::None;
+    for (const auto& tb : t.three_body)
+        if (!account(dnet(tb.op_type_1) + dnet(tb.op_type_2) + dnet(tb.op_type_3)))
+            return SzAxis::None;
+    return u1 ? SzAxis::U1 : SzAxis::Parity;
+}
+
+
+namespace detail {
+
+inline bool coeff_eq(const std::complex<double>& a,
+                     const std::complex<double>& b,
+                     double eps = 1e-12) noexcept {
+    return std::abs(a - b) <= eps * (1.0 + std::abs(a) + std::abs(b));
+}
+
+}  // namespace detail
+
+/// THE flip-subspace closure rule, single-sourced for every consumer (do
+/// not restate it locally). prod sigma^x preserves:
+///   * a fixed-Sz block   iff n_up == N/2,
+///   * an Sz-parity half  iff N is even,
+///   * the full space     always.
+/// ``n_up >= 0`` wins over ``sz_parity`` (mutually exclusive upstream).
+[[nodiscard]] inline bool
+flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
+    if (n_up >= 0)      return 2 * n_up == n_sites;
+    if (sz_parity >= 0) return n_sites % 2 == 0;
+    return true;
+}
+
+/// [H, X] == 0 at the term level (see header comment for the mapping).
+[[nodiscard]] inline bool
+hamiltonian_is_spin_flip_symmetric(const ed::matvec::TermStorage& t) noexcept {
+    constexpr double kZero = 1e-14;
+
+    // Zeeman: any nonzero Sz field breaks the flip.
+    for (const auto& d : t.diag_one_body)
+        if (std::abs(d.coefficient) > kZero) return false;
+
+    // three_body: partner each term with its flip image -- all S+/- ops
+    // swapped (op 0 <-> 1), coefficient scaled by (-1)^{# Sz factors}
+    // (X Sz X = -Sz). Factors on DISTINCT sites commute, so compare
+    // site-sorted factor lists. Same-site three-body products don't commute
+    // under the sort, so stay conservative (reject) when any term repeats a
+    // site -- correctness over coverage for that exotic case.
+    {
+        const auto& v = t.three_body;
+        using Fac = std::array<std::pair<std::uint64_t, int>, 3>;
+        auto facs = [](const ed::matvec::ThreeBodyTerm& tb, bool flip) -> Fac {
+            Fac f = {{ {tb.site_index_1, tb.op_type_1},
+                       {tb.site_index_2, tb.op_type_2},
+                       {tb.site_index_3, tb.op_type_3} }};
+            if (flip) for (auto& x : f) if (x.second != 2) x.second ^= 1;
+            std::sort(f.begin(), f.end());
+            return f;
+        };
+        auto sz_sign = [](const ed::matvec::ThreeBodyTerm& tb) -> double {
+            const int nz = (tb.op_type_1 == 2) + (tb.op_type_2 == 2)
+                         + (tb.op_type_3 == 2);
+            return (nz & 1) ? -1.0 : 1.0;
+        };
+        for (const auto& tb : v) {
+            if (tb.site_index_1 == tb.site_index_2 ||
+                tb.site_index_1 == tb.site_index_3 ||
+                tb.site_index_2 == tb.site_index_3)
+                return false;   // same-site 3-body: conservative
+        }
+        std::vector<char> used(v.size(), 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            const Fac fi = facs(v[i], /*flip=*/true);
+            const std::complex<double> ci = v[i].coefficient * sz_sign(v[i]);
+            bool matched = false;
+            for (std::size_t j = 0; j < v.size(); ++j) {
+                if (used[j]) continue;
+                if (facs(v[j], /*flip=*/false) == fi &&
+                    detail::coeff_eq(v[j].coefficient, ci)) {
+                    used[j] = 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+    }
+
+    // offdiag_one_body: multiset must be invariant under op 0 <-> 1 with the
+    // SAME coefficient.
+    {
+        const auto& v = t.offdiag_one_body;
+        std::vector<char> used(v.size(), 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            bool matched = false;
+            for (std::size_t j = 0; j < v.size(); ++j) {
+                if (used[j]) continue;
+                if (v[j].site_index == v[i].site_index &&
+                    v[j].op_type == (v[i].op_type ^ 1u) &&
+                    detail::coeff_eq(v[j].coefficient, v[i].coefficient)) {
+                    used[j] = 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+    }
+
+    // mixed_two_body: partner with flipped S+/- op and NEGATED coefficient.
+    {
+        const auto& v = t.mixed_two_body;
+        std::vector<char> used(v.size(), 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            bool matched = false;
+            for (std::size_t j = 0; j < v.size(); ++j) {
+                if (used[j]) continue;
+                if (v[j].sz_site == v[i].sz_site &&
+                    v[j].flip_site == v[i].flip_site &&
+                    v[j].flip_op_type == (v[i].flip_op_type ^ 1u) &&
+                    detail::coeff_eq(v[j].coefficient, -v[i].coefficient)) {
+                    used[j] = 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+    }
+
+    // offdiag_two_body: partner with BOTH ops flipped, same coefficient
+    // (accept the site pair in either stored order).
+    {
+        const auto& v = t.offdiag_two_body;
+        std::vector<char> used(v.size(), 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            bool matched = false;
+            for (std::size_t j = 0; j < v.size(); ++j) {
+                if (used[j]) continue;
+                const bool same_order =
+                    v[j].site_index_1 == v[i].site_index_1 &&
+                    v[j].site_index_2 == v[i].site_index_2 &&
+                    v[j].op_type_1 == (v[i].op_type_1 ^ 1u) &&
+                    v[j].op_type_2 == (v[i].op_type_2 ^ 1u);
+                const bool swapped_order =
+                    v[j].site_index_1 == v[i].site_index_2 &&
+                    v[j].site_index_2 == v[i].site_index_1 &&
+                    v[j].op_type_1 == (v[i].op_type_2 ^ 1u) &&
+                    v[j].op_type_2 == (v[i].op_type_1 ^ 1u);
+                if ((same_order || swapped_order) &&
+                    detail::coeff_eq(v[j].coefficient, v[i].coefficient)) {
+                    used[j] = 1;
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+    }
+
+    // diag_two_body invariant; nothing to check.
+    return true;
+}
+
+}  // namespace ed::symmetry

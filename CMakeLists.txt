@@ -134,7 +134,7 @@ if(BUILD_ED_TESTS)
     # lane, the LinearOperator surface, the Backend-templated block lanes on CPU and CUDA, and
     # the sampled-thermal dense crossover.
     ed_add_test(test_block_solve                tests/unit/test_block_solve.cpp)
-    target_include_directories(test_block_solve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # lg_internal.h
+    target_include_directories(test_block_solve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # internal.h
     # THE reduced-CSR budget decision (shared by the abelian + little-group
     # lanes): serial admission, and the aggregate split across concurrent
     # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.

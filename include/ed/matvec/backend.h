@@ -47,7 +47,7 @@ using Complex = std::complex<double>;
 // ----------------------------------------------------------------------------
 // Backend interface over the vector element type Scalar (std::complex<double>
 // for every lane today; P6.4 adds double for real blocks). Concrete backends
-// live in ed/matvec/backends/*.h. The interface takes raw pointers to stay
+// are ed/matvec/cpu_backend.h and ed/gpu/cuda_backend.cuh. The interface takes raw pointers to stay
 // host/device agnostic --- the *meaning* of those pointers (host RAM vs device memory)
 // is determined by memory_space().
 //

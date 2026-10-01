@@ -18,7 +18,7 @@
 #include "common/catch2_harness.h"
 
 #include <ed/matvec/term_storage.h>
-#include <ed/symmetry/spin_flip.h>
+#include <ed/ops/spin_flip.h>
 
 #include <complex>
 

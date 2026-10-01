@@ -27,7 +27,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 
-#include <ed/core/construct_ham.h>
+#include <ed/ops/construct_ham.h>
 
 namespace ed_tests {
 

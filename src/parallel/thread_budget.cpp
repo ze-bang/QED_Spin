@@ -15,7 +15,7 @@
 // =============================================================================
 
 #include "ed/parallel/thread_budget.h"
-#include <ed/config/env_registry.h>
+#include <ed/core/config.h>
 
 #include <algorithm>
 #include <cstdlib>

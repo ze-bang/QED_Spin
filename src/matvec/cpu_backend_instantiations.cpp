@@ -30,7 +30,7 @@ namespace ed::matvec {
 
 // The canonical term-view shape: the six SoA record types every Operator
 // passes to its backend factory (see Operator::DiagonalOneBody ... aliases
-// in ed/core/operator.h, all of which resolve to these ed::matvec types).
+// in ed/ops/operator.h, all of which resolve to these ed::matvec types).
 template class CpuMatVecBackend<basis::FullBasisPolicy,
                                 DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                 MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;

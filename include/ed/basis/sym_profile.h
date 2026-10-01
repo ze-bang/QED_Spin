@@ -1,0 +1,69 @@
+#pragma once
+// =============================================================================
+// include/ed/basis/sym_profile.h
+//
+// Makes symmetry-construction cost visible. ``ED_SYM_PROFILE=1`` logs
+// one Info record per construction phase (ed/core/log.h; qed.set_log_level):
+//
+//     [sym-profile] <phase>: <seconds> s  (<items> items)
+//
+// Zero overhead when the env var is unset (one cached bool test per
+// scope). The phases it wraps (rep enumeration, stabilizer table,
+// per-irrep sector build) are host-side, single-shot, and upstream of
+// every backend.
+// =============================================================================
+
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+
+#include <ed/core/config.h>
+#include <ed/core/log.h>
+
+namespace ed::symmetry {
+
+[[nodiscard]] inline bool sym_profile_enabled() noexcept {
+    static const bool on = [] {
+        return ed::env::flag("ED_SYM_PROFILE", false);
+    }();
+    return on;
+}
+
+/// RAII phase timer. ``items`` (optional) is reported alongside the
+/// wallclock -- pass the rep/sector count once known via ``set_items``.
+class SymPhaseTimer {
+public:
+    explicit SymPhaseTimer(const char* phase) noexcept
+        : phase_(phase),
+          on_(sym_profile_enabled()),
+          t0_(on_ ? std::chrono::steady_clock::now()
+                  : std::chrono::steady_clock::time_point{}) {}
+
+    void set_items(std::uint64_t n) noexcept { items_ = n; }
+
+    ~SymPhaseTimer() {
+        if (!on_) return;
+        const double s = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - t0_)
+                             .count();
+        if (items_ != kNoItems) {
+            ED_LOG(Info, "[sym-profile] %s: %.3f s  (%llu items)", phase_, s,
+                   static_cast<unsigned long long>(items_));
+        } else {
+            ED_LOG(Info, "[sym-profile] %s: %.3f s", phase_, s);
+        }
+    }
+
+    SymPhaseTimer(const SymPhaseTimer&)            = delete;
+    SymPhaseTimer& operator=(const SymPhaseTimer&) = delete;
+
+private:
+    static constexpr std::uint64_t kNoItems = ~0ULL;
+
+    const char*                                 phase_;
+    bool                                        on_;
+    std::chrono::steady_clock::time_point      t0_;
+    std::uint64_t                               items_ = kNoItems;
+};
+
+}  // namespace ed::symmetry

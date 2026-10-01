@@ -32,7 +32,7 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
-#include <ed/core/construct_ham.h>
+#include <ed/ops/construct_ham.h>
 #include <ed/input/input.h>
 
 #include <complex>

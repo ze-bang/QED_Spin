@@ -1,0 +1,104 @@
+#pragma once
+// =============================================================================
+// include/ed/matvec/csr_policy.h
+//
+// Symmetry-sector matvec strategy (rep walk vs reduced sector CSR) and the
+// budget for materialising a reduced sector matrix.
+//
+// A symmetry sector is applied through the rep policy
+// (RepSymmetryBasisPolicy): hold only the orbit-rep list (O(#reps) memory)
+// and regenerate the projection arithmetically per emit (~|G| group ops via
+// the N<=64 perm-LUT), or build the reduced sector matrix once and run a
+// plain SpMV. ED_SYM_REDUCED_CSR overrides the choice; the budget below
+// guards the CSR.
+// =============================================================================
+
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <ed/core/config.h>
+
+#ifdef _OPENMP
+#  include <omp.h>
+#endif
+
+namespace ed::planner {
+
+/// Symmetry matvec strategy (memory up, apply-speed up).
+///   * RepStream         -- RepSymmetryBasisPolicy, regenerate the projection per
+///                          matvec (~|G| ops/emit). O(#reps) memory; the scalable
+///                          floor that can never OOM.
+///   * RepReducedCsr     -- rep policy + build the reduced sector matrix ONCE,
+///                          then plain O(1)/nnz SpMV. Fast tier; +O(dim*nnz) mem.
+///   * Auto              -- no override -> the default (reduced-CSR).
+enum class SymMatvecRepr : int {
+    Auto              = -1,
+    RepStream         =  0,
+    RepReducedCsr     =  1,
+};
+
+/// Resolve the EFFECTIVE strategy: the env knob is the manual escape hatch
+/// (cached process-globally): ``ED_SYM_REDUCED_CSR=1`` forces RepReducedCsr,
+/// ``=0`` the CSR-free rep walk; unset -> the default below. Consumed by
+/// CpuMatVecBackend and the little-group engine (the reduced-CSR sub-choice).
+[[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
+    static const int env_override = [] {
+        if (const std::optional<bool> on = ed::env::tristate("ED_SYM_REDUCED_CSR"))
+            return static_cast<int>(*on ? SymMatvecRepr::RepReducedCsr
+                                        : SymMatvecRepr::RepStream);  // CSR-free rep walk
+        return static_cast<int>(SymMatvecRepr::Auto);
+    }();
+    if (env_override != static_cast<int>(SymMatvecRepr::Auto)) return env_override;
+    // DEFAULT (no env): reduced-CSR -- typically group_size x faster
+    // than the rep walk (the 27-site BFG benchmark measured the rep walk at
+    // ~19-42 s/matvec vs reduced-CSR at ~0.2-0.4 s/matvec). Memory-bound large
+    // systems can opt out with ED_SYM_REDUCED_CSR=0 (CSR-free rep walk).
+    return static_cast<int>(SymMatvecRepr::RepReducedCsr);
+}
+
+/// How many sectors are being built CONCURRENTLY around this call.
+///
+/// The sector-parallel lanes run `omp parallel for` over sectors and build each
+/// sector's reduced CSR lazily inside the loop body, i.e. on an OMP worker. The
+/// outermost active team size is therefore the number of reduced CSRs that can
+/// be in flight at once. Reads the level-1 team (not the innermost) so an inner
+/// Lanczos/BLAS region cannot mistake its own width for the sector fan-out.
+[[nodiscard]] inline unsigned concurrent_sector_builders() noexcept {
+#ifdef _OPENMP
+    if (omp_in_parallel() && omp_get_active_level() >= 1) {
+        const int t = omp_get_team_size(1);
+        if (t > 1) return static_cast<unsigned>(t);
+    }
+#endif
+    return 1u;
+}
+
+/// ONE budget decision for materializing a reduced sector matrix, shared by
+/// the abelian CpuMatVecBackend and the little-group engine's
+/// RepSectorMatVec; keep a single definition so the two lanes cannot drift.
+/// The estimate is an UPPER BOUND: each off-diagonal term
+/// contributes at most one entry per source row; the budget knob is
+/// ``ED_SYM_SECTOR_CSR_BUDGET_GIB`` (default 8, read per call so tests can
+/// toggle without restart). An over-budget sector falls back to the CSR-free
+/// walk on its own -- frontier sectors (N=36 half filling: hundreds of GB)
+/// need no env var.
+///
+/// The budget is an AGGREGATE, not per-sector: it is divided by the number of
+/// concurrent sector builders, so when blocks are solved inside an outer
+/// parallel loop the TOTAL in-flight CSR footprint stays under the knob
+/// regardless of thread count (a per-sector check would let N threads each
+/// allocate the full budget). An over-budget sector degrades to the CSR-free
+/// walk, never OOMs.
+[[nodiscard]] inline bool sector_csr_within_budget(
+        std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
+    const std::uint64_t est_bytes =
+        dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
+        + (dim + 1) * 8u /* row ptr */;
+    // 0 (or less) admits nothing: every sector takes the CSR-free walk.
+    double budget_gib = std::max(0.0, ed::env::real("ED_SYM_SECTOR_CSR_BUDGET_GIB", 8.0));
+    budget_gib /= static_cast<double>(concurrent_sector_builders());
+    return static_cast<double>(est_bytes)
+           <= budget_gib * static_cast<double>(1ULL << 30);
+}
+
+}  // namespace ed::planner

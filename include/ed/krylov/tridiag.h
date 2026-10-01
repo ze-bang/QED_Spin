@@ -5,7 +5,7 @@
 // dynamics). Host-only, no CUDA dependency.
 // =============================================================================
 
-#include <ed/core/blas_lapack_wrapper.h>
+#include <ed/core/lapack.h>
 #include <ed/core/errors.h>
 
 #include <cmath>

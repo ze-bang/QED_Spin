@@ -7,11 +7,11 @@ is duplicated across tasks, symmetries or backends.
 python/qed/api        eigs · spectrum · thermal · dynamics · expect      (verbs)
         │             Symmetry.resolve(H) -> _core.sectors.Spec
         ▼
-ed::sectors           subspaces -> stars -> blocks; one driver per task   (src/solvers/little_group/lg_sectors*.cpp)
+ed::sectors           subspaces -> stars -> blocks; one driver per task   (src/engine/)
         │             block_operator(): the LinearOperator of one block
         ▼
 kernels               Lanczos · Krylov-Schur · dense · FTLM · mTPQ ·
-                      continued fraction · FTLM dynamics                  (include/ed/{krylov,thermal,observables})
+                      continued fraction · FTLM dynamics                  (include/ed/{krylov,thermal,dynamics})
         │             templated on the backend
         ▼
 backends + matvec     CpuBackend / CudaBackend; representative-basis matvec (reduced CSR or
@@ -48,11 +48,11 @@ character.
 
 | Task | Driver | Per block |
 |---|---|---|
-| lowest levels | `eigs` (lg_sectors.cpp) | dense below a crossover, else Krylov-Schur with a degeneracy probe; blocks whose 40-step Lanczos estimate lies above the k-th level are skipped (`prune`); `window` keeps partners of degenerate levels |
+| lowest levels | `eigs` (eigs.cpp) | dense below a crossover, else Krylov-Schur with a degeneracy probe; blocks whose 40-step Lanczos estimate lies above the k-th level are skipped (`prune`); `window` keeps partners of degenerate levels |
 | full spectrum | `spectrum` | dense; on the GPU all blocks in one batched cuSOLVER call |
-| thermodynamics | `thermal` (lg_sectors_thermal.cpp) | exact spectra, or FTLM / mTPQ / OFTLM per block on the lane `ed::place` chooses (blocks up to `dense_max_dim` diagonalised); blocks combine in log space with their multiplicities |
+| thermodynamics | `thermal` (thermal.cpp) | exact spectra, or FTLM / mTPQ / OFTLM per block on the lane `ed::place` chooses (blocks up to `dense_max_dim` diagonalised); blocks combine in log space with their multiplicities |
 | ⟨O⟩(T) | `thermal(observables=)` | O averaged over the symmetries the block uses; exact from block eigenvectors, FTLM from the symmetric estimator on each sample's Krylov basis |
-| T = 0 dynamics | `dynamics` (lg_sectors_dynamics.cpp) | the degenerate ground manifold (with every member of each spin multiplet), then one continued fraction per target sector O reaches |
+| T = 0 dynamics | `dynamics` (dynamics.cpp) | the degenerate ground manifold (with every member of each spin multiplet), then one continued fraction per target sector O reaches |
 | T > 0 dynamics | `dynamics(T=)` | finite-temperature Lanczos between each source sector and every target it reaches (`CrossSectorOrbitObservable` maps between their bases) |
 | ⟨O⟩, ⟨i\|O\|j⟩ | `expect` / `matrix_element` | the averaged O in each level's basis; arbitrary O between two levels' vectors |
 
@@ -60,7 +60,7 @@ character.
 
 Kernels are written once against the backend interface (`include/ed/matvec/backend.h`):
 vectors, BLAS-1, GEMM. `device="gpu"` binds each block's operator with `bind_cuda()`,
-which is the representative gather kernel (`term_kernels_gpu.cuh`), and runs the
+which is the representative gather kernel (`term_kernels.cuh`), and runs the
 kernels on `CudaBackend`. Sampled methods batch their random vectors: `MatvecBatcher` runs
 the samples of a block in lockstep threads and serves each H application with one
 multi-vector launch (`bind_cuda_multi()`), whose outputs equal single applies bit for bit.

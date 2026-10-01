@@ -2,7 +2,7 @@
 // tests/unit/test_casimir_projector.cpp
 //
 // The Lowdin total-spin projector
-// (include/ed/symmetry/casimir_projector.h).
+// (include/ed/ops/casimir_projector.h).
 //
 // Pinned:
 //   * allowed_two_S_in_block: full space, fixed-Sz floor, Sz-parity S=0
@@ -21,10 +21,10 @@
 
 #include <Eigen/Dense>
 
-#include <ed/core/operator.h>
-#include <ed/operators/casimir.h>
-#include <ed/symmetry/casimir_projector.h>
-#include <ed/symmetry/su2_dims.h>
+#include <ed/ops/operator.h>
+#include <ed/ops/casimir.h>
+#include <ed/ops/casimir_projector.h>
+#include <ed/basis/su2_dims.h>
 
 #include <complex>
 #include <cstdint>

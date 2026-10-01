@@ -12,9 +12,9 @@
 #include <Eigen/Dense>
 
 #include <ed/core/errors.h>
-#include <ed/core/linear_operator.h>
+#include <ed/matvec/linear_operator.h>
 #ifdef WITH_CUDA
-#include <ed/matvec/backends/cuda_backend.cuh>
+#include <ed/gpu/cuda_backend.cuh>
 #endif
 
 #include <complex>

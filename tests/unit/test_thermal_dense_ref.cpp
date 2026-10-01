@@ -23,7 +23,7 @@
 #include "common/catch2_harness.h"
 #include "common/test_harness.h"
 
-#include <ed/core/operator.h>
+#include <ed/ops/operator.h>
 #include <ed/sectors/thermal.h>
 
 #ifdef WITH_CUDA

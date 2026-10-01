@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_env_registry.cpp
 //
-// The environment registry (include/ed/config/env_registry.h): one meaning of
+// The environment registry (include/ed/core/config.h): one meaning of
 // "set" for every value type, no duplicate rows, and the unknown-name scan.
 // =============================================================================
 #include "common/catch2_harness.h"
@@ -10,7 +10,7 @@
 #include <set>
 #include <string>
 
-#include <ed/config/env_registry.h>
+#include <ed/core/config.h>
 
 namespace {
 struct ScopedEnv {

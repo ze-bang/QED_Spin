@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include <ed/core/construct_ham.h>
+#include <ed/ops/construct_ham.h>
 
 #include <array>
 #include <cstdint>

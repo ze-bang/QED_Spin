@@ -24,34 +24,34 @@ entry point per task.
 Operators
 ---------
 
-.. doxygenfile:: ed/core/operator.h
-.. doxygenfile:: ed/core/linear_operator.h
+.. doxygenfile:: ed/ops/operator.h
+.. doxygenfile:: ed/matvec/linear_operator.h
 
 Krylov kernels
 --------------
 
-.. doxygenfile:: ed/krylov/lanczos_kernel.h
-.. doxygenfile:: ed/krylov/krylov_schur_kernel.h
+.. doxygenfile:: ed/krylov/lanczos.h
+.. doxygenfile:: ed/krylov/krylov_schur.h
 .. doxygenfile:: ed/krylov/tridiag.h
 
 Thermodynamics kernels
 ----------------------
 
-.. doxygenfile:: ed/thermal/ftlm_kernel.h
-.. doxygenfile:: ed/thermal/mtpq_kernel.h
+.. doxygenfile:: ed/thermal/ftlm.h
+.. doxygenfile:: ed/thermal/mtpq.h
 .. doxygenfile:: ed/thermal/sample_seed.h
 
 Dynamics kernels
 ----------------
 
-.. doxygenfile:: ed/observables/cf_spectral_kernel.h
-.. doxygenfile:: ed/observables/ftlm_dynamics_kernel.h
+.. doxygenfile:: ed/dynamics/cf.h
+.. doxygenfile:: ed/dynamics/ftlm_dynamics.h
 
 Backends and batching
 ---------------------
 
 .. doxygenfile:: ed/matvec/backend.h
-.. doxygenfile:: ed/matvec/matvec_batcher.h
+.. doxygenfile:: ed/matvec/batcher.h
 
 Placement
 ---------

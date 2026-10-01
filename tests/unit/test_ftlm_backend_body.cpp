@@ -18,9 +18,9 @@
 #include "common/catch2_harness.h"
 #include "common/test_harness.h"
 
-#include <ed/matvec/backends/cpu_backend.h>
-#include <ed/core/linear_operator.h>
-#include <ed/thermal/ftlm_kernel.h>
+#include <ed/matvec/cpu_backend.h>
+#include <ed/matvec/linear_operator.h>
+#include <ed/thermal/ftlm.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>

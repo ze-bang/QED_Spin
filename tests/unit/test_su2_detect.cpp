@@ -2,7 +2,7 @@
 // tests/unit/test_su2_detect.cpp
 //
 // The term-level [H, S_tot] = 0 detector
-// ``hamiltonian_is_su2_symmetric`` (include/ed/symmetry/su2.h).
+// ``hamiltonian_is_su2_symmetric`` (include/ed/ops/su2.h).
 //
 // Cases pinned:
 //   * Heisenberg bond J*(SzSz + 0.5 S+S- + 0.5 S-S+)      -> SU(2)
@@ -19,8 +19,8 @@
 #include "common/catch2_harness.h"
 
 #include <ed/matvec/term_storage.h>
-#include <ed/symmetry/spin_flip.h>
-#include <ed/symmetry/su2.h>
+#include <ed/ops/spin_flip.h>
+#include <ed/ops/su2.h>
 
 #include <complex>
 

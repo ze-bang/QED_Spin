@@ -9,13 +9,13 @@
 #include "common/catch2_harness.h"
 #include "common/test_harness.h"
 
-#include <ed/matvec/backends/cpu_backend.h>
-#include <ed/core/linear_operator.h>
+#include <ed/matvec/cpu_backend.h>
+#include <ed/matvec/linear_operator.h>
 
-#include <ed/krylov/lanczos_kernel.h>
-#include <ed/krylov/krylov_schur_kernel.h>
-#include <ed/thermal/ftlm_kernel.h>
-#include <ed/thermal/mtpq_kernel.h>
+#include <ed/krylov/lanczos.h>
+#include <ed/krylov/krylov_schur.h>
+#include <ed/thermal/ftlm.h>
+#include <ed/thermal/mtpq.h>
 #include <ed/thermal/tpq_thermo.h>
 
 

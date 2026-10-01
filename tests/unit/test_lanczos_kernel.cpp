@@ -15,9 +15,9 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/krylov/lanczos_kernel.h>
+#include <ed/krylov/lanczos.h>
 #include <ed/krylov/tridiag.h>
-#include <ed/matvec/backends/cpu_backend.h>
+#include <ed/matvec/cpu_backend.h>
 
 #include <algorithm>
 #include <cmath>

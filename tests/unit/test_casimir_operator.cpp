@@ -2,7 +2,7 @@
 // tests/unit/test_casimir_operator.cpp
 //
 // The S^2_tot Casimir in the TermStorage
-// schema (include/ed/operators/casimir.h).
+// schema (include/ed/ops/casimir.h).
 //
 // Pinned:
 //   * dense S^2 from the carrier == the algebraic reference
@@ -14,8 +14,8 @@
 
 #include <Eigen/Dense>
 
-#include <ed/core/operator.h>
-#include <ed/operators/casimir.h>
+#include <ed/ops/operator.h>
+#include <ed/ops/casimir.h>
 
 #include <cmath>
 #include <complex>

@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 
-#include <ed/core/mem_guard.h>
+#include <ed/core/memory.h>
 
 TEST_CASE("mem_guard: available RAM is the tighter of node and cgroup", "[mem_guard]") {
     // The three probes read live counters at different instants while other tests

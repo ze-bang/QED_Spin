@@ -22,13 +22,13 @@
 
 #include <ed/core/device.h>
 #include <ed/core/errors.h>
-#include <ed/core/linear_operator.h>
+#include <ed/matvec/linear_operator.h>
 #include <ed/core/log.h>
-#include <ed/matvec/backends/cpu_backend.h>
+#include <ed/matvec/cpu_backend.h>
 
 #ifdef WITH_CUDA
 #  include <cuda_runtime.h>
-#  include <ed/matvec/backends/cuda_backend.cuh>
+#  include <ed/gpu/cuda_backend.cuh>
 #endif
 
 namespace ed {

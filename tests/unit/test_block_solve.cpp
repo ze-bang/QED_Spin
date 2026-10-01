@@ -16,13 +16,13 @@
 #include "common/catch2_harness.h"
 #include "common/dense_operator.h"
 #include "common/test_harness.h"
-#include "solvers/little_group/lg_internal.h"
+#include "engine/internal.h"
 
 #include <ed/core/device.h>
 #include <ed/core/errors.h>
 #include <ed/core/select_backend.h>
 #include <ed/sectors/thermal.h>
-#include <ed/symmetry/casimir_projector.h>
+#include <ed/ops/casimir_projector.h>
 
 #include <algorithm>
 #include <cmath>

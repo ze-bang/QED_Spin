@@ -1,7 +1,7 @@
 // =============================================================================
 // test_symmetry_dsl (Catch2 v3)
 //
-// Lock down the programmatic `ed::sym` DSL (`ed/symmetry/group.h`):
+// Lock down the programmatic `ed::sym` DSL (`ed/basis/group.h`):
 //
 //   1. Permutation algebra (compose / power / order / identity / validate).
 //   2. Builders for translation / reflection_1d / site_swap.
@@ -13,7 +13,7 @@
 
 #include <catch2/catch_approx.hpp>
 
-#include <ed/symmetry/group.h>
+#include <ed/basis/group.h>
 
 #include <cmath>
 #include <complex>

@@ -5,7 +5,7 @@
 // operator annihilates the state, which bit(s) to flip, and the real
 // geometric factor from Sz signs -- is shared by the CPU path
 // (`apply_term_to_state`, term_kernels.h) and the GPU device path
-// (`process_source_terms`, term_kernels_gpu.cuh) through these
+// (`process_source_terms`, term_kernels.cuh) through these
 // `__host__ __device__` helpers, so a sign or gating convention cannot
 // diverge between them. Each helper is pure integer / double arithmetic (no
 // complex, no scalar traits, no I/O): the caller owns coefficient

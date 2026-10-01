@@ -9,33 +9,33 @@ set(ED_ENGINE_SOURCES
     src/parallel/numa.cpp
     src/parallel/thread_budget.cpp
     src/matvec/cpu_backend_instantiations.cpp
-    src/symmetry/group.cpp
-    src/symmetry/irreps.cpp
+    src/basis/group.cpp
+    src/basis/irreps.cpp
     src/dssf/operator_spec.cpp
-    src/dssf/cross_sector_orbit_observable.cpp
+    src/dynamics/cross_sector.cpp
     src/input/lattice.cpp
     src/input/hamiltonian_builder.cpp
-    src/solvers/cpu/oftlm.cpp
-    src/solvers/little_group/lg_engine.cpp
-    src/solvers/little_group/lg_block_solve.cpp
-    src/solvers/little_group/lg_stars.cpp
-    src/solvers/little_group/lg_sectors.cpp
-    src/solvers/little_group/lg_sectors_thermal.cpp
-    src/solvers/little_group/lg_sectors_dynamics.cpp
-    src/solvers/little_group/lg_sectors_expect.cpp
-    src/solvers/little_group/lg_blocks.cpp
-    src/solvers/little_group/lg_group_sector.cpp
-    src/solvers/little_group/lg_ground_state.cpp
+    src/engine/oftlm.cpp
+    src/engine/context.cpp
+    src/engine/block_solve.cpp
+    src/engine/stars.cpp
+    src/engine/eigs.cpp
+    src/engine/thermal.cpp
+    src/engine/dynamics.cpp
+    src/engine/expect.cpp
+    src/engine/blocks.cpp
+    src/engine/group_sector.cpp
+    src/engine/ground_state.cpp
 )
 if(WITH_CUDA)
     list(APPEND ED_ENGINE_SOURCES
-        src/solvers/gpu/combinadic.cu
-        src/solvers/gpu/little_group_gpu.cu
-        src/symmetry/streaming_symmetry_gpu_mirror.cu
-        src/matvec/device_csr.cu
+        src/gpu/combinadic.cu
+        src/gpu/little_group.cu
+        src/gpu/rep_matvec.cu
+        src/gpu/device_csr.cu
     )
 else()
-    list(APPEND ED_ENGINE_SOURCES src/symmetry/streaming_symmetry_gpu_mirror.cpp)   # throwing stubs
+    list(APPEND ED_ENGINE_SOURCES src/gpu/rep_matvec_stub.cpp)   # throwing stubs
 endif()
 
 add_library(qed_engine STATIC ${ED_ENGINE_SOURCES})

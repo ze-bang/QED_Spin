@@ -20,9 +20,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <ed/matvec/backends/cpu_backend.h>
-#include <ed/core/linear_operator.h>
-#include <ed/thermal/ftlm_kernel.h>
+#include <ed/matvec/cpu_backend.h>
+#include <ed/matvec/linear_operator.h>
+#include <ed/thermal/ftlm.h>
 #include <ed/thermal/sample_seed.h>
 
 #include <complex>

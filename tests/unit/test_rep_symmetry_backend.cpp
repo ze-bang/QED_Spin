@@ -18,17 +18,17 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/basis_utils.h>      // applyPermutation
-#include <ed/core/operator.h>
-#include <ed/matvec/reduced_symmetry_csr.h>
+#include <ed/basis/bits.h>      // applyPermutation
+#include <ed/ops/operator.h>
+#include <ed/matvec/reduced_csr.h>
 #include <ed/matvec/symmetry_matvec_backend.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/rep_symmetry_basis_policy.h>
 #include <ed/matvec/term_storage.h>
-#include <ed/symmetry/compiled_group.h>
-#include <ed/symmetry/group.h>
-#include <ed/symmetry/orbit_table.h>
-#include <ed/symmetry/rep_sector_data.h>
+#include <ed/basis/compiled_group.h>
+#include <ed/basis/group.h>
+#include <ed/basis/orbit_table.h>
+#include <ed/basis/rep_sector.h>
 
 #include <algorithm>
 #include <chrono>

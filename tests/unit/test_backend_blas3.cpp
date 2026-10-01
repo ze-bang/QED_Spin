@@ -17,10 +17,10 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/matvec/backends/cpu_backend.h>
+#include <ed/matvec/cpu_backend.h>
 
 #ifdef WITH_CUDA
-#  include <ed/matvec/backends/cuda_backend.cuh>
+#  include <ed/gpu/cuda_backend.cuh>
 #  include <cuda_runtime.h>
 #endif
 

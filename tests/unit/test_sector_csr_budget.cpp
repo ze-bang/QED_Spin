@@ -14,7 +14,7 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/planner/sym_matvec_policy_hook.h>
+#include <ed/matvec/csr_policy.h>
 
 #include <cstdlib>
 #include <string>

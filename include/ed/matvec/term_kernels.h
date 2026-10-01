@@ -32,7 +32,7 @@
 //      be passed without touching the kernel.
 //
 // Algorithm of the SCATTER kernel ``apply_terms`` (host variant in this
-// header; device kernels in term_kernels_gpu.cuh, row-gather form in
+// header; device kernels in term_kernels.cuh, row-gather form in
 // term_kernels_gather.h):
 //
 //   1. parallel over output basis states (`for i in [0, dim)`)
@@ -406,7 +406,7 @@ inline void apply_terms(
 // three_body) with the same numerical tolerance (1e-15 zero-skip).
 //
 // Used by the representative-symmetry kernels below, the reduced-CSR
-// builder (reduced_symmetry_csr.h) and Operator's single-state queries.
+// builder (reduced_csr.h) and Operator's single-state queries.
 //
 // Pure function on its inputs; thread-safe by construction (callback
 // owns side effects). The callback is invoked sequentially -- callers
@@ -502,7 +502,7 @@ inline void apply_term_to_state(
 // apply_terms_rep_symmetry -- the HOST on-the-fly representative SpMV.
 //
 // The CPU twin of the device
-// ``apply_terms_rep_symmetry_scatter`` (term_kernels_gpu.cuh): one row per
+// ``apply_terms_rep_symmetry_scatter`` (term_kernels.cuh): one row per
 // orbit representative ``i``. It does NOT walk an orbit CSR -- it applies the
 // Hamiltonian terms to the SINGLE representative ``reps[i]``
 // (``basis.state_of(i)``) with ``pre_phase = inv_norms[i]``, and the policy's

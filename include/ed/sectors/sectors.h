@@ -26,9 +26,9 @@
 // =============================================================================
 
 #include <ed/core/device.h>
-#include <ed/core/operator.h>
-#include <ed/solvers/little_group_blocks.h>
-#include <ed/symmetry/rep_sector_data.h>
+#include <ed/ops/operator.h>
+#include <ed/sectors/blocks.h>
+#include <ed/basis/rep_sector.h>
 
 #include <complex>
 #include <cstdint>

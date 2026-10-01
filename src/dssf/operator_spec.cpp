@@ -10,7 +10,7 @@
 
 #include <ed/dssf/operator_spec.h>
 
-#include <ed/core/operator_builders.h>
+#include <ed/ops/operator_builders.h>
 
 #include <array>
 #include <cmath>

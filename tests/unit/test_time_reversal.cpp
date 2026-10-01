@@ -10,7 +10,7 @@
 #include "common/catch2_harness.h"
 
 #include <ed/matvec/term_storage.h>
-#include <ed/symmetry/time_reversal.h>
+#include <ed/ops/time_reversal.h>
 
 #include <complex>
 

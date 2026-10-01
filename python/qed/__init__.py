@@ -53,7 +53,7 @@ from .discovery import Symmetries, find_symmetries
 def debug_env(prefix: str = "") -> str:
     """Every registered ``ED_*`` / ``QED_*`` environment variable whose name starts
     with ``prefix``, with its live value, default and one-line meaning. The table is
-    ``include/ed/config/env_registry.h`` -- the only place a variable is declared.
+    ``include/ed/core/config.h`` -- the only place a variable is declared.
     Print this into bug reports: machine-to-machine behaviour differences become one
     diff instead of a grep of the tree."""
     return _core.env_dump(prefix)

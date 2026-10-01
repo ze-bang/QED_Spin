@@ -13,8 +13,8 @@
 // =============================================================================
 #include "common/catch2_harness.h"
 
-#include <ed/core/basis_utils.h>          // applyPermutation (scalar reference)
-#include <ed/symmetry/compiled_group.h>
+#include <ed/basis/bits.h>          // applyPermutation (scalar reference)
+#include <ed/basis/compiled_group.h>
 
 #include <algorithm>
 #include <cstdint>

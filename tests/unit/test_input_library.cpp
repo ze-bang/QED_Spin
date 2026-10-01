@@ -17,7 +17,7 @@
 
 #include "common/catch2_harness.h"
 
-#include <ed/core/construct_ham.h>
+#include <ed/ops/construct_ham.h>
 #include <ed/input/input.h>
 
 #include <Eigen/Dense>

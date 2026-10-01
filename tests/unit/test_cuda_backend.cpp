@@ -9,7 +9,7 @@
 //   2. `lanczos_kernel(...)` ground-state energy with both backends,
 //      driving the same matvec callable through cuBLAS on the device
 //      side. Demonstrates that the kernel is *actually* backend-
-//      agnostic: the algorithm body in `ed/krylov/lanczos_kernel.h`
+//      agnostic: the algorithm body in `ed/krylov/lanczos.h`
 //      runs unchanged against the CUDA implementation of `Backend`.
 //
 // Runtime SKIPs (Catch2 SUCCEED + return) keep the build-only CUDA lane
@@ -24,9 +24,9 @@
 
 #ifdef WITH_CUDA
 
-#include <ed/matvec/backends/cpu_backend.h>
-#include <ed/matvec/backends/cuda_backend.cuh>
-#include <ed/krylov/lanczos_kernel.h>
+#include <ed/matvec/cpu_backend.h>
+#include <ed/gpu/cuda_backend.cuh>
+#include <ed/krylov/lanczos.h>
 
 #include <cuda_runtime.h>
 

@@ -36,10 +36,10 @@
 // space, CpuMatVecBackend<RepSymmetryBasisPolicy> for a symmetry sector).
 //
 // This file is host-only on purpose; the device matvec of the rep sectors lives
-// in the GPU sector mirror (streaming_symmetry_gpu_mirror.cu).
+// in the GPU sector mirror (rep_matvec.cu).
 // =============================================================================
 
-#include <ed/config/env_registry.h>
+#include <ed/core/config.h>
 #include <algorithm>
 #include <limits>
 #include <map>
@@ -61,15 +61,15 @@
 #  include <omp.h>
 #endif
 
-#include <ed/core/basis_utils.h>      // popcount()
-#include <ed/planner/sym_matvec_policy_hook.h>  // symmetry-matvec strategy (leaf)
+#include <ed/basis/bits.h>          // popcount()
+#include <ed/matvec/csr_policy.h>   // symmetry-matvec strategy (leaf)
 #include <ed/matvec/basis_policy.h>
 #include <ed/matvec/memory_space.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
-#include <ed/matvec/reduced_symmetry_csr.h>
-#include <ed/matvec/term_kernels_gather.h>  // lock-free row-gather SpMV
-#include <ed/matvec/term_storage.h>   // canonical term-view record types
+#include <ed/matvec/reduced_csr.h>
+#include <ed/matvec/term_kernels_gather.h>   // lock-free row-gather SpMV
+#include <ed/matvec/term_storage.h>          // canonical term-view record types
                                       // (named only by the extern template
                                       //  declarations at the foot of this file)
 

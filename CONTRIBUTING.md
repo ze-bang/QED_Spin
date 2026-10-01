@@ -24,7 +24,7 @@ BLAS-shim locations can be set with `-DED_LAPACKE_ROOT=` and `-DED_BLAS_SHIM_DIR
 - Comments describe the code as it is: what it does and why. History goes in commit
   messages and `CHANGELOG.md`.
 - Environment variables are read only through `ed::env` and must be rows of
-  `include/ed/config/env_registry.h` (`scripts/check_env_registry.sh` checks both ways).
+  `include/ed/core/config.h` (`scripts/check_env_registry.sh` checks both ways).
 
 ## Tests
 
@@ -38,13 +38,13 @@ BLAS-shim locations can be set with `-DED_LAPACKE_ROOT=` and `-DED_BLAS_SHIM_DIR
 
 ## Where things live
 
-- **A task or a symmetry**: the sector drivers in `src/solvers/little_group/lg_sectors*.cpp`,
-  the star walk and block operators in `lg_walk.h`, and the Python verbs in
+- **A task or a symmetry**: the sector drivers in `src/engine/` (`eigs.cpp`, `thermal.cpp`, `dynamics.cpp`, `expect.cpp`),
+  the star walk and block operators in `walk.h`, and the Python verbs in
   `python/qed/api/`. See [`docs/architecture.md`](docs/architecture.md).
-- **A kernel**: `include/ed/krylov/`, `include/ed/thermal/`, `include/ed/observables/`,
+- **A kernel**: `include/ed/krylov/`, `include/ed/thermal/`, `include/ed/dynamics/`,
   written once against the backend interface (`include/ed/matvec/backend.h`).
-- **A device kernel**: `include/ed/matvec/term_kernels_gpu.cuh` and
-  `src/symmetry/streaming_symmetry_gpu_mirror.cu`.
+- **A device kernel**: `include/ed/gpu/term_kernels.cuh` and
+  `src/gpu/rep_matvec.cu`.
 - **An example**: `examples/`, one script per family of verbs; the gate runs them all.
 
 ## Commits
