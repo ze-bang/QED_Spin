@@ -27,11 +27,38 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
-#include <ed/solvers/ftlm.h>   // for continued_fraction_spectral_function
 
 namespace ed::observables {
 
 using Complex = std::complex<double>;
+
+/// S(w) = -Im G(w + i eta) / pi of the continued fraction
+/// G(z) = norm_sq / (z - a_0 - b_1^2 / (z - a_1 - b_2^2 / ...)) of a Lanczos tridiagonal
+/// (alpha[0..M), beta[n] coupling steps n-1 and n, beta[0] unused), evaluated bottom-up: stable
+/// and O(M) per frequency. norm_sq = ||O|psi>||^2.
+inline std::vector<double> continued_fraction(const std::vector<double>& alpha,
+                                              const std::vector<double>& beta,
+                                              const std::vector<double>& omega,
+                                              double eta, double norm_sq) {
+    std::vector<double> S(omega.size(), 0.0);
+    const std::size_t M = alpha.size();
+    if (M == 0) return S;
+    constexpr double kPi = 3.14159265358979323846;
+    #pragma omp parallel for schedule(static)
+    for (std::int64_t iw = 0; iw < static_cast<std::int64_t>(omega.size()); ++iw) {
+        const Complex z(omega[static_cast<std::size_t>(iw)], eta);
+        Complex G(0.0, 0.0);                       // G_M = 0; G_n = b_n^2 / (z - a_n - G_{n+1})
+        for (std::size_t n = M - 1; n >= 1; --n) {
+            const double b2 = n < beta.size() ? beta[n] * beta[n] : 0.0;
+            const Complex d = z - Complex(alpha[n], 0.0) - G;
+            G = std::abs(d) > 1e-300 ? Complex(b2, 0.0) / d : Complex(0.0, 0.0);
+        }
+        const Complex d = z - Complex(alpha[0], 0.0) - G;
+        const Complex G0 = std::abs(d) > 1e-300 ? Complex(norm_sq, 0.0) / d : Complex(0.0, 0.0);
+        S[static_cast<std::size_t>(iw)] = -G0.imag() / kPi;
+    }
+    return S;
+}
 
 struct CfSpectralOptions {
     std::size_t krylov_dim       = 200;
@@ -130,13 +157,13 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     for (auto& a : alpha) a -= E_shift;
     R.energy_shift = E_shift;
 
-    R.spectral_function = ::continued_fraction_spectral_function(
+    R.spectral_function = continued_fraction(
         alpha, beta, omega_grid, opts.broadening, phi_norm * phi_norm);
     if (alpha.size() >= 4) {
         const std::size_t h = alpha.size() / 2;
         std::vector<double> a2(alpha.begin(), alpha.begin() + h);
         std::vector<double> b2(beta.begin(), beta.begin() + std::min(beta.size(), h + 1));
-        const auto S_half = ::continued_fraction_spectral_function(
+        const auto S_half = continued_fraction(
             a2, b2, omega_grid, opts.broadening, phi_norm * phi_norm);
         double smax = 0.0, dmax = 0.0;
         for (std::size_t i = 0; i < R.spectral_function.size() && i < S_half.size(); ++i) {

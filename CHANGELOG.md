@@ -126,6 +126,11 @@ C++ API (installed headers; nothing in Python changes):
   `<ed/thermal/tpq_kernel.h>` (`tpq_kernel`, `TpqKernelOptions`, `TpqStepInfo`) are gone:
   `mtpq_kernel` runs the iteration itself. `MtpqOptions::random_seed` and
   `FtlmCrossIrrepOptions::random_seed` are base seeds as in FTLM (0 draws one).
+- `<ed/solvers/lanczos.h>` (`full_diagonalization`) and `<ed/solvers/ftlm.h>` are gone, with
+  `LinearOperator::try_build_dense_columns` (only `full_diagonalization` called it). A sampled
+  `thermal` block small enough for the dense solve uses the engine's dense solve, the one
+  `method="exact"` uses (results move at roundoff). The continued fraction is
+  `ed::observables::continued_fraction` in `<ed/observables/cf_spectral_kernel.h>`.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

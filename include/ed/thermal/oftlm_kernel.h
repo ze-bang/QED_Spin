@@ -25,8 +25,7 @@
 // random part to the (D - N_V)-dimensional complement, Z is the FULL (shifted)
 // trace -- there is no separate ln(D) term as in plain FTLM.
 //
-// CPU-only lane. Consumes the host term-matvec + the shared host
-// Lanczos helpers in ed/solvers/lanczos.h.
+// CPU-only lane: the host term-matvec, the Lanczos kernel and tridiag_eig.
 // =============================================================================
 
 #include <complex>

@@ -18,7 +18,6 @@
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/solvers/lanczos.h>
 
 #include <algorithm>
 #include <cmath>

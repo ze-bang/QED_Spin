@@ -9,9 +9,9 @@
 //             counted host_dense); dense_max_dim = 0, a spin tower or observables sample it.
 //   [lanes]   the Backend-templated block lanes (scan, Krylov-Schur, GS vector, estimate)
 //             on toy blocks against Eigen; [lanes][cuda] the same lanes on CudaBackend.
-//   [dense]   full_diagonalization, solve_block_dense and solve_block_full.
+//   [dense]   solve_block_full and solve_block_dense.
 //   [linear_operator] bind<Backend>, has_device_kernel (the Casimir wrapper needs H and
-//             S^2 both), try_build_dense_columns; a host-only operator refuses bind_cuda.
+//             S^2 both); a host-only operator refuses bind_cuda.
 // =============================================================================
 #include "common/catch2_harness.h"
 #include "common/dense_operator.h"
@@ -22,7 +22,6 @@
 #include <ed/core/errors.h>
 #include <ed/core/select_backend.h>
 #include <ed/sectors/thermal.h>
-#include <ed/solvers/lanczos.h>
 #include <ed/symmetry/casimir_projector.h>
 
 #include <algorithm>
@@ -574,19 +573,18 @@ TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]
 #endif
 
 // -----------------------------------------------------------------------------
-// [dense]: the dense lanes (full_diagonalization, solve_block_dense, solve_block_full)
+// [dense]: the dense lanes (solve_block_full, solve_block_dense)
 // against the reference spectrum.
 // -----------------------------------------------------------------------------
-TEST_CASE("dense: full_diagonalization matches the dense reference", "[dense]") {
+TEST_CASE("dense: solve_block_full matches the dense reference", "[dense]") {
     for (std::uint64_t N : {4u, 6u, 8u}) {
         for (double hz : {0.0, 0.37}) {           // with a Zeeman field: no SU(2) degeneracy
             auto H = xxz_chain(static_cast<int>(N), false, 1.0, 1.0, hz);
             const std::uint64_t dim = std::uint64_t{1} << N;
             const auto ref = ed_tests::reference_from_operator(*H, dim);
-            std::vector<double> ev;
-            full_diagonalization(*H, dim, dim, ev, /*compute_eigenvectors=*/false);
+            const auto ev = lg::solve_block_full(*H);
             INFO("N " << N << " hz " << hz);
-            ed_tests::require_eigs_close(ev, ref.eigs, ref.eigs.size(), 1e-9, "full_diagonalization");
+            ed_tests::require_eigs_close(ev, ref.eigs, ref.eigs.size(), 1e-9, "solve_block_full");
         }
     }
 }
@@ -653,22 +651,6 @@ TEST_CASE("linear_operator: device capability", "[linear_operator]") {
     REQUIRE_FALSE(both.has_device_kernel());
 #endif
     REQUIRE_FALSE(host_s2.has_device_kernel());
-}
-
-TEST_CASE("linear_operator: try_build_dense_columns equals the column build", "[linear_operator]") {
-    auto H = xxz_chain(8, true, 1.0, 0.6, 0.13);
-    const std::size_t N = 256;
-    std::vector<Complex> direct(N * N, Complex(0, 0));
-    REQUIRE(H->try_build_dense_columns(direct.data(), N));
-    std::vector<Complex> e(N), col(N);
-    double maxdiff = 0.0;
-    for (std::size_t j = 0; j < N; ++j) {
-        std::fill(e.begin(), e.end(), Complex(0, 0));
-        e[j] = Complex(1, 0);
-        H->apply(e.data(), col.data(), N);
-        for (std::size_t i = 0; i < N; ++i) maxdiff = std::max(maxdiff, std::abs(direct[i + j * N] - col[i]));
-    }
-    REQUIRE(maxdiff < 1e-12);
 }
 
 #ifdef WITH_CUDA

@@ -434,28 +434,6 @@ public:
             std::forward<Emit>(emit));
     }
 
-    // Fast dense assembly for the FULL Hilbert space (index == state). Fills
-    // column `j` directly from the sparse term enumerator -- O(nnz) instead of
-    // O(dim) full matvecs. Reentrant (term reads only) -> parallel over columns.
-    // Basis-restricted operators override this (symmetry sectors
-    // return false).
-    [[nodiscard]] bool try_build_dense_columns(Complex* dense,
-                                               std::size_t N) const override {
-        const std::uint64_t D = static_cast<std::uint64_t>(dim());
-        if (static_cast<std::size_t>(D) != N) return false;
-        // Commit the SoA term cache BEFORE the parallel loop (the
-        // basis-restricted overrides do too) so the OMP team does not
-        // contend on the first-call rebuild of a cold operator.
-        commitPendingTransforms();
-        #pragma omp parallel for schedule(static)
-        for (std::uint64_t j = 0; j < D; ++j) {
-            for_each_connected_state(j, [&](std::uint64_t sp, Complex h) {
-                dense[static_cast<std::size_t>(sp) + static_cast<std::size_t>(j) * N] += h;
-            });
-        }
-        return true;
-    }
-
     // ========================================================================
     // isReal: tests (and caches) whether all stored couplings are purely real.
     //

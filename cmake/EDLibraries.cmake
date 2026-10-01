@@ -145,8 +145,6 @@ set_target_properties(ed_matvec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ed_solvers_cpu: CPU eigensolvers + thermal methods.
 # -----------------------------------------------------------------------------
 set(ED_SOLVERS_CPU_SOURCES
-    ${SOLVERS_CPU_DIR}/lanczos.cpp
-    ${SOLVERS_CPU_DIR}/ftlm.cpp
     ${SOLVERS_CPU_DIR}/oftlm.cpp
     ${SRC_DIR}/solvers/little_group/lg_engine.cpp
     ${SRC_DIR}/solvers/little_group/lg_block_solve.cpp
@@ -276,9 +274,8 @@ if(WITH_CUDA)
     target_include_directories(ed_solvers_gpu PRIVATE
         "$<BUILD_INTERFACE:${SOLVERS_GPU_DIR}>"
     )
-    # ed_solvers_gpu calls into the CPU-side helpers (e.g. save_ftlm_results,
-    # average_ftlm_samples in ftlm.cpp), so it has a hard dependency on
-    # ed_solvers_cpu. Declaring it PUBLIC means CMake will list the archives
+    # ed_solvers_gpu calls into the CPU-side engine, so it has a hard dependency
+    # on ed_solvers_cpu. Declaring it PUBLIC means CMake will list the archives
     # in the correct order on the executable link line and downstream callers
     # get the CPU symbols transitively.
     target_link_libraries(ed_solvers_gpu PUBLIC

@@ -10,7 +10,6 @@
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
 #include <ed/sectors/thermal.h>
-#include <ed/solvers/lanczos.h>           // full_diagonalization
 #include <ed/symmetry/su2_dims.h>
 #include <ed/thermal/curves.h>
 #include <ed/thermal/ftlm_kernel.h>
@@ -77,10 +76,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
 
     ed::thermal::Curves c;
     if (b.lane == ed::Lane::HostDense) {
-        std::vector<double> eigs;
-        full_diagonalization(op, n, n, eigs, /*compute_eigenvectors=*/false);
-        if (eigs.empty()) throw std::runtime_error("thermal: the dense solve of a block returned no eigenvalues");
-        c = ed::thermal::exact_curves(eigs, beta);
+        c = ed::thermal::exact_curves(solve_block_full(op), beta);   // the engine's dense solve
     } else if (oftlm) {
         auto host_mv = op.bind_cpu();
         auto apply_H = [&host_mv](const Complex* in, Complex* out, int m) {

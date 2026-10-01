@@ -38,15 +38,6 @@ public:
     [[nodiscard]] virtual bool is_hermitian() const { return true; }
     [[nodiscard]] virtual std::string description() const { return "LinearOperator"; }
 
-    /// Optional fast dense assembly: fill the dim() x dim() COLUMN-MAJOR matrix
-    /// `dense` (pre-zeroed) from the operator's sparse structure in O(nnz).
-    /// Reentrant. false (the default) tells the caller to build the columns
-    /// with apply().
-    [[nodiscard]] virtual bool try_build_dense_columns(Complex* /*dense*/,
-                                                       std::size_t /*n*/) const {
-        return false;
-    }
-
     /// bind_cuda() returns a device apply.
     [[nodiscard]] virtual bool has_device_kernel() const { return false; }
 
