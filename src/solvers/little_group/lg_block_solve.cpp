@@ -277,7 +277,6 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
         kopts.local_ring_size = 8;
     }
     kopts.keep_basis      = false;
-    kopts.dim_cap         = nb;
     // k-LOWEST converged Ritz early exit: at 1e8 dims the window fills with
     // ghost COPIES of converged extremes, and a ghost is exactly as
     // stationary as an eigenvalue (a stationarity test burns the full
@@ -433,7 +432,6 @@ BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
     kopts.max_iter   = std::min<std::size_t>(40, n);
     kopts.reorth     = ed::krylov::ReorthPolicy::None;
     kopts.keep_basis = false;
-    kopts.dim_cap    = n;
     CountedH Hc{H.bind<B>()};
     auto v0 = staged_seed(be, n, 0xE57A7EULL);
     const auto k = ed::krylov::lanczos_kernel(be, Hc, n, v0.get(), kopts);
@@ -582,7 +580,6 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
             n, max_iter > 0 ? static_cast<std::size_t>(max_iter) : kLgGsSmallMaxIter);
         kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
         kopts.keep_basis = true;
-        kopts.dim_cap    = n;
         auto v0 = staged_seed(be, n, 0x51ED900DULL);
         auto kres = ed::krylov::lanczos_kernel(be, Hc, n, v0.get(), kopts);
         v0.reset();

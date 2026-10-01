@@ -140,7 +140,7 @@ TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap
     REQUIRE(krylov_subspace_dim(1, 200, 0, 0) == 200);
     // the MEMORY cap is the predictable upper bound (cannot OOM)
     REQUIRE(krylov_subspace_dim(1, 200, 0, 50) == 50);
-    // global_dim caps it too
+    // the dimension of the space caps it too
     REQUIRE(krylov_subspace_dim(1, 200, 30, 0) == 30);
     // never below nev+1
     REQUIRE(krylov_subspace_dim(5, 1, 0, 2)   == 6);
@@ -164,7 +164,6 @@ TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
     opts.num_eigs  = 3;
     opts.max_iter  = 40;
     opts.tolerance = 1e-10;
-    opts.global_n  = static_cast<std::uint64_t>(dim);
 
     std::vector<std::complex<double>> seed(dim);
     {
@@ -205,7 +204,7 @@ TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
     opts.random_seed = 42;
 
     auto res = ed::thermal::ftlm_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+        backend, apply, dim, opts);
 
     REQUIRE_FALSE(res.energy.empty());
     REQUIRE_FALSE(res.heat_capacity.empty());
@@ -227,7 +226,7 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
     opts.large_value  = 50.0;
 
     auto res = ed::thermal::mtpq_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+        backend, apply, dim, opts);
 
     REQUIRE_FALSE(res.energies.empty());
 }
@@ -262,7 +261,7 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
     opts.random_seed = 99;
     opts.large_value = L;
     opts.max_iter    = 300;
-    const auto res = ed::thermal::mtpq_kernel(backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    const auto res = ed::thermal::mtpq_kernel(backend, apply, dim, opts);
     REQUIRE(res.sample_energies.size() == 1);
     REQUIRE(res.sample_energies[0].size() == 301);
     REQUIRE(res.sample_log_norms[0].size() == 300);

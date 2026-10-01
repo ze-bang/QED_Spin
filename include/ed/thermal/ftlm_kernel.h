@@ -5,9 +5,8 @@
 // FTLM (Finite-Temperature Lanczos Method) kernel ---
 // ``template<Backend, MatvecFn>``:
 //
-//   * ``CpuBackend`` and ``CudaBackend`` delegate to
-//     ``detail::ftlm_kernel_via_backend``, a
-//     fully Backend-templated body that reuses ``lanczos_kernel<Backend>``
+//   * one Backend-templated body for ``CpuBackend`` and ``CudaBackend`` that
+//     reuses ``lanczos_kernel<Backend>``
 //     (BLAS-1 facade) once per random sample. All BLAS-1 ops
 //     run device-resident; cross-PCI traffic is limited to a host-seeded
 //     random starting vector per sample and the small (M x M)
@@ -183,8 +182,11 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
     return g;
 }
 
-/// Backend-templated FTLM body, used by both specialisations of
-/// ``ftlm_kernel`` (``CpuBackend``, ``CudaBackend``).
+}  // namespace detail
+
+/// FTLM on any Backend (CpuBackend, CudaBackend): one ``lanczos_kernel<Backend>`` per
+/// random sample, BLAS-1 on the backend; the only cross-PCI traffic is the host-seeded
+/// start vector per sample and the small (M x M) tridiagonal solved on the host.
 ///
 /// FTLM only needs the first-component weights ``|<v0 | q_k>|^2``
 /// (which the tridiagonal eigenvector solve already returns) so by
@@ -223,11 +225,10 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 /// host-side Jensen-correct averager) so the CPU and GPU lanes produce
 /// identical output to within Lanczos noise.
 template <typename Backend, typename MatvecFn>
-FtlmResult ftlm_kernel_via_backend(const Backend& backend,
-                                    MatvecFn&&     apply_H,
-                                    std::size_t    local_n,
-                                    std::uint64_t  global_n,
-                                    const FtlmOptions& opts)
+FtlmResult ftlm_kernel(const Backend& backend,
+                       MatvecFn&&     apply_H,
+                       std::size_t    local_n,
+                       const FtlmOptions& opts)
 {
     if (local_n == 0) {
         throw std::invalid_argument("ftlm_kernel: local_n must be > 0");
@@ -244,7 +245,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
     // exact ``opts.temperatures``). ``compute_ftlm_thermodynamics`` is
     // temperature-driven; the caller's ordering is preserved so the
     // returned curves are index-aligned with the grid.
-    const FtlmGrid grid = resolve_ftlm_grid(opts, "ftlm_kernel");
+    const detail::FtlmGrid grid = detail::resolve_ftlm_grid(opts, "ftlm_kernel");
     const std::vector<double>& temperatures = grid.temperatures;
 
     // Dim-aware OMP+BLAS thread cap. Harmless when the thermal verb
@@ -370,7 +371,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
         // ---- 4. Host-side thermodynamics for this sample ----
         out.td = ::compute_ftlm_thermodynamics(
             out.ritz, out.weights, temperatures,
-            static_cast<std::uint64_t>(global_n));
+            static_cast<std::uint64_t>(local_n));
         out.ok = true;
         return out;
     };
@@ -474,7 +475,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
             1.0 / static_cast<double>(per_sample.size());
         for (auto& z : legacy.thermo_data.Z_sample) z *= inv_n;
     }
-    FtlmResult out = to_ftlm_result(legacy, grid.betas);
+    FtlmResult out = detail::to_ftlm_result(legacy, grid.betas);
     for (auto& row : obs_num) {
         for (std::size_t t = 0; t < row.size(); ++t) row[t] /= obs_z[t];
         out.observables.push_back(std::move(row));
@@ -482,41 +483,5 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
     return out;
 }
 
-}  // namespace detail
-
-/// FTLM kernel facade.
-///
-/// ``CpuBackend`` and ``CudaBackend`` both delegate to
-/// ``detail::ftlm_kernel_via_backend`` -- a fully Backend-templated
-/// body that reuses ``lanczos_kernel<Backend>`` once per random sample.
-/// On CUDA all BLAS-1 ops run device-resident; the only cross-PCI
-/// traffic is the host-seeded random starting vector per sample (a
-/// single ``~N*16`` byte transfer at the top of each sample) and the
-/// small ``(M x M)`` tridiagonal diagonalisation handled on the host
-/// with LAPACK.
-template <typename Backend, typename MatvecFn>
-FtlmResult ftlm_kernel(const Backend&  backend,
-                       MatvecFn&&      apply_H,
-                       std::size_t     local_n,
-                       std::uint64_t   global_n,
-                       const FtlmOptions& opts)
-{
-    // One body for both backend lanes.
-    constexpr bool single_rank =
-#ifdef WITH_CUDA
-        std::is_same_v<Backend, ed::matvec::CudaBackend> ||
-#endif
-        std::is_same_v<Backend, ed::matvec::CpuBackend>;
-    if constexpr (single_rank) {
-        return detail::ftlm_kernel_via_backend(
-            backend,
-            std::forward<MatvecFn>(apply_H),
-            local_n, global_n, opts);
-    } else {
-        throw std::runtime_error(
-            "ftlm_kernel: unsupported backend (CpuBackend / CudaBackend "
-            "only).");
-    }
-}
 
 }  // namespace ed::thermal

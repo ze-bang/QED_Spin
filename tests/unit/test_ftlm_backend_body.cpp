@@ -2,7 +2,7 @@
 // tests/unit/test_ftlm_backend_body.cpp
 //
 // The Backend-templated FTLM body
-// (``ed::thermal::detail::ftlm_kernel_via_backend``), exercised directly
+// (``ed::thermal::ftlm_kernel``), exercised directly
 // on ``CpuBackend``:
 //   * full reorthogonalisation on and off both give finite curves that
 //     agree with each other at low temperature;
@@ -76,7 +76,7 @@ void require_finite(const ed::thermal::FtlmResult& r, std::size_t nb) {
 
 }  // namespace
 
-TEST_CASE("ftlm_kernel_via_backend: full reorth on/off, ground-state "
+TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
           "estimate, thread scope",
           "[ftlm][thermal][wp10]") {
     constexpr std::uint64_t N   = 8;
@@ -99,12 +99,12 @@ TEST_CASE("ftlm_kernel_via_backend: full reorth on/off, ground-state "
 #endif
 
     opts.full_reorthogonalization = false;
-    const auto local = ed::thermal::detail::ftlm_kernel_via_backend(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    const auto local = ed::thermal::ftlm_kernel(
+        backend, apply, dim, opts);
 
     opts.full_reorthogonalization = true;
-    const auto full = ed::thermal::detail::ftlm_kernel_via_backend(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    const auto full = ed::thermal::ftlm_kernel(
+        backend, apply, dim, opts);
 
 #ifdef _OPENMP
     CHECK(omp_get_max_threads() == omp_before);

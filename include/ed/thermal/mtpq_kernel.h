@@ -90,7 +90,6 @@ template <typename Backend, typename MatvecFn>
 MtpqResult mtpq_kernel(Backend&       backend,
                        MatvecFn&&     apply_H,
                        std::size_t    local_n,
-                       std::uint64_t  /*global_n*/,
                        const MtpqOptions& opts)
 {
     MtpqResult out;
@@ -250,7 +249,6 @@ MtpqThermo mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<doub
         bo.max_iter   = static_cast<std::size_t>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
         bo.reorth     = ed::krylov::ReorthPolicy::None;
         bo.keep_basis = false;
-        bo.dim_cap    = bdim;
         try {
             const auto lk = ed::krylov::lanczos_kernel(be, H, bdim, seed.get(), bo);
             std::vector<double> d = lk.alpha, e;
@@ -282,7 +280,7 @@ MtpqThermo mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<doub
                                 + std::to_string(MTPQ_HARD_CAP) + "); ask for a warmer T_min");
     for (int attempt = 0;; ++attempt) {
         kopts.max_iter = std::max<std::size_t>(steps, 1);
-        MtpqResult kres = mtpq_kernel<Backend>(be, H, n, n, kopts);
+        MtpqResult kres = mtpq_kernel<Backend>(be, H, n, kopts);
         if (temperatures.empty()) return MtpqThermo{};
         MtpqThermo mt = mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, temperatures,
                                               static_cast<double>(n));

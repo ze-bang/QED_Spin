@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_ftlm_sample_seed.cpp
 //
-// The FTLM body (``ed::thermal::detail::ftlm_kernel_via_backend``)
+// The FTLM body (``ed::thermal::ftlm_kernel``)
 // draws sample ``s`` as
 //     generateGaussianRandomVector(N, sample_engine(resolve_base_seed(seed), s))
 // (the recipe shared with OFTLM through ``sample_seed.h``). Pinned by
@@ -93,8 +93,8 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
         rec.seed_transform = [&drawn](Complex* v, std::size_t n) {
             drawn.emplace_back(v, v + n);
         };
-        (void)ed::thermal::detail::ftlm_kernel_via_backend(
-            backend, apply, dim, static_cast<std::uint64_t>(dim), rec);
+        (void)ed::thermal::ftlm_kernel(
+            backend, apply, dim, rec);
         REQUIRE(drawn.size() == samples);
         const std::uint64_t base = ed::thermal::resolve_base_seed(opts.random_seed);
         REQUIRE(base == opts.random_seed);
@@ -122,16 +122,16 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
     }
 
     // 2. Same options twice -> bit-identical curves.
-    const auto first = ed::thermal::detail::ftlm_kernel_via_backend(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
-    const auto second = ed::thermal::detail::ftlm_kernel_via_backend(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    const auto first = ed::thermal::ftlm_kernel(
+        backend, apply, dim, opts);
+    const auto second = ed::thermal::ftlm_kernel(
+        backend, apply, dim, opts);
     REQUIRE(first.energy.size() == betas.size());
     require_identical(first, second);
 
     // 3. The CpuBackend front door runs this body on the 1/beta grid.
     const auto front = ed::thermal::ftlm_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+        backend, apply, dim, opts);
     CHECK(front.betas == betas);
     CHECK(front.temperatures == temperatures);
     require_identical(front, first);
@@ -141,7 +141,7 @@ void check_seed_contract(std::uint64_t n_sites, std::size_t samples,
     exact.betas.clear();
     exact.temperatures = temperatures;
     const auto front_t = ed::thermal::ftlm_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), exact);
+        backend, apply, dim, exact);
     CHECK(front_t.temperatures == temperatures);
     REQUIRE(front_t.energy.size() == temperatures.size());
 }

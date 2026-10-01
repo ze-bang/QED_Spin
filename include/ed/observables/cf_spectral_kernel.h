@@ -41,9 +41,6 @@ struct CfSpectralOptions {
     std::optional<double> energy_shift;
     /// Convergence tolerance for the Lanczos tridiag build.
     double      tolerance        = 1e-12;
-    /// Global problem dimension, forwarded as the Lanczos dimension cap.
-    /// 0 means "use local_n".
-    std::uint64_t global_n       = 0;
 };
 
 struct CfSpectralResult {
@@ -117,9 +114,6 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     kopts.reorth        = ed::krylov::ReorthPolicy::None;
     kopts.keep_basis    = false;
     kopts.breakdown_tol = opts.tolerance;
-    kopts.dim_cap       = (opts.global_n > 0)
-        ? static_cast<std::size_t>(opts.global_n)
-        : local_n;
     auto kres = ed::krylov::lanczos_kernel(be, apply_H, local_n,
                                            phi.get(), kopts);
     std::vector<double> alpha = kres.alpha;

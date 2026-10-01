@@ -363,7 +363,6 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                     for (const auto& c : phi) n2 += std::norm(c);
                     if (n2 < 1e-24) continue;
                     reached.insert({tsub.n_up * 1000 + tsub.sz_parity, static_cast<int>(ti)});
-                    cf.global_n = n;
                     ed::observables::CfSpectralResult r;
                     auto t_cf = std::chrono::steady_clock::now();
                     // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.

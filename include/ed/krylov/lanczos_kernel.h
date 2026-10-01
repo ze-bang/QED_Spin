@@ -158,18 +158,6 @@ struct LanczosKernelOptions {
     /// it is non-null). Default 0.
     std::size_t on_step_interval = 0;
 
-    /// Upper bound on the Krylov subspace dimension imposed by the
-    /// problem geometry. The kernel's effective iteration cap is
-    ///
-    ///     cap = min(max_iter, dim_cap > 0 ? dim_cap : local_n)
-    ///
-    /// Default 0 means "use `local_n`", which is the correct CPU /
-    /// single-GPU value (`local_n == global_dim` in those backends).
-    /// A caller whose vectors are shorter than the problem dimension
-    /// must pass the global dimension here, otherwise the kernel would
-    /// stop early at `local_n` iterations.
-    std::size_t dim_cap = 0;
-
     /// Optional FIXED set of vectors (in backend memory) that every
     /// reorthogonalisation pass also projects out of `w`. The set is
     /// closed at construction time (the kernel does not append to it)
@@ -375,9 +363,8 @@ LanczosKernelResult lanczos_kernel(
         coeffs.reserve(n_aux + expected_total);
     }
 
-    const std::size_t dim_bound =
-        (opts.dim_cap > 0) ? opts.dim_cap : local_n;
-    const std::size_t cap = std::min<std::size_t>(opts.max_iter, dim_bound);
+    // A Krylov space never exceeds the dimension of the space.
+    const std::size_t cap = std::min<std::size_t>(opts.max_iter, local_n);
 
     for (std::size_t j = 0; j < cap; ++j) {
         const double t0 = profile_on ? now_us() : 0.0;

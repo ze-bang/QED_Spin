@@ -52,10 +52,6 @@ struct KrylovSchurOptions {
     bool        compute_vectors = false;
     /// Maximum restart cycles before we give up.
     std::size_t max_restarts    = 30;
-    /// Global problem dimension, forwarded as the per-cycle
-    /// `lanczos_kernel<Backend>` dimension cap.
-    /// Default 0 means "use local_n" (CPU / single-GPU runs).
-    std::uint64_t global_n      = 0;
     /// Breakdown threshold passed to the per-cycle `lanczos_kernel`.
     double      breakdown_tol   = 1e-13;
     /// Memory cap on the per-cycle Krylov subspace, in resident length-N
@@ -98,14 +94,11 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");
     }
 
-    const std::uint64_t global_dim =
-        (opts.global_n > 0) ? opts.global_n
-                            : static_cast<std::uint64_t>(local_n);
     const std::size_t   k_target = std::max<std::size_t>(1, opts.num_eigs);
     // Per-cycle subspace: grown by max_iter, but CAPPED by the memory budget
     // (max_subspace_vectors) so the basis footprint is predictable / cannot OOM.
     const std::size_t   m_max    = ed::krylov::krylov_subspace_dim(
-        k_target, opts.max_iter, global_dim, opts.max_subspace_vectors);
+        k_target, opts.max_iter, static_cast<std::uint64_t>(local_n), opts.max_subspace_vectors);
 
     // --- locked Ritz set (in backend memory) ---------------------------
     std::vector<ed::matvec::Backend::UniqueVec> locked_vecs;
@@ -156,7 +149,6 @@ KrylovSchurResult krylov_schur_kernel(Backend&       be,
         kopts.reorth         = ReorthPolicy::FullCGS2;
         kopts.keep_basis     = true;
         kopts.breakdown_tol  = opts.breakdown_tol;
-        kopts.dim_cap        = static_cast<std::size_t>(global_dim);
         kopts.aux_ortho_ptrs = std::move(aux);
         c.kres = lanczos_kernel(be, matvec, local_n, v_seed.get(), kopts);
         R.iters_done += c.kres.iters_done;

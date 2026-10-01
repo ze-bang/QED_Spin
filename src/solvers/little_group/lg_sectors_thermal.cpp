@@ -161,7 +161,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 ko.observables.push_back(A->template bind<B>());
             }
             if constexpr (device) ko.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
-            auto kres = ed::thermal::ftlm_kernel<B>(be, H, n, n, ko);
+            auto kres = ed::thermal::ftlm_kernel<B>(be, H, n, ko);
             d.temperatures  = T;
             d.energy        = std::move(kres.energy);
             d.specific_heat = std::move(kres.heat_capacity);
