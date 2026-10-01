@@ -437,9 +437,10 @@ TEST_CASE("lanes: lowest values of toy blocks match Eigen", "[lanes]") {
         for (std::size_t k = 1; k <= std::min<std::size_t>(dim, 8) + 1; ++k) {
             INFO(b.name << " dim " << dim << " k " << k);
             const auto sol = lg::solve_block_lowest(be, *b.op, k);
-            REQUIRE(sol.converged);
-            REQUIRE(sol.values.size() == std::min(k, dim));
-            for (std::size_t i = 0; i < sol.values.size(); ++i) REQUIRE(std::abs(sol.values[i] - ref[i]) < 1e-8);
+            CHECK(sol.converged);              // CHECK: one run lists every failing (block, k)
+            CHECK(sol.values.size() == std::min(k, dim));
+            for (std::size_t i = 0; i < std::min(sol.values.size(), ref.size()); ++i)
+                CHECK(std::abs(sol.values[i] - ref[i]) < 1e-8);
         }
     }
 }
@@ -544,9 +545,18 @@ TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]
         REQUIRE(c1.converged == g1.converged);
         if (c1.converged) {
             REQUIRE(std::abs(c1.values[0] - g1.values[0]) < 1e-10);
-            Complex o(0, 0);
-            for (std::size_t a = 0; a < D.dim(); ++a) o += std::conj(c1.vectors[0][a]) * g1.vectors[0][a];
-            REQUIRE(1.0 - std::abs(o) < 1e-10);
+            const auto ref = eigen_values(b.dense);
+            if (ref.size() < 2 || ref[1] - ref[0] > 1e-6) {
+                // A unique ground state: the same vector up to a phase.
+                Complex o(0, 0);
+                for (std::size_t a = 0; a < D.dim(); ++a) o += std::conj(c1.vectors[0][a]) * g1.vectors[0][a];
+                REQUIRE(1.0 - std::abs(o) < 1e-10);
+            } else {
+                // A degenerate E0 (the odd Ising ring): each lane may return any vector of the
+                // eigenspace, so require each to be an eigenvector.
+                REQUIRE(residual(D, c1.values[0], c1.vectors[0]) < 1e-8);
+                REQUIRE(residual(D, g1.values[0], g1.vectors[0]) < 1e-8);
+            }
         }
         // The kept-basis lane on the device too.
         const auto kb = lg::solve_gs_vector(gpu, D, /*kept_basis_max_dim=*/D.dim());

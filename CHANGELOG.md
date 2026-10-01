@@ -107,7 +107,9 @@ C++ API (installed headers; nothing in Python changes):
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)
-block, which has no device kernel; use device='auto' or 'cpu'").
+block, which has no device kernel; use device='auto' or 'cpu'"). A sampled `thermal` block
+small enough for the dense solve whose LAPACK solve fails (a non-finite H) raises
+RuntimeError instead of falling through to the sampling kernel.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

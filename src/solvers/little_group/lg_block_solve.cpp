@@ -156,6 +156,33 @@ struct CountedH {
     }
 };
 
+// The k lowest LEVELS of a Lanczos tridiagonal (Ritz values w[0..m) ascending; bound(j) the Paige
+// bound |beta_m z_{m,j}| of value j), walked contiguously from the bottom. Values within 1e-9 scale
+// of a level's first copy are that level: ghost copies of a converged extreme, or the copy of a
+// degenerate level the recurrence picks up from roundoff once its first Krylov space is exhausted
+// (the 7-state ring at k = 1). A level is converged when ANY copy carries a bound <= 1e-7 scale and
+// is reported at its first converged copy. The walk stops at the first unconverged level, never
+// backfilled from above (Lanczos converges the TOP extreme first). True when k levels were found;
+// `out` (if given) receives the converged prefix.
+template <class Bound>
+bool lowest_levels(std::size_t m, const double* w, Bound&& bound, double scale, std::size_t k,
+                   std::vector<double>* out) {
+    std::size_t found = 0;
+    for (std::size_t j = 0; j < m && found < k;) {
+        const double first = w[j];
+        std::size_t i = j;
+        bool converged = false;
+        double value = first;
+        for (; i < m && std::abs(w[i] - first) <= 1e-9 * scale; ++i)
+            if (!converged && bound(i) <= 1e-7 * scale) { converged = true; value = w[i]; }
+        if (!converged) return false;
+        if (out) out->push_back(value);
+        ++found;
+        j = i;
+    }
+    return found >= k;
+}
+
 }  // namespace
 
 // Several lowest levels of one block above the dense crossover: thick-restart
@@ -317,20 +344,10 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
                 const auto& w = es.eigenvalues();
                 const double scale = std::max(
                     {std::abs(w(0)), std::abs(w(m - 1)), 1e-300});
-                std::size_t distinct = 0;
-                double last = 0.0;
-                for (int j = 0; j < m && distinct < kk; ++j) {
-                    if (distinct > 0
-                        && std::abs(w(j) - last) <= 1e-9 * scale)
-                        continue;                 // ghost copy of `last`
-                    const double bound =
-                        beta_m * std::abs(es.eigenvectors()(m - 1, j));
-                    if (bound > 1e-7 * scale) return false;  // lowest
-                        // unconverged distinct value: keep iterating
-                    last = w(j);
-                    ++distinct;
-                }
-                return distinct >= kk;
+                const auto& Z = es.eigenvectors();
+                return lowest_levels(static_cast<std::size_t>(m), w.data(),
+                                     [&](std::size_t j) { return beta_m * std::abs(Z(m - 1, static_cast<Eigen::Index>(j))); },
+                                     scale, kk, nullptr);
             };
         kopts.convergence_check_interval = 10;
     }
@@ -359,7 +376,7 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // genuine upper levels converge. On this path a single-vector recurrence
     // cannot represent a true within-block degeneracy anyway (exact
     // arithmetic yields ONE copy per eigenvalue), so equal-to-tolerance
-    // duplicates ARE ghosts: keep the first of each cluster. Additionally
+    // duplicates ARE one level (see lowest_levels). Additionally
     // keep only Ritz values whose tridiagonal residual bound
     // |beta_m * z_{m,j}| marks them converged -- both tests are free (the
     // tridiag is m <= a few hundred).
@@ -367,27 +384,17 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     const double scale  = std::max(
         {std::abs(diag.front()), std::abs(diag[m - 1]), 1e-300});
     // CONTIGUITY (pairs with the gate above): walk the Ritz values
-    // ASCENDING, dedup ghost copies, and take the k lowest distinct values
+    // ASCENDING, merge ghost copies into levels, and take the k lowest levels
     // -- STOPPING at the first unconverged one. Skipping past it would
     // backfill with converged UPPER-spectrum values (Lanczos converges the
     // top extreme first) and report them as the "lowest" with
     // converged=true. An unconverged low value truncates the list and flags
     // the block unconverged; it is never silently replaced by a higher value.
-    bool all_converged = true;
-    for (std::size_t j = 0; j < m && sol.values.size() < k; ++j) {
-        if (!sol.values.empty()
-            && std::abs(diag[j] - sol.values.back()) <= 1e-9 * scale)
-            continue;                             // ghost copy
-        const double bound = beta_m * std::abs(z[(m - 1) + j * m]);
-        if (bound > 1e-7 * scale) {               // lowest unconverged
-            all_converged = false;                // distinct value: stop --
-            break;                                // never backfill from above
-        }
-        sol.values.push_back(diag[j]);
-    }
-    // A budget-capped block that could not deliver k distinct converged
-    // values must be DISTINGUISHABLE from a converged one downstream.
-    sol.converged = all_converged && sol.values.size() >= k;
+    // A budget-capped block that could not deliver k converged levels must be
+    // DISTINGUISHABLE from a converged one downstream.
+    sol.converged = lowest_levels(m, diag.data(),
+                                  [&](std::size_t j) { return beta_m * std::abs(z[(m - 1) + j * m]); },
+                                  scale, k, &sol.values);
     return sol;
 }
 
@@ -548,6 +555,8 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) 
         if (resid <= kLgGsResidTol || attempt == kLgGsRestarts) break;
         be.copy(u.get(), seed.get(), n);   // restarted refinement
     }
+    // Release the work vectors before the host copy: the lane exists to stay at a few n-vectors.
+    seed.reset(); vp.reset(); vc.reset(); w.reset();
     return std::make_pair(E0, to_host(be, u.get(), n));
 }
 
@@ -562,10 +571,11 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
     GsVector g;
     CountedH Hc{H.bind<B>()};
     double E0 = 0.0;
-    std::vector<Complex> u(n);
+    std::vector<Complex> u;                  // allocated per branch: the two-pass returns its own
     if (n <= 2) {   // the caller sends blocks below its dense crossover to a dense solve
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(H));
         E0 = es.eigenvalues()(0);
+        u.assign(n, Complex(0, 0));
         for (std::size_t i = 0; i < n; ++i)
             u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
     } else if (n > kept_basis_max_dim) {
@@ -595,7 +605,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
             diag.data(), off.data(), z.data(), static_cast<lapack_int>(m));
         if (info != 0) return g;
         E0 = diag[0];
-        std::fill(u.begin(), u.end(), Complex(0, 0));
+        u.assign(n, Complex(0, 0));
         std::vector<Complex> vj_host;
         for (std::size_t j = 0; j < m; ++j) {
             const double yj = z[j];              // column 0, row j
