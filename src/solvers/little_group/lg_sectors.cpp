@@ -114,7 +114,7 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
 
 // The lowest Ritz value after 40 Lanczos steps from a fixed random start: an upper bound on
 // the block's lowest level (on the device when the block has a device kernel).
-double estimate_lowest(const detail::BlockOp& bop, Device device) {
+double prune_estimate(const detail::BlockOp& bop, Device device) {
     const ed::LinearOperator& op = *bop.op;
     if (bop.on_device) {
         ed::workflows::SolveOptions so;
@@ -127,27 +127,8 @@ double estimate_lowest(const detail::BlockOp& bop, Device device) {
         const auto r = ed::workflows::solve(op, so);
         if (!r.eigenvalues.empty()) return r.eigenvalues.front();
     }
-    const std::size_t n = op.dim();
-    std::vector<Complex> v0(n);
-    std::mt19937_64 gen(0xE57A7EULL);
-    std::normal_distribution<double> nd(0.0, 1.0);
-    for (auto& c : v0) c = Complex(nd(gen), nd(gen));
-    ed::krylov::LanczosKernelOptions kopts;
-    kopts.max_iter   = std::min<std::size_t>(40, n);
-    kopts.reorth     = ed::krylov::ReorthPolicy::None;
-    kopts.keep_basis = false;
-    kopts.dim_cap    = n;
     ed::matvec::CpuBackend be;
-    auto apply = [&op](const Complex* in, Complex* o2, std::size_t nn) { op.apply(in, o2, nn); };
-    const auto k = ed::krylov::lanczos_kernel(be, apply, n, v0.data(), kopts);
-    std::vector<double> d = k.alpha, e;
-    for (std::size_t i = 1; i < k.alpha.size(); ++i) e.push_back(k.beta[i]);
-    if (d.empty()) return -std::numeric_limits<double>::infinity();
-    e.resize(std::max<std::size_t>(d.size(), 1));
-    if (LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()), d.data(), e.data(),
-                      nullptr, 1) != 0)
-        return -std::numeric_limits<double>::infinity();     // never prune on a failed estimate
-    return *std::min_element(d.begin(), d.end());
+    return lg_detail::estimate_lowest(be, op).theta;     // -inf on a failed estimate: never pruned
 }
 
 // The phase record of one solved block, logged at Info. `rep` is the block's H; its counters
@@ -330,11 +311,18 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                                                       device_iters, dense);
                     if (on_device) ++res.device_blocks;
                     res.placement.add(on_device, dense);
-                } else if (o.vectors) {
-                    std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim, &converged);
-                    res.placement.add(false, !krylov);
                 } else {
-                    ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged);
+                    BlockSolution sol;
+                    if (!krylov) {
+                        sol = solve_block_dense(mv, static_cast<std::size_t>(want), o.vectors);
+                    } else {
+                        ed::matvec::CpuBackend be;
+                        sol = o.vectors ? solve_block_eigenpairs(be, mv, static_cast<std::size_t>(want))
+                                        : solve_block_lowest(be, mv, static_cast<std::size_t>(want));
+                    }
+                    ev = std::move(sol.values);
+                    vv = std::move(sol.vectors);
+                    converged = sol.converged;
                     res.placement.add(false, !krylov);
                 }
                 res.block_stats.push_back(block_stats(
@@ -410,7 +398,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 detail::require_device_kernel(o.device, bop, bi->tag, "eigs");
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
-                                      estimate_lowest(bop, o.device)});
+                                      prune_estimate(bop, o.device)});
             }
         });
     }

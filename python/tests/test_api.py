@@ -624,3 +624,82 @@ def test_dense_max_dim_is_the_thermal_crossover():
         assert float(np.max(np.abs(sampled.E - exact.E))) > 1e-8
     with pytest.raises(qed.errors.InvalidRequest, match="dense_max_dim"):
         qed.thermal(H, T, method="ftlm", sym=sym, dense_max_dim=-5)
+
+
+# ---------------------------------------------------------------------------
+# The Krylov lanes at toy dimensions: dense_max_dim=0 sends every block above dimension 2
+# to the lanes the device runs (P2.4), so their answers must equal a dense numpy reference.
+# ---------------------------------------------------------------------------
+
+def _xxz_open(n, delta, hz):
+    H = qed.Operator(n)
+    for i in range(n - 1):
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, i + 1, 0.5)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, i + 1, 0.5)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, delta)
+    for i in range(n):
+        H.add_one_body(qed.OP_SZ, i, hz)
+    return H
+
+
+def _dense(H, n):
+    eye = np.eye(1 << n, dtype=complex)
+    return np.column_stack([H.apply(eye[:, j]) for j in range(1 << n)])
+
+
+def _reference_levels(H, n, content):
+    """Every level the content resolves, ascending, each counted as eigs counts it."""
+    M = _dense(H, n)
+    pop = np.array([bin(s).count("1") for s in range(1 << n)])
+    if content in ("none", "flip"):
+        return np.linalg.eigvalsh(M)
+    sector = np.flatnonzero(pop == n // 2)
+    Ms = M[np.ix_(sector, sector)]
+    if content in ("sz_one", "lg"):
+        return np.linalg.eigvalsh(Ms)
+    # su2: the singlets of the Sz = 0 sector (S^2 = 2 sum_{i<j} S_i.S_j + 3N/4).
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, j) for i in range(n) for j in range(i + 1, n)], J=2.0)
+    S2 = _dense(b.to_operator(), n)[np.ix_(sector, sector)] + 0.75 * n * np.eye(len(sector))
+    w, U = np.linalg.eigh(S2)
+    Q = U[:, np.abs(w) < 1e-8]
+    return np.linalg.eigvalsh(Q.conj().T @ Ms @ Q)
+
+
+def _lane_symmetry(n, periodic, content):
+    off = dict(spin_flip="off", time_reversal="off")
+    if content == "none":
+        return qed.Symmetry.none()
+    if content == "sz_one":
+        return qed.Symmetry(spatial=None, sz=n // 2, **off)
+    if content == "lg":
+        refl = [(n - 1 - i) % n for i in range(n)] if not periodic else [(-i) % n for i in range(n)]
+        group = ([[(i + 1) % n for i in range(n)]] if periodic else []) + [refl]
+        return qed.Symmetry(spatial=group, sz=n // 2, **off)
+    if content == "flip":
+        return qed.Symmetry(spatial=None, sz="off", spin_flip="require", time_reversal="off")
+    return qed.Symmetry(spatial=None, total_spin=0, **off)
+
+
+_LANE_CASES = [("ring10_j2", c) for c in ("none", "sz_one", "lg", "flip", "su2")] + \
+              [("ring8", c) for c in ("sz_one", "lg", "su2")] + \
+              [("xxz_field9", c) for c in ("none", "sz_one", "lg")]
+
+
+@pytest.mark.parametrize("model,content", _LANE_CASES)
+def test_krylov_lanes_at_toy_dims(model, content):
+    H, n, periodic = {"ring10_j2": lambda: (_ring(10, 0.3), 10, True),
+                      "ring8": lambda: (_ring(8), 8, True),
+                      "xxz_field9": lambda: (_xxz_open(9, 0.6, 0.2), 9, False)}[model]()
+    sym = _lane_symmetry(n, periodic, content)
+    ref = _reference_levels(H, n, content)
+    for k in (1, 3):
+        for vectors in (False, True):
+            r = qed.eigs(H, k, sym=sym, vectors=vectors, dense_max_dim=0, device="cpu", prune=False)
+            assert r.complete, (k, vectors)
+            np.testing.assert_allclose(np.asarray(r.energies)[:k], ref[:k], atol=1e-8)
+            if vectors and content != "su2":
+                V = np.array(r.vectors())
+                np.testing.assert_allclose(V.conj() @ V.T, np.eye(len(V)), atol=1e-10)
+                for e, v in zip(r.energies, V):
+                    assert np.linalg.norm(H.apply(v) - e * v) < 1e-7

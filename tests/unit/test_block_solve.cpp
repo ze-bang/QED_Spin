@@ -7,9 +7,13 @@
 //             injected DeviceProbe that counts its calls; with_backend().
 //   [thermal] a sampled block up to dense_max_dim is diagonalised on the host (and
 //             counted host_dense); dense_max_dim = 0, a spin tower or observables sample it.
+//   [lanes]   the Backend-templated block lanes (scan, Krylov-Schur, GS vector, estimate)
+//             on toy blocks against Eigen; [lanes][cuda] the same lanes on CudaBackend.
 // =============================================================================
 #include "common/catch2_harness.h"
+#include "common/dense_operator.h"
 #include "common/test_harness.h"
+#include "solvers/little_group/lg_internal.h"
 
 #include <ed/core/device.h>
 #include <ed/core/errors.h>
@@ -19,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -349,3 +354,206 @@ TEST_CASE("thermal: a spin tower or observables keep a small block sampled", "[t
         for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
     }
 }
+
+// -----------------------------------------------------------------------------
+// [lanes]: the Backend-templated block lanes on toy blocks against Eigen. Every block is
+// above the lanes' own n <= 2 dense guard, so these are the Krylov paths the verbs run
+// above their dense crossover (and, on a device, at every size).
+// -----------------------------------------------------------------------------
+namespace {
+
+namespace lg = ed::solvers::lg_detail;
+
+// XXZ chain: Jxy (S+S- + S-S+)/2 + Jz SzSz on nearest neighbours, plus a uniform field hz.
+std::shared_ptr<Operator> xxz_chain(int N, bool periodic, double Jxy, double Jz, double hz) {
+    auto H = std::make_shared<Operator>(static_cast<std::uint64_t>(N), 0.5f);
+    for (int i = 0; i < (periodic ? N : N - 1); ++i) {
+        const auto a = static_cast<std::uint64_t>(i), b = static_cast<std::uint64_t>((i + 1) % N);
+        H->addTwoBodyTerm(2, a, 2, b, Complex(Jz, 0));
+        H->addTwoBodyTerm(0, a, 1, b, Complex(0.5 * Jxy, 0));
+        H->addTwoBodyTerm(1, a, 0, b, Complex(0.5 * Jxy, 0));
+    }
+    for (int i = 0; hz != 0.0 && i < N; ++i) H->addOneBodyTerm(2, static_cast<std::uint64_t>(i), Complex(hz, 0));
+    return H;
+}
+
+struct ToyBlock {
+    std::string name;
+    std::shared_ptr<const ed::LinearOperator> op;
+    Eigen::MatrixXcd dense;
+};
+
+// Open chain, ring, Ising-heavy and field-XXZ models; full spaces and Sz sectors; dims 3..256.
+std::vector<ToyBlock> toy_blocks() {
+    struct Model { const char* name; int N; bool periodic; double Jxy, Jz, hz; };
+    const Model models[] = {{"open", 6, false, 1.0, 1.0, 0.0},    {"ring", 8, true, 1.0, 1.0, 0.0},
+                            {"ising", 7, true, 0.2, 1.0, 0.0},    {"field", 8, true, 1.0, 0.5, 0.31}};
+    std::vector<ToyBlock> out;
+    for (const Model& m : models) {
+        auto H = xxz_chain(m.N, m.periodic, m.Jxy, m.Jz, m.hz);
+        const std::uint64_t full = std::uint64_t{1} << m.N;
+        out.push_back({std::string(m.name) + "/full", H, ed_tests::reference_from_operator(*H, full).H});
+        for (int n_up : {1, m.N / 2}) {
+            auto S = std::make_shared<ed_tests::SzSectorOperator>(H, n_up);
+            Eigen::MatrixXcd D = ed_tests::apply_to_dense([&S](const Complex* in, Complex* o, int n) {
+                S->apply(in, o, static_cast<std::size_t>(n));
+            }, S->dim());
+            out.push_back({std::string(m.name) + "/n_up=" + std::to_string(n_up), S, std::move(D)});
+        }
+    }
+    return out;
+}
+
+std::vector<double> eigen_values(const Eigen::MatrixXcd& D) {
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(D);
+    return {es.eigenvalues().data(), es.eigenvalues().data() + es.eigenvalues().size()};
+}
+
+std::shared_ptr<const ed::LinearOperator> sz_sector(int N, bool periodic, int n_up) {
+    return std::make_shared<ed_tests::SzSectorOperator>(xxz_chain(N, periodic, 1.0, 1.0, 0.0), n_up);
+}
+
+double residual(const ed::LinearOperator& H, double e, const std::vector<Complex>& v) {
+    std::vector<Complex> hv(v.size());
+    H.apply(v.data(), hv.data(), v.size());
+    double r = 0.0;
+    for (std::size_t i = 0; i < v.size(); ++i) r += std::norm(hv[i] - e * v[i]);
+    return std::sqrt(r);
+}
+
+}  // namespace
+
+TEST_CASE("lanes: lowest values of toy blocks match Eigen", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    for (const ToyBlock& b : toy_blocks()) {
+        const auto ref = eigen_values(b.dense);
+        const std::size_t dim = ref.size();
+        REQUIRE(dim >= 3);
+        for (std::size_t k = 1; k <= std::min<std::size_t>(dim, 8) + 1; ++k) {
+            INFO(b.name << " dim " << dim << " k " << k);
+            const auto sol = lg::solve_block_lowest(be, *b.op, k);
+            REQUIRE(sol.converged);
+            REQUIRE(sol.values.size() == std::min(k, dim));
+            for (std::size_t i = 0; i < sol.values.size(); ++i) REQUIRE(std::abs(sol.values[i] - ref[i]) < 1e-8);
+        }
+    }
+}
+
+TEST_CASE("lanes: the Bethe ground state of the 10-ring", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    const auto H = sz_sector(10, true, 5);   // 252 states
+    const auto sol = lg::solve_block_lowest(be, *H, 1);
+    REQUIRE(sol.converged);
+    REQUIRE(sol.values.size() == 1);
+    REQUIRE(std::abs(sol.values[0] - (-4.515446354492155)) < 1e-8);
+    REQUIRE(sol.applies > 0);
+}
+
+TEST_CASE("lanes: Krylov-Schur pairs are orthonormal eigenpairs", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    const auto H = sz_sector(8, false, 4);   // the 8-site open chain at sz = 0: 70 states
+    const auto ref = ed_tests::reference_from_operator(*xxz_chain(8, false, 1.0, 1.0, 0.0), 256).eigs;
+    const auto sol = lg::solve_block_eigenpairs(be, *H, 5);
+    REQUIRE(sol.converged);
+    REQUIRE(sol.values.size() == 5);
+    REQUIRE(sol.vectors.size() == 5);
+    const auto sector = eigen_values(ed_tests::apply_to_dense([&H](const Complex* in, Complex* o, int n) {
+        H->apply(in, o, static_cast<std::size_t>(n));
+    }, H->dim()));
+    for (std::size_t i = 0; i < 5; ++i) {
+        REQUIRE(std::abs(sol.values[i] - sector[i]) < 1e-9);
+        REQUIRE(residual(*H, sol.values[i], sol.vectors[i]) < 1e-7);
+        for (std::size_t j = 0; j < 5; ++j) {
+            Complex g(0, 0);
+            for (std::size_t a = 0; a < H->dim(); ++a) g += std::conj(sol.vectors[i][a]) * sol.vectors[j][a];
+            REQUIRE(std::abs(g - Complex(i == j ? 1.0 : 0.0, 0.0)) < 1e-12);
+        }
+    }
+    REQUIRE(sector.front() >= ref.front() - 1e-12);
+}
+
+TEST_CASE("lanes: the two-pass GS vector is certified at small n", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    for (int N : {6, 8, 10, 12}) {                 // 20, 70, 252, 924 states
+        const auto H = sz_sector(N, true, N / 2);
+        INFO("N " << N << ", dim " << H->dim());
+        const auto g = lg::solve_gs_vector(be, *H, /*kept_basis_max_dim=*/0);
+        REQUIRE(g.certified);
+        REQUIRE(g.residual <= 1e-8);
+        REQUIRE(residual(*H, g.energy, g.vector) <= 1e-8);
+        // The kept-basis lane finds the same level.
+        const auto k = lg::solve_gs_vector(be, *H);
+        REQUIRE(k.certified);
+        REQUIRE(std::abs(k.energy - g.energy) < 1e-9);
+    }
+}
+
+TEST_CASE("lanes: a starved budget is reported, not thrown", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    const auto H = sz_sector(10, true, 5);
+    REQUIRE_FALSE(lg::solve_block_lowest(be, *H, 1, /*max_iter=*/4).converged);
+    REQUIRE_FALSE(lg::solve_block_lowest(be, *H, 3, /*max_iter=*/4).converged);
+    REQUIRE_FALSE(lg::solve_block_eigenpairs(be, *H, 3, /*max_iter=*/4).converged);
+    const auto g = lg::solve_gs_vector(be, *H, lg::LanePolicy<ed::matvec::CpuBackend>::gs_kept_basis_max_dim, 4);
+    REQUIRE_FALSE(g.certified);
+    REQUIRE_FALSE(lg::solve_block_eigenpairs(be, *H, 1, /*max_iter=*/4).converged);
+}
+
+TEST_CASE("lanes: an operator's ResourceLimit propagates", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    for (std::size_t k : {std::size_t{1}, std::size_t{3}}) {
+        auto T = std::make_shared<ed_tests::ThrowingOperator>(sz_sector(10, true, 5), 7);
+        REQUIRE_THROWS_AS(lg::solve_block_eigenpairs(be, *T, k), ed::ResourceLimit);
+    }
+}
+
+TEST_CASE("lanes: the pruning estimate is deterministic and an upper bound", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    const auto H = sz_sector(12, true, 6);
+    const auto a = lg::estimate_lowest(be, *H), b = lg::estimate_lowest(be, *H);
+    REQUIRE(a.theta == b.theta);
+    REQUIRE(a.applies > 0);
+    REQUIRE(a.applies <= 40);
+    REQUIRE(a.theta >= lg::solve_block_lowest(be, *H, 1).values.front() - 1e-12);
+}
+
+#ifdef WITH_CUDA
+TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]") {
+    if (!ed::have_cuda()) {
+        SUCCEED("no CUDA device: skipped");
+        return;
+    }
+    ed::matvec::CpuBackend cpu;
+    ed::matvec::CudaBackend gpu;
+    for (const ToyBlock& b : toy_blocks()) {
+        ed_tests::DenseOperator D(b.dense);
+        REQUIRE(D.has_device_kernel());
+        for (std::size_t k : {std::size_t{1}, std::size_t{2}, std::size_t{4}}) {
+            INFO(b.name << " k " << k);
+            const auto c = lg::solve_block_lowest(cpu, D, k), g = lg::solve_block_lowest(gpu, D, k);
+            REQUIRE(c.converged == g.converged);
+            REQUIRE(c.values.size() == g.values.size());
+            for (std::size_t i = 0; i < c.values.size(); ++i) REQUIRE(std::abs(c.values[i] - g.values[i]) < 1e-10);
+        }
+        const auto c1 = lg::solve_block_eigenpairs(cpu, D, 1), g1 = lg::solve_block_eigenpairs(gpu, D, 1);
+        REQUIRE(c1.converged == g1.converged);
+        if (c1.converged) {
+            REQUIRE(std::abs(c1.values[0] - g1.values[0]) < 1e-10);
+            Complex o(0, 0);
+            for (std::size_t a = 0; a < D.dim(); ++a) o += std::conj(c1.vectors[0][a]) * g1.vectors[0][a];
+            REQUIRE(1.0 - std::abs(o) < 1e-10);
+        }
+        // The kept-basis lane on the device too.
+        const auto kb = lg::solve_gs_vector(gpu, D, /*kept_basis_max_dim=*/D.dim());
+        REQUIRE(kb.certified == c1.converged);
+    }
+    ed_tests::DenseOperator D(ed_tests::apply_to_dense([H = sz_sector(10, true, 5)](const Complex* in, Complex* o, int n) {
+        H->apply(in, o, static_cast<std::size_t>(n));
+    }, 252));
+    REQUIRE_FALSE(lg::solve_block_lowest(gpu, D, 1, 4).converged);
+    REQUIRE_FALSE(lg::solve_block_lowest(gpu, D, 3, 4).converged);
+    REQUIRE_FALSE(lg::solve_block_eigenpairs(gpu, D, 1, 4).converged);
+    auto T = std::make_shared<ed_tests::ThrowingOperator>(std::make_shared<ed_tests::DenseOperator>(D.matrix()), 7);
+    REQUIRE_THROWS_AS(lg::solve_block_eigenpairs(gpu, *T, 1), ed::ResourceLimit);
+}
+#endif

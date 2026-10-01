@@ -51,9 +51,19 @@ def _sym(m, content):
     raise Missing(f"content {content!r} is not in the sector-resolved API yet")
 
 
+# --cpu-dense-max-dim N (conftest.py; the gate never passes it): CPU cells solve with
+# dense_max_dim=N and prune=False, so a pre-flight run puts the host lanes on the block sizes
+# the device lanes see.
+CPU_DENSE_MAX_DIM = None
+
+
 def _dense_max_dim(device):
     """Grid blocks are below the dense crossover; drop it so GPU cells run the device path."""
-    return 0 if device == "gpu" else None
+    return 0 if device == "gpu" else CPU_DENSE_MAX_DIM
+
+
+def _prune(device):
+    return device == "cpu" and CPU_DENSE_MAX_DIM is None
 
 
 def _on_device(device, r):
@@ -69,7 +79,7 @@ def _on_device(device, r):
 
 def eigs(m, H, content, device, k):
     # GPU cells solve every block (prune=False), so the device path is what they measure.
-    r = _eigs(H, k, sym=_sym(m, content), device=device, prune=(device == "cpu"),
+    r = _eigs(H, k, sym=_sym(m, content), device=device, prune=_prune(device),
               dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
     return np.sort(r.energies)
@@ -99,14 +109,15 @@ def thermal(m, H, content, device, method, T, samples, krylov, seed, observables
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
     r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
-                  krylov=krylov, samples=samples, seed=7, device=device)
+                  krylov=krylov, samples=samples, seed=7, device=device,
+                  dense_max_dim=None if device == "gpu" else CPU_DENSE_MAX_DIM)
     _on_device(device, r)
     return r.S[0]
 
 
 def expect(m, H, content, device, ops, k):
     """[(energy, multiplicity, values per op)] for the levels of the lowest-k window."""
-    r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=(device == "cpu"),
+    r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=_prune(device),
                 dense_max_dim=_dense_max_dim(device))
     _on_device(device, r.eigs)
     return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
@@ -114,7 +125,7 @@ def expect(m, H, content, device, ops, k):
 
 def matrix_elements(m, H, content, device, O, k):
     """[(<v_i|O|v_j> from the API, v_i, v_j in the full basis)] over the first levels."""
-    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=(device == "cpu"),
+    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=_prune(device),
               dense_max_dim=_dense_max_dim(device))
     n = min(3, len(r.levels))
     full = [r._raw.multiplet(r._spec, r._n_sites, i, -1)[0] for i in range(n)]

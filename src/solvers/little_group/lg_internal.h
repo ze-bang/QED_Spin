@@ -4,8 +4,9 @@
 // The concrete types (RepSectorMatVec, ProjectedBlockOp, Monomial, SparseColumns,
 // EngineContext, StarBuild) and the declarations of the helpers that more than
 // one engine translation unit calls. Nothing outside src/solvers/little_group/
-// includes this header: the public surface is ed::sectors (include/ed/sectors/),
-// built on the block handles of little_group_blocks.h.
+// includes this header but tests/unit/test_block_solve.cpp (which drives the block lanes
+// directly): the public surface is ed::sectors (include/ed/sectors/), built on the block
+// handles of little_group_blocks.h.
 //
 // The engine is deliberately defensive: the star folding (solve one momentum
 // per residue orbit, multiply the spectrum) is exact by construction; every
@@ -15,11 +16,12 @@
 //
 // File map
 //   lg_engine.cpp        EngineContext construction, k-sectors, monomials, irrep tables
-//   lg_block_solve.cpp   per-block eigensolves (dense / Lanczos / Krylov-Schur), crossover
+//   lg_block_solve.cpp   the per-block eigensolve driver: dense solve, crossover, and the
+//                        Backend-templated lanes (scan, Krylov-Schur, GS vector, estimate)
 //   lg_stars.cpp         per-star block construction (build_star_blocks)
 //   lg_group_sector.cpp  full-little-group sectors for 1-dim irreps (build_star_blocks fast path)
 //   lg_blocks.cpp        LittleGroupBlock handle
-//   lg_ground_state.cpp  certified ground-state vector, streamed k-sectors, shared sector data
+//   lg_ground_state.cpp  streamed k-sectors, shared sector data
 //   lg_walk.h            the star walk and block operators of the ed::sectors verbs
 //   lg_sectors*.cpp      the ed::sectors verbs (spectrum / thermal / dynamics / expect)
 // =============================================================================
@@ -766,32 +768,81 @@ void make_engine_context(const ::Operator&                    op,
 [[nodiscard]] std::map<int, std::vector<int>>
 star_partition(const EngineContext& cx, bool tr_on);
 
-// lg_block_solve.cpp
+// lg_block_solve.cpp: the per-block eigensolve driver. The dense choice is the verb's
+// (lowest_dense_floor, through place()); the Krylov lanes are templated on the Backend and
+// instantiated for CpuBackend and, with CUDA, CudaBackend. Every lane binds H once
+// (H.bind<B>()), counts its applies, draws its seed on the host and stages it on the
+// backend; vectors come back on the host, in block coordinates.
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
-[[nodiscard]] std::vector<double>
-solve_block_lowest(const ed::LinearOperator& mv, int want,
-                   int dense_max_dim, bool* converged_out = nullptr);
 
-// lg_ground_state.cpp: certified lowest eigenpair of one block (FullCGS2 / two-pass by
-// dimension); throws when the residual guard fails.
-[[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const ed::LinearOperator& hk);
+/// The memory policy of the lanes on one backend (P4.7's footprint.h and P7.3's resident
+/// basis replace it).
+template <class B> struct LanePolicy;
+template <> struct LanePolicy<ed::matvec::CpuBackend> {
+    /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate.
+    static std::uint64_t ks_budget_bytes() { return ed::core::available_ram_bytes(); }
+    /// The GS vector keeps its Krylov basis up to this dimension, and runs the two-pass above.
+    static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
+};
+#ifdef WITH_CUDA
+template <> struct LanePolicy<ed::matvec::CudaBackend> {
+    static std::uint64_t ks_budget_bytes() { return 0; }    // no cap, as the device lane had none
+    static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector is always two-pass
+};
+#endif
 
-// lg_block_solve.cpp: k levels of one block by Krylov-Schur; with vecs_out the Ritz
-// vectors (block coordinates) too.
-[[nodiscard]] std::vector<double>
-solve_block_lowest_krylov_schur(const ed::LinearOperator& mv, std::size_t k,
-                                bool* converged_out,
-                                std::vector<std::vector<Complex>>* vecs_out = nullptr);
+/// The lowest levels of one block, ascending; with vectors, aligned with them. `converged`
+/// false: the block could not certify the requested window (the certified prefix is kept).
+struct BlockSolution {
+    std::vector<double>               values;
+    std::vector<std::vector<Complex>> vectors;
+    bool                              converged = true;
+    std::uint64_t                     applies   = 0;   ///< H applies of this solve
+};
 
-// lg_block_solve.cpp: the lowest `want` eigenpairs of one block in block coordinates
-// (dense / certified GS vector / Krylov-Schur by size); *converged false when the
-// window could not be certified (the certified prefix is still returned).
-[[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
-solve_block_eigenpairs(const ed::LinearOperator& mv, int want,
-                       int dense_max_dim, bool* converged);
+/// The certified lowest eigenpair of one block: `certified` when ||H u - E u|| <= kLgGsResidTol
+/// (a miss or an internal numerical failure leaves it false).
+struct GsVector {
+    double               energy   = 0.0;
+    std::vector<Complex> vector;
+    double               residual = std::numeric_limits<double>::infinity();
+    bool                 certified = false;
+    std::uint64_t        applies   = 0;
+};
+
+/// An upper bound on a block's lowest level (40 Lanczos steps); -inf when it failed.
+struct BlockEstimate {
+    double        theta   = -std::numeric_limits<double>::infinity();
+    std::uint64_t applies = 0;
+};
+
+/// The `want` lowest levels by a dense solve on the host: LAPACK values, or Eigen with vectors.
+[[nodiscard]] BlockSolution solve_block_dense(const ed::LinearOperator& H, std::size_t want, bool vectors);
+
+/// The `want` lowest values above the dense crossover: the contiguous Paige-gated scan for one
+/// level, Krylov-Schur with locking for several. max_iter 0 keeps every default (a test seam).
+template <class B>
+[[nodiscard]] BlockSolution solve_block_lowest(B& be, const ed::LinearOperator& H, std::size_t want,
+                                               std::uint64_t max_iter = 0);
+
+/// The `want` lowest eigenpairs above the dense crossover: the certified GS vector for one
+/// level, Krylov-Schur with vectors for several.
+template <class B>
+[[nodiscard]] BlockSolution solve_block_eigenpairs(B& be, const ed::LinearOperator& H, std::size_t want,
+                                                   std::uint64_t max_iter = 0);
+
+/// The certified lowest eigenpair: dense at n <= 2, FullCGS2 with a kept basis up to
+/// kept_basis_max_dim, the two-pass recurrence above; the residual guard decides.
+template <class B>
+[[nodiscard]] GsVector solve_gs_vector(B& be, const ed::LinearOperator& H,
+                                       std::size_t kept_basis_max_dim = LanePolicy<B>::gs_kept_basis_max_dim,
+                                       std::uint64_t max_iter = 0);
+
+/// The pruning estimate: the lowest Ritz value of 40 no-reorth Lanczos steps.
+template <class B>
+[[nodiscard]] BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H);
 
 // lg_stars.cpp
 [[nodiscard]] StarBuild
