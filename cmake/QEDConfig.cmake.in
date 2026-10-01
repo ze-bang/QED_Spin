@@ -1,48 +1,31 @@
 @PACKAGE_INIT@
 
 # -----------------------------------------------------------------------------
-# QEDConfig.cmake -- exposes the installed `QED` C++ libraries to downstream
-# CMake projects via `find_package(QED CONFIG)`.
-#
-# Provides the imported targets:
-#
-#   QED::ed_parallel     Thread budget + OpenMP thread pinning
-#   QED::ed_core         Core types/config
-#   QED::ed_solvers_cpu  CPU eigensolvers + thermal methods
-#   QED::ed_solvers_gpu  GPU/CUDA solvers (only if installed with WITH_CUDA=ON)
-#
-# Downstream usage:
+# QEDConfig.cmake -- the installed engine for downstream CMake projects:
 #
 #   find_package(QED CONFIG REQUIRED)
-#   target_link_libraries(my_app PRIVATE QED::ed_solvers_cpu)
+#   target_link_libraries(my_app PRIVATE QED::qed_engine)
 #
-# Re-finds the transitive dependencies that the imported targets reference
-# (BLAS / LAPACK / OpenMP / optionally CUDAToolkit).
+# Re-finds the dependencies the imported target references (Threads, OpenMP, Eigen3 and,
+# when installed with WITH_CUDA=ON, CUDAToolkit).
 # -----------------------------------------------------------------------------
 
 include(CMakeFindDependencyMacro)
 
-set(QED_VERSION             "@PROJECT_VERSION@")
-set(QED_WITH_CUDA           "@WITH_CUDA@")
-set(QED_WITH_SCALAPACK      "@WITH_SCALAPACK@")
-set(QED_BLAS_PROFILE        "@BLAS_PROFILE@")
+set(QED_VERSION      "@PROJECT_VERSION@")
+set(QED_WITH_CUDA    "@WITH_CUDA@")
+set(QED_BLAS_PROFILE "@BLAS_PROFILE@")
 
 find_dependency(Threads)
-
-# OpenMP is optional but extremely commonly enabled.
 if(NOT TARGET OpenMP::OpenMP_CXX)
     find_dependency(OpenMP)
 endif()
-
-# Eigen3 (header-only, used pervasively).
 if(NOT TARGET Eigen3::Eigen)
     find_dependency(Eigen3 NO_MODULE)
 endif()
-
 if(QED_WITH_CUDA)
     find_dependency(CUDAToolkit)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/QEDTargets.cmake")
-
 check_required_components(QED)

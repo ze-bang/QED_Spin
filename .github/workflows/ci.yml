@@ -68,7 +68,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Python lane: install the wheel via scikit-build-core (which builds the
-  # pybind11 extension against the C++ ed_solvers_cpu library) and run the
+  # pybind11 extension against the C++ qed_engine library) and run the
   # pytest smoke suite. This is independent of the C++-only lane above so a
   # broken Python surface doesn't mask C++ regressions and vice versa.
   # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # clang-tidy lane: pure analysis, warnings only (||true). Runs against the
-  # ed_core / ed_dssf / ed_solvers_cpu translation units using the
+  # qed_engine translation units using the
   # checks defined in .clang-tidy at repo root. We deliberately do NOT fail
   # the build on warnings yet -- that flip will happen once the existing
   # technical debt is triaged. The lane exists today so newly-added code is
@@ -325,7 +325,7 @@ jobs:
             -DBLAS_PROFILE=OPENBLAS
 
       - name: Build (needed so generated headers exist)
-        run: cmake --build build-tidy --target ed_core ed_dssf ed_solvers_cpu -- -j$(nproc)
+        run: cmake --build build-tidy --target qed_engine -- -j$(nproc)
 
       - name: Run clang-tidy on src/dssf and src/core (warnings only)
         run: |
@@ -427,14 +427,14 @@ jobs:
             -DCMAKE_CUDA_ARCHITECTURES=70
 
       - name: Build (compile only, no execution)
-        run: cmake --build build-cuda --target ed_solvers_gpu -- -j$(nproc)
+        run: cmake --build build-cuda --target qed_engine -- -j$(nproc)
 
   # ---------------------------------------------------------------------------
   # CUDA full lane (DISABLED-BY-DEFAULT, opt-in via self-hosted runner).
   #
   # GitHub-hosted runners have no NVIDIA GPU, so the ``linux-cuda-build``
   # lane above only catches header / linker breakage. To actually execute
-  # the ``ed_solvers_gpu`` test suites, point this
+  # the CUDA test suites, point this
   # lane at a runner that has a CUDA-capable device. Three options:
   #
   #   1. GitHub-hosted GPU runners (public beta -> GA 2024-2025).

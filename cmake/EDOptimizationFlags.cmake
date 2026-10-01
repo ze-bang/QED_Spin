@@ -1,8 +1,7 @@
 # =============================================================================
 # cmake/EDOptimizationFlags.cmake
 #
-# Builds the global CPU_OPT_FLAGS list used as $<COMPILE_LANGUAGE:CXX>
-# compile options on the executable targets.
+# Builds the CPU_OPT_FLAGS list used as $<COMPILE_LANGUAGE:CXX> compile options.
 #
 # Exposed cache option:
 #   ED_ENABLE_FAST_MATH   default OFF. -ffast-math
@@ -15,9 +14,8 @@
 #                         -ftree-vectorize / -fomit-frame-pointer / GCC- or
 #                         Clang-specific extras / optionally -ffast-math.
 #
-# Application of CPU_OPT_FLAGS to specific targets is done in CMakeLists.txt
-# (after the targets are defined) via target_compile_options(); this file
-# only computes the list.
+# qed_engine, the tests and _core apply it via target_compile_options(); this file only
+# computes the list.
 # =============================================================================
 
 option(ED_ENABLE_FAST_MATH
@@ -69,5 +67,4 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         )
     endif()
 
-    message(STATUS "  CPU Optimization Flags: ${CPU_OPT_FLAGS}")
 endif()

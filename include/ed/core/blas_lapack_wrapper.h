@@ -3,18 +3,13 @@
 
 #pragma once
 
-// Always prefer vendor-specific umbrella headers when available.
+// MKL ships its own umbrella header (BLAS_PROFILE=MKL defines WITH_MKL); every other provider
+// gives the standard CBLAS and LAPACKE headers (cmake/EDBlas.cmake).
 #if defined(WITH_MKL)
     #include <mkl.h>
-    #define BLAS_LAPACK_BACKEND "Intel MKL"
-#elif defined(USE_AOCL_BLIS)
-    #include <cblas.h>
-    #include <lapacke.h>
-    #define BLAS_LAPACK_BACKEND "AMD AOCL-BLIS"
 #else
     #include <cblas.h>
     #include <lapacke.h>
-    #define BLAS_LAPACK_BACKEND "Generic BLAS/LAPACK"
 #endif
 
 // Ensure LAPACK_COMPLEX_CPP is defined for C++ std::complex interoperability.

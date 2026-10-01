@@ -144,6 +144,14 @@ C++ API (installed headers; nothing in Python changes):
   the backend, and `LanczosKernelOptions`, `LanczosKernelResult` and `KrylovSchurResult`
   alias `LanczosKernelOptionsT<Complex>` and the like. `ed::matvec::is_cpu_backend_v<B>`
   tells a host backend of any scalar type. `LanczosKernelOptions::on_step` (no caller) is gone.
+- **Build.** One static library, `qed_engine` (`QED::qed_engine` when installed), replaces
+  `ed_parallel`, `ed_core`, `ed_matvec`, `ed_dssf`, `ed_symmetry`, `ed_input`,
+  `ed_solvers_cpu` and `ed_solvers_gpu`; it carries the include path, `WITH_CUDA` and the link
+  stack. `BLAS_PROFILE` is `AUTO`, `FLEXIBLAS`, `OPENBLAS` or `MKL` (`cmake/EDBlas.cmake`;
+  `AOCL`, `AOCL_BLIS` and `GENERIC` are gone, `AUTO` being FindBLAS's search), `WITH_CUDA`
+  defaults to OFF, headers are reached only as `<ed/...>` (the flattened include directories
+  are gone), and the never-read macros `USE_FLEXIBLAS`, `USE_AOCL_BLIS`, `WITH_SCALAPACK`,
+  `TPQ_HAVE_CUDA` and `ENABLE_GPU` are no longer defined.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

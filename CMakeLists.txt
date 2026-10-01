@@ -1,264 +1,71 @@
 cmake_minimum_required(VERSION 3.18)
 
-# =============================================================================
-# BLAS/LAPACK BACKEND CONFIGURATION
-# =============================================================================
-# This project supports multiple BLAS/LAPACK backends. To avoid ABI conflicts,
-# we define coherent "library profiles" that ensure all components are compatible.
+# The QED_Spin engine: one static library (qed_engine), the pybind11 module qed._core
+# (ED_BUILD_PYTHON), the Catch2 unit tests (BUILD_ED_TESTS) and the docs (ED_BUILD_DOCS).
+# Entry points: scripts/build.sh on a cluster, CMakePresets.json in CI, pyproject.toml for pip.
 #
-# Available profiles (set via -DBLAS_PROFILE=<profile>):
-#   AUTO      - Auto-detect best available (default)
-#   FLEXIBLAS - FlexiBLAS wrapper (recommended for HPC clusters)
-#   MKL       - Intel MKL
-#   AOCL      - AMD AOCL (BLIS + libflame)
-#   OPENBLAS  - OpenBLAS
-#   GENERIC   - System BLAS/LAPACK (reference implementation)
-#
-# No target links ScaLAPACK. SCALAPACK_ROOT and the SCALAPACK_* variables set
-# by the profiles only feed the configuration summary and QEDConfig.cmake.
-# =============================================================================
+#   -DWITH_CUDA=ON          build the device lanes (default OFF)
+#   -DBLAS_PROFILE=...      AUTO | FLEXIBLAS | OPENBLAS | MKL (cmake/EDBlas.cmake)
+#   -DED_MARCH=...          -march value (cmake/EDOptimizationFlags.cmake; default native)
 
-set(BLAS_PROFILE "AUTO" CACHE STRING "BLAS/LAPACK library profile (AUTO, FLEXIBLAS, MKL, AOCL, OPENBLAS, GENERIC)")
-set_property(CACHE BLAS_PROFILE PROPERTY STRINGS AUTO FLEXIBLAS MKL AOCL OPENBLAS GENERIC)
-
-# Custom ScaLAPACK root (informational; see above)
-set(SCALAPACK_ROOT "" CACHE PATH "Root path to a custom ScaLAPACK installation")
-# Optional custom LAPACKE root (to avoid system BLAS/LAPACK alternatives)
-set(LAPACKE_ROOT "" CACHE PATH "Root path to a custom LAPACKE installation")
-
-# -----------------------------------------------------------------------------
-# Local-developer cache variables. Set these via -D on the command line or in
-# a local.cmake file:
-#
-#   cmake --preset default -DED_LAPACKE_ROOT=/path/to/lapacke_ref/install \
-#                          -DED_BLAS_SHIM_DIR=/path/to/blas_shim
-#
-# Both default to empty; when empty, the system search paths are used.
-# -----------------------------------------------------------------------------
-set(ED_LAPACKE_ROOT "" CACHE PATH
-    "Optional override: path to a local LAPACKE install (used when LAPACKE_ROOT is unset).")
-set(ED_BLAS_SHIM_DIR "" CACHE PATH
-    "Optional override: directory containing libblas.so.3 to PREPEND to RPATH \
-(used by the AOCL profile to avoid MKL alternatives via liblapacke).")
-
-# Make CMake search cmake/ for our project-local modules.
-list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-# Host platform detection (CPU vendor + AVX2/FMA reporting).
-include(EDPlatform)
-
-# Map the per-vendor switches USE_AOCL_BLIS / WITH_MKL / USE_FLEXIBLAS to BLAS_PROFILE
-if(DEFINED USE_AOCL_BLIS AND USE_AOCL_BLIS AND BLAS_PROFILE STREQUAL "AUTO")
-    set(BLAS_PROFILE "AOCL")
-endif()
-if(DEFINED WITH_MKL AND WITH_MKL AND BLAS_PROFILE STREQUAL "AUTO")
-    set(BLAS_PROFILE "MKL")
-endif()
-if(DEFINED USE_FLEXIBLAS AND USE_FLEXIBLAS AND BLAS_PROFILE STREQUAL "AUTO")
-    set(BLAS_PROFILE "FLEXIBLAS")
-endif()
-
-set(DEFAULT_WITH_CUDA ON)
-
-# Set defaults based on CPU vendor (only if AUTO)
-if(BLAS_PROFILE STREQUAL "AUTO")
-    if(CPU_VENDOR STREQUAL "AMD")
-        # Check if AOCL is installed
-        if(EXISTS "/opt/AMD/aocl" OR DEFINED ENV{AOCL_ROOT} OR DEFINED ENV{EBROOTAOCLMINBLAS})
-            set(BLAS_PROFILE "AOCL")
-        elseif(DEFINED ENV{EBROOTFLEXIBLAS} OR DEFINED ENV{FLEXIBLAS_ROOT})
-            set(BLAS_PROFILE "FLEXIBLAS")
-        else()
-            set(BLAS_PROFILE "OPENBLAS")
-        endif()
-    elseif(CPU_VENDOR STREQUAL "Intel")
-        if(EXISTS "/opt/intel/oneapi/mkl" OR DEFINED ENV{MKLROOT})
-            set(BLAS_PROFILE "MKL")
-        elseif(DEFINED ENV{EBROOTFLEXIBLAS})
-            set(BLAS_PROFILE "FLEXIBLAS")
-        else()
-            set(BLAS_PROFILE "OPENBLAS")
-        endif()
-    else()
-        # Unknown vendor - try FlexiBLAS, then OpenBLAS
-        if(DEFINED ENV{EBROOTFLEXIBLAS} OR DEFINED ENV{FLEXIBLAS_ROOT})
-            set(BLAS_PROFILE "FLEXIBLAS")
-        else()
-            set(BLAS_PROFILE "OPENBLAS")
-        endif()
-    endif()
-endif()
-
-message(STATUS "BLAS/LAPACK profile: ${BLAS_PROFILE}")
-
-# Derive the per-vendor flags from BLAS_PROFILE
-set(WITH_MKL OFF)
-set(USE_ONEMKL OFF)
-set(USE_AOCL_BLIS OFF)
-set(USE_FLEXIBLAS OFF)
-
-if(BLAS_PROFILE STREQUAL "MKL")
-    set(WITH_MKL ON)
-    set(USE_ONEMKL ON)
-elseif(BLAS_PROFILE STREQUAL "AOCL")
-    set(USE_AOCL_BLIS ON)
-elseif(BLAS_PROFILE STREQUAL "FLEXIBLAS")
-    set(USE_FLEXIBLAS ON)
-endif()
-
-# Options (define before project)
-option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
+option(WITH_CUDA "Build the CUDA lanes" OFF)
 
 # CUDA architectures: H100 (sm_90) unless the caller chose them (-DCMAKE_CUDA_ARCHITECTURES
 # or the CUDAARCHS environment variable). Compute capability 6.0+ is required for native
 # double atomicAdd. Seeded into the cache before project(), which would otherwise cache the
 # compiler default (sm_52) and have every later re-configure pick that up.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+if(WITH_CUDA AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
     set(CMAKE_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA architectures to build for")
 endif()
 
-# Set languages based on options. The version is mirrored in CITATION.cff
-# and CHANGELOG.md; bump in lockstep when releasing.
+# The version is mirrored in CITATION.cff and CHANGELOG.md; bump in lockstep when releasing.
 if(WITH_CUDA)
     project(QED VERSION 0.1.0 LANGUAGES CXX CUDA)
-    enable_language(CUDA)
 else()
     project(QED VERSION 0.1.0 LANGUAGES CXX)
 endif()
 
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Set CUDA standard if CUDA is enabled
 if(WITH_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    # Add CUDA compiler flags to handle C++ standard library compatibility
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++17")
-    
-    # Separate host and device compilation to avoid C++17 issues
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr -Xcompiler -fPIC -std=c++17")
     set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 endif()
-
-# Build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Source directories
-set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
-set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
-set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
-set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
-set(DSSF_DIR ${SRC_DIR}/dssf)
-set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
-set(PARALLEL_DIR ${SRC_DIR}/parallel)
-set(MATVEC_DIR ${SRC_DIR}/matvec)
-
-# Include directories - public headers in include/, private in src/
-include_directories(${INCLUDE_DIR})
-include_directories(${INCLUDE_DIR}/ed/core)
-include_directories(${INCLUDE_DIR}/ed/solvers)
-include_directories(${INCLUDE_DIR}/ed/gpu)
-include_directories(${INCLUDE_DIR}/ed/matvec)
-include_directories(${SRC_DIR})
-include_directories(${SOLVERS_CPU_DIR})
-include_directories(${SOLVERS_GPU_DIR})
-
-# =============================================================================
-# BLAS / LAPACK / LAPACKE BACKEND
-# =============================================================================
-# Profile-based selection (FLEXIBLAS / MKL / AOCL / AOCL_BLIS / OPENBLAS /
-# GENERIC). Sets BLAS_LIBRARIES, LAPACK_LIBRARIES, LAPACKE_LIBRARIES,
-# EXTRA_LINALG_LIBRARIES, BLAS_VENDOR, SCALAPACK_COMPATIBLE in this scope.
-include(EDBlasProfile)
-# =============================================================================
-# OTHER DEPENDENCIES
-# =============================================================================
-# Eigen3, optional CUDAToolkit (gated by
-# WITH_CUDA). Each is independent of the BLAS profile above.
-include(EDDependencies)
-
-# CPU optimization flags must be defined before EDLibraries so the static
-# libraries pick them up via target_compile_options(... PRIVATE CPU_OPT_FLAGS).
-include(EDOptimizationFlags)
-
-# Find OpenMP BEFORE EDLibraries so the static libraries can link
-# OpenMP::OpenMP_CXX as PUBLIC, propagating it to every executable.
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    message(STATUS "  OpenMP Support: YES")
-else()
-    message(STATUS "  OpenMP Support: NO")
-endif()
-
-# =============================================================================
-# STATIC LIBRARIES
-# =============================================================================
-# Defines ed_parallel / ed_core / ed_solvers_cpu / ed_solvers_gpu (the last only
-# when WITH_CUDA). Each library exposes its include directories and its link
-# stack via PUBLIC properties so the executables below need only
-# `target_link_libraries(<exe> PRIVATE ed_solvers_cpu ...)`.
-include(EDLibraries)
-
-# If using oneMKL via its modern CMake target, propagate it to the libraries.
-if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
-    target_link_libraries(ed_solvers_cpu PUBLIC MKL::MKL)
-    if(TARGET ed_solvers_gpu)
-        target_link_libraries(ed_solvers_gpu PUBLIC MKL::MKL)
-    endif()
-endif()
-
-# =============================================================================
-# INSTALL RULES + QEDConfig.cmake export
-#
-# Allows the package to be installed into a prefix and consumed by downstream
-# CMake projects via:
-#
-#   find_package(QED CONFIG REQUIRED)
-#   target_link_libraries(myapp PRIVATE QED::ed_solvers_cpu)
-#
-# Layout under <prefix>:
-#   include/ed/                 public headers (kept hierarchical)
-#   lib/                        libed_core.a, libed_solvers_cpu.a, ...
-#                               libed_solvers_gpu.a (when WITH_CUDA)
-#   lib/cmake/QED/              QEDConfig.cmake, QEDConfigVersion.cmake,
-#                               QEDTargets.cmake
-# =============================================================================
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GNUInstallDirs)
+include(EDBlas)                 # BLAS / LAPACK / LAPACKE
+include(EDDependencies)         # Eigen3; CUDAToolkit under WITH_CUDA
+include(EDOptimizationFlags)    # CPU_OPT_FLAGS
+find_package(OpenMP REQUIRED)
+include(EDLibraries)            # qed_engine
+
+# =============================================================================
+# Install: headers, the library and QEDConfig.cmake, so a downstream project can
+#   find_package(QED CONFIG REQUIRED)
+#   target_link_libraries(myapp PRIVATE QED::qed_engine)
+# =============================================================================
 include(CMakePackageConfigHelpers)
-
-set(_ED_INSTALL_TARGETS ed_parallel ed_core ed_matvec ed_dssf ed_symmetry ed_input ed_solvers_cpu)
-if(TARGET ed_solvers_gpu)
-    list(APPEND _ED_INSTALL_TARGETS ed_solvers_gpu)
-endif()
-
-install(TARGETS ${_ED_INSTALL_TARGETS}
+install(TARGETS qed_engine
     EXPORT QEDTargets
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-
-# Public headers (preserve subdirectory layout).
-install(DIRECTORY ${INCLUDE_DIR}/ed
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ed
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        FILES_MATCHING
-        PATTERN "*.h"
-        PATTERN "*.hpp"
-        PATTERN "*.cuh"
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.cuh"
 )
-
 install(EXPORT QEDTargets
         FILE QEDTargets.cmake
         NAMESPACE QED::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/QED
 )
-
 configure_package_config_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/QEDConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/QEDConfig.cmake
@@ -275,83 +82,24 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/QED
 )
 
-# Print configuration summary
-message(STATUS "Configuration Summary:")
-message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
-if(WITH_CUDA)
-    message(STATUS "  CUDA Support: YES")
-    message(STATUS "  CUDA Version: ${CUDAToolkit_VERSION}")
-    if(CMAKE_CUDA_ARCHITECTURES)
-        message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
-    endif()
-else()
-    message(STATUS "  CUDA Support: NO")
-endif()
-
-# Build configuration summary and performance options
-message(STATUS "")
-message(STATUS "=== Performance Configuration Summary ===")
-message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  BLAS Profile: ${BLAS_PROFILE}")
-if(BLAS_LIBRARIES)
-    message(STATUS "  BLAS Libraries: ${BLAS_LIBRARIES}")
-endif()
-if(LAPACK_LIBRARIES)
-    message(STATUS "  LAPACK Libraries: ${LAPACK_LIBRARIES}")
-endif()
-if(WITH_SCALAPACK AND SCALAPACK_LIBRARIES)
-    message(STATUS "  ScaLAPACK Libraries: ${SCALAPACK_LIBRARIES}")
-    message(STATUS "  ScaLAPACK Compatible: ${SCALAPACK_COMPATIBLE}")
-endif()
-message(STATUS "  Aggressive Optimizations: ${ENABLE_AGGRESSIVE_OPTS}")
-message(STATUS "  Profile-Guided Optimization: ${ENABLE_PROFILE_GUIDED_OPTS}")
-message(STATUS "  Native Architecture: ${ENABLE_NATIVE_ARCH}")
-message(STATUS "  CUDA Support: ${WITH_CUDA}")
-message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
-
-# CPU information (informational; uses CPU_VENDOR set by EDPlatform).
-_ed_report_cpu_features()
+message(STATUS "QED ${PROJECT_VERSION}: ${CMAKE_BUILD_TYPE}, WITH_CUDA=${WITH_CUDA} (${CMAKE_CUDA_ARCHITECTURES}), "
+               "BLAS ${BLAS_PROFILE}, flags ${CPU_OPT_FLAGS}")
 
 # =============================================================================
-# Optional Python bindings.
-#
-# When enabled, builds the `qed._core` pybind11 extension using the
-# project's static-library stack. Two ways to enable:
-#
-#   * Top-level CMake: `cmake -B build -DED_BUILD_PYTHON=ON ...` and then
-#     run `import qed` from `python/`.
-#   * `pip install .` from the project root, which uses scikit-build-core
-#     (configured in pyproject.toml) and forces ED_BUILD_PYTHON=ON behind
-#     the scenes.
-#
-# The default is OFF so the C++-only build stays lean for HPC clusters
-# without a Python toolchain.
+# Python bindings (qed._core). `pip install .` (scikit-build-core, pyproject.toml) turns them
+# on; scripts/build.sh does unless --no-python.
 # =============================================================================
 option(ED_BUILD_PYTHON "Build the qed pybind11 Python bindings" OFF)
 if(SKBUILD)
     set(ED_BUILD_PYTHON ON CACHE BOOL "" FORCE)
 endif()
-
 if(ED_BUILD_PYTHON)
     add_subdirectory(python/qed)
 endif()
 
 # =============================================================================
-# Documentation site (Doxygen + Sphinx + Breathe -> GitHub Pages).
-#
-# Opt-in via `-DED_BUILD_DOCS=ON`. The required Python packages
-# (sphinx, breathe, myst-parser, furo) are listed in docs/requirements.txt;
-# install them inside your virtualenv before configuring with this flag.
-# Doxygen itself must be available on the host (`apt install doxygen`).
-#
-# Targets (only created when ED_BUILD_DOCS is on):
-#   * `doxygen`  -- regenerates the C++ API XML
-#   * `sphinx`   -- builds the public HTML site (depends on `doxygen`)
-#
-# CI builds the site on every push to main and publishes the result to
-# GitHub Pages; see .github/workflows/docs.yml for the deployment pipeline.
+# Documentation site (Doxygen + Sphinx + Breathe; docs/requirements.txt): targets `doxygen`
+# and `sphinx`. CI publishes it (.github/workflows/docs.yml).
 # =============================================================================
 option(ED_BUILD_DOCS "Build the Doxygen + Sphinx documentation site" OFF)
 if(ED_BUILD_DOCS)
@@ -359,145 +107,95 @@ if(ED_BUILD_DOCS)
 endif()
 
 # =============================================================================
-# ED test suite (CPU).
-#
-# A small, fast set of regression tests that exercise the matrix-free Operator
-# path, the fixed-Sz operator, full diagonalization, every Lanczos-family
-# solver and the in-memory basis buffer.
-# Enable with `-DBUILD_ED_TESTS=ON` (defaults to ON) and run with `ctest`.
+# Unit tests (Catch2 v3): one executable per file, each TEST_CASE a ctest test.
 # =============================================================================
 option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
-
-# -----------------------------------------------------------------------------
 if(BUILD_ED_TESTS)
     enable_testing()
+    include(EDCatch2)               # Catch2::Catch2WithMain, catch_discover_tests
 
-    # Catch2 v3, brought in via FetchContent with a
-    # system-wide find_package fallback. Defines Catch2::Catch2WithMain.
-    include(EDCatch2)
-
-    # Helper to declare a test executable. Each test gets its own binary so
-    # CTest can run them in parallel and report failures independently.
-    # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
-    # BLAS/LAPACK/OpenMP), and against ed_solvers_gpu
-    # when CUDA is enabled. This guarantees tests are compiled against the
-    # exact same TUs as the production binaries.
-    #
-    # Tests that use the Catch2 v3 harness pass USE_CATCH2 as a
-    # third argument, in which case the helper links Catch2::Catch2WithMain
-    # and registers the binary with `catch_discover_tests` so CTest sees
-    # each TEST_CASE individually.
     function(ed_add_test test_name test_source)
         add_executable(${test_name} ${test_source})
-        target_include_directories(${test_name} PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests
-        )
-        if(WITH_CUDA)
-            target_link_libraries(${test_name} PRIVATE ed_solvers_gpu)
-        else()
-            target_link_libraries(${test_name} PRIVATE ed_solvers_cpu)
-        endif()
-        target_compile_options(${test_name} PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>
-        )
-
-        set(_use_catch2 FALSE)
-        if(${ARGC} GREATER 2 AND "${ARGV2}" STREQUAL "USE_CATCH2")
-            set(_use_catch2 TRUE)
-        endif()
-
-        if(_use_catch2)
-            target_link_libraries(${test_name} PRIVATE Catch2::Catch2WithMain)
-            # SKIP_RETURN_CODE 4: when a Catch2 v3 TEST_CASE explicitly
-            # calls SKIP(...) and is the only case matched by the
-            # `--test-name-pattern` ctest spec, Catch2 exits with code 4
-            # (== "no tests ran"). Without this property CTest reports the
-            # otherwise correct skip as a Failed test in the CI lane.
-            catch_discover_tests(${test_name}
-                PROPERTIES
-                    TIMEOUT 180
-                    SKIP_RETURN_CODE 4
-            )
-        else()
-            add_test(NAME ${test_name} COMMAND ${test_name})
-            set_tests_properties(${test_name} PROPERTIES TIMEOUT 180)
-        endif()
+        target_include_directories(${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        target_link_libraries(${test_name} PRIVATE qed_engine Catch2::Catch2WithMain)
+        target_compile_options(${test_name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
+        # SKIP_RETURN_CODE 4: a TEST_CASE that calls SKIP(...) and is the only one matched
+        # exits with 4 ("no tests ran"), which ctest would otherwise report as a failure.
+        catch_discover_tests(${test_name} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 4)
     endfunction()
 
-    ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
+    ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp)
     # One Lanczos algorithm shared by CPU / GPU via the abstract Backend
     # interface: pins agreement with a sequential-MGS reference and
     # orthogonality of the CGS2 basis.
-    ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
-    ed_add_test(test_kernel_facades            tests/unit/test_kernel_facades.cpp USE_CATCH2)
+    ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp)
+    ed_add_test(test_kernel_facades            tests/unit/test_kernel_facades.cpp)
     # The per-block solve driver: place() (the device decision for every block), the dense
     # lane, the LinearOperator surface, the Backend-templated block lanes on CPU and CUDA, and
     # the sampled-thermal dense crossover.
-    ed_add_test(test_block_solve                tests/unit/test_block_solve.cpp USE_CATCH2)
+    ed_add_test(test_block_solve                tests/unit/test_block_solve.cpp)
+    target_include_directories(test_block_solve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # lg_internal.h
     # THE reduced-CSR budget decision (shared by the abelian + little-group
     # lanes): serial admission, and the aggregate split across concurrent
     # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.
-    ed_add_test(test_sector_csr_budget          tests/unit/test_sector_csr_budget.cpp USE_CATCH2)
+    ed_add_test(test_sector_csr_budget          tests/unit/test_sector_csr_budget.cpp)
     # Numerical accuracy: FTLM and mTPQ through ed::sectors::thermal against a dense
     # reference, without symmetry and over the Sz sectors, on the CPU and (WITH_CUDA) the
     # device. test_block_solve [thermal] pins the dense crossover these runs switch off.
-    ed_add_test(test_thermal_dense_ref          tests/unit/test_thermal_dense_ref.cpp USE_CATCH2)
+    ed_add_test(test_thermal_dense_ref          tests/unit/test_thermal_dense_ref.cpp)
     # The Backend-templated FTLM body (both lanes) honours full
     # reorthogonalisation and fills ground_state_estimate.
-    ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp USE_CATCH2)
+    ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp)
     # The FTLM body draws the shared per-sample seed recipe
     # (sample_seed.h), is run-to-run bit-identical, and is what the CPU
     # front door returns.
-    ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp USE_CATCH2)
+    ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp)
     # OpenMP thread-pinning hook (env-knob default + parsing,
     # idempotent pinning).
-    ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
+    ed_add_test(test_numa                       tests/unit/test_numa.cpp)
     # The environment registry: one meaning of "set" per value type, unique rows,
     # the unknown-name scan.
-    ed_add_test(test_env_registry               tests/unit/test_env_registry.cpp USE_CATCH2)
+    ed_add_test(test_env_registry               tests/unit/test_env_registry.cpp)
     # The available-memory probe honours the job's cgroup limit (Krylov basis caps).
-    ed_add_test(test_mem_guard                  tests/unit/test_mem_guard.cpp USE_CATCH2)
+    ed_add_test(test_mem_guard                  tests/unit/test_mem_guard.cpp)
 
-    # ed_input library lockdown (lattice generators + HamiltonianBuilder).
-    ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
-    target_link_libraries(test_input_library PRIVATE ed_input)
+    # Lattice generators + HamiltonianBuilder.
+    ed_add_test(test_input_library              tests/unit/test_input_library.cpp)
     # Symmetry engine: compiled byte-LUT group action bit-identity
-    ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
+    ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp)
     # Fused OrbitTable (hash, Burnside sum rule)
-    ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp USE_CATCH2)
-    # Content-addressed OrbitTable cache (registry + disk)
-    ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp USE_CATCH2)
+    ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp)
+    # The in-process OrbitTable registry
+    ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp)
     # Spin-flip commutation check (SectorTransporter gate)
-    ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
+    ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp)
     # The real-Hamiltonian gate of time-reversal pairing
-    ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
+    ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp)
     # SU(2): S^2 Casimir in the TermStorage schema + labeling
-    ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp USE_CATCH2)
+    ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp)
     # SU(2): term-level [H, S_tot] = 0 detector
-    ed_add_test(test_su2_detect                 tests/unit/test_su2_detect.cpp USE_CATCH2)
+    ed_add_test(test_su2_detect                 tests/unit/test_su2_detect.cpp)
     # SU(2): S-resolved dims (highest-weight Burnside differencing)
-    ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp USE_CATCH2)
+    ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp)
     # SU(2): Lowdin total-spin projector + targeting wrapper
-    ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp USE_CATCH2)
+    ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp)
     # Numerical irrep decomposition (non-abelian symmetry engine)
-    ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
+    ed_add_test(test_irreps                     tests/unit/test_irreps.cpp)
     # The CPU on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
     # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
     # reproduces an independent full-space reference (H applied to the
     # expanded symmetric states) in every momentum sector of the
     # Heisenberg Z_N ring, N=6/8; GATHER, SCATTER, rank-table, two-level
     # lookup and reduced-CSR forms agree.
-    ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp USE_CATCH2)
-    ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp USE_CATCH2)
-    target_link_libraries(test_dssf_operator_spec PRIVATE ed_dssf)
+    ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp)
+    ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp)
     target_compile_definitions(test_dssf_operator_spec PRIVATE
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
     )
 
     # Lock down the programmatic symmetry DSL (ed::sym::Permutation
-    # algebra + generate_group closure). Lives in ed_symmetry.
-    ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp USE_CATCH2)
-    target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
+    # algebra + generate_group closure).
+    ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp)
 
     # -------------------------------------------------------------------------
     # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU
@@ -510,10 +208,10 @@ if(BUILD_ED_TESTS)
         # CudaBackend BLAS-1 round-trips + agreement of
         # `lanczos_kernel<Backend&>` between CpuBackend and CudaBackend on a
         # 6-site Heisenberg chain.
-        ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
+        ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp)
     endif()
 
     # Backend BLAS-3 surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
     # (+ CudaBackend when WITH_CUDA).
-    ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp USE_CATCH2)
+    ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp)
 endif()

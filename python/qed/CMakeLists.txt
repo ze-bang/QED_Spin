@@ -3,12 +3,8 @@
 #
 # Build target: pybind11 module `qed._core`.
 #
-# Linked against the project's CPU static-library stack (ed_solvers_cpu) so
-# the binding inherits BLAS/LAPACK/OpenMP transitively. When the
-# top-level build sets ``WITH_CUDA=ON`` we additionally PRIVATE-link
-# ``ed_solvers_gpu``, which holds the device lanes (the operators'
-# rep-sector device mirror, the
-# little-group GPU eigensolver) that the workflow bindings dispatch into.
+# Linked against qed_engine, which brings BLAS/LAPACK/OpenMP and, under WITH_CUDA, the device
+# lanes the bindings dispatch into.
 #
 # When built via scikit-build-core (pip install [-e] .), the binary lands in
 # `python/qed/_core*.so` next to `__init__.py`. When built via the
@@ -26,7 +22,7 @@ include(EDPybind11)
 # we just lose visibility=hidden and strip-on-build, neither of which
 # matter for an in-process Python extension. CPU-only builds keep the
 # default extras (smallest possible wheel, hidden symbols).
-if(WITH_CUDA AND TARGET ed_solvers_gpu)
+if(WITH_CUDA)
     pybind11_add_module(_core MODULE NO_EXTRAS
         _bindings/qed_bindings.cpp
         _bindings/input_bindings.cpp
@@ -40,21 +36,10 @@ else()
     )
 endif()
 
-target_link_libraries(_core PRIVATE
-    ed_solvers_cpu
-    ed_dssf
-    ed_symmetry
-    ed_input
-)
+target_link_libraries(_core PRIVATE qed_engine)
 
-# When the project was configured with WITH_CUDA=ON, the bindings reference
-# the device-lane symbols in ed_solvers_gpu (gated by `#ifdef WITH_CUDA`,
-# which is set via `add_definitions(-DWITH_CUDA)` in
-# `cmake/EDDependencies.cmake`). We must PRIVATE-link ed_solvers_gpu so the
-# linker can resolve them.
-if(WITH_CUDA AND TARGET ed_solvers_gpu)
-    target_link_libraries(_core PRIVATE ed_solvers_gpu)
-    # ed_solvers_gpu is built with CUDA_SEPARABLE_COMPILATION=ON (device
+if(WITH_CUDA)
+    # qed_engine is built with CUDA_SEPARABLE_COMPILATION=ON (device
     # functions across .cu translation units link via cudadevrt). Python
     # loads `_core.so` standalone, so we must perform device linking here
     # to bake the device code into the module -- otherwise dlopen fails
