@@ -6,16 +6,15 @@
 //
 // Represents operators as lists of one/two/three-body spin terms stored
 // in branch-free Structure-of-Arrays (``ed::matvec::TermStorage``) for
-// vectorised SpMV. Implements the ``ed::matvec::MatVecOperator`` interface
-// so solvers can consume Operator / symmetry-
-// adapted operators through one polymorphic surface.
+// vectorised SpMV. Implements ``ed::LinearOperator``, so solvers consume
+// Operator and symmetry-adapted operators through one polymorphic surface.
 //
 // Public API surface
 // ------------------
 //   * Construction:        Operator(n_bits, spin_l)
 //   * Term mutation:       addOneBodyTerm / addTwoBodyTerm / addThreeBodyTerm
 //   * Matvec:              apply (routes through CpuMatVecBackend)
-//   * Properties:          isReal, dim, memory_space, is_hermitian
+//   * Properties:          isReal, dim, is_hermitian
 //
 // Depends on: basis_utils.h, ed::matvec subsystem, Eigen.
 // =============================================================================
@@ -36,7 +35,6 @@
 #include <ed/core/linear_operator.h>
 #include <ed/core/thermal_types.h>  // transitive: solvers/observables, ftlm, etc.
 #include <ed/matvec/basis_policy.h>
-#include <ed/matvec/matvec.h>
 #include <ed/matvec/matvec_backend.h>
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
@@ -44,8 +42,8 @@
 
 using Complex = std::complex<double>;
 
-// Operator implements the matvec interface (ed::matvec::MatVecOperator):
-// apply(), dim(), memory_space() and is_hermitian() are virtual, so solvers
+// Operator implements ed::LinearOperator: apply(), dim() and
+// is_hermitian() are virtual, so solvers
 // and dispatchers consume Operator and symmetry-adapted operators through
 // one interface. The virtual destructor makes deletion through a base
 // pointer safe.
@@ -278,14 +276,11 @@ public:
     }
 
     // -------------------------------------------------------------------
-    // MatVecOperator interface: dim() / memory_space() / is_hermitian() /
+    // LinearOperator interface: dim() / is_hermitian() /
     // description(). apply() is defined with the matvec entry points below.
     // -------------------------------------------------------------------
     [[nodiscard]] std::size_t dim() const override {
         return static_cast<std::size_t>(1ULL << n_bits_);
-    }
-    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-        return ed::matvec::MemorySpace::Host;
     }
     [[nodiscard]] bool is_hermitian() const override {
         // A structural check on the committed term list (adjoint partners with conjugate coefficients, real diagonal),

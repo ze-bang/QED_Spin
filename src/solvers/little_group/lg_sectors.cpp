@@ -99,7 +99,7 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
     so.compute_vectors = vectors;
     so.backend.allow_gpu = true;
     so.backend.require_gpu = device == Device::Gpu;
-    const auto r = ed::workflows::solve(static_cast<const ed::LinearOperator&>(*bop.op), so);
+    const auto r = ed::workflows::solve(*bop.op, so);
     ev = r.eigenvalues;
     if (vectors) {
         if (!r.eigenvectors || r.eigenvectors->host.size() < ev.size())
@@ -115,7 +115,7 @@ bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, D
 // The lowest Ritz value after 40 Lanczos steps from a fixed random start: an upper bound on
 // the block's lowest level (on the device when the block has a device kernel).
 double estimate_lowest(const detail::BlockOp& bop, Device device) {
-    const auto& op = static_cast<const ed::LinearOperator&>(*bop.op);
+    const ed::LinearOperator& op = *bop.op;
     if (bop.on_device) {
         ed::workflows::SolveOptions so;
         so.num_eigs  = 1;
@@ -310,7 +310,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                     ? static_cast<std::uint64_t>(o.per_block)
                     : (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
                 const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));
-                const ed::matvec::MatVecOperator& mv = *bop.op;
+                const ed::LinearOperator& mv = *bop.op;
                 bool converged = true;
                 std::vector<double> ev;
                 std::vector<std::vector<Complex>> vv;

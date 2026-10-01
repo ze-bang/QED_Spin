@@ -63,6 +63,13 @@ Breaking changes so far:
   `ED_XSEC_CSR_BUDGET_GIB`, `ED_GPU_SYM_CACHE_GIB`) honour 0 as "nothing fits" instead of
   falling back to the default. `ED_ENV_STRICT=false` no longer turns strict mode on.
 
+C++ API (installed headers; nothing in Python changes):
+
+- `ed::matvec::MatVecOperator` and `<ed/matvec/matvec.h>` are merged into `ed::LinearOperator`
+  (`<ed/core/linear_operator.h>`), with `as_apply_function` and `check_size` gone.
+  `LinearOperator::has_device_kernel()` says whether `bind_cuda()` has a device apply; the
+  default `bind_cuda()` throws `ed::DeviceUnsupported` instead of returning the host apply.
+
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 
 The library was rebuilt around one path from a Python call to the kernels (c438459..cf38fcd;

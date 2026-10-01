@@ -52,7 +52,7 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
 }
 
 [[nodiscard]] std::vector<double>
-dense_block_eigenvalues(const ed::matvec::MatVecOperator& mv) {
+dense_block_eigenvalues(const ed::LinearOperator& mv) {
     Eigen::MatrixXcd Hb = materialize(mv);
     return dense_eigenvalues_inplace(Hb);
 }
@@ -61,7 +61,7 @@ dense_block_eigenvalues(const ed::matvec::MatVecOperator& mv) {
 // dense_eigenvalues_inplace (threaded LAPACK divide-and-conquer; real blocks
 // take the ~2x cheaper real path).
 [[nodiscard]] std::vector<double>
-solve_block_full(const ed::matvec::MatVecOperator& mv) {
+solve_block_full(const ed::LinearOperator& mv) {
     if (mv.dim() == 0) return {};
     return dense_block_eigenvalues(mv);
 }
@@ -101,7 +101,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // clean refusal, never a silent fall-back to the ghost-prone scan. The total
 // iteration budget is max(200k, 2000), spent as restart cycles.
 [[nodiscard]] std::vector<double>
-solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
+solve_block_lowest_krylov_schur(const ed::LinearOperator& mv, std::size_t k,
                                 bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out) {
     const std::size_t nb = mv.dim();
@@ -181,7 +181,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
 // guard lets partially-converged and ghost Ritz values through as
 // eigenvalues on near-degenerate blocks.
 [[nodiscard]] std::vector<double>
-solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
+solve_block_lowest(const ed::LinearOperator& mv, int want,
                    int dense_max_dim, bool* converged_out) {
     if (converged_out) *converged_out = true;
     const std::uint64_t nb = mv.dim();
@@ -368,7 +368,7 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
 // Krylov-Schur with vectors. `converged` is false when the block could not
 // certify the requested window; the certified prefix is still returned.
 [[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
-solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
+solve_block_eigenpairs(const ed::LinearOperator& mv, int want,
                        int dense_max_dim, bool* converged) {
     *converged = true;
     const std::size_t nb = mv.dim();

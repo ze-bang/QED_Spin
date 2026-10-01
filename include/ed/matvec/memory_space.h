@@ -12,11 +12,8 @@
 // keeps memory_space.h header-only and free of optional dependencies (no CUDA
 // includes required).
 //
-// Convention: each concrete MatVecOperator subclass declares a single
-// MemorySpace from which it expects its `in` buffer to come and into which
-// it will write `out`. Solvers compose this with a Backend of the matching
-// space. This is the pattern used by Trilinos Tpetra / Kokkos: tag the
-// data, dispatch the runtime.
+// Each Backend declares the MemorySpace its vectors live in; operators apply
+// on host buffers and bind a device apply through bind_cuda().
 // =============================================================================
 
 #include <cstdint>

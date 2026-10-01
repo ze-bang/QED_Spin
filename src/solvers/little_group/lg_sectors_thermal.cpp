@@ -254,7 +254,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     } else {
                         bool on_gpu = false;
                         try {
-                            b = sampled_block(static_cast<const ed::LinearOperator&>(mv), t, beta, seed, &on_gpu,
+                            b = sampled_block(mv, t, beta, seed, &on_gpu,
                                               tower_sampling ? &bop : nullptr, tower_dim, obs, folded);
                         } catch (const ed::DeviceUnsupported& e) {
                             // Name the block: a small one takes the exact fallback on the host,
@@ -304,7 +304,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                 try {
                     const Deferred& d = deferred[static_cast<std::size_t>(q)];
                     bool on_gpu = false;
-                    BlockThermo r = sampled_block(static_cast<const ed::LinearOperator&>(*d.bop.op), t, beta, d.seed,
+                    BlockThermo r = sampled_block(*d.bop.op, t, beta, d.seed,
                                                   &on_gpu, tower_sampling ? &d.bop : nullptr, d.tower_dim, d.obs,
                                                   d.folded);
                     BlockThermo& b = blocks[d.block];

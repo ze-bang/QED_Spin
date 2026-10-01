@@ -19,7 +19,7 @@
 //   * ``MatVecBackend`` (this header)     : SpMV kernel choice the OPERATOR uses
 //                                           (matrix-free vs CSR; real vs complex)
 //
-// The two abstractions are orthogonal -- a solver pairs any MatVecOperator
+// The two abstractions are orthogonal -- a solver pairs any LinearOperator
 // (whose ``apply`` happens to go through a MatVecBackend) with any Backend
 // (which it uses for the surrounding linear algebra).
 //

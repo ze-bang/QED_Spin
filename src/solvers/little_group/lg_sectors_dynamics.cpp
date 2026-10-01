@@ -511,7 +511,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         const Job& j = jobs[i];
         const auto fo = options(i);
         const std::size_t dim_src = j.src->rd->reps.size();
-        const ed::matvec::MatVecOperator& Hs = j.Hp ? static_cast<const ed::matvec::MatVecOperator&>(*j.Hp) : *j.src->H;
+        const ed::LinearOperator& Hs = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, int nn) { Hs.apply(in, o, static_cast<std::size_t>(nn)); };
         return collect(j, [&](const Target* t) {
             if (!t) {

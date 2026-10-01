@@ -34,7 +34,7 @@
 #include <vector>
 
 #include <ed/core/operator.h>
-#include <ed/matvec/matvec.h>
+#include <ed/core/linear_operator.h>
 #include <ed/matvec/term_storage.h>
 
 namespace ed::ops {

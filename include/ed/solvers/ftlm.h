@@ -14,7 +14,6 @@
 #include <map>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
-#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;

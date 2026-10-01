@@ -29,7 +29,7 @@ using ed::ops::make_S2_carrier;
 namespace {
 
 // Dense matrix of an operator by applying it to unit vectors.
-Eigen::MatrixXcd dense_of(const ed::matvec::MatVecOperator& op) {
+Eigen::MatrixXcd dense_of(const ed::LinearOperator& op) {
     const std::uint64_t dim = op.dim();
     Eigen::MatrixXcd M(dim, dim);
     std::vector<Cx> e(dim), col(dim);

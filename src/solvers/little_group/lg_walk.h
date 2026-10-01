@@ -50,7 +50,7 @@ engine_options(const Spec& s, const Subspace& sub) {
 /// 2S + 1 members of each multiplet. A null `op` means the block holds no
 /// state of the requested spin.
 struct BlockOp {
-    std::shared_ptr<const ed::matvec::MatVecOperator> op;
+    std::shared_ptr<const ed::LinearOperator> op;
     double        ghost        = std::numeric_limits<double>::infinity();
     std::uint64_t multiplicity = 1;
     bool          on_device    = false;   ///< the operator may be bound to a CUDA backend
@@ -67,7 +67,7 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               Device device = Device::Cpu) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
-    b.op = std::shared_ptr<const ed::matvec::MatVecOperator>(bi, &block_mv(*bi));
+    b.op = std::shared_ptr<const ed::LinearOperator>(bi, &block_mv(*bi));
     b.multiplicity = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
     // Group and momentum sectors have a device kernel; the isotypic sandwich does not.
     RepSectorMatVec* rep = bi->gop ? bi->gop.get() : (bi->W ? nullptr : sb.hk.get());
@@ -76,7 +76,7 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         if (dev) { rep->enable_device(true); b.on_device = true; }
         return b;
     }
-    std::shared_ptr<const ed::matvec::MatVecOperator> s2;
+    std::shared_ptr<const ed::LinearOperator> s2;
     std::shared_ptr<RepSectorMatVec> s2rep;
     if (bi->gop) {
         s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, bi->gsec);
@@ -114,7 +114,7 @@ public:
         : gpu_(device != Device::Cpu && ed::have_cuda()) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
-    std::size_t add(const ed::matvec::MatVecOperator& mv) {
+    std::size_t add(const ed::LinearOperator& mv) {
         using namespace ed::solvers::lg_detail;
         const std::size_t id = spectra_.size();
         spectra_.emplace_back();

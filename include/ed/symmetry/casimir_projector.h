@@ -52,7 +52,6 @@
 
 #include <ed/config/env_registry.h>
 #include <ed/core/linear_operator.h>
-#include <ed/matvec/matvec.h>
 #include <ed/symmetry/spin_flip.h>
 #include <ed/symmetry/su2_dims.h>
 #ifdef WITH_CUDA
@@ -122,7 +121,7 @@ public:
     /// live in (full, fixed-Sz, rep/orbit, flip-projected, ...).
     /// `two_S_present` is the block's tower content (allowed_two_S_in_block
     /// or the S-resolved-dims survey); the target must be a member.
-    LowdinS2Projector(std::shared_ptr<const ed::matvec::MatVecOperator> s2,
+    LowdinS2Projector(std::shared_ptr<const ed::LinearOperator> s2,
                       int two_S_target, std::vector<int> two_S_present)
         : s2_(std::move(s2)), two_S_(two_S_target) {
         if (!s2_) {
@@ -154,7 +153,7 @@ public:
         return static_cast<int>(excluded_.size());
     }
     [[nodiscard]] int two_S() const noexcept { return two_S_; }
-    [[nodiscard]] const std::shared_ptr<const ed::matvec::MatVecOperator>& s2() const noexcept { return s2_; }
+    [[nodiscard]] const std::shared_ptr<const ed::LinearOperator>& s2() const noexcept { return s2_; }
 
 #ifdef WITH_CUDA
     /// `project` on device vectors: `s2_dev` is the device S^2 matvec, `w` a device scratch
@@ -239,7 +238,7 @@ private:
         return std::sqrt(n2);
     }
 
-    std::shared_ptr<const ed::matvec::MatVecOperator> s2_;
+    std::shared_ptr<const ed::LinearOperator> s2_;
     int two_S_;
     std::vector<double> excluded_;  // S'(S'+1), farthest-first
 };
@@ -268,7 +267,7 @@ private:
 class CasimirProjectedOperator : public ed::LinearOperator {
 public:
     CasimirProjectedOperator(
-        std::shared_ptr<const ed::matvec::MatVecOperator> h,
+        std::shared_ptr<const ed::LinearOperator> h,
         std::shared_ptr<const LowdinS2Projector> projector,
         int reproject_freq = -1)  // -1 = kSu2ReprojectFreq
         : h_(std::move(h)),
@@ -278,10 +277,6 @@ public:
         if (!h_ || !projector_) {
             throw std::invalid_argument(
                 "CasimirProjectedOperator: null operator/projector");
-        }
-        if (h_->memory_space() != ed::matvec::MemorySpace::Host) {
-            throw std::invalid_argument(
-                "CasimirProjectedOperator: the wrapped operator must live on the host");
         }
         ghost_shift_ = estimate_ghost_shift();
     }
@@ -299,12 +294,6 @@ public:
     }
 
     [[nodiscard]] std::size_t dim() const override { return h_->dim(); }
-    [[nodiscard]] std::size_t global_dim() const override {
-        return h_->global_dim();
-    }
-    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-        return h_->memory_space();
-    }
     [[nodiscard]] bool is_hermitian() const override {
         return h_->is_hermitian();
     }
@@ -329,17 +318,16 @@ public:
     void place_ghost(double mu) noexcept { ghost_shift_ = mu; }
 
 #ifdef WITH_CUDA
-    /// Device-capable when H and S^2 both have a device mirror.
-    [[nodiscard]] ed::Geometry geometry() const override {
-        ed::Geometry g = LinearOperator::geometry();
-        g.supports_device_matvec = device_parts().first != nullptr;
-        return g;
+    /// Device-capable when H and S^2 both have a device kernel.
+    [[nodiscard]] bool has_device_kernel() const override {
+        return h_->has_device_kernel() && projector_->s2()->has_device_kernel();
     }
 
     /// The same apply with every vector on the device.
     [[nodiscard]] MatvecFn bind_cuda() const override {
-        const auto [h, s2] = device_parts();
-        if (!h) return bind_cpu();
+        if (!has_device_kernel()) return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
+        const ed::LinearOperator* h = h_.get();
+        const ed::LinearOperator* s2 = projector_->s2().get();
         struct Scratch {
             ed::matvec::CudaBackend be;
             ed::matvec::Backend::UniqueVec w;
@@ -359,17 +347,6 @@ public:
 #endif
 
 private:
-#ifdef WITH_CUDA
-    /// (H, S^2) when both have a device mirror, else nulls.
-    [[nodiscard]] std::pair<const ed::LinearOperator*, const ed::LinearOperator*> device_parts() const {
-        const auto* h  = dynamic_cast<const ed::LinearOperator*>(h_.get());
-        const auto* s2 = dynamic_cast<const ed::LinearOperator*>(projector_->s2().get());
-        if (h && s2 && h->geometry().supports_device_matvec && s2->geometry().supports_device_matvec)
-            return {h, s2};
-        return {nullptr, nullptr};
-    }
-#endif
-
     /// One-time spectral-radius estimate for the ghost shift: a dozen
     /// power iterations from a fixed-seed random start give |lambda|_max
     /// from below; the 2x + 1 margin keeps mu above the true radius (and
@@ -403,7 +380,7 @@ private:
         return 2.0 * rho + 1.0;
     }
 
-    std::shared_ptr<const ed::matvec::MatVecOperator> h_;
+    std::shared_ptr<const ed::LinearOperator> h_;
     std::shared_ptr<const LowdinS2Projector> projector_;
     int freq_;
     double ghost_shift_ = 1.0;

@@ -3,7 +3,7 @@
 // include/ed/matvec/backend.h
 //
 // Backend: the vector-primitives half of the matvec layer. While
-// MatVecOperator says "how to apply H to a vector", Backend says "how to do
+// LinearOperator says "how to apply H to a vector", Backend says "how to do
 // every *other* linear-algebra primitive that the surrounding Krylov /
 // thermal solver needs on that vector": axpy, dot, norm, scale, copy,
 // memory allocation.
@@ -15,9 +15,9 @@
 //     Host                      CpuBackend
 //     CudaDevice                CudaBackend
 //
-// Why a separate object instead of methods on MatVecOperator? Because
+// Why a separate object instead of methods on LinearOperator? Because
 // vector primitives are independent of which Hamiltonian you're applying.
-// One backend can drive many different MatVecOperators (e.g. the
+// One backend can drive many different LinearOperators (e.g. the
 // Hamiltonian and an observable, used together in FTLM-style spectral
 // kernels).
 //

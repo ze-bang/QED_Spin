@@ -146,10 +146,6 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 // kernel over an in-memory RepSectorData (reps + 1/norms + chi_k + A perms).
 // Memory O(#reps), never O(2^N).
 // -----------------------------------------------------------------------------
-// Derives from ed::LinearOperator (not bare MatVecOperator) so the block
-// handles can feed the orchestrator verbs directly (ed::workflows::thermal
-// consumes any LinearOperator; geometry()/bind_cpu() are synthesized from
-// dim()/apply()).
 class RepSectorMatVec final : public ed::LinearOperator {
 public:
     using TV = ed::matvec::TermViewT<
@@ -205,29 +201,26 @@ public:
         apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
     }
     [[nodiscard]] std::size_t dim() const override { return rd_->reps.size(); }
-    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-        return ed::matvec::MemorySpace::Host;
-    }
     [[nodiscard]] bool is_hermitian() const override { return true; }
     [[nodiscard]] std::string description() const override {
         return "LittleGroupRepSector(H_k)";
     }
 
-    /// Let backend selection run this sector on a CUDA device (the device rep-gather
-    /// kernel over the same RepSectorData). Off unless a caller asks for it.
+    /// Let the verbs run this sector on a CUDA device (the device rep-gather kernel over the
+    /// same RepSectorData); it also permits the host-pointer gather. Off unless a caller asks.
     void enable_device(bool on) noexcept { device_ok_ = on; }
-    [[nodiscard]] ed::Geometry geometry() const override {
-        ed::Geometry g = ed::LinearOperator::geometry();
+    [[nodiscard]] bool has_device_kernel() const override {
 #ifdef WITH_CUDA
-        g.supports_device_matvec = device_ok_;
+        return device_ok_;
+#else
+        return false;
 #endif
-        return g;
     }
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
         if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, tv_.spin_l, terms_);
 #endif
-        return bind_cpu();
+        return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
     }
     [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
 #ifdef WITH_CUDA
@@ -473,8 +466,8 @@ struct BlockApplyProfile {
 // little-group matvec (still matrix-free through H_k0).
 //
 // Owns its inputs via shared_ptr (all irrep blocks of one star co-own
-// the star's H_k0), and derives from LinearOperator so the orchestrator
-// verbs can consume it directly. Scratch is allocated LAZILY on first
+// the star's H_k0), and derives from LinearOperator so the solvers
+// consume it directly. Scratch is allocated LAZILY on first
 // apply: block handles are also built in plan/enumeration passes where a
 // dim_k0-sized allocation per block would be a real memory regression at
 // frontier N. One in-flight apply per instance (the shared hk_ apply is
@@ -554,9 +547,6 @@ public:
         }
     }
     [[nodiscard]] std::size_t dim() const override { return W_.cols.size(); }
-    [[nodiscard]] ed::matvec::MemorySpace memory_space() const override {
-        return ed::matvec::MemorySpace::Host;
-    }
     [[nodiscard]] bool is_hermitian() const override { return true; }
     [[nodiscard]] std::string description() const override {
         return "LittleGroupBlock(W^h H_k W)";
@@ -619,7 +609,7 @@ dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
 // Dense materialization dispatch: the little-group blocks (plain rep sector /
 // projected W^dagger H_k W) take the CSR path above; anything else (defensive)
 // falls back to the column-by-column matvec build.
-[[nodiscard]] inline Eigen::MatrixXcd materialize(const ed::matvec::MatVecOperator& mv) {
+[[nodiscard]] inline Eigen::MatrixXcd materialize(const ed::LinearOperator& mv) {
     if (const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv))
         return dense_block(*hk, nullptr);
     if (const auto* bop = dynamic_cast<const ProjectedBlockOp*>(&mv))
@@ -778,21 +768,21 @@ star_partition(const EngineContext& cx, bool tr_on);
 
 // lg_block_solve.cpp
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
-[[nodiscard]] std::vector<double> solve_block_full(const ed::matvec::MatVecOperator& mv);
+[[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
 [[nodiscard]] std::vector<double>
-solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
+solve_block_lowest(const ed::LinearOperator& mv, int want,
                    int dense_max_dim, bool* converged_out = nullptr);
 
 // lg_ground_state.cpp: certified lowest eigenpair of one block (FullCGS2 / two-pass by
 // dimension); throws when the residual guard fails.
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const ed::matvec::MatVecOperator& hk);
+solve_gs_vector(const ed::LinearOperator& hk);
 
 // lg_block_solve.cpp: k levels of one block by Krylov-Schur; with vecs_out the Ritz
 // vectors (block coordinates) too.
 [[nodiscard]] std::vector<double>
-solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
+solve_block_lowest_krylov_schur(const ed::LinearOperator& mv, std::size_t k,
                                 bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
@@ -800,7 +790,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
 // (dense / certified GS vector / Krylov-Schur by size); *converged false when the
 // window could not be certified (the certified prefix is still returned).
 [[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
-solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
+solve_block_eigenpairs(const ed::LinearOperator& mv, int want,
                        int dense_max_dim, bool* converged);
 
 // lg_stars.cpp
@@ -836,7 +826,7 @@ struct LittleGroupBlock::Impl {
 
 namespace lg_detail {
 // The operator a block is solved with: group sector, isotypic sandwich, or the plain k-sector.
-[[nodiscard]] inline const ed::matvec::MatVecOperator& block_mv(const LittleGroupBlock::Impl& b) {
+[[nodiscard]] inline const ed::LinearOperator& block_mv(const LittleGroupBlock::Impl& b) {
     if (b.gop) return *b.gop;
     if (b.pop) return *b.pop;
     return *b.hk;

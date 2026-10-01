@@ -25,7 +25,7 @@ namespace lg_detail {   // solve_gs_vector backs solve_block_eigenpairs (lg_bloc
 // two-pass seeded by the current u (Lanczos restarted on an approximate
 // eigenvector converges rapidly), up to `restarts` times.
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
+solve_gs_vector_two_pass(const ed::LinearOperator& hk,
                          std::size_t n)
 {
     const std::size_t max_iter = std::min<std::size_t>(n, kLgGsTwoPassMaxIter);
@@ -187,7 +187,7 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
 // contract is loud, and there is no cheaper correct fallback for a
 // vector consumer).
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const ed::matvec::MatVecOperator& hk)
+solve_gs_vector(const ed::LinearOperator& hk)
 {
     const std::size_t n = hk.dim();
     if (n == 0) throw std::runtime_error("little_group: empty GS sector");

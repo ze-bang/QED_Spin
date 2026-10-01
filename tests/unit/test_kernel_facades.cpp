@@ -10,7 +10,7 @@
 #include "common/test_harness.h"
 
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/matvec/matvec.h>
+#include <ed/core/linear_operator.h>
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
@@ -34,10 +34,10 @@ using Complex = std::complex<double>;
 
 namespace {
 
-// Wrap a `MatVecOperator` reference as a `void(in,out,n)` callable
+// Wrap a `LinearOperator` reference as a `void(in,out,n)` callable
 // suitable for the kernel facades.
 struct MatvecCallable {
-    const ed::matvec::MatVecOperator* op;
+    const ed::LinearOperator* op;
     void operator()(const Complex* in, Complex* out, std::size_t n) const {
         op->apply(in, out, n);
     }

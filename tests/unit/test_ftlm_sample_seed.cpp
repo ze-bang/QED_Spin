@@ -24,7 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ed/matvec/backends/cpu_backend.h>
-#include <ed/matvec/matvec.h>
+#include <ed/core/linear_operator.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/sample_seed.h>
@@ -39,7 +39,7 @@ using Complex = std::complex<double>;
 namespace {
 
 struct MatvecCallable {
-    const ed::matvec::MatVecOperator* op;
+    const ed::LinearOperator* op;
     void operator()(const Complex* in, Complex* out, std::size_t n) const {
         op->apply(in, out, n);
     }

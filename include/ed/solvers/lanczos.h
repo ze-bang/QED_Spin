@@ -17,7 +17,6 @@
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
-#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>
@@ -34,6 +33,8 @@
 // Type definitions for complex vectors
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
+
+namespace ed { class LinearOperator; }
 
 /**
  * @brief Generate a random complex vector with i.i.d. complex Gaussian components.
@@ -101,16 +102,12 @@ void estimate_spectral_bounds(
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues,
                        bool compute_eigenvectors = true,
-                       const ed::matvec::MatVecOperator* op_for_dense = nullptr,
+                       const ed::LinearOperator* op_for_dense = nullptr,
                        std::vector<std::vector<Complex>>* eigenvectors_out = nullptr);
 
-// MatVecOperator-taking convenience overload: adapts `op.apply(...)` through
-// ed::matvec::as_apply_function (one virtual call per matvec).
-inline void full_diagonalization(const ed::matvec::MatVecOperator& H_op,
-                                 uint64_t N, uint64_t num_eigs,
-                                 std::vector<double>& eigenvalues,
-                                 bool compute_eigenvectors = true)
-{
-    full_diagonalization(ed::matvec::as_apply_function(H_op),
-                         N, num_eigs, eigenvalues, compute_eigenvectors);
-}
+// LinearOperator overload: the matvec column build through op.apply() (one virtual call
+// per matvec; no dense fast path).
+void full_diagonalization(const ed::LinearOperator& H_op,
+                          uint64_t N, uint64_t num_eigs,
+                          std::vector<double>& eigenvalues,
+                          bool compute_eigenvectors = true);

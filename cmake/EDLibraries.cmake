@@ -116,7 +116,7 @@ set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # -----------------------------------------------------------------------------
 # ed_matvec: unified matrix-vector multiplication layer. Provides:
 #
-#   * MatVecOperator       polymorphic base for any operator that acts on
+#   * LinearOperator       polymorphic base for any operator that acts on
 #                          a vector (any backend, any basis)
 #   * Backend              host/cuda backends for the surrounding
 #                          level-1 BLAS (axpy/dot/norm/scale)

@@ -340,7 +340,7 @@ __device__ __forceinline__ void process_source_terms(
 // a dense reference. This is intrinsic to scatter-from-source under this
 // normalisation -- do NOT "fix" it by conjugating the emit (that flips
 // which lane is the adjoint, it does not reconcile them). Every operator
-// that reaches this kernel honours MatVecOperator::is_hermitian()
+// that reaches this kernel honours LinearOperator::is_hermitian()
 // == true (all construction paths emit Hermitian-paired terms;
 // CrossSectorOrbitObservable, the non-Hermitian-probe carrier, is
 // CPU-only). Any carrier that routes unpaired terms here needs a

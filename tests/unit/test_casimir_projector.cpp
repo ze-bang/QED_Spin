@@ -56,7 +56,7 @@ double norm_of(const std::vector<Cx>& v) {
 }
 
 // ||S^2 v - lam v|| / ||v||
-double eigen_residual(const ed::matvec::MatVecOperator& s2,
+double eigen_residual(const ed::LinearOperator& s2,
                       const std::vector<Cx>& v, double lam) {
     std::vector<Cx> w(v.size());
     s2.apply(v.data(), w.data(), v.size());
@@ -103,7 +103,7 @@ TEST_CASE("allowed_two_S_in_block: floors, parities, guards", "[casimir_proj]") 
 TEST_CASE("Lowdin projector: eigenspace, idempotence, orthogonality, trace",
           "[casimir_proj]") {
     const std::uint64_t N = 6, dim = 1ULL << N;
-    auto s2 = std::static_pointer_cast<const ed::matvec::MatVecOperator>(
+    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(
         std::shared_ptr<::Operator>(make_S2_carrier(N)));
     const auto towers = allowed_two_S_in_block(static_cast<int>(N));
 
@@ -153,7 +153,7 @@ TEST_CASE("Lowdin projector matches the dense eigenbasis projector",
           "[casimir_proj]") {
     const std::uint64_t N = 5, dim = 1ULL << N;
     auto carrier = make_S2_carrier(N);
-    auto s2 = std::static_pointer_cast<const ed::matvec::MatVecOperator>(
+    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(
         std::shared_ptr<::Operator>(carrier));
 
     Eigen::MatrixXcd M(dim, dim);
@@ -201,7 +201,7 @@ TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
 
     const auto towers = allowed_two_S_in_block(static_cast<int>(N), n_up);
     auto s2 =
-        std::static_pointer_cast<const ed::matvec::MatVecOperator>(s2sz);
+        std::static_pointer_cast<const ed::LinearOperator>(s2sz);
     for (int ts : towers) {
         LowdinS2Projector P(s2, ts, towers);
         const double lam = 0.25 * ts * (ts + 2);
@@ -236,10 +236,10 @@ TEST_CASE("CasimirProjectedOperator preserves H on the tower and scrubs "
 
     const auto towers = allowed_two_S_in_block(static_cast<int>(N), n_up);
     auto s2 =
-        std::static_pointer_cast<const ed::matvec::MatVecOperator>(s2sz);
+        std::static_pointer_cast<const ed::LinearOperator>(s2sz);
     auto proj = std::make_shared<const LowdinS2Projector>(s2, 0, towers);
     CasimirProjectedOperator wrapped(
-        std::static_pointer_cast<const ed::matvec::MatVecOperator>(h), proj,
+        std::static_pointer_cast<const ed::LinearOperator>(h), proj,
         /*reproject_freq=*/1);
 
     // Seed preparation lands in the S = 0 tower.

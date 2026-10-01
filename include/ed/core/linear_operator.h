@@ -2,23 +2,18 @@
 // =============================================================================
 // include/ed/core/linear_operator.h
 //
-// LinearOperator: the operator concept consumed by the orchestrators
-// (`ed::workflows::solve`, `ed::workflows::thermal`). Combines the
-// `MatVecOperator` polymorphic apply with the geometry + binding
-// metadata an orchestrator needs to pick a Backend at runtime.
+// LinearOperator: the one operator interface every solver consumes. A concrete
+// operator supplies the host apply and its dimension; the solvers pair it with
+// a Backend (axpy/dot/norm/scale/copy) through bind<Backend>().
 //
-// Design:
-//   * `LinearOperator` derives from `ed::matvec::MatVecOperator`, so every
-//     concrete operator is also usable via the `MatVecOperator*` API; the
-//     orchestrators additionally need `geometry()` and the matching
-//     `bind<Backend>` lane.
-//   * `Geometry` captures every piece of metadata `ed::select_backend`
-//     reads to choose a backend (local dim, global dim, memory space).
-//   * `bind<Backend>` returns a `std::function` matching the matvec
-//     signature kernels already consume (`(const Complex*, Complex*,
-//     std::size_t) -> void`). The default implementation is a thin
-//     wrapper over `apply()` --- concrete operators with a faster
-//     backend-specialised path override the specific lane.
+//   * apply(in, out, n): out = A in on HOST buffers; out is overwritten.
+//   * has_device_kernel(): the operator can bind a device apply (bind_cuda).
+//     The default bind_cuda() throws ed::DeviceUnsupported instead of handing
+//     the host apply device pointers.
+//   * bind<CpuBackend>() -> bind_cpu(), bind<CudaBackend>() -> bind_cuda().
+//
+// Internal kernels stay templated (term_kernels.h), so the virtual call costs
+// one indirection per apply.
 // =============================================================================
 
 #include <complex>
@@ -26,81 +21,49 @@
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <vector>
 
-#include <ed/matvec/matvec.h>
+#include <ed/core/errors.h>
 #include <ed/matvec/memory_space.h>
 
 namespace ed {
 
 using Complex = std::complex<double>;
 
-// ---------------------------------------------------------------------------
-// Geometry --- the geometry/runtime metadata an orchestrator needs to
-// pick a Backend.
-// ---------------------------------------------------------------------------
+// TRANSITIONAL (P2.4 C1 -> C6): what select_backend() reads. Every field is
+// derived from dim() and has_device_kernel(); it goes with the orchestrator.
 struct Geometry {
-    /// Dimension of the vectors apply() acts on (= global_dim unless the
-    /// operator is partitioned).
-    std::size_t           local_dim    = 0;
-    /// Global Hilbert-space dimension.
-    std::uint64_t         global_dim   = 0;
-    /// Offset of the local slab in the global ordering (0 when unpartitioned).
-    std::uint64_t         local_offset = 0;
-    /// Where the apply() expects its buffers to live.
+    std::size_t             local_dim    = 0;
+    std::uint64_t           global_dim   = 0;
+    std::uint64_t           local_offset = 0;
     ed::matvec::MemorySpace memory_space = ed::matvec::MemorySpace::Host;
-
-    /// Decouples DEVICE CAPABILITY from STORAGE: when
-    /// `true`, the host operator advertises that it can lazily
-    /// promote to a GPU mirror via `bind_cuda()`. `select_backend`
-    /// inspects this flag to decide whether to pick `CudaBackend`,
-    /// even when `memory_space == Host`.
-    ///
-    /// The contract for an operator opting in:
-    ///   1. `bind_cuda()` must NOT throw -- it must lazily build a
-    ///      device mirror on first call and cache it.
-    ///   2. The mirror must obey the same semantics as the host
-    ///      `apply()` (bit-exact within FP atomic-ordering tol).
-    ///
-    /// Default `false` (host-only operator). The little-group ``RepSectorMatVec`` flips this to
-    /// `true` on CUDA builds (its bind_cuda builds the device rep
-    /// mirror).
-    bool                  supports_device_matvec = false;
+    bool                    supports_device_matvec = false;
 
     [[nodiscard]] bool is_device() const noexcept {
         return ed::matvec::is_device(memory_space);
     }
 };
 
-// ---------------------------------------------------------------------------
-// LinearOperator
-// ---------------------------------------------------------------------------
-class LinearOperator : public ed::matvec::MatVecOperator {
+class LinearOperator {
 public:
-    /// Geometry + memory-space metadata used by `ed::select_backend`.
-    /// Default implementation derives geometry from the
-    /// `MatVecOperator` getters (dim / global_dim / memory_space).
-    /// Override when the local offset is not zero.
-    [[nodiscard]] virtual Geometry geometry() const {
-        Geometry g;
-        g.local_dim    = this->dim();
-        g.global_dim   = this->global_dim();
-        g.local_offset = 0;
-        g.memory_space = this->memory_space();
-        return g;
+    virtual ~LinearOperator() = default;
+
+    /// out = A in. Buffers are host memory, distinct, of dim() elements.
+    virtual void apply(const Complex* in, Complex* out, std::size_t n) const = 0;
+    [[nodiscard]] virtual std::size_t dim() const = 0;
+    [[nodiscard]] virtual bool is_hermitian() const { return true; }
+    [[nodiscard]] virtual std::string description() const { return "LinearOperator"; }
+
+    /// Optional fast dense assembly: fill the dim() x dim() COLUMN-MAJOR matrix
+    /// `dense` (pre-zeroed) from the operator's sparse structure in O(nnz).
+    /// Reentrant. false (the default) tells the caller to build the columns
+    /// with apply().
+    [[nodiscard]] virtual bool try_build_dense_columns(Complex* /*dense*/,
+                                                       std::size_t /*n*/) const {
+        return false;
     }
 
-    // -------------------------------------------------------------------
-    // bind<Backend> --- return a callable matching the matvec signature
-    // every kernel in the project consumes:
-    //   void(const Complex*, Complex*, std::size_t)
-    //
-    // The default just calls apply(). Concrete operators with a faster
-    // backend-specialised path override the appropriate overload below.
-    // The template is non-virtual; specialisation happens via the
-    // backend-tagged virtual hooks `bind_cpu`, `bind_cuda`. Each defaults
-    // to `apply()` so an operator without a specialised path still works.
-    // -------------------------------------------------------------------
+    /// bind_cuda() returns a device apply.
+    [[nodiscard]] virtual bool has_device_kernel() const { return false; }
 
     using MatvecFn = std::function<void(const Complex*, Complex*, std::size_t)>;
 
@@ -109,7 +72,9 @@ public:
             this->apply(in, out, n);
         };
     }
-    [[nodiscard]] virtual MatvecFn bind_cuda() const { return bind_cpu(); }
+    [[nodiscard]] virtual MatvecFn bind_cuda() const {
+        throw ed::DeviceUnsupported(description() + " has no device kernel");
+    }
 
     /// k vectors per call on the device: outs[i] = A ins[i] (device pointers, each of dim()).
     /// Operators whose device kernel can serve several vectors in one pass return it; the
@@ -118,13 +83,21 @@ public:
                                              std::size_t n, std::size_t k)>;
     [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
 
-    /// Tagged dispatch helper. The template indirection makes calls
-    /// from the orchestrators read more naturally:
-    ///     auto mv = op.bind<CpuBackend>();
-    /// The implementation matches on the backend type's
-    /// `MemorySpace` and forwards to the corresponding virtual hook.
+    /// bind<CpuBackend>() is bind_cpu(), bind<CudaBackend>() is bind_cuda().
     template <typename Backend>
     [[nodiscard]] MatvecFn bind() const;
+
+    // TRANSITIONAL (P2.4 C1 -> C6), non-virtual: the orchestrator's view.
+    [[nodiscard]] Geometry geometry() const {
+        Geometry g;
+        g.local_dim = g.global_dim = dim();
+        g.supports_device_matvec = has_device_kernel();
+        return g;
+    }
+    [[nodiscard]] std::uint64_t global_dim() const { return dim(); }
+    [[nodiscard]] ed::matvec::MemorySpace memory_space() const {
+        return ed::matvec::MemorySpace::Host;
+    }
 };
 
 }  // namespace ed

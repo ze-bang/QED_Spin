@@ -88,7 +88,7 @@ TEST_CASE("dense assembly: try_build_dense_columns == matvec column build",
     auto f = make_fixture();
     using C = std::complex<double>;
 
-    auto check = [](const ed::matvec::MatVecOperator& op, std::size_t N) {
+    auto check = [](const ed::LinearOperator& op, std::size_t N) {
         std::vector<C> direct(N * N, C(0.0, 0.0));
         REQUIRE(op.try_build_dense_columns(direct.data(), N));   // lane supports it
 

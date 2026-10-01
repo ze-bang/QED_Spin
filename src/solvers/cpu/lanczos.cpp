@@ -1,4 +1,5 @@
 #include <ed/solvers/lanczos.h>
+#include <ed/core/linear_operator.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cpu_backend.h>
 #include <ed/parallel/numa.h>
@@ -151,7 +152,7 @@ void estimate_spectral_bounds(
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, uint64_t N, uint64_t num_eigs,
                        std::vector<double>& eigenvalues,
                        bool compute_eigenvectors,
-                       const ed::matvec::MatVecOperator* op_for_dense,
+                       const ed::LinearOperator* op_for_dense,
                        std::vector<std::vector<Complex>>* eigenvectors_out) {
     if (eigenvectors_out) eigenvectors_out->clear();
 
@@ -405,4 +406,15 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             "). Reduce the block with symmetry or use a Krylov method.");
     }
     
+}
+
+void full_diagonalization(const ed::LinearOperator& H_op,
+                          uint64_t N, uint64_t num_eigs,
+                          std::vector<double>& eigenvalues,
+                          bool compute_eigenvectors) {
+    full_diagonalization(
+        [&H_op](const Complex* in, Complex* out, int n) {
+            H_op.apply(in, out, static_cast<std::size_t>(n));
+        },
+        N, num_eigs, eigenvalues, compute_eigenvectors);
 }
