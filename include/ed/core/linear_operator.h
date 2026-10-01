@@ -23,25 +23,10 @@
 #include <string>
 
 #include <ed/core/errors.h>
-#include <ed/matvec/memory_space.h>
 
 namespace ed {
 
 using Complex = std::complex<double>;
-
-// TRANSITIONAL (P2.4 C1 -> C6): what select_backend() reads. Every field is
-// derived from dim() and has_device_kernel(); it goes with the orchestrator.
-struct Geometry {
-    std::size_t             local_dim    = 0;
-    std::uint64_t           global_dim   = 0;
-    std::uint64_t           local_offset = 0;
-    ed::matvec::MemorySpace memory_space = ed::matvec::MemorySpace::Host;
-    bool                    supports_device_matvec = false;
-
-    [[nodiscard]] bool is_device() const noexcept {
-        return ed::matvec::is_device(memory_space);
-    }
-};
 
 class LinearOperator {
 public:
@@ -86,18 +71,6 @@ public:
     /// bind<CpuBackend>() is bind_cpu(), bind<CudaBackend>() is bind_cuda().
     template <typename Backend>
     [[nodiscard]] MatvecFn bind() const;
-
-    // TRANSITIONAL (P2.4 C1 -> C6), non-virtual: the orchestrator's view.
-    [[nodiscard]] Geometry geometry() const {
-        Geometry g;
-        g.local_dim = g.global_dim = dim();
-        g.supports_device_matvec = has_device_kernel();
-        return g;
-    }
-    [[nodiscard]] std::uint64_t global_dim() const { return dim(); }
-    [[nodiscard]] ed::matvec::MemorySpace memory_space() const {
-        return ed::matvec::MemorySpace::Host;
-    }
 };
 
 }  // namespace ed

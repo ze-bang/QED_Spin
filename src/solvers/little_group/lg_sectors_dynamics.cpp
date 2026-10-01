@@ -18,6 +18,7 @@
 #include <ed/symmetry/su2_dims.h>
 #include <ed/symmetry/time_reversal.h>
 #ifdef WITH_CUDA
+#include <cuda_runtime.h>                     // cudaMemGetInfo
 #include <ed/matvec/backends/cuda_backend.cuh>
 #include <ed/matvec/device_csr.h>
 #endif

@@ -41,6 +41,10 @@
 #include <string>
 #include <vector>
 
+#ifdef WITH_CUDA
+#include <cuda_runtime.h>                     // cudaGetDeviceCount
+#endif
+
 namespace py = pybind11;
 
 namespace {

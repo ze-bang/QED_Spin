@@ -53,11 +53,15 @@ Backends and batching
 .. doxygenfile:: ed/matvec/backend.h
 .. doxygenfile:: ed/matvec/matvec_batcher.h
 
-Orchestrator
-------------
+Placement
+---------
 
-``ed::workflows::solve`` runs one operator (a block) on the backend ``select_backend`` picks;
-eigs calls it on device-placed blocks (transitional). Sampled thermal blocks call the thermal
-kernels (``ftlm_kernel``, ``mtpq``, ``oftlm_cpu``) directly on the lane ``ed::place`` chooses.
+``ed::place`` decides where each block of every verb runs (host or device, dense or Krylov),
+from the 'auto' table in ``device.h``; ``ed::with_backend`` runs a lane on a fresh backend.
+Eigs blocks run the Backend-templated block lanes; sampled thermal blocks call the thermal
+kernels (``ftlm_kernel``, ``mtpq``, ``oftlm_cpu``).
 
-.. doxygenfile:: ed/orchestrator.h
+.. doxygenfile:: ed/core/device.h
+.. doxygenfile:: ed/core/select_backend.h
+.. doxygenfile:: ed/thermal/ftlm_kernel.h
+.. doxygenfile:: ed/thermal/mtpq_kernel.h

@@ -3,7 +3,7 @@
 // include/ed/krylov/subspace_policy.h
 //
 // SINGLE SOURCE OF TRUTH for the Krylov-Schur per-cycle
-// subspace size. The kernels, the orchestrator (which sizes the run), and the
+// subspace size. The kernels, the block lanes (which size the run), and the
 // planner (which estimates its memory) all call this so they agree -- otherwise
 // `max_iter` means "iterations" to one component and "subspace size" (= stored
 // basis vectors) to another, and the memory footprint becomes unpredictable.

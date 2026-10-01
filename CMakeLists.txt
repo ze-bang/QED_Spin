@@ -430,21 +430,10 @@ if(BUILD_ED_TESTS)
     # orthogonality of the CGS2 basis.
     ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
     ed_add_test(test_kernel_facades            tests/unit/test_kernel_facades.cpp USE_CATCH2)
-    # The per-block solve driver: place(), the device decision for every block of every verb.
+    # The per-block solve driver: place() (the device decision for every block), the dense
+    # lane, the LinearOperator surface, the Backend-templated block lanes on CPU and CUDA, and
+    # the sampled-thermal dense crossover.
     ed_add_test(test_block_solve                tests/unit/test_block_solve.cpp USE_CATCH2)
-    ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
-    ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
-    ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
-    # Smoke-test the unified orchestrator
-    # `ed::workflows::solve(LinearOperator&, SolveOptions)` — Sz guard,
-    # auto fixed-Sz projection, default-method picker, GPU fallback.
-    ed_add_test(test_auto_solve                 tests/unit/test_auto_solve.cpp USE_CATCH2)
-    # End-to-end correctness of every ground-state algorithm reachable
-    # through `ed::workflows::solve` (LANCZOS, BLOCK_LANCZOS,
-    # KRYLOV_SCHUR, FULL) with auto-Sz projection on. Validates the
-    # matvec wiring through the virtual `LinearOperator::apply` and
-    # the orchestrator's solver-family switch in one place.
-    ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
     # THE reduced-CSR budget decision (shared by the abelian + little-group
     # lanes): serial admission, and the aggregate split across concurrent
     # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.

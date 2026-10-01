@@ -9,6 +9,9 @@
 //             counted host_dense); dense_max_dim = 0, a spin tower or observables sample it.
 //   [lanes]   the Backend-templated block lanes (scan, Krylov-Schur, GS vector, estimate)
 //             on toy blocks against Eigen; [lanes][cuda] the same lanes on CudaBackend.
+//   [dense]   full_diagonalization, solve_block_dense and solve_block_full.
+//   [linear_operator] bind<Backend>, has_device_kernel (the Casimir wrapper needs H and
+//             S^2 both), try_build_dense_columns; a host-only operator refuses bind_cuda.
 // =============================================================================
 #include "common/catch2_harness.h"
 #include "common/dense_operator.h"
@@ -19,6 +22,8 @@
 #include <ed/core/errors.h>
 #include <ed/core/select_backend.h>
 #include <ed/sectors/thermal.h>
+#include <ed/solvers/lanczos.h>
+#include <ed/symmetry/casimir_projector.h>
 
 #include <algorithm>
 #include <cmath>
@@ -555,5 +560,110 @@ TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]
     REQUIRE_FALSE(lg::solve_block_eigenpairs(gpu, D, 1, 4).converged);
     auto T = std::make_shared<ed_tests::ThrowingOperator>(std::make_shared<ed_tests::DenseOperator>(D.matrix()), 7);
     REQUIRE_THROWS_AS(lg::solve_block_eigenpairs(gpu, *T, 1), ed::ResourceLimit);
+}
+#endif
+
+// -----------------------------------------------------------------------------
+// [dense]: the dense lanes (full_diagonalization, solve_block_dense, solve_block_full)
+// against the reference spectrum.
+// -----------------------------------------------------------------------------
+TEST_CASE("dense: full_diagonalization matches the dense reference", "[dense]") {
+    for (std::uint64_t N : {4u, 6u, 8u}) {
+        for (double hz : {0.0, 0.37}) {           // with a Zeeman field: no SU(2) degeneracy
+            auto H = xxz_chain(static_cast<int>(N), false, 1.0, 1.0, hz);
+            const std::uint64_t dim = std::uint64_t{1} << N;
+            const auto ref = ed_tests::reference_from_operator(*H, dim);
+            std::vector<double> ev;
+            full_diagonalization(*H, dim, dim, ev, /*compute_eigenvectors=*/false);
+            INFO("N " << N << " hz " << hz);
+            ed_tests::require_eigs_close(ev, ref.eigs, ref.eigs.size(), 1e-9, "full_diagonalization");
+        }
+    }
+}
+
+TEST_CASE("dense: solve_block_dense and solve_block_full", "[dense]") {
+    auto H = xxz_chain(6, true, 1.0, 0.7, 0.21);
+    const auto ref = ed_tests::reference_from_operator(*H, 64).eigs;
+    const auto full = lg::solve_block_full(*H);
+    ed_tests::require_eigs_close(full, ref, ref.size(), 1e-10, "solve_block_full");
+    for (bool vectors : {false, true}) {
+        const auto sol = lg::solve_block_dense(*H, 5, vectors);
+        REQUIRE(sol.converged);
+        REQUIRE(sol.values.size() == 5);
+        for (std::size_t i = 0; i < 5; ++i) REQUIRE(std::abs(sol.values[i] - ref[i]) < 1e-10);
+        REQUIRE(sol.vectors.size() == (vectors ? 5u : 0u));
+        for (std::size_t i = 0; vectors && i < 5; ++i) REQUIRE(residual(*H, sol.values[i], sol.vectors[i]) < 1e-9);
+        // More levels than the block holds: the whole block.
+        REQUIRE(lg::solve_block_dense(*H, 100, vectors).values.size() == 64);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// [linear_operator]: the one operator interface.
+// -----------------------------------------------------------------------------
+TEST_CASE("linear_operator: bind<CpuBackend> is the host apply", "[linear_operator]") {
+    auto H = ed_tests::build_heisenberg_chain(4, 1.0, /*periodic=*/true);
+    const ed::LinearOperator& base = *H;
+    auto mv = base.bind<ed::matvec::CpuBackend>();
+    REQUIRE(mv);
+    std::vector<Complex> x(16), y(16), z(16);
+    for (std::size_t i = 0; i < 16; ++i) x[i] = Complex(0.1 * i, -0.05 * i * i);
+    mv(x.data(), y.data(), 16);
+    base.apply(x.data(), z.data(), 16);
+    REQUIRE(y == z);
+}
+
+TEST_CASE("linear_operator: device capability", "[linear_operator]") {
+    auto H = ed_tests::build_heisenberg_chain(4, 1.0, /*periodic=*/true);
+    REQUIRE_FALSE(H->has_device_kernel());                  // ::Operator has none
+    auto S = std::make_shared<ed_tests::SzSectorOperator>(
+        std::shared_ptr<const Operator>(ed_tests::build_heisenberg_chain(4, 1.0, true)), 2);
+    REQUIRE_FALSE(S->has_device_kernel());
+    // The Casimir wrapper has a device kernel exactly when H and S^2 both have one.
+    auto S2op = std::make_shared<Operator>(std::uint64_t{4}, 0.5f);
+    for (int i = 0; i < 4; ++i)
+        for (int j = i + 1; j < 4; ++j) {
+            const auto a = static_cast<std::uint64_t>(i), b = static_cast<std::uint64_t>(j);
+            S2op->addTwoBodyTerm(2, a, 2, b, Complex(2.0, 0));
+            S2op->addTwoBodyTerm(0, a, 1, b, Complex(1.0, 0));
+            S2op->addTwoBodyTerm(1, a, 0, b, Complex(1.0, 0));
+        }
+    const Eigen::MatrixXcd S2 = ed_tests::reference_from_operator(*S2op, 16).H
+                                + 3.0 * Eigen::MatrixXcd::Identity(16, 16);   // + 3N/4
+    const Eigen::MatrixXcd Hd = ed_tests::reference_from_operator(*H, 16).H;
+    auto dense_h  = std::make_shared<ed_tests::DenseOperator>(Hd);
+    auto dense_s2 = std::make_shared<ed_tests::DenseOperator>(S2);
+    auto proj_dev  = std::make_shared<ed::symmetry::LowdinS2Projector>(dense_s2, 0, std::vector<int>{0, 2, 4});
+    auto proj_host = std::make_shared<ed::symmetry::LowdinS2Projector>(S2op, 0, std::vector<int>{0, 2, 4});
+    ed::symmetry::CasimirProjectedOperator both(dense_h, proj_dev, 1), host_s2(dense_h, proj_host, 1);
+#ifdef WITH_CUDA
+    REQUIRE(dense_h->has_device_kernel());
+    REQUIRE(both.has_device_kernel());
+#else
+    REQUIRE_FALSE(both.has_device_kernel());
+#endif
+    REQUIRE_FALSE(host_s2.has_device_kernel());
+}
+
+TEST_CASE("linear_operator: try_build_dense_columns equals the column build", "[linear_operator]") {
+    auto H = xxz_chain(8, true, 1.0, 0.6, 0.13);
+    const std::size_t N = 256;
+    std::vector<Complex> direct(N * N, Complex(0, 0));
+    REQUIRE(H->try_build_dense_columns(direct.data(), N));
+    std::vector<Complex> e(N), col(N);
+    double maxdiff = 0.0;
+    for (std::size_t j = 0; j < N; ++j) {
+        std::fill(e.begin(), e.end(), Complex(0, 0));
+        e[j] = Complex(1, 0);
+        H->apply(e.data(), col.data(), N);
+        for (std::size_t i = 0; i < N; ++i) maxdiff = std::max(maxdiff, std::abs(direct[i + j * N] - col[i]));
+    }
+    REQUIRE(maxdiff < 1e-12);
+}
+
+#ifdef WITH_CUDA
+TEST_CASE("linear_operator: a host-only operator refuses a device binding", "[linear_operator][cuda]") {
+    auto H = ed_tests::build_heisenberg_chain(4, 1.0, /*periodic=*/true);
+    REQUIRE_THROWS_AS(H->bind<ed::matvec::CudaBackend>(), ed::DeviceUnsupported);
 }
 #endif

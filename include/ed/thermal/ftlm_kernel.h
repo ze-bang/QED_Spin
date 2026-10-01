@@ -49,8 +49,8 @@
 #ifdef WITH_CUDA
 // Forward declaration so the ``if constexpr`` branch below can refer to
 // CudaBackend without dragging the full ``cuda_backend.cuh`` into every
-// consumer of this header. The orchestrator TU (which actually calls
-// ``ftlm_kernel<CudaBackend>``) already pulls the full definition via
+// consumer of this header. The thermal verb (which actually calls
+// ``ftlm_kernel<CudaBackend>``) pulls the full definition via
 // ``select_backend.h``.
 namespace ed { namespace matvec { class CudaBackend; } }
 #endif
@@ -194,7 +194,7 @@ inline FtlmGrid resolve_ftlm_grid(const FtlmOptions& opts,
 ///
 /// Contract:
 ///   * the whole call runs under ``ThreadBudgetScope(auto_threads_for_dim
-///     (local_n))``. Nested inside the orchestrator's identical scope it
+///     (local_n))``. Nested inside the thermal verb's identical scope it
 ///     is a no-op: ``auto_threads_for_dim`` never exceeds the current
 ///     ``omp_get_max_threads()`` and the scope only touches the runtimes
 ///     when the requested count differs from the current one;
@@ -247,7 +247,7 @@ FtlmResult ftlm_kernel_via_backend(const Backend& backend,
     const FtlmGrid grid = resolve_ftlm_grid(opts, "ftlm_kernel");
     const std::vector<double>& temperatures = grid.temperatures;
 
-    // Dim-aware OMP+BLAS thread cap. Harmless when the orchestrator
+    // Dim-aware OMP+BLAS thread cap. Harmless when the thermal verb
     // already applied it (see the doc comment above).
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(

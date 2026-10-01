@@ -318,9 +318,8 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
 // hook — when set, the kernel calls it every
 // `convergence_check_interval` iterations with the current
 // (alpha, beta) tridiagonal. Returning `true` terminates the loop
-// without consuming the rest of `max_iter`. `workflows::solve` wires this
-// through `make_smallest_ritz_convergence` for its relative-Δλ early
-// exit. Without a unit test the callback can rot silently.
+// without consuming the rest of `max_iter`. The block lanes wire their Paige gate
+// through it. Without a unit test the callback can rot silently.
 //
 // Two sections:
 //   1. A counting probe verifies the callback fires at exactly
@@ -455,5 +454,41 @@ TEST_CASE("unified Lanczos kernel rejects misuse",
         REQUIRE_THROWS_AS(
             lanczos_kernel(be, matvec, 8, v0.data(), opts),
             std::invalid_argument);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// LocalDGKS3 reorthogonalization (moved from test_minimalist_collapse).
+// -----------------------------------------------------------------------------
+TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
+          "[lanczos][reorth][local_dgks3]") {
+    constexpr std::uint64_t N = 4;
+    auto H = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    const std::size_t dim = static_cast<std::size_t>(1ull << N);
+
+    ed::matvec::CpuBackend be;
+    auto matvec = H->bind<ed::matvec::CpuBackend>();
+    REQUIRE(matvec);
+
+    std::mt19937_64 rng(0xC0FFEEull);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<Complex> seed(dim);
+    for (auto& z : seed) z = Complex{dist(rng), dist(rng)};
+
+    LanczosKernelOptions opts;
+    opts.max_iter   = 12;
+    opts.reorth     = ReorthPolicy::LocalDGKS3;
+    opts.keep_basis = false;
+
+    auto res = lanczos_kernel(be, matvec, dim, seed.data(), opts);
+
+    // A non-trivial run with a well-formed tridiagonal.
+    REQUIRE(res.iters_done >= 4u);
+    REQUIRE(res.alpha.size() == res.iters_done);
+    REQUIRE(res.beta.size()  == res.iters_done + 1);
+    for (auto a : res.alpha) REQUIRE(std::isfinite(a));
+    for (auto b : res.beta) {
+        REQUIRE(std::isfinite(b));
+        REQUIRE(b >= 0.0);
     }
 }

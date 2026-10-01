@@ -102,10 +102,6 @@ LastTestsFailed.log
 CTestTestfile.cmake
 DartConfiguration.tcl
 
-# Per-test scratch directories created by ed_tests::make_scratch_dir()
-test_scratch/
-test_scratch_*/
-
 # ---------------------------------------------------------------------------
 # Run outputs, scratch directories, logs
 # Inputs (tests/fixtures/) are re-included below.

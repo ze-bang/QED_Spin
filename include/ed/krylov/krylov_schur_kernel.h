@@ -60,7 +60,7 @@ struct KrylovSchurOptions {
     double      breakdown_tol   = 1e-13;
     /// Memory cap on the per-cycle Krylov subspace, in resident length-N
     /// vectors (the basis held during each restart cycle is the dominant cost).
-    /// 0 = no cap. The orchestrator sets this from available RAM/VRAM so the
+    /// 0 = no cap. The block lanes set it from LanePolicy<B> (available RAM) so the
     /// footprint is PREDICTABLE: m_max <= max_subspace_vectors regardless of
     /// max_iter. See ed::krylov::krylov_subspace_dim.
     std::uint64_t max_subspace_vectors = 0;

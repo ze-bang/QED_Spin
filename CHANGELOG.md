@@ -89,6 +89,12 @@ C++ API (installed headers; nothing in Python changes):
   places each sampled block and calls the kernels itself; the mTPQ recipe (spectral bounds,
   shift L, step count, one retry) is `ed::thermal::mtpq<Backend>(be, H, n, betas, MtpqRun)`
   in `<ed/thermal/mtpq_kernel.h>`.
+- The solve orchestrator is gone: `ed::workflows::solve` / `ed::solve`, `SolveOptions`,
+  `SolveMethod`, `<ed/orchestrator.h>` and `<ed/core/results.h>` (`GroundStateResult`,
+  `BackendMetadata`, `KrylovDiagnostics`), with `ed::select_backend`, `BackendConstraints`,
+  `BackendVariant` and the lane-label helpers. `ed::Geometry`, `LinearOperator::geometry()`,
+  `global_dim()` and `memory_space()` go with them (`Backend::memory_space()` stays). Every
+  block is placed by `ed::place` and solved by the block lanes.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

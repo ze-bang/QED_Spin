@@ -286,7 +286,7 @@ public:
         // A structural check on the committed term list (adjoint partners with conjugate coefficients, real diagonal),
         // cached until the term list changes. Every solver lane assumes
         // Hermiticity (the rep kernels apply H^dagger; Lanczos tridiagonalises
-        // the symmetric part silently), so the orchestrator refuses
+        // the symmetric part silently), so input validation can refuse
         // non-Hermitian input up front instead of returning numbers.
         commitPendingTransforms();
         if (!hermitian_check_done_) {

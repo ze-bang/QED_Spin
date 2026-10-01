@@ -31,8 +31,8 @@ namespace ed::symmetry {
 /// Requires ``rep.usable()``; fixed-Sz sectors use the combinadic rank
 /// reverse lookup, full-Hilbert (sym-only) sectors the identity rank.
 /// On a non-CUDA build this throws ``std::logic_error``; callers reach it
-/// only through ``select_backend``, which never picks the GPU lane unless
-/// ``Geometry::supports_device_matvec`` is set (WITH_CUDA only).
+/// only through ``bind_cuda`` of an operator whose ``has_device_kernel()`` is true, which
+/// needs WITH_CUDA.
 ed::LinearOperator::MatvecFn
 make_sector_matvec_gpu_rep(const RepSectorData&            rep,
                            double                          spin_l,
