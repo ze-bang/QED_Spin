@@ -318,11 +318,18 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // -- it sharpens the excited window at negligible cost there.
     if (static_cast<std::size_t>(nb) > kLgTwoPassMinDim) {
         kopts.reorth          = ed::krylov::ReorthPolicy::None;
+    } else if (static_cast<std::size_t>(nb) <= kopts.max_iter) {
+        // The run may span the whole block. The ring's projections are not recorded in the
+        // tridiagonal; once the space is (nearly) exhausted they stop being negligible, and the
+        // tridiagonal's eigenvalues leave H's spectrum (the 28-state parity-1 k-sectors of the
+        // chiral 3x3 torus: -5.31939 against E0 -5.31922). At this size full reorthogonalisation
+        // is exact and cheap. Blocks this small are dense at the default crossover.
+        kopts.reorth          = ed::krylov::ReorthPolicy::FullCGS2;
     } else {
         kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
         kopts.local_ring_size = 8;
     }
-    kopts.keep_basis      = false;
+    kopts.keep_basis      = kopts.reorth == ed::krylov::ReorthPolicy::FullCGS2;   // CGS2 projects on it
     // k-LOWEST converged Ritz early exit: at 1e8 dims the window fills with
     // ghost COPIES of converged extremes, and a ghost is exactly as
     // stationary as an eigenvalue (a stationarity test burns the full
