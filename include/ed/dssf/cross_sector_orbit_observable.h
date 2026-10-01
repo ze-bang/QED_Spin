@@ -108,14 +108,6 @@ public:
     /// @param dst_size   must equal ``dim_dst()`` (defensive check)
     void apply(const Complex* in, Complex* out, std::size_t dst_size) const;
 
-    /// std::function adapter for callers that pass operator
-    /// applications as lambdas (the FTLM/CF matvec API).
-    auto as_apply_function() const {
-        return [this](const Complex* in, Complex* out, std::size_t n) {
-            this->apply(in, out, n);
-        };
-    }
-
     /// The rectangular matrix as CSR (row per target state), built on first use.
     /// Empty pointers when the build was refused by ED_XSEC_CSR_BUDGET_GIB.
     struct CsrView {

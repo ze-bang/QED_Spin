@@ -131,6 +131,12 @@ C++ API (installed headers; nothing in Python changes):
   `thermal` block small enough for the dense solve uses the engine's dense solve, the one
   `method="exact"` uses (results move at roundoff). The continued fraction is
   `ed::observables::continued_fraction` in `<ed/observables/cf_spectral_kernel.h>`.
+- `OftlmOptions` and `oftlm_cpu` are declared in `<ed/thermal/ftlm_kernel.h>`
+  (`<ed/thermal/oftlm_kernel.h>` is gone). `<ed/observables/ftlm_cross_irrep_kernel.h>` and its
+  host wrapper `ftlm_cross_irrep_kernel_one_sector` are gone: `FtlmCrossIrrepOptions` and
+  `FtlmCrossIrrepSectorResult` live in `<ed/observables/ftlm_dynamics_kernel.h>`, whose
+  `ftlm_dynamics_kernel(backend, ...)` serves the host too. Gone:
+  `CrossSectorOrbitObservable::as_apply_function`.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
 ("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)

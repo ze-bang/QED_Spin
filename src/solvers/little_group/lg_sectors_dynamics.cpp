@@ -8,7 +8,6 @@
 
 #include <ed/dssf/cross_sector_orbit_observable.h>
 #include <ed/observables/cf_spectral_kernel.h>
-#include <ed/observables/ftlm_cross_irrep_kernel.h>
 #include <ed/observables/ftlm_dynamics_kernel.h>
 #include <ed/parallel/numa.h>
 #include <ed/krylov/lanczos_kernel.h>
@@ -514,18 +513,19 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         const auto fo = options(i);
         const std::size_t dim_src = j.src->rd->reps.size();
         const ed::LinearOperator& Hs = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
-        auto H_src = [&Hs](const Complex* in, Complex* o, int nn) { Hs.apply(in, o, static_cast<std::size_t>(nn)); };
+        auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
+        auto& be = ed::matvec::default_cpu_backend();
         return collect(j, [&](const Target* t) {
             if (!t) {
-                auto zero = [](const Complex*, Complex* o, int nn) { std::fill(o, o + nn, Complex(0, 0)); };
-                return ed::observables::ftlm_cross_irrep_kernel_one_sector(
-                    H_src, H_src, zero, dim_src, dim_src, d.temperatures, d.omega, fo);
+                auto zero = [](const Complex*, Complex* o, std::size_t nn) { std::fill(o, o + nn, Complex(0, 0)); };
+                return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, dim_src, dim_src,
+                                                             d.temperatures, d.omega, fo);
             }
             const auto obs = observable(j, *t);
-            auto H_dst = [t](const Complex* in, Complex* o, int nn) { t->H->apply(in, o, static_cast<std::size_t>(nn)); };
-            auto O_ap  = [&obs](const Complex* in, Complex* o, int nn) { obs.apply(in, o, static_cast<std::size_t>(nn)); };
-            return ed::observables::ftlm_cross_irrep_kernel_one_sector(
-                H_src, H_dst, O_ap, dim_src, t->rd->reps.size(), d.temperatures, d.omega, fo);
+            auto H_dst = [t](const Complex* in, Complex* o, std::size_t nn) { t->H->apply(in, o, nn); };
+            auto O_ap  = [&obs](const Complex* in, Complex* o, std::size_t nn) { obs.apply(in, o, nn); };
+            return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, O_ap, dim_src, t->rd->reps.size(),
+                                                         d.temperatures, d.omega, fo);
         });
     };
     // The same estimator with both Krylov bases, H and O on the device.

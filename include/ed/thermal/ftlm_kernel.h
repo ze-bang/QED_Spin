@@ -100,6 +100,29 @@ struct FtlmResult {
     double ground_state_estimate = std::numeric_limits<double>::quiet_NaN();
 };
 
+/// OFTLM, the orthogonalized FTLM (Morita & Tohyama, Phys. Rev. Research 2, 013205 (2020)): the
+/// N_V lowest eigenstates are treated exactly and the random starts are orthogonalised against
+/// them, which removes plain FTLM's low-temperature bias; N_V = 0 is FTLM. With the common shift
+/// e_min = eps_0, D the block dimension and R the samples:
+///
+///   Z(beta) = sum_{i<N_V} e^{-beta (eps_i - e_min)}
+///           + (D - N_V)/R sum_r sum_j |<r~|psi_j^r>|^2 e^{-beta (eps~_j^r - e_min)},
+///
+/// <E> Z and <E^2> Z likewise, ln Z = ln Z(beta) - beta e_min and V = <(H - <H>)^2>. The (D - N_V)
+/// factor scales the random part to the complement, so Z is the full trace (no ln D term).
+struct OftlmOptions {
+    std::size_t   num_samples  = 20;   ///< R: random samples for the stochastic part
+    std::size_t   krylov_dim   = 100;  ///< M: Lanczos steps per random sample
+    std::size_t   num_exact    = 8;    ///< N_V: low-lying states treated exactly
+    std::size_t   exact_krylov = 0;    ///< Lanczos steps for the exact eigenpairs (0 -> auto)
+    std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
+    std::uint64_t random_seed  = 0;
+};
+
+/// OFTLM on one block on the host (src/solvers/cpu/oftlm.cpp). apply_H: out = H in, length N.
+Curves oftlm_cpu(const std::function<void(const std::complex<double>*, std::complex<double>*, int)>& apply_H,
+                 std::uint64_t N, const OftlmOptions& opts);
+
 namespace detail {
 
 /// One sample's Boltzmann moments about its lowest Ritz value e_min, per beta:

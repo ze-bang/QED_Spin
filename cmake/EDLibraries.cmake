@@ -156,7 +156,6 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_blocks.cpp
     ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp
     ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
-    ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})

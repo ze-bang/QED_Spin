@@ -2,33 +2,94 @@
 // =============================================================================
 // include/ed/observables/ftlm_dynamics_kernel.h
 //
-// Finite-temperature Lanczos for a dynamical correlation between two sectors, on any
-// Backend. The Jaklic-Prelovsek estimator of ftlm_cross_irrep_kernel_one_sector (same
-// random vectors, same accumulation, same result struct), with every O(dim) step on the
-// backend: both Lanczos runs keep their bases in backend memory, O is applied to each
-// source Krylov vector there, and the overlaps W = (O V_H)^dag V_S come from one GEMM.
-// Only the m_H x m_S overlap matrix and the tridiagonals reach the host.
+// Finite-temperature Lanczos (Jaklic-Prelovsek) for a dynamical correlation between two
+// sectors, on any Backend. O is rectangular: it maps the source sector (dim_src) to a target
+// sector (dim_dst). Per source sector, with R Gaussian samples |r> drawn in the source basis,
+// the Ritz states |psi_i> (energies E_i, first components c_i = <psi_i|r>) of a Lanczos run on
+// H_src from |r>, and a second Lanczos run on H_dst from O|r> for the resolvent,
 //
-//   H_src, H_dst, O_apply: (in, out, n) callables over backend pointers; O maps a source
-//   vector (dim_src) to a target vector (dim_dst).
+//   S(omega, T) = (dim_src / R) sum_r sum_i e^{-beta (E_i - E_min)} c_i
+//                 sum_j <psi_i|O^dag|chi_j><chi_j|O|r> L_eta(omega - (lambda_j - E_i)),
+//   Z(T)        = (dim_src / R) sum_r sum_i e^{-beta (E_i - E_min)} c_i^2,
+//
+// L_eta a unit Lorentzian. Both are returned UN-normalised (times dim_src, or trace_dim): the
+// caller (the dynamics verb) sums S and Z over source sectors and divides.
+//
+// Every O(dim) step runs on the backend: both Lanczos runs keep their bases in backend memory,
+// O is applied to each source Krylov vector there, and the overlaps W = (O V_H)^dag V_S come from
+// one GEMM. Only the m_H x m_S overlap matrix and the tridiagonals reach the host.
+//
+//   H_src, H_dst, O_apply: (in, out, n) callables over backend pointers.
 // =============================================================================
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/matvec_batcher.h>
-#include <ed/observables/ftlm_cross_irrep_kernel.h>
 #include <ed/thermal/sample_seed.h>
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <map>
 #include <random>
 #include <stdexcept>
 #include <vector>
 #include <type_traits>
 
 namespace ed::observables {
+
+using Complex = std::complex<double>;
+
+/// Parameters for the FTLM cross-irrep kernel.
+struct FtlmCrossIrrepOptions {
+    std::size_t krylov_dim       = 200;
+    std::size_t num_samples      = 30;
+    double      broadening       = 0.05;
+    /// Base seed: sample s starts from gaussian_vector(dim_src, sample_engine(random_seed, s))
+    /// (0 draws one).
+    std::uint64_t random_seed    = 0;
+    /// Applied in place to each (host) random vector before use, e.g. a projection onto one
+    /// spin tower; the kernel renormalises the result. The trace then runs over the image of
+    /// the transform, whose dimension is `trace_dim` (0: the whole source sector).
+    std::function<void(Complex*, std::size_t)> seed_transform;
+    std::size_t trace_dim        = 0;
+    /// Device multi-vector source and target H (LinearOperator::bind_cuda_multi): on a CUDA run
+    /// up to `batch_width` samples advance in lockstep and share each H apply. O must then be
+    /// safe to apply from several threads at once.
+    std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src, batch_dst;
+    std::size_t batch_width      = 8;
+};
+
+/// One sector's UN-normalised FTLM cross-irrep accumulators. Keyed
+/// by temperature; the caller aggregates across sectors.
+struct FtlmCrossIrrepSectorResult {
+    /// Per-temperature numerators: sum_r sum_i exp(-beta(E_i-E_min)) c_i^2 S_i(omega)
+    /// Length equals ``omega_grid.size()``. Multiplied by dim_src on
+    /// return so the cross-sector aggregator can sum directly.
+    std::map<double, std::vector<double>>  S_real;
+    std::map<double, std::vector<double>>  S_imag;
+    /// Per-temperature denominators (the sector's partition function
+    /// times dim_src / R). Same dim_src multiplication as ``S_*``.
+    std::map<double, double>               Z;
+    /// Source-sector dimension (used to multiply S/Z; reported for
+    /// debugging).
+    std::size_t                            dim_src       = 0;
+    /// Target-sector dimension.
+    std::size_t                            dim_dst       = 0;
+    /// Number of samples actually processed (after rejecting samples
+    /// whose Lanczos failed).
+    std::size_t                            samples_done  = 0;
+    /// Energy reference used for the thermal exponent's numerical
+    /// stability shift (= min Ritz energy across all samples in this
+    /// sector). Reported so the caller can sanity-check the per-
+    /// sector recombination.
+    double                                 E_min         = 0.0;
+};
+
 
 template <class Backend, class HSrc, class HDst, class OApply>
 FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&& H_dst, OApply&& O_apply,

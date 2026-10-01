@@ -14,7 +14,6 @@
 #include <ed/thermal/curves.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
-#include <ed/thermal/oftlm_kernel.h>
 
 #include <algorithm>
 #include <map>

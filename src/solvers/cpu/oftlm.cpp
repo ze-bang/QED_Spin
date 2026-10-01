@@ -2,11 +2,11 @@
 // src/solvers/cpu/oftlm.cpp
 //
 // Orthogonalized Finite-Temperature Lanczos Method (OFTLM).
-// See include/ed/thermal/oftlm_kernel.h for the estimator + references.
+// See OftlmOptions in include/ed/thermal/ftlm_kernel.h for the estimator and references.
 // =============================================================================
 
 #include <ed/thermal/sample_seed.h>
-#include <ed/thermal/oftlm_kernel.h>
+#include <ed/thermal/ftlm_kernel.h>
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/tridiag.h>

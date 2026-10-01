@@ -46,7 +46,6 @@ Dynamics kernels
 
 .. doxygenfile:: ed/observables/cf_spectral_kernel.h
 .. doxygenfile:: ed/observables/ftlm_dynamics_kernel.h
-.. doxygenfile:: ed/observables/ftlm_cross_irrep_kernel.h
 
 Backends and batching
 ---------------------
@@ -64,5 +63,3 @@ kernels (``ftlm_kernel``, ``mtpq``, ``oftlm_cpu``).
 
 .. doxygenfile:: ed/core/device.h
 .. doxygenfile:: ed/core/select_backend.h
-.. doxygenfile:: ed/thermal/ftlm_kernel.h
-.. doxygenfile:: ed/thermal/mtpq_kernel.h
