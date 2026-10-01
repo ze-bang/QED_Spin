@@ -151,7 +151,8 @@ void bind_input(py::module_& parent) {
             Each nearest-neighbour pair once, oriented as generated (the
             chain's wrap bond runs N-1 -> 0, kagome triangles counter-
             clockwise, honeycomb bonds A -> B), so a uniform DM vector over
-            ``nn_pairs()`` is translation invariant.
+            ``nn_pairs()`` is translation invariant (not along a periodic length of
+            2, where a pair's two bonds are stored as one).
         nnn_bonds, nnnn_bonds : list[Bond]
             The second and third distance shells (minimum image on a
             periodic lattice), i < j. ``nnn_pairs()`` / ``nnnn_pairs()``

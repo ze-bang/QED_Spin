@@ -45,7 +45,8 @@ struct Lattice {
     // to the site r + delta it links to (chain i -> i+1, the wrap bond included);
     // every kagome triangle counter-clockwise; every honeycomb bond from A to B;
     // every pyrochlore bond from the lower sublattice to the higher. A uniform
-    // DM vector over these bonds is the translation-invariant model.
+    // DM vector over these bonds is the translation-invariant model -- except
+    // along a periodic length of 2, where a pair's two bonds are stored as one.
     std::vector<Bond> nn_bonds;
 
     // The second and third distance shells (i < j): the pairs whose distance,

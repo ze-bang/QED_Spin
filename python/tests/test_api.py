@@ -495,6 +495,7 @@ def test_a_repeated_temperature_repeats_its_row():
     mixed = qed.dynamics(H, O, omega, T=[1.0, 0.5, 1.0], **kw)
     assert list(mixed.T) == [1.0, 0.5, 1.0]
     np.testing.assert_array_equal(mixed.S[2], mixed.S[0])
+    np.testing.assert_array_equal(mixed.S[0], one.S[0])            # the row of T = 1, not another
     for bad in ([0.0], [float("nan")], [float("inf")]):
         with pytest.raises(qed.errors.InvalidRequest):
             qed.dynamics(H, O, omega, T=bad, **kw)
