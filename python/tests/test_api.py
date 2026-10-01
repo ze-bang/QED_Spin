@@ -734,7 +734,9 @@ def test_auto_runs_the_cpu_lanes_below_the_floor(model):
     dsym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")
     sa = qed.dynamics(H, O, omega, sym=dsym, device="auto").S
     sc = qed.dynamics(H, O, omega, sym=dsym, device="cpu").S
-    assert np.array_equal(np.asarray(sa), np.asarray(sc))
+    # T = 0 dynamics is not bitwise reproducible even between two runs on one device (threaded
+    # reductions; P2.4 step 0, dev/p24/STEP0.md), so it is compared to roundoff.
+    np.testing.assert_allclose(np.asarray(sa), np.asarray(sc), rtol=1e-12, atol=1e-14)
 
 
 @pytest.mark.parametrize("scale", [1.0, 1e6])
