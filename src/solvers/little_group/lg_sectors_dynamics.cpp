@@ -363,9 +363,9 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                     cf.global_n = n;
                     ed::observables::CfSpectralResult r;
                     auto t_cf = std::chrono::steady_clock::now();
-                    const bool gpu = d.device != Device::Cpu && ed::have_cuda()
-                                     && (d.device == Device::Gpu || n >= (std::size_t{1} << 14));
-                    if (gpu) {
+                    // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.
+                    const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsCf, n, false, 1, true, "dynamics"});
+                    if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
                         t.H->enable_device(true);
                         ed::matvec::CudaBackend cbe;
@@ -377,7 +377,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
                         auto apply = [&t](const Complex* in, Complex* o, std::size_t nn) { t.H->apply(in, o, nn); };
                         r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
                     }
-                    out.placement.add(gpu, false);
+                    out.placement.add(lane);
                     phase["continued fraction"] += clock_since(t_cf);
                     for (std::size_t i = 0; i < S.size(); ++i) S[i] += r.spectral_function[i];
                 }
@@ -584,19 +584,17 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     };
 
     // On a device every source large enough to fill it (all of them for Device::Gpu) runs
-    // there, one at a time.
+    // there, one at a time. Sources are k-sector RepSectorMatVecs: they always have a device kernel.
     std::vector<Source> sources(jobs.size());
     std::vector<std::size_t> host_jobs, device_jobs;
-    const bool gpu_ok = d.device != Device::Cpu && ed::have_cuda();
     for (std::size_t i = 0; i < jobs.size(); ++i) {
         const std::size_t dim = jobs[i].src->rd->reps.size();
-        (gpu_ok && (d.device == Device::Gpu || dim >= (std::size_t{1} << 16)) ? device_jobs : host_jobs)
-            .push_back(i);
+        const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsFtlm, dim, false, 1, true, "dynamics"});
+        (ed::on_device(lane) ? device_jobs : host_jobs).push_back(i);
+        out.placement.add(lane);
     }
     auto t_k = std::chrono::steady_clock::now();
     for (std::size_t i : device_jobs) { sources[i] = run_device(i); ++out.device_blocks; }
-    out.placement.device_krylov += device_jobs.size();
-    out.placement.host_krylov   += host_jobs.size();
     phase["ftlm kernel (device)"] += clock_since(t_k);
 
     // On the host, small sectors run concurrently, one thread each: at a few thousand states a
@@ -604,7 +602,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     // Large ones run one at a time with every thread.
     std::vector<std::size_t> small, large;
     for (std::size_t i : host_jobs)
-        (jobs[i].src->rd->reps.size() < (std::size_t{1} << 16) ? small : large).push_back(i);
+        (jobs[i].src->rd->reps.size() < ed::kHostPoolMaxDim ? small : large).push_back(i);
     t_k = std::chrono::steady_clock::now();
     for (std::size_t i : small) {        // warm the lazily built operators before going parallel
         std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());

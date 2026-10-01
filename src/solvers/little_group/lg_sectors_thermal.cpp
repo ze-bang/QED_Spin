@@ -177,10 +177,9 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     // of each block are formed once the batch is solved.
     detail::DenseBatch batch(t.method == ThermalSpec::Method::Exact ? t.device : Device::Cpu);
     struct Pending { std::size_t id; std::size_t block; detail::BlockOp filter; };
-    // Sampled blocks on the host below kSmallBlock states run afterwards, concurrently, one thread
+    // Sampled blocks on the host below kHostPoolMaxDim states run afterwards, concurrently, one thread
     // each (a Lanczos step that short is slower on a thread team -- measured 8x at 32 threads on
     // the dynamics sources); each keeps the seed it was given here, so the order does not matter.
-    constexpr std::uint64_t kSmallBlock = std::uint64_t{1} << 16;
     struct Deferred {
         std::size_t block; detail::BlockOp bop; std::uint64_t seed; std::uint64_t tower_dim;
         std::vector<std::shared_ptr<const ed::LinearOperator>> obs; bool folded;
@@ -249,7 +248,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
                     multiplets += tower_dim * bi->tag.multiplicity;
-                    if (t.device == Device::Cpu && bi->tag.dim < kSmallBlock) {
+                    if (t.device == Device::Cpu && bi->tag.dim < ed::kHostPoolMaxDim) {
                         deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, folded});
                     } else {
                         bool on_gpu = false;
@@ -341,7 +340,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             BlockThermo b = exact_block(ev, beta);
             b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.sz2 = blocks[p.block].sz2;
             b.mirrored = blocks[p.block].mirrored;
-            b.device = batch.on_device(); b.dense = true;
+            b.device = ed::on_device(batch.lane(p.id)); b.dense = true;
             blocks[p.block] = std::move(b);
         }
         std::vector<BlockThermo> kept;

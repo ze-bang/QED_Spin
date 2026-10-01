@@ -69,6 +69,11 @@ C++ API (installed headers; nothing in Python changes):
   (`<ed/core/linear_operator.h>`), with `as_apply_function` and `check_size` gone.
   `LinearOperator::has_device_kernel()` says whether `bind_cuda()` has a device apply; the
   default `bind_cuda()` throws `ed::DeviceUnsupported` instead of returning the host apply.
+- `<ed/core/device.h>`: `ed::Device` (`ed::sectors::Device` is an alias of it), `ed::Lane`,
+  `ed::Task` and the 'auto' table `auto_row`. `ed::place(Device, BlockRequest)`
+  (`<ed/core/select_backend.h>`) is the one device decision for every block of every verb;
+  `ed::with_backend(lane, fn)` runs `fn` on a fresh backend of that lane.
+  `ed::sectors::Placement::add(Lane)` counts one solve.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

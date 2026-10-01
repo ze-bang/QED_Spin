@@ -105,20 +105,21 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     return b;
 }
 
-/// Dense spectra of many blocks: on the host one block at a time, or -- with a device --
+/// Dense spectra of many blocks: on the host one block at a time, or -- on a device lane --
 /// materialised as the walk visits them and solved in one batched cuSOLVER call at the end
 /// (the walk streams stars, so the matrices are the only thing that outlives a star).
+/// place(Task::DenseBatch) chooses each entry's lane.
 class DenseBatch {
 public:
-    explicit DenseBatch(Device device)
-        : gpu_(device != Device::Cpu && ed::have_cuda()) {}
+    explicit DenseBatch(Device device) : device_(device) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
     std::size_t add(const ed::LinearOperator& mv) {
         using namespace ed::solvers::lg_detail;
         const std::size_t id = spectra_.size();
         spectra_.emplace_back();
-        if (!gpu_) {
+        lanes_.push_back(ed::place(device_, {ed::Task::DenseBatch, mv.dim()}));
+        if (!ed::on_device(lanes_.back())) {
             spectra_.back() = solve_block_full(mv);
             return id;
         }
@@ -153,11 +154,12 @@ public:
     }
 
     [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
+    [[nodiscard]] ed::Lane lane(std::size_t id) const { return lanes_[id]; }
     [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
-    [[nodiscard]] bool on_device() const noexcept { return gpu_; }
 
 private:
-    bool gpu_;
+    Device device_;
+    std::vector<ed::Lane>             lanes_;
     ed::solvers::LgBlocksPacked       packed_;
     std::vector<std::size_t>          queued_;
     std::vector<std::vector<double>>  spectra_;

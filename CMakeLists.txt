@@ -430,6 +430,8 @@ if(BUILD_ED_TESTS)
     # orthogonality of the CGS2 basis.
     ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
     ed_add_test(test_kernel_facades            tests/unit/test_kernel_facades.cpp USE_CATCH2)
+    # The per-block solve driver: place(), the device decision for every block of every verb.
+    ed_add_test(test_block_solve                tests/unit/test_block_solve.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)

@@ -3,7 +3,10 @@
 // =============================================================================
 // include/ed/core/select_backend.h
 //
-// `ed::select_backend(LinearOperator, BackendConstraints)`: the runtime
+// place(Device, BlockRequest): the lane (host or device, dense or Krylov) one block runs on,
+// for every verb; with_backend(lane, fn) runs fn on a fresh backend of that lane.
+//
+// TRANSITIONAL (P2.4 C6 deletes it): `ed::select_backend(LinearOperator, BackendConstraints)`, the runtime
 // dispatch helper consumed by the orchestrators (`ed::workflows::solve`,
 // `ed::workflows::thermal`). Resolves the (have_cuda, gpu_mem_fits,
 // user constraints) tuple into a single `BackendVariant` the caller can
@@ -16,14 +19,17 @@
 //   3. else                                          --> CpuBackend
 // =============================================================================
 
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <variant>
 
+#include <ed/core/device.h>
 #include <ed/core/errors.h>
 #include <ed/core/linear_operator.h>
 #include <ed/core/log.h>
@@ -145,6 +151,89 @@ inline std::optional<std::size_t> free_device_bytes(bool fresh = false) noexcept
     (void)fresh;
     return std::nullopt;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// place(): the one device decision for every block of every verb.
+// ---------------------------------------------------------------------------
+
+/// What place() asks of the machine (a test seam: the [place] unit tests count the calls).
+struct DeviceProbe {
+    bool (*available)() noexcept = &have_cuda;
+    std::optional<std::size_t> (*free_bytes)(bool fresh) noexcept = &free_device_bytes;
+};
+
+/// The lane one block runs on. In order:
+///   a. DenseBatch: the host under Cpu or without a device ('gpu' raises DeviceUnavailable),
+///      else the device (no floor, no memory check).
+///   b. A block the verb solves densely runs dense on the host under every device.
+///   c. Cpu: the host Krylov lanes, before any probe ('cpu' never initialises CUDA).
+///   d. Auto: the device when the block has a kernel, its task may run there, dim >= the
+///      task's floor, a device is visible and (fit_vectors > 0) the vectors fit; else the host.
+///   e. Gpu: the device, or DeviceUnavailable / DeviceUnsupported / ResourceLimit saying why not.
+/// TRANSITIONAL: a device-bound Eigs block of dim <= kDeviceDenseMaxDim or 2 want >= dim is
+/// solved densely on the host.
+[[nodiscard]] inline Lane place(Device d, const BlockRequest& r, const DeviceProbe& probe = {}) {
+    if (r.task == Task::DenseBatch) {
+        if (d == Device::Cpu) return Lane::HostDense;
+        if (!probe.available()) {
+            if (d == Device::Gpu)
+                throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
+            return Lane::HostDense;
+        }
+        return Lane::DeviceDense;
+    }
+    if (r.dense) return Lane::HostDense;
+    if (d == Device::Cpu) return Lane::HostKrylov;
+    const AutoRow row = auto_row(r.task);
+    const std::uint64_t need = std::uint64_t{row.fit_vectors} * r.dim * sizeof(std::complex<double>);
+    const bool small_eigs = r.task == Task::Eigs && (r.dim <= kDeviceDenseMaxDim || 2 * r.want >= r.dim);
+    if (d == Device::Auto) {
+        if (!r.device_kernel || r.task == Task::Oftlm || r.dim < row.floor || !probe.available())
+            return Lane::HostKrylov;
+        if (row.fit_vectors > 0) {
+            const std::optional<std::size_t> free = probe.free_bytes(false);
+            if (!free || need > *free) return Lane::HostKrylov;
+        }
+        return small_eigs ? Lane::HostDense : Lane::DeviceKrylov;
+    }
+    if (!probe.available())
+        throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
+    if (r.task == Task::Oftlm)
+        throw ed::DeviceUnsupported(std::string(r.verb) + ": OFTLM (exact_states > 0) runs on the host only; with "
+                                    "device='gpu' use FTLM without exact_states, or device='auto' or 'cpu'");
+    if (!r.device_kernel)
+        throw ed::DeviceUnsupported(std::string(r.verb) + ": device='gpu', but "
+                                    + (r.what ? r.what() : "a block of dim " + std::to_string(r.dim)) + " "
+                                    + r.why + "; use device='auto' or 'cpu'");
+    if (small_eigs) return Lane::HostDense;
+    if (row.fit_vectors > 0) {
+        const std::optional<std::size_t> free = probe.free_bytes(true);
+        if (!free)
+            throw ed::DeviceUnavailable("device='gpu', but the device's memory cannot be queried "
+                                        "(no CUDA context could be created)");
+        if (need > *free)
+            throw ed::ResourceLimit("device='gpu', but a block of dim " + std::to_string(r.dim) + " needs "
+                                    + std::to_string(need >> 20) + " MiB of device memory and "
+                                    + std::to_string(*free >> 20) + " MiB are free");
+    }
+    return Lane::DeviceKrylov;
+}
+
+/// fn(backend) on a fresh CpuBackend for a host lane, or a fresh CudaBackend for a device lane.
+/// A device lane in a build without CUDA is a logic error (place() never returns one there).
+template <class Fn>
+auto with_backend(Lane lane, Fn&& fn) {
+    if (on_device(lane)) {
+#ifdef WITH_CUDA
+        ed::matvec::CudaBackend be;
+        return fn(be);
+#else
+        throw std::logic_error("with_backend: a device lane in a build without CUDA");
+#endif
+    }
+    ed::matvec::CpuBackend be;
+    return fn(be);
 }
 
 /// Device memory the operator's solve needs: `fudge_factor` vectors of its dimension.

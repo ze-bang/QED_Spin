@@ -25,6 +25,7 @@
 // k orthonormal eigenvectors even when a level is degenerate.
 // =============================================================================
 
+#include <ed/core/device.h>
 #include <ed/core/operator.h>
 #include <ed/solvers/little_group_blocks.h>
 #include <ed/symmetry/rep_sector_data.h>
@@ -42,11 +43,12 @@ namespace ed::sectors {
 using Complex = std::complex<double>;
 using Perm    = std::vector<int>;
 
-/// Where the blocks run. Gpu: every block that has a device kernel runs on it (group and
-/// momentum sectors); isotypic W blocks, spin-projected blocks and blocks small enough for a
-/// dense solve stay on the host. Auto: the device only above the backend's dimension floor.
-/// Results count the blocks that ran on the device.
-enum class Device { Cpu, Gpu, Auto };
+/// Where the blocks run (ed::Device, include/ed/core/device.h). place() (select_backend.h)
+/// decides each block: Cpu never touches CUDA; Gpu runs every Krylov solve on the device or
+/// raises naming the block (isotypic W blocks, OFTLM, blocks without a device kernel); blocks
+/// the verb solves densely stay on the host under every device; Auto uses the device above the
+/// task's floor in the 'auto' table (auto_row). Results count where the solves ran.
+using Device = ed::Device;
 
 /// Things a caller should know about a result that did not stop it: (code, message) pairs,
 /// e.g. ("partial_window", ...) for an eigs window returned incomplete under allow_partial.
@@ -116,11 +118,24 @@ struct EigsOptions {
     double window       = 0.0;
 };
 
-/// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host. Under
-/// Device::Gpu no Krylov solve runs on the host (a block that cannot run on the device raises);
-/// small blocks may still be solved densely there.
+/// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host, one
+/// count per lane place() chose. Under Device::Gpu no Krylov solve runs on the host (a block
+/// that cannot run on the device raises); small blocks may still be solved densely there.
+/// Units: one per block solve. Prune estimates and setup work (projector shifts, seed
+/// projections) are not counted; dynamics counts one per continued fraction at T = 0 and one
+/// per source sector at T > 0. A host Krylov solve whose H apply is the device gather on host
+/// vectors (the hybrid lane, dim >= kHostGatherFloor) counts host_krylov, since its vectors
+/// and Krylov work are on the host; its block_stats lane says "gpu-gather".
 struct Placement {
     std::size_t device_krylov = 0, device_dense = 0, host_krylov = 0, host_dense = 0;
+    void add(ed::Lane lane) {
+        switch (lane) {
+            case ed::Lane::HostDense:    ++host_dense;    break;
+            case ed::Lane::HostKrylov:   ++host_krylov;   break;
+            case ed::Lane::DeviceDense:  ++device_dense;  break;
+            case ed::Lane::DeviceKrylov: ++device_krylov; break;
+        }
+    }
     void add(bool device, bool dense) {
         ++(device ? (dense ? device_dense : device_krylov) : (dense ? host_dense : host_krylov));
     }
