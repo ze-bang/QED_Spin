@@ -1,9 +1,9 @@
 // =============================================================================
 // tests/unit/test_kernel_facades.cpp
 //
-// Lockdown for the Backend-templated algorithm kernels (Lanczos / FTLM /
-// mTPQ / block Krylov-Schur / Krylov-Schur). The tests prove the headers
-// compile, link, and produce correct numbers on small Heisenberg chains.
+// Lockdown for the Backend-templated algorithm kernels (Lanczos / FTLM / mTPQ /
+// Krylov-Schur). The tests prove the headers compile, link, and produce correct
+// numbers on small Heisenberg chains.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -13,7 +13,6 @@
 #include <ed/matvec/matvec.h>
 
 #include <ed/krylov/lanczos_kernel.h>
-#include <ed/krylov/block_krylov_schur_kernel.h>
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/thermal/ftlm_kernel.h>
 #include <ed/thermal/mtpq_kernel.h>
@@ -46,11 +45,11 @@ struct MatvecCallable {
 
 }  // namespace
 
-TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity",
-          "[kernel-facade][block-krylov-schur]") {
-    // Heisenberg chain has SU(2)-degenerate levels -- the discriminating test
-    // for a block method: it must return the k lowest eigenvalues *counting
-    // multiplicity*, where single-vector Lanczos/Krylov-Schur miss copies.
+TEST_CASE("krylov::krylov_schur_kernel == dense lowest-k WITH multiplicity",
+          "[kernel-facade][krylov-schur][degeneracy]") {
+    // The Heisenberg ring has SU(2)-degenerate levels: a Krylov space grown from one
+    // start vector holds one copy of each, so the k lowest eigenvalues *counting
+    // multiplicity* need the fresh starts after locking and the degeneracy probe.
     constexpr std::uint64_t N   = 6;
     constexpr std::size_t   dim = std::size_t{1} << N;
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
@@ -70,14 +69,18 @@ TEST_CASE("krylov::block_krylov_schur_kernel == dense lowest-k WITH multiplicity
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
     const auto ref = es.eigenvalues();   // ascending, with multiplicity
 
-    ed::krylov::BlockKrylovSchurOptions opts;
+    std::mt19937_64 gen(0x51ED0B70ULL);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Complex> v0(dim);
+    for (auto& z : v0) z = Complex(nd(gen), nd(gen));
+    ed::krylov::KrylovSchurOptions opts;
     opts.num_eigs     = 6;
-    opts.block_size   = 4;
+    opts.max_iter     = 40;
     opts.tolerance    = 1e-10;
     opts.max_restarts = 200;
-    auto res = ed::krylov::block_krylov_schur_kernel(
-        backend, apply, dim, static_cast<std::uint64_t>(dim), opts);
+    auto res = ed::krylov::krylov_schur_kernel(backend, apply, dim, v0.data(), opts);
 
+    REQUIRE(res.converged);
     REQUIRE(res.eigenvalues.size() == opts.num_eigs);
     for (std::size_t i = 0; i < opts.num_eigs; ++i)
         REQUIRE(std::abs(res.eigenvalues[i] - ref[static_cast<long>(i)]) < 1e-7);
@@ -145,24 +148,6 @@ TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap
     const auto vb = krylov_vector_budget(16ull << 30, 100'000'000ull, 0.5, 0);
     REQUIRE(vb >= 4);
     REQUIRE(vb <= 6);
-}
-
-TEST_CASE("krylov::block diagnostics: per-eigenvalue residuals + n_converged",
-          "[kernel-facade][diagnostics]") {
-    constexpr std::uint64_t N   = 6;
-    constexpr std::size_t   dim = std::size_t{1} << N;
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-    ed::matvec::CpuBackend backend;
-    MatvecCallable apply{H.get()};
-
-    SECTION("block Krylov-Schur: locked == converged, residuals below tol") {
-        ed::krylov::BlockKrylovSchurOptions o;
-        o.num_eigs = 4; o.block_size = 4; o.tolerance = 1e-10; o.max_restarts = 200;
-        auto r = ed::krylov::block_krylov_schur_kernel(backend, apply, dim, dim, o);
-        REQUIRE(r.residuals.size() == r.eigenvalues.size());
-        REQUIRE(r.n_converged == r.eigenvalues.size());
-        for (double rho : r.residuals) REQUIRE(rho <= 1e-10);
-    }
 }
 
 TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",

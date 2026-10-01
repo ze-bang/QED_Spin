@@ -176,15 +176,6 @@ public:
         throw std::runtime_error("Backend::gemm not implemented for this backend");
     }
 
-    /// In-place tall-skinny QR. On entry, `A` is `m_local x b`
-    /// column-major. On exit, `A` holds Q (orthonormal columns) and
-    /// `R_host` (size `b*b`, column-major) holds the upper-triangular
-    /// R block. Uses LAPACK / cuSolver `geqrf` + `ungqr`.
-    virtual void qr_thin(Complex* /*A*/, std::size_t /*m_local*/, std::size_t /*b*/,
-                         Complex* /*R_host*/) const {
-        throw std::runtime_error("Backend::qr_thin not implemented for this backend");
-    }
-
     // Convenience helper: allocate a zero-filled work vector. Many
     // Krylov inner loops need a couple of these per iteration; this is
     // the cleanest way to express it without forcing every backend to

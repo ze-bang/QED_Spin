@@ -57,10 +57,10 @@ def run(**kw):
         return "raised", f"{type(ex).__name__}: {str(ex)[:160]}", None
 
 
-st, got, comp = run(block_size=1)
+st, got, comp = run()
 print(f"ref (with multiplicity) = {ref.tolist()}")
-print(f"eigs(k={K}, block_size=1): {st} {got if st == 'raised' else got.tolist()} complete={comp}")
-st_p, got_p, comp_p = run(block_size=1, allow_partial=True)
+print(f"eigs(k={K}): {st} {got if st == 'raised' else got.tolist()} complete={comp}")
+st_p, got_p, comp_p = run(allow_partial=True)
 print(f"eigs(k={K}, allow_partial=True): {st_p} "
       f"{got_p if st_p == 'raised' else got_p.tolist()} complete={comp_p}")
 

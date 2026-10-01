@@ -29,7 +29,11 @@ Breaking changes so far:
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.
-- **Removed:** `Operator.conserves_sz`; `qed.lattice` (`TriangularSupercell` and its label helpers).
+- **Removed:**
+  - `Operator.conserves_sz`;
+  - `qed.lattice` (`TriangularSupercell` and its label helpers);
+  - block Krylov-Schur (`eigs(block_size=...)`): the single-vector Krylov-Schur finds every
+    copy of a degenerate level.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

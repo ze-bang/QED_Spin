@@ -331,11 +331,10 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                     if (on_device) ++res.device_blocks;
                     res.placement.add(on_device, dense);
                 } else if (o.vectors) {
-                    std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim,
-                                                              o.block_size, &converged);
+                    std::tie(ev, vv) = solve_block_eigenpairs(mv, want, o.dense_max_dim, &converged);
                     res.placement.add(false, !krylov);
                 } else {
-                    ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged, o.block_size);
+                    ev = solve_block_lowest(mv, want, o.dense_max_dim, &converged);
                     res.placement.add(false, !krylov);
                 }
                 res.block_stats.push_back(block_stats(
@@ -397,7 +396,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
         const Subspace& sub = subs[si];
-        const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim, o.block_size);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, o.dense_max_dim);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;
@@ -437,7 +436,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
         Spec star = s;
         star.only_k0 = {c.k0};
         const Subspace& sub = subs[c.sub];
-        const LittleGroupOptions opt = detail::engine_options(star, sub, o.dense_max_dim, o.block_size);
+        const LittleGroupOptions opt = detail::engine_options(star, sub, o.dense_max_dim);
         detail::walk(H, n_sites, star, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks)
                 if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip)
@@ -499,7 +498,7 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
     std::vector<Entry> entries;
     std::size_t n_blocks = 0;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, 64);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             res.tr_engaged   = res.tr_engaged || tr_on;

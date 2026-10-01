@@ -52,7 +52,6 @@
 #include <cuComplex.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
 
 #include <ed/core/errors.h>
 #include <ed/matvec/backend.h>
@@ -84,14 +83,6 @@ inline void check_cublas(cublasStatus_t err, const char* what) {
                                  std::to_string(static_cast<int>(err)) +
                                  " (last CUDA error: " +
                                  cudaGetErrorString(cudaPeekAtLastError()) + ")");
-    }
-}
-
-inline void check_cusolver(cusolverStatus_t err, const char* what) {
-    if (err != CUSOLVER_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("CudaBackend: ") + what +
-                                 " failed with cuSolver status " +
-                                 std::to_string(static_cast<int>(err)));
     }
 }
 
@@ -162,12 +153,8 @@ public:
         // Use raw cuda* calls (noexcept) inside the destructor; errors
         // here would only surface as `cudaGetLastError()` from a later
         // call. The driver tears down resources at process exit anyway.
-        if (qr_work_dev_)  cudaFree(qr_work_dev_);
-        if (qr_tau_dev_)   cudaFree(qr_tau_dev_);
-        if (qr_info_dev_)  cudaFree(qr_info_dev_);
         if (staging_buf_)  cudaFree(staging_buf_);
         if (coeffs_dev_)   cudaFree(coeffs_dev_);
-        if (cusolver_)     cusolverDnDestroy(cusolver_);
         if (handle_)       cublasDestroy(handle_);
     }
 
@@ -182,44 +169,27 @@ public:
     // non-trivial state).
     CudaBackend(CudaBackend&& other) noexcept
         : handle_(other.handle_),
-          cusolver_(other.cusolver_),
           pool_available_(other.pool_available_),
           staging_buf_(other.staging_buf_),
           staging_capacity_(other.staging_capacity_),
           staging_n_(other.staging_n_),
           staging_fingerprint_(std::move(other.staging_fingerprint_)),
           coeffs_dev_(other.coeffs_dev_),
-          coeffs_capacity_(other.coeffs_capacity_),
-          qr_work_dev_(other.qr_work_dev_),
-          qr_work_capacity_(other.qr_work_capacity_),
-          qr_tau_dev_(other.qr_tau_dev_),
-          qr_tau_capacity_(other.qr_tau_capacity_),
-          qr_info_dev_(other.qr_info_dev_)
+          coeffs_capacity_(other.coeffs_capacity_)
     {
         other.handle_            = nullptr;
-        other.cusolver_          = nullptr;
         other.staging_buf_       = nullptr;
         other.staging_capacity_  = 0;
         other.staging_n_         = 0;
         other.coeffs_dev_        = nullptr;
         other.coeffs_capacity_   = 0;
-        other.qr_work_dev_       = nullptr;
-        other.qr_work_capacity_  = 0;
-        other.qr_tau_dev_        = nullptr;
-        other.qr_tau_capacity_   = 0;
-        other.qr_info_dev_       = nullptr;
     }
     CudaBackend& operator=(CudaBackend&& other) noexcept {
         if (this != &other) {
-            if (qr_work_dev_) cudaFree(qr_work_dev_);
-            if (qr_tau_dev_)  cudaFree(qr_tau_dev_);
-            if (qr_info_dev_) cudaFree(qr_info_dev_);
             if (staging_buf_) cudaFree(staging_buf_);
             if (coeffs_dev_)  cudaFree(coeffs_dev_);
-            if (cusolver_)    cusolverDnDestroy(cusolver_);
             if (handle_)      cublasDestroy(handle_);
             handle_              = other.handle_;
-            cusolver_            = other.cusolver_;
             pool_available_      = other.pool_available_;
             staging_buf_         = other.staging_buf_;
             staging_capacity_    = other.staging_capacity_;
@@ -227,23 +197,12 @@ public:
             staging_fingerprint_ = std::move(other.staging_fingerprint_);
             coeffs_dev_          = other.coeffs_dev_;
             coeffs_capacity_     = other.coeffs_capacity_;
-            qr_work_dev_         = other.qr_work_dev_;
-            qr_work_capacity_    = other.qr_work_capacity_;
-            qr_tau_dev_          = other.qr_tau_dev_;
-            qr_tau_capacity_     = other.qr_tau_capacity_;
-            qr_info_dev_         = other.qr_info_dev_;
             other.handle_            = nullptr;
-            other.cusolver_          = nullptr;
             other.staging_buf_       = nullptr;
             other.staging_capacity_  = 0;
             other.staging_n_         = 0;
             other.coeffs_dev_        = nullptr;
             other.coeffs_capacity_   = 0;
-            other.qr_work_dev_       = nullptr;
-            other.qr_work_capacity_  = 0;
-            other.qr_tau_dev_        = nullptr;
-            other.qr_tau_capacity_   = 0;
-            other.qr_info_dev_       = nullptr;
         }
         return *this;
     }
@@ -490,7 +449,7 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Level-3 BLAS via cuBLAS / cuSolver. All matrices column-major;
+    // Level-3 BLAS via cuBLAS. All matrices column-major;
     // pointers are device pointers.
     // ------------------------------------------------------------------
     void gemm(char opA, char opB,
@@ -516,101 +475,9 @@ public:
             "cublasZgemm");
     }
 
-    /// In-place tall-skinny QR via cuSolver ZGEQRF + ZUNGQR. `A` is on
-    /// device (m_local x b column-major); R_host is host scratch
-    /// (b x b column-major).
-    void qr_thin(Complex* A, std::size_t m_local, std::size_t b,
-                 Complex* R_host) const override {
-        if (b == 0 || m_local == 0) return;
-        if (m_local < b) {
-            throw std::runtime_error(
-                "CudaBackend::qr_thin: m_local < b is not supported");
-        }
-        ensure_cusolver_();
-        const int M = static_cast<int>(m_local);
-        const int N = static_cast<int>(b);
-
-        ensure_qr_tau_(b);
-        if (!qr_info_dev_) {
-            cuda_backend_detail::check_cuda(
-                cudaMalloc(&qr_info_dev_, sizeof(int)), "cudaMalloc(qr_info)");
-        }
-
-        int lwork_geqrf = 0;
-        cuda_backend_detail::check_cusolver(
-            cusolverDnZgeqrf_bufferSize(cusolver_, M, N,
-                reinterpret_cast<cuDoubleComplex*>(A), M, &lwork_geqrf),
-            "cusolverDnZgeqrf_bufferSize");
-        int lwork_ungqr = 0;
-        cuda_backend_detail::check_cusolver(
-            cusolverDnZungqr_bufferSize(cusolver_, M, N, N,
-                reinterpret_cast<cuDoubleComplex*>(A), M,
-                reinterpret_cast<cuDoubleComplex*>(qr_tau_dev_),
-                &lwork_ungqr),
-            "cusolverDnZungqr_bufferSize");
-        const int lwork = std::max(lwork_geqrf, lwork_ungqr);
-        ensure_qr_work_(static_cast<std::size_t>(lwork));
-
-        cuda_backend_detail::check_cusolver(
-            cusolverDnZgeqrf(cusolver_, M, N,
-                reinterpret_cast<cuDoubleComplex*>(A), M,
-                reinterpret_cast<cuDoubleComplex*>(qr_tau_dev_),
-                reinterpret_cast<cuDoubleComplex*>(qr_work_dev_), lwork,
-                static_cast<int*>(qr_info_dev_)),
-            "cusolverDnZgeqrf");
-        int info_host = 0;
-        cuda_backend_detail::check_cuda(
-            cudaMemcpy(&info_host, qr_info_dev_, sizeof(int),
-                       cudaMemcpyDeviceToHost), "qr_thin info D2H");
-        if (info_host != 0) {
-            throw std::runtime_error(
-                "CudaBackend::qr_thin: cusolverDnZgeqrf info=" +
-                std::to_string(info_host));
-        }
-
-        // Copy device A (which currently holds Householder factors in
-        // the lower part and the upper-triangular R in the upper part)
-        // back to host as a b x b extract before ZUNGQR overwrites it.
-        std::vector<Complex> top_block(m_local * b);
-        const std::size_t copy_rows = std::min(m_local, b);
-        for (std::size_t j = 0; j < b; ++j) {
-            cuda_backend_detail::check_cuda(
-                cudaMemcpy(top_block.data() + j * copy_rows,
-                           A + j * m_local,
-                           copy_rows * sizeof(Complex),
-                           cudaMemcpyDeviceToHost),
-                "qr_thin: D2H column for R extract");
-        }
-        for (std::size_t j = 0; j < b; ++j) {
-            for (std::size_t i = 0; i <= j; ++i) {
-                R_host[i + j * b] = top_block[i + j * copy_rows];
-            }
-            for (std::size_t i = j + 1; i < b; ++i) {
-                R_host[i + j * b] = Complex{0.0, 0.0};
-            }
-        }
-
-        cuda_backend_detail::check_cusolver(
-            cusolverDnZungqr(cusolver_, M, N, N,
-                reinterpret_cast<cuDoubleComplex*>(A), M,
-                reinterpret_cast<cuDoubleComplex*>(qr_tau_dev_),
-                reinterpret_cast<cuDoubleComplex*>(qr_work_dev_), lwork,
-                static_cast<int*>(qr_info_dev_)),
-            "cusolverDnZungqr");
-        cuda_backend_detail::check_cuda(
-            cudaMemcpy(&info_host, qr_info_dev_, sizeof(int),
-                       cudaMemcpyDeviceToHost), "qr_thin info D2H (ungqr)");
-        if (info_host != 0) {
-            throw std::runtime_error(
-                "CudaBackend::qr_thin: cusolverDnZungqr info=" +
-                std::to_string(info_host));
-        }
-    }
-
 private:
-    cublasHandle_t             handle_         = nullptr;
-    mutable cusolverDnHandle_t cusolver_       = nullptr;
-    bool                       pool_available_ = false;
+    cublasHandle_t handle_         = nullptr;
+    bool           pool_available_ = false;
 
     // Persistent staging buffer for batched dot_many / axpy_many. Sized
     // lazily to fit (n x m) complex<double>. Owned by the backend so
@@ -627,40 +494,6 @@ private:
     // (`dot_many`) or from host (`axpy_many`) once per call.
     mutable Complex*     coeffs_dev_      = nullptr;
     mutable std::size_t  coeffs_capacity_ = 0;  // bytes
-
-    // qr_thin: persistent cuSolver scratch.
-    mutable void*       qr_work_dev_      = nullptr;
-    mutable std::size_t qr_work_capacity_ = 0;  // bytes
-    mutable Complex*    qr_tau_dev_       = nullptr;
-    mutable std::size_t qr_tau_capacity_  = 0;  // count of Complex
-    mutable void*       qr_info_dev_      = nullptr;
-
-    void ensure_cusolver_() const {
-        if (cusolver_) return;
-        cuda_backend_detail::check_cusolver(
-            cusolverDnCreate(&cusolver_), "cusolverDnCreate");
-    }
-
-    void ensure_qr_work_(std::size_t lwork) const {
-        const std::size_t bytes = lwork * sizeof(Complex);
-        if (bytes <= qr_work_capacity_) return;
-        if (qr_work_dev_) cudaFree(qr_work_dev_);
-        qr_work_dev_ = nullptr;
-        cuda_backend_detail::check_cuda(
-            cudaMalloc(&qr_work_dev_, bytes), "cudaMalloc(qr_work)");
-        qr_work_capacity_ = bytes;
-    }
-
-    void ensure_qr_tau_(std::size_t count) const {
-        if (count <= qr_tau_capacity_) return;
-        if (qr_tau_dev_) cudaFree(qr_tau_dev_);
-        qr_tau_dev_ = nullptr;
-        cuda_backend_detail::check_cuda(
-            cudaMalloc(reinterpret_cast<void**>(&qr_tau_dev_),
-                       count * sizeof(Complex)),
-            "cudaMalloc(qr_tau)");
-        qr_tau_capacity_ = count;
-    }
 
     void ensure_staging_(std::size_t n, std::size_t m) const {
         const std::size_t needed = n * m * sizeof(Complex);

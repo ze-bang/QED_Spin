@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/krylov/subspace_policy.h
 //
-// SINGLE SOURCE OF TRUTH for the Krylov-Schur / block-Krylov-Schur per-cycle
+// SINGLE SOURCE OF TRUTH for the Krylov-Schur per-cycle
 // subspace size. The kernels, the orchestrator (which sizes the run), and the
 // planner (which estimates its memory) all call this so they agree -- otherwise
 // `max_iter` means "iterations" to one component and "subspace size" (= stored

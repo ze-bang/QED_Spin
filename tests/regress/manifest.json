@@ -80,7 +80,7 @@
   {"id":"E4-python-arch-01","rep":"E4-python-arch-01","sev":"medium","axis":"elegance","status":"info","dev":"cpu","seconds":60},
   {"id":"E4-python-arch-05","rep":"E4-python-arch-05","sev":"medium","axis":"elegance","status":"info","dev":"cpu","seconds":60},
   {"id":"F-A-1","rep":"F-A-1","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
-  {"id":"F-B-1","rep":"F-B-1","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":60},
+  {"id":"F-B-1","rep":"F-B-1","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"F-B-2","rep":"C10-krylov-02","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"F-C-1","rep":"C01-pyapi-01","sev":"high","axis":"correctness","status":"open","dev":"cpu","seconds":60},
   {"id":"F-C-2","rep":"C01-pyapi-03","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":120},

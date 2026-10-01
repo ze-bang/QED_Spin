@@ -98,7 +98,6 @@ struct EigsOptions {
     int  k             = 1;
     bool vectors       = false;
     int  dense_max_dim = 64;    ///< per-block dense crossover
-    int  block_size    = 1;     ///< >1: block Krylov-Schur inside each block
     bool allow_partial = false; ///< return an incomplete window instead of throwing
     Device device      = Device::Cpu;
     /// Rows each block contributes (0: enough for k given its multiplicity). With `cut`

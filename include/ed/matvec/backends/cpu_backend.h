@@ -6,9 +6,8 @@
 // interface, used by the CPU solvers (Lanczos, FTLM, LTLM, TPQ, CG,
 // time evolution).
 //
-// Level-1 vector primitives are OpenMP loops; level-3 primitives (gemm,
-// qr_thin) call cBLAS / LAPACKE through the `ed/core/blas_lapack_wrapper.h`
-// shim.
+// Level-1 vector primitives are OpenMP loops; the level-3 primitive (gemm)
+// calls cBLAS through the `ed/core/blas_lapack_wrapper.h` shim.
 //
 // Allocations use aligned new (64-byte alignment for AVX-512) so the
 // inner SpMV / level-1 BLAS loops can rely on aligned moves.
@@ -276,7 +275,7 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Level-3 BLAS via cBLAS / LAPACKE. All matrix arguments column-major.
+    // Level-3 BLAS via cBLAS. All matrix arguments column-major.
     // -----------------------------------------------------------------
     void gemm(char opA, char opB,
               std::size_t m, std::size_t n, std::size_t k,
@@ -293,43 +292,6 @@ public:
                     &alpha, A, static_cast<int>(lda),
                             B, static_cast<int>(ldb),
                     &beta,  C, static_cast<int>(ldc));
-    }
-
-    /// In-place tall-skinny QR using LAPACK ZGEQRF + ZUNGQR. On exit
-    /// the column-major A holds Q (m x b), and R_host (column-major,
-    /// b x b) holds the upper triangle from ZGEQRF (extracted before
-    /// ZUNGQR overwrites A with Q).
-    void qr_thin(Complex* A, std::size_t m_local, std::size_t b,
-                 Complex* R_host) const override {
-        if (b == 0 || m_local == 0) return;
-        if (m_local < b) {
-            throw std::runtime_error("CpuBackend::qr_thin: m_local < b is not supported");
-        }
-        const int M  = static_cast<int>(m_local);
-        const int N  = static_cast<int>(b);
-        std::vector<Complex> tau(b);
-        int info = LAPACKE_zgeqrf(LAPACK_COL_MAJOR, M, N,
-            reinterpret_cast<lapack_complex_double*>(A), M,
-            reinterpret_cast<lapack_complex_double*>(tau.data()));
-        if (info != 0) {
-            throw std::runtime_error("CpuBackend::qr_thin: LAPACKE_zgeqrf info=" +
-                                     std::to_string(info));
-        }
-        for (std::size_t j = 0; j < b; ++j) {
-            for (std::size_t i = 0; i <= j; ++i) {
-                R_host[i + j * b] = A[i + j * m_local];
-            }
-            for (std::size_t i = j + 1; i < b; ++i) {
-                R_host[i + j * b] = Complex{0.0, 0.0};
-            }
-        }
-        info = LAPACKE_zungqr(LAPACK_COL_MAJOR, M, N, N,
-            reinterpret_cast<lapack_complex_double*>(A), M,
-            reinterpret_cast<lapack_complex_double*>(tau.data()));
-        if (info != 0) {
-            throw std::runtime_error("CpuBackend::qr_thin: LAPACKE_zungqr info=" +
-                                     std::to_string(info));
-        }
     }
 
 private:

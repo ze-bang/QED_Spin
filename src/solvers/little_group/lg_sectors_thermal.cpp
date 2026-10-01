@@ -117,7 +117,7 @@ using BlockKey = std::pair<int, int>;
 std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub) {
     std::map<BlockKey, std::uint64_t> d;
     if (sub.n_up < 0 || sub.n_up > n_sites) return d;
-    detail::walk(H, n_sites, s, detail::engine_options(s, sub, 64, 1), [&](const EngineContext&, bool, StarBuild& sb) {
+    detail::walk(H, n_sites, s, detail::engine_options(s, sub, 64), [&](const EngineContext&, bool, StarBuild& sb) {
         for (const auto& bi : sb.blocks) d[{bi->tag.k_raw, bi->tag.irrep}] += bi->tag.dim;
     });
     return d;
@@ -188,7 +188,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     std::vector<Pending> pending;
     std::size_t n_blocks = 0;
     for (const Subspace& sub : subspaces(H, n_sites, s)) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub, 64, 1);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, 64);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;

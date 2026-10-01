@@ -1,15 +1,14 @@
 // =============================================================================
 // tests/unit/test_backend_blas3.cpp
 //
-// Pins the Level-3 BLAS surface on `Backend` (`gemm`, `qr_thin`)
+// Pins the Level-3 BLAS surface on `Backend` (`gemm`)
 // across the concrete backends:
 //
-//     CpuBackend    -- LAPACK / cBLAS path
-//     CudaBackend   -- cuBLAS + cuSolver path
+//     CpuBackend    -- cBLAS path
+//     CudaBackend   -- cuBLAS path
 //
-// The BLAS-3 surface is what the block Krylov-Schur kernel runs on. This
-// test covers correctness on small random inputs, not
-// performance.
+// FTLM dynamics forms its overlap matrices with it. This test covers
+// correctness on small random inputs, not performance.
 //
 // Runtime SKIPs follow the same pattern as `test_cuda_backend.cpp`:
 // build-without-CUDA hosts get the CpuBackend lane; the CudaBackend lane
@@ -92,32 +91,6 @@ bool cuda_available() {
 }
 #endif
 
-// Check that Q (m x b column-major) has orthonormal columns
-// (||Q^H Q - I||_inf <= tol).
-double orthonormality_error(const Complex* Q, std::size_t m, std::size_t b) {
-    std::vector<Complex> G(b * b);
-    ref_gemm('C', 'N', b, b, m, Complex{1, 0}, Q, m, Q, m,
-             Complex{0, 0}, G.data(), b);
-    double worst = 0.0;
-    for (std::size_t j = 0; j < b; ++j) {
-        for (std::size_t i = 0; i < b; ++i) {
-            const Complex target = (i == j) ? Complex{1, 0} : Complex{0, 0};
-            worst = std::max(worst, std::abs(G[i + j * b] - target));
-        }
-    }
-    return worst;
-}
-
-// Check that Q * R recovers the input matrix A (m x b column-major).
-double qr_reconstruction_error(const Complex* Q, const Complex* R,
-                                const Complex* A_in,
-                                std::size_t m, std::size_t b) {
-    std::vector<Complex> QR(m * b);
-    ref_gemm('N', 'N', m, b, b, Complex{1, 0}, Q, m, R, b,
-             Complex{0, 0}, QR.data(), m);
-    return max_abs_diff(QR.data(), A_in, m * b);
-}
-
 }  // namespace
 
 // =============================================================================
@@ -161,19 +134,6 @@ TEST_CASE("CpuBackend::gemm honors conjugate-transpose ops",
     REQUIRE(max_abs_diff(C_be.data(), C_ref.data(), m * n) < kTol);
 }
 
-TEST_CASE("CpuBackend::qr_thin produces orthonormal Q and recovers A=Q*R",
-          "[backend-blas3][cpu][qr]") {
-    ed::matvec::CpuBackend be;
-    const std::size_t m = 32, b = 5;
-    auto A_in = random_matrix(m, b, 0xACEFACE);
-    auto A    = A_in;
-    std::vector<Complex> R(b * b);
-    be.qr_thin(A.data(), m, b, R.data());
-
-    REQUIRE(orthonormality_error(A.data(), m, b) < 1e-12);
-    REQUIRE(qr_reconstruction_error(A.data(), R.data(), A_in.data(), m, b) < 1e-12);
-}
-
 // =============================================================================
 // CudaBackend BLAS-3 (only when WITH_CUDA + a visible GPU)
 // =============================================================================
@@ -207,25 +167,5 @@ TEST_CASE("CudaBackend::gemm matches naive reference",
     be.copy_to_host(dC.get(), C_be.data(), m * n);
     REQUIRE(max_abs_diff(C_be.data(), C_ref.data(), m * n) < kTol);
 }
-
-TEST_CASE("CudaBackend::qr_thin produces orthonormal Q and recovers A=Q*R",
-          "[backend-blas3][cuda][qr]") {
-    if (!cuda_available()) { SUCCEED("no CUDA device, skipping"); return; }
-    ed::matvec::CudaBackend be;
-    const std::size_t m = 64, b = 4;
-    auto A_in = random_matrix(m, b, 0xCAFEFEED);
-
-    auto dA = be.make_zero_vector(m * b);
-    be.copy_from_host(A_in.data(), dA.get(), m * b);
-    std::vector<Complex> R(b * b);
-    be.qr_thin(dA.get(), m, b, R.data());
-
-    std::vector<Complex> Q(m * b);
-    be.copy_to_host(dA.get(), Q.data(), m * b);
-
-    REQUIRE(orthonormality_error(Q.data(), m, b) < 1e-10);
-    REQUIRE(qr_reconstruction_error(Q.data(), R.data(), A_in.data(), m, b) < 1e-10);
-}
-
 
 #endif  // WITH_CUDA

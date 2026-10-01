@@ -99,12 +99,6 @@ struct LittleGroupOptions {
     /// decision: a star whose wanted irreps are all one-dimensional takes the group-sector
     /// path even when the co-group also has larger irreps.
     std::vector<CharConstraint> only_irrep_chars;
-    /// Lowest-k solves above the dense crossover: 1 (default) = single-vector
-    /// Krylov-Schur with locking when k > 1 (the basis-free scan when k = 1);
-    /// p >= 2 = block Krylov-Schur with block width p, which also resolves an
-    /// accidental degeneracy of up to p levels INSIDE one (k, irrep, flip) block --
-    /// something no single-vector method can see.
-    int block_size = 1;
 };
 
 /// One star's diagnostics.

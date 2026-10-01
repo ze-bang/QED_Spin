@@ -36,7 +36,6 @@
 #include <ed/matvec/backends/cpu_backend.h>      // CpuBackend for the GS Lanczos
 #include <ed/krylov/lanczos_kernel.h>            // keep_basis Ritz-vector GS
 #include <ed/krylov/krylov_schur_kernel.h>       // multi-level blocks: locked KS
-#include <ed/krylov/block_krylov_schur_kernel.h> // ... and its block form (multiplicities)
 #include <ed/krylov/subspace_policy.h>          // memory-capped Krylov basis
 #include <ed/core/mem_guard.h>                  // job-aware available RAM
 #include <ed/core/blas_lapack_wrapper.h>         // LAPACKE_dstevd
@@ -783,19 +782,18 @@ star_partition(const EngineContext& cx, bool tr_on);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
-                   int dense_max_dim, bool* converged_out = nullptr,
-                   int block_size = 1);
+                   int dense_max_dim, bool* converged_out = nullptr);
 
 // lg_ground_state.cpp: certified lowest eigenpair of one block (dense / FullCGS2 /
 // two-pass by dimension); throws when the residual guard fails.
 [[nodiscard]] std::pair<double, std::vector<Complex>>
 solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim);
 
-// lg_block_solve.cpp: k levels of one block by (block) Krylov-Schur; with vecs_out
-// the Ritz vectors (block coordinates) too.
+// lg_block_solve.cpp: k levels of one block by Krylov-Schur; with vecs_out the Ritz
+// vectors (block coordinates) too.
 [[nodiscard]] std::vector<double>
 solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
-                                int block_size, bool* converged_out,
+                                bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out = nullptr);
 
 // lg_block_solve.cpp: the lowest `want` eigenpairs of one block in block coordinates
@@ -803,7 +801,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
 // window could not be certified (the certified prefix is still returned).
 [[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
 solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
-                       int dense_max_dim, int block_size, bool* converged);
+                       int dense_max_dim, bool* converged);
 
 // lg_stars.cpp
 [[nodiscard]] StarBuild

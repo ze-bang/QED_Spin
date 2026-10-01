@@ -93,11 +93,11 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 }
 
 // Several lowest levels of one block above the dense crossover: thick-restart
-// Krylov-Schur with locking (single vector, block_size <= 1) or its block form
-// (block_size = p resolves within-block multiplicities up to p). Both reorthogonalise
-// fully inside each cycle, so there are no ghost copies to dedup, and both lock
-// Ritz pairs strictly from the bottom: a level whose residual has not converged
-// stops the locked prefix, it is never replaced by a higher one.
+// Krylov-Schur with locking. It reorthogonalises fully inside each cycle, so there
+// are no ghost copies to dedup; it locks Ritz pairs strictly from the bottom (a level
+// whose residual has not converged stops the locked prefix, it is never replaced by a
+// higher one); and after locking, a fresh start deflated against the locked set finds
+// the further copies of a degenerate level.
 //
 // Budgets. The per-cycle basis (m length-nb vectors) is capped by the RAM this job
 // may still allocate (cgroup-aware); a cap too small to hold k + 8 vectors is a
@@ -105,7 +105,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // iteration budget is max(200k, 2000), spent as restart cycles.
 [[nodiscard]] std::vector<double>
 solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
-                                int block_size, bool* converged_out,
+                                bool* converged_out,
                                 std::vector<std::vector<Complex>>* vecs_out) {
     const std::size_t nb = mv.dim();
     const std::uint64_t cap = ed::krylov::krylov_vector_budget(
@@ -141,43 +141,24 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
         mv.apply(in, out, nn);
     };
     ed::matvec::CpuBackend be;
-    std::vector<double> ev;
+    std::mt19937_64 gen(0x51ED0B70ULL);       // same stream as the k = 1 scan
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Complex> v0(nb);
+    for (auto& v : v0) v = Complex(nd(gen), nd(gen));
+    ed::krylov::KrylovSchurOptions o;
+    o.num_eigs             = k;
+    o.max_iter             = per_cycle;
+    o.max_restarts         = restarts;
+    o.tolerance            = tol;
+    o.max_subspace_vectors = cycle_cap;
+    o.compute_vectors      = vecs_out != nullptr;
+    auto r = ed::krylov::krylov_schur_kernel(be, apply_H, nb, v0.data(), o);
+    std::vector<double> ev = std::move(r.eigenvalues);
+    const bool conv  = r.converged;
+    const bool whole = r.exhausted;   // every eigenvalue of the block was found (fewer than k when nb < k)
     std::vector<std::vector<Complex>> vv;    // Ritz vectors (block coordinates)
-    bool conv = false;
-    bool whole = false;      // every eigenvalue of the block was found (fewer than k when nb < k)
-    if (block_size <= 1) {
-        std::mt19937_64 gen(0x51ED0B70ULL);       // same stream as the k = 1 scan
-        std::normal_distribution<double> nd(0.0, 1.0);
-        std::vector<Complex> v0(nb);
-        for (auto& v : v0) v = Complex(nd(gen), nd(gen));
-        ed::krylov::KrylovSchurOptions o;
-        o.num_eigs             = k;
-        o.max_iter             = per_cycle;
-        o.max_restarts         = restarts;
-        o.tolerance            = tol;
-        o.max_subspace_vectors = cycle_cap;
-        o.compute_vectors      = vecs_out != nullptr;
-        auto r = ed::krylov::krylov_schur_kernel(be, apply_H, nb, v0.data(), o);
-        ev   = std::move(r.eigenvalues);
-        conv = r.converged;
-        whole = r.exhausted;
-        if (vecs_out)
-            for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
-    } else {
-        ed::krylov::BlockKrylovSchurOptions o;
-        o.num_eigs             = k;
-        o.block_size           = static_cast<std::size_t>(block_size);
-        o.max_iter             = per_cycle;
-        o.max_restarts         = restarts;
-        o.tolerance            = tol;
-        o.max_subspace_vectors = cycle_cap;
-        o.compute_vectors      = vecs_out != nullptr;
-        auto r = ed::krylov::block_krylov_schur_kernel(be, apply_H, nb, nb, o);
-        ev   = std::move(r.eigenvalues);
-        conv = r.converged;
-        if (vecs_out)
-            for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
-    }
+    if (vecs_out)
+        for (auto& v : r.eigenvectors) vv.emplace_back(v.get(), v.get() + nb);
     // Ascending, vectors kept aligned with their values; then the k lowest.
     std::vector<std::size_t> order(ev.size());
     std::iota(order.begin(), order.end(), std::size_t{0});
@@ -204,7 +185,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
 // eigenvalues on near-degenerate blocks.
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
-                   int dense_max_dim, bool* converged_out, int block_size) {
+                   int dense_max_dim, bool* converged_out) {
     if (converged_out) *converged_out = true;
     const std::uint64_t nb = mv.dim();
     if (nb == 0) return {};
@@ -225,11 +206,11 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
         return std::vector<double>(w.begin(), w.begin() + m);
     }
 
-    // Several levels, or an explicit block size: Krylov-Schur (see above). The
-    // basis-free scan below stays the k = 1 lane -- the one production uses at
-    // N = 36, where a Krylov basis of 1e8-dimensional vectors does not fit.
-    if (k > 1 || block_size > 1)
-        return solve_block_lowest_krylov_schur(mv, k, block_size, converged_out);
+    // Several levels: Krylov-Schur (see above). The basis-free scan below stays the
+    // k = 1 lane -- the one production uses at N = 36, where a Krylov basis of
+    // 1e8-dimensional vectors does not fit.
+    if (k > 1)
+        return solve_block_lowest_krylov_schur(mv, k, converged_out);
 
     // WITHIN-BLOCK genuine degeneracy: a single-vector Lanczos returns
     // exactly ONE Ritz value per eigenvalue no matter its true multiplicity
@@ -240,14 +221,14 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // k <= 10) -- verified at 4x4 J2=1.0 (which DOES carry a within-block
     // degeneracy at block ~800): normal operation matches the dense
     // spectrum. The residual gap is a block that both exceeds the crossover AND
-    // carries an accidental degeneracy; two remedies: raise ED_SYM_LG_DENSE_FLOOR
-    // so the block goes dense (exact, memory permitting), or ask for block_size >= 2,
-    // which routes the block through block Krylov-Schur (above) and resolves
-    // multiplicities up to the block size. This scan is the k = 1 lane only.
+    // carries an accidental degeneracy; two remedies: raise the dense crossover so
+    // the block goes dense (exact, memory permitting), or ask for k >= 2, which
+    // routes the block through Krylov-Schur (above), whose fresh starts after
+    // locking find every copy. This scan is the k = 1 lane only.
     ed::matvec::CpuBackend be;
     std::vector<Complex> v0(nb);
     // Fixed start-vector seed. Single-vector Lanczos returns ONE copy of a
-    // genuinely degenerate pair; multiplicity needs block Lanczos.
+    // genuinely degenerate pair (see above for the lanes that count copies).
     std::mt19937_64 gen(0x51ED0B70ULL);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& v : v0) v = Complex(nd(gen), nd(gen));
@@ -388,11 +369,11 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
 // The lowest `want` eigenpairs of one block, in block coordinates. Dense below the
 // lowest-k crossover (exact); one level through the certified ground-state solver
 // (memory-light two-pass lane at frontier dimensions); several levels through
-// (block) Krylov-Schur with vectors. `converged` is false when the block could not
+// Krylov-Schur with vectors. `converged` is false when the block could not
 // certify the requested window; the certified prefix is still returned.
 [[nodiscard]] std::pair<std::vector<double>, std::vector<std::vector<Complex>>>
 solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
-                       int dense_max_dim, int block_size, bool* converged) {
+                       int dense_max_dim, bool* converged) {
     *converged = true;
     const std::size_t nb = mv.dim();
     std::vector<double> ev;
@@ -413,7 +394,7 @@ solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
         }
         return {ev, vv};
     }
-    if (k == 1 && block_size <= 1) {
+    if (k == 1) {
         try {
             auto [e0, v] = solve_gs_vector(mv, dense_max_dim);
             ev.push_back(e0);
@@ -423,7 +404,7 @@ solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
         }
         return {ev, vv};
     }
-    ev = solve_block_lowest_krylov_schur(mv, k, block_size, converged, &vv);
+    ev = solve_block_lowest_krylov_schur(mv, k, converged, &vv);
     return {ev, vv};
 }
 

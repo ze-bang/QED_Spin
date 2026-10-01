@@ -32,7 +32,6 @@ Krylov kernels
 
 .. doxygenfile:: ed/krylov/lanczos_kernel.h
 .. doxygenfile:: ed/krylov/krylov_schur_kernel.h
-.. doxygenfile:: ed/krylov/block_krylov_schur_kernel.h
 
 Thermodynamics kernels
 ----------------------

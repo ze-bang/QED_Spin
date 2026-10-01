@@ -29,7 +29,7 @@ inline std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
 }
 
 inline ed::solvers::LittleGroupOptions
-engine_options(const Spec& s, const Subspace& sub, int dense_max_dim, int block_size) {
+engine_options(const Spec& s, const Subspace& sub, int dense_max_dim) {
     ed::solvers::LittleGroupOptions o;
     o.n_up          = sub.n_up;
     o.sz_parity     = sub.sz_parity;
@@ -42,7 +42,6 @@ engine_options(const Spec& s, const Subspace& sub, int dense_max_dim, int block_
     o.only_irrep    = s.only_irrep;
     o.only_irrep_chars = s.only_irrep_chars;
     o.dense_max_dim = dense_max_dim;
-    o.block_size    = block_size;
     return o;
 }
 

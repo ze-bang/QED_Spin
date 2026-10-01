@@ -19,7 +19,10 @@ Reached through ED_SYM_LG_DENSE_FLOOR=0, which the library's own test grid sets
 (python/tests/grid/adapter.py:64) to force the Krylov lane at toy dimensions. Model: open Heisenberg
 chain with unequal bonds (no spatial symmetry, distinct one-magnon levels), Symmetry(sz=1): one block
 of dimension N. Expected: odd N (3, 5) with block_size=2 raises; even N (4) with block_size=2 and
-odd N with block_size=1 return the exact ground energy."""
+odd N with block_size=1 return the exact ground energy.
+Restated after P2.1, which removed block Krylov-Schur and eigs(block_size=) (owner-approved): the
+claim holds only while eigs still accepts block_size; the single-vector lane must stay exact on the
+same odd blocks."""
 import os
 import signal
 
@@ -61,7 +64,7 @@ def ref_ground(N, n_up):
     return float(np.linalg.eigvalsh(H[np.ix_(idx, idx)])[0])
 
 
-def qed_ground(N, n_up, bs):
+def qed_ground(N, n_up, **kw):
     H = qed.Operator(N, 0.5)
     for i in range(N - 1):
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, BONDS[i])
@@ -69,7 +72,7 @@ def qed_ground(N, n_up, bs):
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, i + 1, 0.5 * BONDS[i])
     sym = qed.Symmetry(spatial=None, sz=n_up, spin_flip="off", time_reversal="off")
     try:
-        r = qed.eigs(H, 1, sym=sym, block_size=bs, prune=False)
+        r = qed.eigs(H, 1, sym=sym, prune=False, **kw)
         e = np.asarray(r.energies, float)
         return ("ok", float(e[0]) if len(e) else None, bool(r.complete))
     except Exception as ex:  # noqa: BLE001
@@ -77,21 +80,19 @@ def qed_ground(N, n_up, bs):
 
 
 rows = {}
-for (N, n_up, bs) in [(3, 1, 2), (5, 1, 2), (4, 1, 2), (3, 1, 1), (5, 1, 1)]:
-    ref = ref_ground(N, n_up)
-    st, val, comp = qed_ground(N, n_up, bs)
+for N in (3, 4, 5):
+    ref = ref_ground(N, 1)
+    st, val, comp = qed_ground(N, 1)
     good = st == "ok" and val is not None and abs(val - ref) < 1e-8 and comp
-    rows[(N, bs)] = (st, val, comp, ref, good)
-    print(f"N={N} dim={N} block_size={bs}: {st} {val} complete={comp} ref={ref:.12f} correct={good}")
-
-odd_bs2_fail = [N for N in (3, 5) if not rows[(N, 2)][4]]
-controls_ok = rows[(3, 1)][4] and rows[(5, 1)][4]
-even_ok = rows[(4, 2)][4]
-if not controls_ok:
-    print("REPRO: INCONCLUSIVE the block_size=1 control on the same odd blocks also failed")
-elif odd_bs2_fail:
-    how = "; ".join(f"N={N}: {rows[(N, 2)][0]} {rows[(N, 2)][1]}" for N in odd_bs2_fail)
-    print(f"REPRO: CONFIRMED block_size=2 cannot certify the ground state of odd-dimension blocks "
-          f"(block_size=1 exact, even dim block_size=2 correct={even_ok}): {how}")
+    rows[N] = good
+    print(f"N={N} dim={N}: {st} {val} complete={comp} ref={ref:.12f} correct={good}")
+st2, val2, _ = qed_ground(3, 1, block_size=2)
+removed = st2 == "raised" and val2.startswith("TypeError")
+print(f"eigs(block_size=2): {st2} {val2}")
+if not all(rows.values()):
+    print(f"REPRO: CONFIRMED the remaining (single-vector) lane cannot certify these blocks: {rows}")
+elif not removed:
+    print(f"REPRO: CONFIRMED eigs still accepts block_size: {st2} {val2}")
 else:
-    print("REPRO: NOT_REPRODUCED block_size=2 certified the ground state of every odd-dimension block")
+    print("REPRO: NOT_REPRODUCED block Krylov-Schur is removed (block_size raises TypeError); the "
+          "single-vector lane is exact on the odd blocks")

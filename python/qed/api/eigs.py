@@ -99,7 +99,7 @@ class EigResult(Labelled):
 
 @_log.replays
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
-         block_size: int = 1, dense_max_dim: int = 64, allow_partial: bool = False,
+         dense_max_dim: int = 64, allow_partial: bool = False,
          device: str = "cpu", prune: bool = True, window: float = 0.0) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
@@ -114,7 +114,7 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     spec = sym.resolve(H, diagnostics)
     n = int(H.num_sites)
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
-                             dense_max_dim=int(dense_max_dim), block_size=int(block_size),
+                             dense_max_dim=int(dense_max_dim),
                              allow_partial=bool(allow_partial), device=_device.resolve(device),
                              prune=bool(prune), window=float(window))
     rows = int(k) if window <= 0 else sum(int(L.multiplicity) for L in raw.levels)
