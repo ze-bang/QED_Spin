@@ -10,6 +10,7 @@
 #include <ed/observables/cf_spectral_kernel.h>
 #include <ed/observables/ftlm_cross_irrep_kernel.h>
 #include <ed/observables/ftlm_dynamics_kernel.h>
+#include <ed/parallel/numa.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/sectors/dynamics.h>
 #include <ed/symmetry/casimir_projector.h>
@@ -263,6 +264,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
     if (distinct.size() != d.temperatures.size())
         throw ed::InvalidRequest("dynamics: a temperature is listed twice");
     detail::require_device(d.device, "dynamics");
+    ed::parallel::pin_omp_threads_once();
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
     if (s.spin_flip == 1 && !ed::symmetry::hamiltonian_is_spin_flip_symmetric(term_soa(H)))
         throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");

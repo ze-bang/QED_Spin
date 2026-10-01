@@ -136,9 +136,6 @@ struct Placement {
             case ed::Lane::DeviceKrylov: ++device_krylov; break;
         }
     }
-    void add(bool device, bool dense) {
-        ++(device ? (dense ? device_dense : device_krylov) : (dense ? host_dense : host_krylov));
-    }
     Placement& operator+=(const Placement& o) {
         device_krylov += o.device_krylov; device_dense += o.device_dense;
         host_krylov += o.host_krylov; host_dense += o.host_dense;
@@ -173,7 +170,7 @@ struct BlockStats {
     std::uint64_t dim = 0;
     std::string   kind;              ///< "group" (full little group), "isotypic" (W), "plain" (k-sector)
     /// How H was applied: "dense" (materialised), "csr" (reduced CSR), "walk" (CSR-free gather),
-    /// "gpu-gather" (device kernel on host vectors), "device" (whole solve on the device).
+    /// "gpu-gather" (device kernel on host vectors), "device" (the whole solve on the device lane).
     std::string   lane;
     double        context_orbit_s = 0.0;  ///< the walk's abelian orbit table (shared by its blocks)
     double        star_orbit_s    = 0.0;  ///< the star's own group orbit table
@@ -181,7 +178,7 @@ struct BlockStats {
     double        build_s         = 0.0;  ///< CSR / device-mirror build charged to this block
     std::uint64_t nnz             = 0;    ///< reduced-CSR entries (0 without a CSR)
     std::uint64_t csr_bytes       = 0;
-    std::uint64_t applies         = 0;    ///< H applies (device: Krylov iterations)
+    std::uint64_t applies         = 0;    ///< H applies of the solve, on either lane
     double        apply_s         = 0.0;  ///< seconds inside those applies
     /// Solve time outside applies and builds: Krylov vector work (BLAS-1, reorthogonalisation),
     /// tridiagonal / dense eigensolves.

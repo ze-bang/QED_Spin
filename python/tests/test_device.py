@@ -7,6 +7,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 qed = pytest.importorskip("qed")
@@ -141,3 +142,30 @@ def test_gpu_refuses_oftlm():
     # OFTLM has only a host lane; it used to run there under device='gpu' and count as a GPU block.
     with pytest.raises(qed.errors.DeviceUnsupported, match="OFTLM"):
         qed.thermal(_ring(8), [1.0], method="ftlm", exact_states=4, device="gpu")
+
+
+@gpu
+def test_gpu_and_cpu_certify_the_same_blocks():
+    # Device eigs blocks run the host's certified lanes (P2.4 C5): the same levels, the same
+    # completeness, every Krylov solve on the device.
+    H = _ring(16)
+    sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")   # one 12870-state block
+    for k in (1, 3):
+        for vectors in (False, True):
+            c = qed.eigs(H, k, sym=sym, vectors=vectors, device="cpu")
+            g = qed.eigs(H, k, sym=sym, vectors=vectors, device="gpu")
+            np.testing.assert_allclose(g.energies, c.energies, atol=1e-10)
+            assert g.complete == c.complete
+            assert g.placement["device_krylov"] >= 1 and g.placement["host_krylov"] == 0
+            assert all(b["lane"] == "device" and b["applies"] > 0 for b in g.block_stats)
+
+
+@gpu
+def test_small_device_blocks_are_dense_on_the_host():
+    # The transitional rule: a device-bound eigs block of at most 32 states is solved densely on
+    # the host (P6.2 / P7.4 retire it). The 10-ring's momentum blocks are all that small.
+    H = _ring(10)
+    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=[[(i + 1) % 10 for i in range(10)]], point_group=False),
+                 device="gpu", dense_max_dim=0)
+    assert r.placement["host_krylov"] == 0 and r.placement["device_krylov"] == 0
+    assert r.placement["host_dense"] >= 1

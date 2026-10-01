@@ -703,3 +703,57 @@ def test_krylov_lanes_at_toy_dims(model, content):
                 np.testing.assert_allclose(V.conj() @ V.T, np.eye(len(V)), atol=1e-10)
                 for e, v in zip(r.energies, V):
                     assert np.linalg.norm(H.apply(v) - e * v) < 1e-7
+
+
+# ---------------------------------------------------------------------------
+# device='auto' runs the 'cpu' lanes on every block it keeps on the host (P2.4 C5): below the
+# device floor, without a device, or on a CPU build, 'auto' and 'cpu' answer bit for bit.
+# ---------------------------------------------------------------------------
+
+def _same_result(a, b):
+    assert np.array_equal(np.asarray(a.energies), np.asarray(b.energies))
+    assert a.complete == b.complete and a.placement == b.placement
+    assert [s["lane"] for s in a.block_stats] == [s["lane"] for s in b.block_stats]
+
+
+@pytest.mark.parametrize("model", ["ring10_j2", "xxz_field9", "ring12"])
+def test_auto_runs_the_cpu_lanes_below_the_floor(model):
+    H = {"ring10_j2": lambda: _ring(10, 0.3), "xxz_field9": lambda: _xxz_open(9, 0.6, 0.2),
+         "ring12": lambda: _ring(12)}[model]()
+    n = int(H.num_sites)
+    sym = qed.Symmetry(spatial=None, sz=n // 2, spin_flip="off", time_reversal="off")
+    for k in (1, 3):
+        for vectors in (False, True):
+            for dmd in (None, 0):
+                c = qed.eigs(H, k, sym=sym, vectors=vectors, dense_max_dim=dmd, device="cpu")
+                a = qed.eigs(H, k, sym=sym, vectors=vectors, dense_max_dim=dmd, device="auto")
+                _same_result(a, c)
+                if vectors:
+                    assert np.array_equal(np.array(a.vectors()), np.array(c.vectors()))
+    O, omega = _sz_q(n, math.pi), np.linspace(0.0, 4.0, 9)
+    dsym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")
+    sa = qed.dynamics(H, O, omega, sym=dsym, device="auto").S
+    sc = qed.dynamics(H, O, omega, sym=dsym, device="cpu").S
+    assert np.array_equal(np.asarray(sa), np.asarray(sc))
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e6])
+def test_auto_certifies_like_cpu(scale):
+    # L2-numerics-03's scaled 16-ring (two flip blocks of 6435 states, below the device floor).
+    # 'auto' used to take the orchestrator's CPU lanes there and accept an uncertified vector
+    # that 'cpu' refuses; now both give the same outcome, whichever it is.
+    H = qed.Operator(16)
+    for i in range(16):
+        j = (i + 1) % 16
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * scale)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * scale)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 * scale)
+    sym = qed.Symmetry(spatial=None, sz=8)
+    outcome = {}
+    for device in ("cpu", "auto"):
+        try:
+            r = qed.eigs(H, 1, sym=sym, vectors=True, device=device)
+            outcome[device] = ("ok", float(r.energies[0]), r.complete)
+        except RuntimeError as e:
+            outcome[device] = ("raised", type(e).__name__)
+    assert outcome["auto"] == outcome["cpu"]

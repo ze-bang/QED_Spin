@@ -56,6 +56,15 @@ Breaking changes so far:
   honours it exactly, and `None` (the default) keeps the automatic value. `thermal`'s sampled
   methods diagonalise blocks up to it (default 512; 0 always samples); `dynamics` passes it to
   its ground-state solve.
+- **One eigensolve per block, on every device.** `eigs` blocks placed on the device
+  (`device="gpu"`, or `"auto"` above 2^14 states) run the same certified lanes as
+  `device="cpu"`: the k = 1 scan with its contiguous Paige gate and max(40k, 400) steps,
+  Krylov-Schur at tolerance 1e-9 with 2k + 60 vectors per cycle, and residual-guarded vectors.
+  A device block that cannot certify its levels is partial, so `eigs` (and ground-state
+  `dynamics`) raise unless `allow_partial`, where they used to return uncertified values.
+  `"auto"` blocks that stay on the host are solved exactly as under `"cpu"` (same lanes,
+  `dense_max_dim` honoured, same placement). On device blocks `block_stats` `applies` counts
+  H applies. `ED_NUMA_PIN_THREADS` pins at the entry of every verb.
 - **Environment variables read one way.** Every variable goes through the registry's typed
   readers: the switches (`ED_SYM_REDUCED_CSR`, `ED_CSR_FORCE`, `ED_AUTO_THREADS`,
   `ED_ENV_STRICT`) take the registry's words (`0`, `false`, `off`, `no` are off, anything else

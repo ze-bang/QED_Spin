@@ -53,7 +53,6 @@ struct BlockOp {
     std::shared_ptr<const ed::LinearOperator> op;
     double        ghost        = std::numeric_limits<double>::infinity();
     std::uint64_t multiplicity = 1;
-    bool          on_device    = false;   ///< the operator may be bound to a CUDA backend
     std::shared_ptr<const ed::symmetry::LowdinS2Projector> projector;   ///< onto the tower (SU(2) only)
     [[nodiscard]] bool is_ghost(double e) const {
         return std::isfinite(ghost) && e > ghost - 1e-6 * std::max(1.0, std::abs(ghost));
@@ -73,7 +72,7 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     RepSectorMatVec* rep = bi->gop ? bi->gop.get() : (bi->W ? nullptr : sb.hk.get());
     const bool dev = rep && device != Device::Cpu;
     if (s.two_S < 0) {
-        if (dev) { rep->enable_device(true); b.on_device = true; }
+        if (dev) rep->enable_device(true);   // its device kernel: op->has_device_kernel()
         return b;
     }
     std::shared_ptr<const ed::LinearOperator> s2;
@@ -95,7 +94,6 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     if (dev && s2rep) {                 // H and S^2 on the device: the projected apply runs there
         rep->enable_device(true);
         s2rep->enable_device(true);
-        b.on_device = true;
     }
     auto wrapped = std::make_shared<ed::symmetry::CasimirProjectedOperator>(b.op, proj, 1);
     b.ghost = wrapped->ghost_shift();
@@ -380,19 +378,6 @@ inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
 /// Why a block has no device kernel, for place()'s refusal.
 inline const char* no_kernel_reason(bool w_block) {
     return w_block ? "is an isotypic (W) block, which has no device kernel" : "has no device kernel";
-}
-
-/// device='gpu' runs every Krylov solve on the device, so a block without a device kernel (an
-/// isotypic W block: a multi-dimensional irrep, or any irrep of an Sz-parity sector) is refused
-/// before it is solved.
-inline void require_device_kernel(Device d, const BlockOp& bop, const ed::solvers::LittleGroupBlockTag& tag,
-                                  const char* verb) {
-    if (d == Device::Gpu && !bop.on_device)
-        throw ed::DeviceUnsupported(
-            std::string(verb) + ": device='gpu', but the block of star " + std::to_string(tag.k0) + ", irrep "
-            + std::to_string(tag.irrep) + ", n_up " + std::to_string(tag.n_up) + " (dim "
-            + std::to_string(tag.dim) + ") is an isotypic (W) block, which has no "
-            "device kernel; use device='auto' or 'cpu'");
 }
 
 /// A thermal average under a spec that restricts the sectors (a total spin, one Sz sector or

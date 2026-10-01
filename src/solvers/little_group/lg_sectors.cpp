@@ -6,7 +6,7 @@
 
 #include "lg_walk.h"
 
-#include <ed/orchestrator.h>              // ed::workflows::solve
+#include <ed/parallel/numa.h>             // pin_omp_threads_once
 #include <ed/sectors/sectors.h>
 #include <ed/core/basis_utils.h>
 #include <ed/symmetry/commute_check.h>
@@ -88,54 +88,40 @@ void require_normal(const Spec& s, int n_sites) {
     }
 }
 
-// One block solved by the orchestrator, which binds it to a CUDA backend when the block has a
-// device kernel. Returns whether it actually ran on the device; `iters` receives its Krylov
-// iterations.
-bool solve_by_orchestrator(const detail::BlockOp& bop, int want, bool vectors, Device device,
-                           std::vector<double>& ev, std::vector<std::vector<Complex>>& vv,
-                           bool& converged, std::size_t& iters, bool& dense) {
-    ed::workflows::SolveOptions so;
-    so.num_eigs        = static_cast<std::size_t>(want);
-    so.compute_vectors = vectors;
-    so.backend.allow_gpu = true;
-    so.backend.require_gpu = device == Device::Gpu;
-    const auto r = ed::workflows::solve(*bop.op, so);
-    ev = r.eigenvalues;
-    if (vectors) {
-        if (!r.eigenvectors || r.eigenvectors->host.size() < ev.size())
-            throw std::runtime_error("eigs: the device solve returned no host eigenvectors");
-        vv.assign(r.eigenvectors->host.begin(), r.eigenvectors->host.begin() + static_cast<long>(ev.size()));
-    }
-    converged = static_cast<int>(ev.size()) >= want;
-    iters     = r.krylov.iters_done;
-    dense     = r.backend.dense;
-    return r.backend.lane == "gpu";
+// What place() needs to know about one eigs block: its size, whether the verb solves it densely,
+// the levels owed, and whether its operator has a device kernel (a refusal names the block).
+ed::BlockRequest eigs_request(const detail::BlockOp& bop, const LittleGroupBlock::Impl& bi, bool dense,
+                              std::uint64_t want) {
+    ed::BlockRequest r;
+    r.task  = ed::Task::Eigs;
+    r.dim   = bi.tag.dim;
+    r.dense = dense;
+    r.want  = want;
+    r.device_kernel = bop.op->has_device_kernel();
+    r.verb  = "eigs";
+    r.what  = [tag = bi.tag] { return detail::block_name(tag); };
+    r.why   = detail::no_kernel_reason(bi.W != nullptr);
+    return r;
 }
 
-// The lowest Ritz value after 40 Lanczos steps from a fixed random start: an upper bound on
-// the block's lowest level (on the device when the block has a device kernel).
-double prune_estimate(const detail::BlockOp& bop, Device device) {
+// The pruning estimate of a block above the dense crossover, on the lane place() chooses for
+// it: an upper bound on its lowest level (-inf when the estimate failed: never pruned). A block
+// the transitional small-block rule keeps on the host is solved exactly.
+double prune_estimate(const detail::BlockOp& bop, const LittleGroupBlock::Impl& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
-    if (bop.on_device) {
-        ed::workflows::SolveOptions so;
-        so.num_eigs  = 1;
-        so.max_iter  = 40;
-        so.method    = ed::workflows::SolveMethod::Lanczos;
-        so.tolerance = 1e-6;
-        so.backend.allow_gpu = true;
-        so.backend.require_gpu = device == Device::Gpu;
-        const auto r = ed::workflows::solve(op, so);
-        if (!r.eigenvalues.empty()) return r.eigenvalues.front();
+    const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
+    if (lane == ed::Lane::HostDense) {
+        const auto sol = solve_block_dense(op, 1, false);
+        return sol.values.empty() ? -std::numeric_limits<double>::infinity() : sol.values.front();
     }
-    ed::matvec::CpuBackend be;
-    return lg_detail::estimate_lowest(be, op).theta;     // -inf on a failed estimate: never pruned
+    return ed::with_backend(lane, [&op](auto& be) { return lg_detail::estimate_lowest(be, op).theta; });
 }
 
 // The phase record of one solved block, logged at Info. `rep` is the block's H; its counters
 // before the solve are passed in (an isotypic block shares them with its star's other blocks).
 BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const RepSectorMatVec& rep,
                        std::uint64_t applies0, double apply0, double build0, double solve_s,
-                       bool on_device, std::size_t device_iters, double context_orbit_s,
+                       ed::Lane lane, std::uint64_t lane_applies, double context_orbit_s,
                        const StarBuild& sb) {
     BlockStats st;
     st.k0 = tag.k0; st.irrep = tag.irrep; st.flip_parity = tag.flip_parity; st.n_up = tag.n_up;
@@ -150,9 +136,9 @@ BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const R
     st.applies         = rep.applies() - applies0;
     st.apply_s         = rep.apply_seconds() - apply0;
     st.solve_s         = solve_s;
-    if (on_device) {
+    if (ed::on_device(lane)) {          // the whole solve ran on the device: the lane counted its applies
         st.lane    = "device";
-        st.applies = device_iters;
+        st.applies = lane_applies;
     } else {
         st.lane = st.applies == 0 ? "dense" : rep.lane();
     }
@@ -272,6 +258,7 @@ std::vector<double> EigsResult::energies(int k) const {
 EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptions& o) {
     if (o.k < 1) throw std::invalid_argument("eigs: k must be >= 1");
     detail::require_device(o.device, "eigs");
+    ed::parallel::pin_omp_threads_once();
     struct Row { Level level; bool owed_more; };   // owed_more: block stopped short of its request
     struct BlockEnd { double last; bool short_; };
     EigsResult res;
@@ -301,34 +288,25 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 const std::uint64_t applies0 = rep.applies();
                 const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
                 const auto t0 = std::chrono::steady_clock::now();
-                bool on_device = false;
-                std::size_t device_iters = 0;
-                const bool krylov = dim > lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim);
-                if (krylov) detail::require_device_kernel(o.device, bop, bi->tag, "eigs");
-                if (bop.on_device && krylov) {
-                    bool dense = false;
-                    on_device = solve_by_orchestrator(bop, want, o.vectors, o.device, ev, vv, converged,
-                                                      device_iters, dense);
-                    if (on_device) ++res.device_blocks;
-                    res.placement.add(on_device, dense);
-                } else {
-                    BlockSolution sol;
-                    if (!krylov) {
-                        sol = solve_block_dense(mv, static_cast<std::size_t>(want), o.vectors);
-                    } else {
-                        ed::matvec::CpuBackend be;
-                        sol = o.vectors ? solve_block_eigenpairs(be, mv, static_cast<std::size_t>(want))
-                                        : solve_block_lowest(be, mv, static_cast<std::size_t>(want));
-                    }
-                    ev = std::move(sol.values);
-                    vv = std::move(sol.vectors);
-                    converged = sol.converged;
-                    res.placement.add(false, !krylov);
-                }
+                // The same lanes on every device: dense below the crossover, else the certified
+                // Krylov lanes on the backend place() chooses.
+                const bool dense = dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim);
+                const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
+                const std::size_t w = static_cast<std::size_t>(want);
+                BlockSolution sol = lane == ed::Lane::HostDense
+                    ? solve_block_dense(mv, w, o.vectors)
+                    : ed::with_backend(lane, [&](auto& be) {
+                          return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
+                      });
+                ev = std::move(sol.values);
+                vv = std::move(sol.vectors);
+                converged = sol.converged;
+                res.placement.add(lane);
+                if (ed::on_device(lane)) ++res.device_blocks;
                 res.block_stats.push_back(block_stats(
                     bi->tag, bi->gop ? "group" : (bi->W ? "isotypic" : "plain"), rep, applies0, apply0,
                     build0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-                    on_device, device_iters, context_orbit_s, sb));
+                    lane, sol.applies, context_orbit_s, sb));
                 // Off-tower ghosts sit above the spectrum: once one appears the tower is exhausted.
                 bool ghost_seen = false;
                 for (std::size_t i = 0; i < ev.size(); ++i)
@@ -396,9 +374,8 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim);
                 if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.t_orbit_table); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
-                detail::require_device_kernel(o.device, bop, bi->tag, "eigs");
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
-                                      prune_estimate(bop, o.device)});
+                                      prune_estimate(bop, *bi, o.device)});
             }
         });
     }
@@ -479,6 +456,7 @@ std::vector<double> SpectrumResult::expanded() const {
 
 SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device device) {
     detail::require_device(device, "spectrum");
+    ed::parallel::pin_omp_threads_once();
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     detail::DenseBatch batch(device);
