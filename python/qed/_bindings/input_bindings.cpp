@@ -219,8 +219,7 @@ void bind_input(py::module_& parent) {
         basis used by `qed.Operator`. Materialise the result via
         :meth:`to_operator`.
     )pbdoc")
-        .def(py::init<std::size_t, double>(),
-             py::arg("num_sites"), py::arg("spin") = 0.5)
+        .def(py::init<std::size_t>(), py::arg("num_sites"))
 
         // Low-level term insertion ---------------------------------------
         .def("add_one_body",
@@ -359,9 +358,7 @@ void bind_input(py::module_& parent) {
         // conflict.
         .def("to_operator",
              [](const HamiltonianBuilder& self) {
-                 auto op = std::make_unique<Operator>(
-                     static_cast<uint64_t>(self.num_sites()),
-                     static_cast<float>(self.spin()));
+                 auto op = std::make_unique<Operator>(static_cast<uint64_t>(self.num_sites()), 0.5f);
                  self.emit_into(*op);
                  return op;
              },
@@ -375,7 +372,6 @@ void bind_input(py::module_& parent) {
 
         // Inspection -----------------------------------------------------
         .def_property_readonly("num_sites", &HamiltonianBuilder::num_sites)
-        .def_property_readonly("spin", &HamiltonianBuilder::spin)
         .def_property_readonly("l1_norm", &HamiltonianBuilder::l1_norm)
         .def("clear", &HamiltonianBuilder::clear,
              py::return_value_policy::reference_internal)

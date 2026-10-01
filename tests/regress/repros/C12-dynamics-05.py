@@ -25,7 +25,7 @@ def site_op(m, i, N):
 def build(terms, N, nbits=None):
     """terms: list of (coeff, [(op, site), ...]); the product is written left to right
     (rightmost acts first). Returns (qed.Operator, dense matrix on N sites)."""
-    O = qed.Operator(N if nbits is None else nbits, 0.5)
+    O = qed.Operator(N if nbits is None else nbits)
     D = np.zeros((2 ** N, 2 ** N), complex)
     for c, fs in terms:
         if len(fs) == 1:

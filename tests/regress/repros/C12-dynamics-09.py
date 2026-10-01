@@ -22,7 +22,6 @@ s.basis = "ladder"
 s.components = [2]
 s.momentum_points = [[0.5, 0.0, 0.0]]          # 'half a reciprocal unit' per the header doc
 s.num_sites = 4
-s.spin_length = 0.5
 s.positions_file = pos
 try:
     p = qed.dssf.build_observables(s)

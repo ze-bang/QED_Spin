@@ -11,7 +11,7 @@ import qed
 
 N = 12
 dimers = [(2 * i, 2 * i + 1) for i in range(N // 2)]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j in dimers:
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)

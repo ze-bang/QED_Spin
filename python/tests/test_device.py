@@ -22,7 +22,7 @@ def _ring(n=10):
 
 
 def _sz(n, site=0):
-    O = qed.Operator(n, 0.5)
+    O = qed.Operator(n)
     O.add_one_body(qed.OP_SZ, site, 1.0)
     return O
 
@@ -59,7 +59,7 @@ def _context_after(device):
         "b = qed.input.HamiltonianBuilder(12)\n"
         "b.heisenberg([(i, (i + 1) % 12) for i in range(12)], J=1.0)\n"
         "H = b.to_operator()\n"
-        "O = qed.Operator(12, 0.5)\n"
+        "O = qed.Operator(12)\n"
         "O.add_one_body(qed.OP_SZ, 0, 1.0)\n"
         f"qed.eigs(H, 2, device={device!r})\n"
         f"qed.thermal(H, [1.0], method='ftlm', samples=2, krylov=20, device={device!r})\n"

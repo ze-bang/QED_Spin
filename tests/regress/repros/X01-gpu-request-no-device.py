@@ -31,7 +31,7 @@ with warnings.catch_warnings(record=True) as w:
     except Exception as e:
         print("thermal raised:", type(e).__name__, str(e)[:200])
     try:
-        O = qed.Operator(N, 0.5)
+        O = qed.Operator(N)
         for j in range(N):
             O.add_one_body(qed.OP_SZ, j, np.exp(-1j * np.pi * j) / np.sqrt(N))
         S = qed.dynamics(H, O, np.linspace(0, 3, 31), eta=0.1, device="gpu")

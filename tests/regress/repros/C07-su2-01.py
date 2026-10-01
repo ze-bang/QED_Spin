@@ -32,7 +32,7 @@ SP, SM, SZ = dense_ops(N)
 
 
 def build(J, Jz, h):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     D = np.zeros((2 ** N, 2 ** N), complex)
     for i in range(N):
         j = (i + 1) % N

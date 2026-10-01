@@ -34,7 +34,7 @@ for (x, y) in sites:
     for dx, dy in ((1, 0), (0, 1), (-1, 1)):
         a, b = site(x, y), site(x + dx, y + dy)
         bonds.add((min(a, b), max(a, b)))
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j in sorted(bonds):
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)

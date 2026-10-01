@@ -21,7 +21,7 @@ import sys, time, types
 import numpy as np
 import qed
 N = 16
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
@@ -37,7 +37,7 @@ if mode == "eigs":
     r = qed.eigs(H, 1, sym=sym)
     e0 = float(r.energies[0])
 else:
-    O = qed.Operator(N, 0.5)
+    O = qed.Operator(N)
     for i in range(N):
         O.add_one_body(qed.OP_SZ, i, (-1.0) ** i)
     r = qed.dynamics(H, O, np.linspace(0, 4, 41), eta=0.1, T=None, sym=sym)

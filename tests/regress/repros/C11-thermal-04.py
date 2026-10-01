@@ -36,7 +36,7 @@ for T in Ts:
     ref_lnZ.append(np.log(z) - b * ev[0]); ref_E.append((w * ev).sum() / z)
 ref_lnZ = np.array(ref_lnZ); ref_E = np.array(ref_E)
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j in bonds:
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)

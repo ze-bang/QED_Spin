@@ -39,7 +39,6 @@ def _base_spec() -> dssf.OperatorSpec:
     s.polarization = [1.0, 0.0, 0.0]
     s.unit_cell_size = 4
     s.num_sites = 4
-    s.spin_length = 0.5
     s.positions_file = str(POSITIONS_4SITE)
     return s
 

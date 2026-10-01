@@ -52,7 +52,7 @@ def dense_ops(N):
 
 def build(N, bonds, hz=0.0):
     """(qed Operator, dense H) for sum J S_i.S_j + hz sum Sz_i."""
-    O = qed.Operator(N, 0.5)
+    O = qed.Operator(N)
     Sz, Sp, Sm = dense_ops(N)
     Hd = np.zeros((1 << N, 1 << N))
     for i, j, J in bonds:

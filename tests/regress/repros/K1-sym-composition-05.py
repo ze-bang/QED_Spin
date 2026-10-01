@@ -14,15 +14,15 @@ import qed
 
 signal.alarm(100)
 N = 8
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
-SzSz = qed.Operator(N, 0.5)
+SzSz = qed.Operator(N)
 SzSz.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, 1.0)
-SdS = qed.Operator(N, 0.5)
+SdS = qed.Operator(N)
 SdS.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5)
 SdS.add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, 0.5)
 SdS.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, 1.0)

@@ -57,11 +57,8 @@ struct OperatorSpec {
     /// Number of sublattices for `sublattice` operator type.
     std::uint64_t unit_cell_size{4};
 
-    /// Total number of sites in the system.
+    /// Total number of (spin-1/2) sites in the system.
     std::uint64_t num_sites{0};
-
-    /// Local spin quantum number (typically 0.5).
-    float spin_length{0.5f};
 
     /// Path to the lattice positions file (passed through to every
     /// `*Operator(...)` constructor).

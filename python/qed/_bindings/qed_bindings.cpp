@@ -280,16 +280,11 @@ PYBIND11_MODULE(_core, m) {
         Parameters
         ----------
         num_sites : int
-            Number of spins (must satisfy ``num_sites < 64``).
-        spin : float, optional
-            Local spin quantum number (default 0.5; only spin-1/2 is fully
-            supported by the matrix-free path).
+            Number of spin-1/2 sites (must satisfy ``num_sites < 64``).
     )pbdoc")
-        .def(py::init<uint64_t, float>(),
-             py::arg("num_sites"),
-             py::arg("spin") = 0.5f)
+        .def(py::init([](uint64_t num_sites) { return std::make_unique<Operator>(num_sites, 0.5f); }),
+             py::arg("num_sites"))
         .def_property_readonly("num_sites", &Operator::getNumBits)
-        .def_property_readonly("spin", &Operator::getSpin)
         .def_property_readonly("dimension",
                                [](const Operator& op) -> uint64_t {
                                    return 1ULL << op.getNumBits();
@@ -443,7 +438,6 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("theta",             &ed::dssf::OperatorSpec::theta)
         .def_readwrite("unit_cell_size",    &ed::dssf::OperatorSpec::unit_cell_size)
         .def_readwrite("num_sites",         &ed::dssf::OperatorSpec::num_sites)
-        .def_readwrite("spin_length",       &ed::dssf::OperatorSpec::spin_length)
         .def_readwrite("positions_file",    &ed::dssf::OperatorSpec::positions_file)
         .def_readwrite("sublattice",        &ed::dssf::OperatorSpec::sublattice)
         .def("__repr__", [](const ed::dssf::OperatorSpec& s) {

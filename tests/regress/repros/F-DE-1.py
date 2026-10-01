@@ -36,7 +36,7 @@ Ts = [0.5, 1.0, 2.0, 4.0]
 T_perm = [(i + 1) % N for i in range(N)]
 R_perm = [(-i) % N for i in range(N)]
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, complex(0.5 * J))

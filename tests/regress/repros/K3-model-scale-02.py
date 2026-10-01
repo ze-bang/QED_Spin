@@ -22,14 +22,14 @@ import json, time, cmath
 import numpy as np
 import qed
 N = 16
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
 q = 2 * np.pi * 3 / N
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SZ, j, complex(cmath.exp(1j * q * j)) / np.sqrt(N))
 t = qed.symmetry.translation(N, 1)

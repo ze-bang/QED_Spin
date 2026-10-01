@@ -27,7 +27,7 @@ CHILD = r'''
 import json, sys, time, qed
 N, NUP = 26, 13
 model = sys.argv[1]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)

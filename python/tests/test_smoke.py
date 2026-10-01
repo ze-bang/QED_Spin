@@ -7,8 +7,6 @@ in <1 s. Heavier physics regression tests live under
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -27,15 +25,14 @@ def test_operator_constants_are_distinct():
 
 
 def test_operator_dimension_for_spin_half_chain():
-    op = qed.Operator(num_sites=4, spin=0.5)
+    op = qed.Operator(num_sites=4)
     assert op.num_sites == 4
     assert op.dimension == 16
-    assert math.isclose(op.spin, 0.5)
 
 
 def test_apply_zero_vector_is_zero():
     """Applying any operator to the zero vector must return the zero vector."""
-    op = qed.Operator(num_sites=3, spin=0.5)
+    op = qed.Operator(num_sites=3)
     op.add_one_body(qed.OP_SZ, 0, complex(1.0, 0.0))
     z = np.zeros(op.dimension, dtype=np.complex128)
     out = op.apply(z)

@@ -31,7 +31,7 @@ def exact_lowest(scale):
 
 
 def run(scale):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, (i + 1) % N, 1.0 * scale)
     sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")

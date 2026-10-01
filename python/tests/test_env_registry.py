@@ -50,7 +50,7 @@ def test_clean_environment_is_silent():
 def test_flag_set_to_zero_is_off(monkeypatch):
     """ED_SYM_PROFILE=0 switches every one of its read sites OFF."""
     monkeypatch.setenv("ED_SYM_PROFILE", "0")
-    code = ("import qed; from qed import _core; H=qed.Operator(4,0.5);\n"
+    code = ("import qed; from qed import _core; H=qed.Operator(4);\n"
             "[H.add_two_body(_core.OP_SZ,i,_core.OP_SZ,(i+1)%4,1.0) for i in range(4)];\n"
             "qed.eigs(H, 1, sym=qed.Symmetry(spatial=[[(i+1)%4 for i in range(4)]], sz=2))")
     r = subprocess.run([sys.executable, "-c", code], env=dict(os.environ), capture_output=True, text=True)

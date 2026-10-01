@@ -24,7 +24,7 @@ for N in (24, 26):
 m = chain(16)
 H = m.operator()
 N = m.N
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SZ, j, np.exp(-2j * np.pi * 4 * j / N) / np.sqrt(N))
 w = np.linspace(-1.0, 6.0, 61)

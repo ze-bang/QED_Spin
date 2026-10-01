@@ -65,7 +65,7 @@ def ref_ground(N, n_up):
 
 
 def qed_ground(N, n_up, **kw):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N - 1):
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, BONDS[i])
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, i + 1, 0.5 * BONDS[i])

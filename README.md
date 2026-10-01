@@ -18,7 +18,7 @@ H = b.to_operator()
 r  = qed.eigs(H, 4)                                    # lowest 4 levels; symmetries found automatically
 th = qed.thermal(H, np.linspace(0.1, 4, 40), method="ftlm", device="gpu")
 
-Sz_pi = qed.Operator(N, 0.5)                           # S^z at q = pi
+Sz_pi = qed.Operator(N)                           # S^z at q = pi
 for j in range(N):
     Sz_pi.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * math.pi * j) / math.sqrt(N))
 w  = np.linspace(0, 4, 400)

@@ -31,7 +31,7 @@ G = V[:, np.abs(w - w[0]) < 1e-8]
 E0 = w[0]
 E_up = N * 0.25
 
-Hq = qed.Operator(N, 0.5)
+Hq = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     Hq.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
@@ -42,7 +42,7 @@ sym = qed.Symmetry(spatial=[t], point_group=False, sz=2, spin_flip="off", time_r
 omega = np.array([E_up - E0])
 res = {}
 for d in (9, 1):
-    O = qed.Operator(N, 0.5)
+    O = qed.Operator(N)
     for i in range(N):
         O.add_two_body(qed.OP_SPLUS, i, qed.OP_SPLUS, (i + d) % N, 1.0)
     ref_w = float(np.mean([abs(sum(g[idx[frozenset((i, (i + d) % N))]] for i in range(N))) ** 2 for g in G.T]))

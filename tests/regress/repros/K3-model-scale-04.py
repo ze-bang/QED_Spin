@@ -12,11 +12,11 @@ ops_like = [p for p in params if p not in ("H", "omega", "eta", "T", "sym", "kry
                                            "degeneracy_tol", "device")]
 doc = (qed._core.sectors.dynamics.__doc__ or "").splitlines()[:3]
 N = 4
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, (i + 1) % N, 1.0)
-A = qed.Operator(N, 0.5); A.add_one_body(qed.OP_SZ, 0, 1.0)
-B = qed.Operator(N, 0.5); B.add_one_body(qed.OP_SZ, 1, 1.0)
+A = qed.Operator(N); A.add_one_body(qed.OP_SZ, 0, 1.0)
+B = qed.Operator(N); B.add_one_body(qed.OP_SZ, 1, 1.0)
 try:
     qed.dynamics(H, A, [0.0, 1.0], B)
     res = "accepted a second probe"

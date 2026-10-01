@@ -12,7 +12,7 @@ PRE = ("import qed\nN=6\nb=qed.input.HamiltonianBuilder(N)\n"
        "sym=qed.Symmetry(spatial=None)\n")
 CASES = {
     "expect(H, None)": "qed.expect(H, None, sym=sym)",
-    "expect(H, [Sz0, None])": "O=qed.Operator(N,0.5); O.add_one_body(qed.OP_SZ,0,1.0); qed.expect(H, [O, None], sym=sym)",
+    "expect(H, [Sz0, None])": "O=qed.Operator(N); O.add_one_body(qed.OP_SZ,0,1.0); qed.expect(H, [O, None], sym=sym)",
     "thermal(observables=[None])": "qed.thermal(H,[1.0],method='exact',sym=sym,observables=[None])",
 }
 res = {}

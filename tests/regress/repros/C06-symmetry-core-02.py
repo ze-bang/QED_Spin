@@ -17,7 +17,7 @@ from qed import _core
 N = 12
 J2 = 0.4
 bonds = [(i, (i + 1) % N, 1.0) for i in range(N)] + [(i, (i + 2) % N, J2) for i in range(N)]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j, J in bonds:
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * J)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * J)

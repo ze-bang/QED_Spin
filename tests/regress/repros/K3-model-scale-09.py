@@ -6,8 +6,8 @@ out three-body records, so composite probes must be rebuilt term by term."""
 import qed
 
 N = 4
-A = qed.Operator(N, 0.5); A.add_one_body(qed.OP_SZ, 0, 1.0)
-B = qed.Operator(N, 0.5); B.add_one_body(qed.OP_SZ, 1, 1.0)
+A = qed.Operator(N); A.add_one_body(qed.OP_SZ, 0, 1.0)
+B = qed.Operator(N); B.add_one_body(qed.OP_SZ, 1, 1.0)
 B.add_three_body(qed.OP_SZ, 0, qed.OP_SZ, 1, qed.OP_SZ, 2, 1.0)
 fails = {}
 for name, f in {"A+B": lambda: A + B, "2*A": lambda: 2.0 * A, "A*2": lambda: A * 2.0,

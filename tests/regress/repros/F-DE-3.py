@@ -46,7 +46,7 @@ def op1(kind, i):   # library convention: bit set = spin down, S+ clears a set b
 Sp = [op1("+", i) for i in range(N)]
 Sm = [op1("-", i) for i in range(N)]
 Sz = [op1("z", i) for i in range(N)]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 Hd = np.zeros((dim, dim), complex)
 for i in range(N - 1):
     j = i + 1
@@ -59,7 +59,7 @@ for i in range(N):   # hy * Sy_i, Sy = (S+ - S-)/(2i)
     H.add_one_body(qed.OP_SMINUS, i, complex(0.5j * HY))
     Hd += HY * (Sp[i] - Sm[i]) / 2j
 assert np.allclose(Hd, Hd.conj().T)
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 O.add_one_body(qed.OP_SPLUS, SITE, 1.0 + 0j)
 Od = Sp[SITE]
 

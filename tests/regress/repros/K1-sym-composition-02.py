@@ -22,7 +22,7 @@ import sys, types
 import qed
 N = 12
 model = sys.argv[1]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 jx, jy, jz = (1.0, 0.6, 0.8) if model == "xyz" else (1.0, 1.0, 0.8)
 for i in range(N):
     j = (i + 1) % N
@@ -79,7 +79,7 @@ except Exception as ex:
 if ndev > 0:
     os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"
     N = 12
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.4)

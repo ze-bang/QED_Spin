@@ -22,7 +22,7 @@ ref1 = np.sort(np.linalg.eigvalsh(gm.dense(m.terms, m.N)))
 
 
 def build(s):
-    H = qed.Operator(m.N, 0.5)
+    H = qed.Operator(m.N)
     for c, ops in m.terms:
         c = complex(c) * s
         if c == 0:

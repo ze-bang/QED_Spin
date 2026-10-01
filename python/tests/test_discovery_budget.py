@@ -175,7 +175,7 @@ def test_huge_group_runs_without_spatial_symmetry_and_matches_dense():
 
 def test_field_only_default_eigs_is_instant():
     """A paramagnet's coupling graph has |Aut| = N! (audit C02-discovery-03)."""
-    H = qed.Operator(10, 0.5)
+    H = qed.Operator(10)
     for i in range(10):
         H.add_one_body(_core.OP_SZ, i, 1.0)
     t0 = time.time()
@@ -205,7 +205,7 @@ def test_three_body_terms_enter_the_graph():
     L = 3
     idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
     code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
-    H = qed.Operator(L * L, 0.5)
+    H = qed.Operator(L * L)
     for y in range(L):
         for x in range(L):
             for c, ops in triple(idx(x, y), idx(x + 1, y), idx(x, y + 1), 0.5):
@@ -232,7 +232,7 @@ def test_discovery_reads_the_operator_not_its_spelling():
     from collections import defaultdict
     from grid.models import dot, triple
     code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
-    H = qed.Operator(6, 0.5)
+    H = qed.Operator(6)
 
     def add(terms):
         for c, ops in terms:

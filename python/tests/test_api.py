@@ -66,7 +66,7 @@ def test_total_spin_needs_an_su2_hamiltonian():
 
 def test_expect_under_total_spin_needs_invariant_operators():
     H = _ring(6)
-    sz0 = qed.Operator(6, 0.5)
+    sz0 = qed.Operator(6)
     sz0.add_one_body(qed.OP_SZ, 0, 1.0)
     with pytest.raises(ValueError, match="SU\\(2\\) invariant"):
         qed.expect(H, [sz0], 1, sym=qed.Symmetry(spatial=None, total_spin=0))
@@ -119,7 +119,7 @@ def test_saved_eigs_reload_with_vectors_expect_and_matrix_elements(tmp_path):
     sym = qed.Symmetry(spatial=_translations(8))
     r = qed.eigs(H, 4, sym=sym, vectors=True)
     bond = qed.input.HamiltonianBuilder(8).heisenberg([(0, 1)], J=1.0).to_operator()
-    sp = qed.Operator(8, 0.5)
+    sp = qed.Operator(8)
     sp.add_one_body(qed.OP_SPLUS, 0, 1.0)
     path = tmp_path / "levels.npz"
     r.save(path)
@@ -288,7 +288,7 @@ def test_a_residue_acting_as_a_scalar_keeps_its_character():
     # On the small Sz sectors of a 7-site ring the reflection acts on k = 0 as a scalar; the states
     # there still carry its character (audit F-DE-1: they were dropped from every selection).
     n = 7
-    H = qed.Operator(n, 0.5)
+    H = qed.Operator(n)
     for i in range(n):
         j = (i + 1) % n
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.375)
@@ -375,7 +375,7 @@ def test_one_dimensional_irreps_take_the_group_sector_path():
 def _ising(n, periodic=True, scale=1.0):
     """H = scale sum Sz_i Sz_j over the chain's bonds, its diagonal (the exact spectrum) and the
     set-bit count of each basis state."""
-    H = qed.Operator(n, 0.5)
+    H = qed.Operator(n)
     bonds = [(i, (i + 1) % n) for i in range(n if periodic else n - 1)]
     for i, j in bonds:
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, scale)
@@ -457,7 +457,7 @@ def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
     # (~1e-14) is far below ulp(E0^2), where raw second moments cancel to rounding noise; a
     # constant added to H must not change C either (audit C06-symmetry-core-01, L2-numerics-01).
     n = 12
-    H = qed.Operator(n, 0.5)
+    H = qed.Operator(n)
     for i in range(0, n, 2):
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, i + 1, 0.5)
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, i + 1, 0.5)
@@ -478,7 +478,7 @@ def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
 # ---------------------------------------------------------------------------
 
 def _sz_q(n, q):
-    O = qed.Operator(n, 0.5)
+    O = qed.Operator(n)
     for j in range(n):
         O.add_one_body(qed.OP_SZ, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
     return O
@@ -505,12 +505,12 @@ def test_omega_is_measured_from_a_zero_ground_energy():
     # The all-up state of the XX ring has E0 = 0 exactly, and S^-_q makes one magnon of energy
     # cos q: the pole sits at omega = cos q - E0 (an E0 of 0 was read as "unset").
     n = 6
-    H = qed.Operator(n, 0.5)
+    H = qed.Operator(n)
     for i in range(n):
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5)
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.5)
     q = 2 * math.pi / n
-    O = qed.Operator(n, 0.5)
+    O = qed.Operator(n)
     for j in range(n):
         O.add_one_body(qed.OP_SMINUS, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
     omega = np.linspace(-1.5, 1.5, 601)

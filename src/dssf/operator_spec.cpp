@@ -24,7 +24,7 @@ namespace {
 // Build a full-Hilbert observable value-type Operator via ``build``.
 template <typename BuildFn>
 Operator make_full(const OperatorSpec& spec, BuildFn&& build) {
-    Operator op(spec.num_sites, spec.spin_length);
+    Operator op(spec.num_sites, 0.5f);
     build(op);
     return op;
 }

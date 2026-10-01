@@ -15,7 +15,6 @@ ordering, the way the C++ ``ed::dssf`` layer does; feed them to :func:`qed.dynam
     spec.momentum_points = [[0.0, 0.0, 0.0], [3.14159, 0.0, 0.0]]
     spec.polarization    = [0.0, 0.0, 1.0]
     spec.num_sites       = 4
-    spec.spin_length     = 0.5
     spec.positions_file  = "/abs/path/to/positions.dat"
 
     obs = qed.dssf.build_observables(spec)

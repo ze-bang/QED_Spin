@@ -24,7 +24,7 @@ N = 12
 bonds = [(i, (i + 1) % N) for i in range(N)]
 
 def op(s):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i, j in bonds:
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, s)
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * s)

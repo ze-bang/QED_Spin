@@ -26,13 +26,13 @@ E, V = np.linalg.eigh(Hd)
 g = V[:, 0]
 ss = float(np.real(np.vdot(g, sum(site(s, 0) @ site(s, 1) for s in (sx, sy, sz)) @ g)))
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
-Ozz = qed.Operator(N, 0.5)
+Ozz = qed.Operator(N)
 Ozz.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, 1.0)
 try:
     v = qed.expect(H, [Ozz], 1, sym=qed.Symmetry(spatial=None, total_spin=0)).values[0, 0]

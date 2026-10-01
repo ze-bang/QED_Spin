@@ -48,7 +48,7 @@ for x in range(2):
         bonds += [(A, B), (A, C), (B, C)]
         bonds += [(A, site(x - 1, y, 1)), (A, site(x, y - 1, 2)), (B, site(x + 1, y - 1, 2))]
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j in bonds:
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, complex(0.5 * J))
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, complex(0.5 * J))

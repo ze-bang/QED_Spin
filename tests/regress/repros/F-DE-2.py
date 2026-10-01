@@ -50,7 +50,7 @@ def op1(kind, i):   # library convention: bit set = spin down, S+ clears a set b
 Sp = [op1("+", i) for i in range(N)]
 Sm = [op1("-", i) for i in range(N)]
 Sz = [op1("z", i) for i in range(N)]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0j)
@@ -71,7 +71,7 @@ for (p, q, r), sgn in eps.items():
         for o2, c2 in comp[q].items():
             for o3, c3 in comp[r].items():
                 terms[(o1, o2, o3)] = terms.get((o1, o2, o3), 0) + sgn * c1 * c2 * c3
-chi = qed.Operator(N, 0.5)
+chi = qed.Operator(N)
 Chid = np.zeros((dim, dim), complex)
 for (o1, o2, o3), cf in terms.items():
     if abs(cf) < 1e-15:

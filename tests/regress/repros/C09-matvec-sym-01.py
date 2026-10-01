@@ -20,7 +20,7 @@ N, J, k = 8, 1e-16, 4
 
 
 def ring(scale):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, scale)

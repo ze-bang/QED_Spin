@@ -16,7 +16,7 @@ def at(o, i):
         m = np.kron(m, o if k == i else np.eye(2))
     return m
 SP = [at(sp, i) for i in range(N)]; SM = [at(sm, i) for i in range(N)]; SZ = [at(sz, i) for i in range(N)]
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 D = np.zeros((2 ** N, 2 ** N), complex)
 for i in range(N):
     j = (i + 1) % N

@@ -19,7 +19,7 @@ import sys
 CODE = r"""
 import numpy as np, qed
 N = 12
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N - 1):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, 1.0)
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, i + 1, 0.5)

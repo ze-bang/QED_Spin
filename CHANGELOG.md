@@ -41,7 +41,10 @@ Breaking changes so far:
   - block Krylov-Schur (`eigs(block_size=...)`): the single-vector Krylov-Schur finds every
     copy of a degenerate level;
   - `qed.symmetry.momentum_labels`: `EigResult.momentum(i, translations)` reads a level's
-    momentum.
+    momentum;
+  - the `spin` parameter and property of `Operator` and `HamiltonianBuilder`, and
+    `dssf.OperatorSpec.spin_length`: sites are spin-1/2 (any other value solved a different
+    spin-1/2 model). Write `qed.Operator(N)`.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

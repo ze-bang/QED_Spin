@@ -43,7 +43,7 @@ for s in range(1 << N):
     ref.append(sum(0.25 if b[i] == b[i + 1] else -0.25 for i in range(N - 1)))
 ref = np.sort(np.array(ref))
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N - 1):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, 1.0)
 sym = qed.Symmetry(spatial=None, sz=NUP, spin_flip="off", time_reversal="off")

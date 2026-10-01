@@ -25,7 +25,7 @@ signal.alarm(280)
 
 
 def ring(N, s, h=0.0):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * s)
@@ -38,7 +38,7 @@ def ring(N, s, h=0.0):
 
 N = 9
 q = 2 * np.pi * 4 / N
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SPLUS, j, np.exp(1j * q * j) / np.sqrt(N))
 w = np.linspace(0.0, 3.0, 121)
@@ -62,13 +62,13 @@ code_b = r'''
 import numpy as np, qed
 N = 13
 t = [(i + 1) % N for i in range(N)]
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SZ, j, np.exp(1j * np.pi * j * 6 / 13) / np.sqrt(N))
 sym = qed.Symmetry(spatial=[t], point_group=False, time_reversal="off")
 w = np.linspace(0.0, 3.0, 11)
 for s in (1.0, 1e2, 1e3, 1e4, 1e5):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * s)

@@ -27,7 +27,6 @@ def build(kind):
     s.momentum_points = [[0.7, 0.0, 0.0]]
     s.unit_cell_size = 1
     s.num_sites = N
-    s.spin_length = 0.5
     s.positions_file = pos
     p = qed.dssf.build_observables(s)
     terms = {}

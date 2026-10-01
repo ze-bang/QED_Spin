@@ -30,7 +30,6 @@ for typ in ("sum", "sublattice", "experimental"):
     s.momentum_points = [[3.141592653589793, 0.0]]
     s.num_sites = 4
     s.unit_cell_size = 2
-    s.spin_length = 0.5
     s.positions_file = pos
     try:
         p = qed.dssf.build_observables(s)
@@ -42,7 +41,7 @@ CHILD = r'''
 import qed
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sum"; s.basis = "ladder"; s.components = [2]
-s.momentum_points = [[]]; s.num_sites = 4; s.spin_length = 0.5; s.positions_file = %r
+s.momentum_points = [[]]; s.num_sites = 4; s.positions_file = %r
 try:
     qed.dssf.build_observables(s)
     print("CHILD accepted")

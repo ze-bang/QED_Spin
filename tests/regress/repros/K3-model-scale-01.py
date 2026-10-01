@@ -42,7 +42,7 @@ sel = np.where(pop == N // 2)[0]
 E_ref = float(np.linalg.eigvalsh(Mb[np.ix_(sel, sel)])[0])
 
 # hand-merged equivalent: Dz (Sx_i Sy_j - Sy_i Sx_j) = (i Dz/2)(S+_i S-_j - S-_i S+_j)
-Hm = qed.Operator(N, 0.5)
+Hm = qed.Operator(N)
 for (i, j) in bonds:
     Hm.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     Hm.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0.5j * D)

@@ -31,7 +31,7 @@ def dense(s):
 
 
 def qop(s):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     P, M, Z = qed._core.OP_SPLUS, qed._core.OP_SMINUS, qed._core.OP_SZ
     for i in range(N):
         j = (i + 1) % N

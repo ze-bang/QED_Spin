@@ -47,7 +47,6 @@ ed::dssf::OperatorSpec base_spec() {
     s.polarization     = {1.0, 0.0, 0.0};
     s.unit_cell_size   = 4;
     s.num_sites        = 4;
-    s.spin_length      = 0.5f;
     s.positions_file   = ED_TEST_POSITIONS_4SITE;
     return s;
 }

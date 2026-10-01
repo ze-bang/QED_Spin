@@ -50,8 +50,8 @@ inline std::complex<double> non_kramer_factor(int sub_a, int sub_b) {
 
 }  // namespace
 
-HamiltonianBuilder::HamiltonianBuilder(std::size_t num_sites, double spin)
-    : num_sites_(num_sites), spin_(spin) {
+HamiltonianBuilder::HamiltonianBuilder(std::size_t num_sites)
+    : num_sites_(num_sites) {
     if (num_sites == 0) {
         throw std::invalid_argument("HamiltonianBuilder: num_sites must be > 0");
     }
@@ -352,12 +352,7 @@ HamiltonianBuilder& HamiltonianBuilder::ring_exchange(
     // S^{op_i}_i S^{op_j}_j S^{op_k}_k tri-product, by **fusing** the
     // 4th leg via `Sz_a Sz_b = 1/4` for spin-1/2 anti-aligned pairs. This
     // is mathematically equivalent for the spin-1/2 ring on a square
-    // plaquette but is **lossy** for spin > 1/2; we therefore restrict
-    // ring_exchange to the spin-1/2 case.
-    if (std::abs(spin_ - 0.5) > 1e-12) {
-        throw std::runtime_error(
-            "HamiltonianBuilder::ring_exchange: only spin-1/2 is supported");
-    }
+    // plaquette (the only sites the builder has).
     // Concrete 4-body spin-1/2 ring exchange Hamiltonian (Misguich/Lhuillier):
     //   K (P_p + P_p^{-1}) = K/2 [ Sz_1 Sz_3 + Sz_2 Sz_4 + 4(Sz_1 Sz_2 + ...) - ...
     // The exact decomposition is non-trivial; for the v1 release we expose
@@ -475,8 +470,7 @@ void HamiltonianBuilder::emit_into(Operator& op) const {
 }
 
 std::shared_ptr<Operator> HamiltonianBuilder::to_operator() const {
-    auto op = std::make_shared<Operator>(static_cast<uint64_t>(num_sites_),
-                                         static_cast<float>(spin_));
+    auto op = std::make_shared<Operator>(static_cast<uint64_t>(num_sites_), 0.5f);
     emit_into(*op);
     return op;
 }

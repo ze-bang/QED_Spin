@@ -16,7 +16,7 @@ t = [(i + 1) % N for i in range(N)]
 
 
 def heis(h=0.0):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
@@ -27,7 +27,7 @@ def heis(h=0.0):
     return H
 
 
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * np.pi * j) / np.sqrt(N))
 omega = np.linspace(0.0, 4.0, 201)

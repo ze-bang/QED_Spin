@@ -17,7 +17,7 @@ import os
 import qed
 
 N = 10
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 H.add_one_body(qed._core.OP_SZ, 0, 1.0)
 H.add_one_body(qed._core.OP_SZ, 1, 1.0)
 sym = qed.Symmetry(spatial=None, sz=5, spin_flip="off", time_reversal="off")

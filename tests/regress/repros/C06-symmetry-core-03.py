@@ -18,7 +18,7 @@ import itertools, sys, time
 import qed
 from qed import _core
 R = int(sys.argv[1]); N = 2 * R
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 def bond(i, j, J):
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * J)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * J)

@@ -40,7 +40,7 @@ def c_ref(T):
 Cref = np.array([c_ref(T) for T in Ts])
 
 def build(c):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i, j in bonds:
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)

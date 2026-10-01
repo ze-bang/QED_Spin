@@ -15,13 +15,13 @@ import qed
 
 N, NO = 8, 12
 eta = 0.05
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
-O = qed.Operator(NO, 0.5)
+O = qed.Operator(NO)
 for i in range(NO):
     O.add_one_body(qed.OP_SZ, i, 1.0)
 t = [(i + 1) % N for i in range(N)]
@@ -46,13 +46,13 @@ except Exception as e:
 code = textwrap.dedent(f"""
     import qed
     N, NO = {N}, {NO}
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
-    O = qed.Operator(NO, 0.5)
+    O = qed.Operator(NO)
     O.add_one_body(qed.OP_SZ, NO - 1, 1.0)
     t = [(i + 1) % N for i in range(N)]
     sym = qed.Symmetry(spatial=[t], point_group=False, spin_flip="off", time_reversal="off")

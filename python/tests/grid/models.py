@@ -63,7 +63,7 @@ class Model:
 
     def operator(self):
         import qed
-        H = qed.Operator(self.N, 0.5)
+        H = qed.Operator(self.N)
         code = {"+": qed.OP_SPLUS, "-": qed.OP_SMINUS, "z": qed.OP_SZ}
         for c, ops in self.terms:
             if abs(c) < 1e-15:

@@ -10,13 +10,13 @@ import numpy as np
 import qed
 
 N = 8
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     j = (i + 1) % N
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
-S2 = qed.Operator(N, 0.5)
+S2 = qed.Operator(N)
 for i in range(N):
     for j in range(N):
         S2.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)

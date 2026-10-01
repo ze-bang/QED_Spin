@@ -35,7 +35,7 @@ namespace ed::input {
 
 class HamiltonianBuilder {
 public:
-    HamiltonianBuilder(std::size_t num_sites, double spin = 0.5);
+    explicit HamiltonianBuilder(std::size_t num_sites);   // spin-1/2 sites
 
     // ------------------------------------------------------------------
     // Low-level term insertion (purely additive)
@@ -178,7 +178,6 @@ public:
     const std::vector<ThreeBodyTerm>& three_body_terms() const noexcept { return three_body_; }
 
     std::size_t num_sites() const noexcept { return num_sites_; }
-    double spin() const noexcept { return spin_; }
 
     // Sum of |coefficient| across all term lists (rough size metric).
     double l1_norm() const noexcept;
@@ -188,7 +187,6 @@ public:
 
 private:
     std::size_t num_sites_;
-    double spin_;
     std::vector<OneBodyTerm> one_body_;
     std::vector<TwoBodyTerm> two_body_;
     std::vector<ThreeBodyTerm> three_body_;

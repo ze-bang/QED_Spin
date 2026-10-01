@@ -33,7 +33,6 @@ def spec(U, filt):
     s.momentum_points = [[0.0, 0.0, 0.0]]
     s.num_sites = N
     s.unit_cell_size = U
-    s.spin_length = 0.5
     s.positions_file = pos
     s.sublattice = filt
     return s
@@ -65,7 +64,7 @@ import qed
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sublattice"; s.basis = "ladder"; s.components = [2]
 s.momentum_points = [[0.0, 0.0, 0.0]]; s.num_sites = 12; s.unit_cell_size = 0
-s.spin_length = 0.5; s.positions_file = %r; s.sublattice = 0
+s.positions_file = %r; s.sublattice = 0
 try:
     p = qed.dssf.build_observables(s)
     print("CHILD returned", len(p))

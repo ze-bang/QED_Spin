@@ -15,7 +15,7 @@ import qed
 CODE = r"""
 import time, qed
 N = {N}
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     H.add_one_body(qed.OP_SZ, i, 1.0)
 t0 = time.time()
@@ -38,7 +38,7 @@ def run(N, timeout):
 
 
 N = 10
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i in range(N):
     H.add_one_body(qed.OP_SZ, i, 1.0)
 t0 = time.time()

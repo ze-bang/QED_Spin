@@ -23,7 +23,7 @@ T = [(i + 1) % N for i in range(N)]
 
 
 def build(s, h):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i in range(N):
         j = (i + 1) % N
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 * s)

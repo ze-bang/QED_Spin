@@ -24,7 +24,7 @@ N = {N}
 b = qed.input.HamiltonianBuilder(N)
 b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
 H = b.to_operator()
-o = qed.Operator(N, 0.5)
+o = qed.Operator(N)
 for j in range(N):
     o.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * math.pi * j) / math.sqrt(N))
 w = np.linspace(0.0, 3.0, 31)

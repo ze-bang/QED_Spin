@@ -4,7 +4,9 @@
 """Claim: HamiltonianBuilder(N, spin=1.0) is accepted, and qed.eigs silently solves a different model:
 the two-state engine scales Sz by spin_l (SzSz by spin_l^2) but keeps the spin-1/2 S+-, so a spin=1
 'Heisenberg' ring is the spin-1/2 XXZ ring with Jz/Jxy = 4, not the spin-1 Heisenberg ring. A
-total_spin restriction is also accepted (or not) without any spin check."""
+total_spin restriction is also accepted (or not) without any spin check.
+Restated after P2.1 removed the spin parameter (owner-approved): Operator(N, 1.0),
+HamiltonianBuilder(N, spin=1.0) and OperatorSpec.spin_length must all be gone."""
 import numpy as np
 import qed
 
@@ -36,6 +38,17 @@ def dense_heis(S, jz):
 e_spin1 = dense_heis(1.0, 1.0)
 e_half_heis = dense_heis(0.5, 1.0)
 e_half_xxz4 = dense_heis(0.5, 4.0)
+left = []
+try:
+    qed.Operator(N, 1.0)
+    left.append("Operator(N, 1.0)")
+except TypeError:
+    pass
+if hasattr(qed.dssf.OperatorSpec(), "spin_length"):
+    left.append("OperatorSpec.spin_length")
+if left:
+    print(f"REPRO: CONFIRMED a spin other than 1/2 can still be requested: {left}")
+    raise SystemExit(0)
 try:
     b = qed.input.HamiltonianBuilder(N, spin=1.0)
     b.heisenberg(bonds, J=1.0)
@@ -49,7 +62,7 @@ try:
     su2 = f"total_spin=0 accepted, E0={e_su2:.10f}"
 except Exception as ex:
     su2 = f"total_spin=0 raised {type(ex).__name__}: {ex}"
-print(f"H.spin={H.spin} lib E0={e_lib:.10f}; dense spin-1 Heisenberg {e_spin1:.10f}; "
+print(f"lib E0={e_lib:.10f}; dense spin-1 Heisenberg {e_spin1:.10f}; "
       f"spin-1/2 Heisenberg {e_half_heis:.10f}; spin-1/2 XXZ Jz=4 {e_half_xxz4:.10f}; {su2}")
 if abs(e_lib - e_spin1) > 1e-6:
     print(f"REPRO: CONFIRMED spin=1.0 accepted silently; E0_lib={e_lib:.8f} != spin-1 {e_spin1:.8f} "

@@ -17,7 +17,7 @@ H = b.to_operator()
 
 def sz_q(q):
     """S^z_q = N^-1/2 sum_j e^{-i q j} S^z_j."""
-    o = qed.Operator(N, 0.5)
+    o = qed.Operator(N)
     for j in range(N):
         o.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * q * j) / math.sqrt(N))
     return o

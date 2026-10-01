@@ -25,7 +25,7 @@ ev = np.linalg.eigvalsh(Hs.toarray())
 b = 1 / T0; w = np.exp(-b * (ev - ev[0])); z = w.sum()
 lnZ_ex = np.log(z) - b * ev[0]; E_ex = (w * ev).sum() / z; S_ex = lnZ_ex + b * E_ex
 
-H = qed.Operator(N, 0.5)
+H = qed.Operator(N)
 for i, j in bonds:
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)

@@ -22,7 +22,7 @@ for mname in ("chain12", "tri9chi"):
     N = m.N
     lg = qed.Symmetry(spatial="auto")
     su2 = qed.Symmetry(spatial=None, total_spin=0.0 if N % 2 == 0 else 0.5)
-    O = qed.Operator(N, 0.5)
+    O = qed.Operator(N)
     for j in range(N):
         O.add_one_body(qed.OP_SZ, j, np.exp(-2j * np.pi * j / N) / np.sqrt(N))
     calls = [

@@ -31,7 +31,7 @@ sym = qed.Symmetry(spatial=[T], sz=N // 2, spin_flip="off", time_reversal="off",
 
 def sq(q):
     """S(q) = (1/N) sum_{i != j} cos(q (i-j)) S_i.S_j (translation invariant, many pair terms)."""
-    O = qed.Operator(N, 0.5)
+    O = qed.Operator(N)
     for i in range(N):
         for j in range(N):
             if i == j:

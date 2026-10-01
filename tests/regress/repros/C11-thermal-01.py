@@ -33,7 +33,7 @@ def exact(ev, Ts):
     return np.array(E), np.array(C)
 
 def build(J):
-    H = qed.Operator(N, 0.5)
+    H = qed.Operator(N)
     for i, j in bonds:
         H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * J)
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * J)

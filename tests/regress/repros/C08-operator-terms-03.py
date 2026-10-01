@@ -30,7 +30,6 @@ s.basis = "ladder"
 s.components = [3]
 s.momentum_points = [[np.pi, 0.0, 0.0]]
 s.num_sites = N
-s.spin_length = 0.5
 s.positions_file = pos
 try:
     p = qed.dssf.build_observables(s)
@@ -55,7 +54,7 @@ err_flip = float(np.max(np.abs(w - w_ref)))
 print(f"apply vs sum_i phi_i (S+_i + S-_i): max|diff|={err_flip:.3e}  |w|={np.linalg.norm(w):.3e}")
 
 # legit operator with the same phases: S+ + S-
-Og = qed.Operator(N, 0.5)
+Og = qed.Operator(N)
 for i in range(N):
     Og.add_one_body(0, i, phi[i])
     Og.add_one_body(1, i, phi[i])

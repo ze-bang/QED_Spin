@@ -20,7 +20,7 @@ b = qed.input.HamiltonianBuilder(N)
 b.heisenberg([(i, (i + 1) %% N) for i in range(N)], J=1.0)
 H = b.to_operator()
 q = 2 * math.pi * 6 / N
-O = qed.Operator(N, 0.5)
+O = qed.Operator(N)
 for j in range(N):
     O.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * q * j) / math.sqrt(N))
 t = qed.symmetry.translation(N, 1)

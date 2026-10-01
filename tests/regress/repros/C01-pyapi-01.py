@@ -31,7 +31,7 @@ def op1(kind, i):
 Sp = [op1("+", i) for i in range(N)]; Sm = [op1("-", i) for i in range(N)]; Sz = [op1("z", i) for i in range(N)]
 Hd = sum(0.5 * (Sp[i] @ Sm[(i + 1) % N] + Sm[i] @ Sp[(i + 1) % N]) + Sz[i] @ Sz[(i + 1) % N] for i in range(N))
 Jd = 0.5j * Sp[0] @ Sm[1] - 0.5j * Sm[0] @ Sp[1]
-J01 = qed.Operator(N, 0.5)
+J01 = qed.Operator(N)
 J01.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5j)
 J01.add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, -0.5j)
 
