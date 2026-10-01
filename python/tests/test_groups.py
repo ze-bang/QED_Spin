@@ -2,6 +2,7 @@
 behind Symmetry(spatial=...), and what the engine does with that split."""
 from __future__ import annotations
 
+import importlib.util
 import itertools
 import random
 
@@ -12,6 +13,9 @@ import qed
 from qed._groups import close_group, normal_abelian_split, spatial_split, split_generator_set
 
 from grid.models import dense, triangular
+
+needs_pynauty = pytest.mark.skipif(importlib.util.find_spec("pynauty") is None,
+                                   reason="the automorphism search needs pynauty")
 
 
 def _compose(a, b):
@@ -127,6 +131,7 @@ def test_symmetric_group_without_normal_abelian_part():
     assert [c for c, _ in notes] == ["co_group_capped"]
 
 
+@needs_pynauty
 def test_accidental_symmetry_keeps_the_whole_group_within_the_cap():
     # The 3x3 honeycomb torus with nearest-neighbour bonds has 216 automorphisms, twice its space
     # group, and a largest normal abelian subgroup of only 3 elements: a co-group of 72 that the
@@ -146,6 +151,7 @@ def test_split_does_not_depend_on_the_input_order():
     assert normal_abelian_split(G) == normal_abelian_split(shuffled)
 
 
+@needs_pynauty
 def test_tri9_automorphisms_are_split_into_cosets():
     # The 3x3 triangular torus with nearest-neighbour bonds is the complete tripartite graph
     # K_{3,3,3}: |Aut| = 3!^3 * 3! = 1296, far beyond the 108-element space group. Its largest
@@ -174,6 +180,43 @@ def test_engine_refuses_a_residue_that_does_not_normalise():
     spec.residues = [[1, 0, 2, 3]]
     with pytest.raises(qed.errors.InvalidRequest, match="does not normalise"):
         qed._core.sectors.eigs(H, 4, spec, k=1)
+
+
+def test_normaliser_split_keeps_what_normalises_the_translations():
+    # The 3x3 triangular torus is K_{3,3,3} (parts: x - y mod 3), with 1296 automorphisms in
+    # which the translations are not normal. Their normaliser is the 108-element space group.
+    from qed._groups import normaliser_split
+    T1, T2, C6, sigma = _triangular_space_group(3)
+    swap = lambda a, b: [b if i == a else a if i == b else i for i in range(9)]  # noqa: E731
+    G = close_group([T1, T2, C6, sigma, swap(0, 4), swap(4, 8)])           # sites 0, 4, 8: part 0
+    assert len(G) == 1296
+    T = close_group([T1, T2])
+    A, residues = normaliser_split(G, T)
+    assert {tuple(a) for a in A} == set(T) and len(residues) == 11
+    _check_split(G, A, residues)
+    assert set(close_group(A + residues)) == set(close_group([T1, T2, C6, sigma]))
+
+
+def test_permutations_may_come_as_numpy_arrays():
+    t, r = _ring_generators()
+    assert qed.symmetry.split_nonabelian(np.array([t, r])) == qed.symmetry.split_nonabelian([t, r])
+    from types import SimpleNamespace
+    H = _heisenberg(6, [(i, (i + 1) % 6) for i in range(6)])
+    A, residues = qed.Symmetry(spatial=SimpleNamespace(generators=np.array([t]),
+                                                       star_perms=np.array([r]))).groups(H)
+    assert len(A) == 6 and len(residues) == 1
+
+
+def test_without_the_point_group_residues_are_not_checked():
+    # The residue does not normalise the translations; without the point group it is not used.
+    from types import SimpleNamespace
+    t, _ = _ring_generators(4)
+    H = _heisenberg(4, [(i, (i + 1) % 4) for i in range(4)])
+    gs = SimpleNamespace(generators=[t], star_perms=[[1, 0, 2, 3]])
+    A, residues = qed.Symmetry(spatial=gs, point_group=False).groups(H)
+    assert len(A) == 4 and residues == []
+    with pytest.raises(qed.errors.InvalidRequest, match="does not normalise"):
+        qed.Symmetry(spatial=gs).groups(H)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +291,7 @@ def _k4_terms(bonds):
     return [t for i, j in bonds for t in dot(i, j)]
 
 
+@needs_pynauty
 def test_tri9_default_symmetry_vectors_and_labels():
     m = triangular(3)
     H = m.operator()

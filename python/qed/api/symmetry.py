@@ -133,7 +133,10 @@ class Symmetry:
             A, residues = report.abelian or identity, report.residues
         else:
             gens = getattr(spatial, "generators", None)
-            star = list(getattr(spatial, "star_perms", None) or []) if gens is not None else []
+            star = []
+            if gens is not None and self.point_group:   # else a GeneratorSet's residues go unchecked
+                sp = getattr(spatial, "star_perms", None)
+                star = list(sp) if sp is not None else []
             perms = list(gens) + star if gens is not None else list(spatial)
             # Group arithmetic on a map that is not a bijection never closes (its powers never
             # return to the identity): refuse it before any.

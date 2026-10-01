@@ -1,10 +1,11 @@
 """Graph automorphisms of a spin Hamiltonian (pynauty), behind ``qed.find_symmetries``.
 
-The terms become a coloured graph (vertex colours from the one-body terms, and a
-subdivision vertex per interacting pair whose colour encodes the bond's couplings);
-its automorphisms that leave H invariant are the site symmetries. The classes then
-extract a maximal abelian subgroup (the momenta) and describe the group.
+The terms become a coloured graph: vertex colours from the one-body terms, a subdivision
+vertex per interacting pair whose colour encodes the bond's couplings, and one per triple of
+sites carrying three-body terms. Its automorphisms that leave H invariant are the site
+symmetries; ``qed._groups`` splits them for the sector engine.
 """
+import itertools
 from collections import defaultdict, deque
 
 import numpy as np
@@ -91,14 +92,32 @@ def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=10):
     vertex_colors = {v: final_map[colors[v]] for v in vertex_ids}
     return vertex_colors
 
-def construct_colored_graph(vertex_weights, edges):
+def _triple_signature(triple, terms):
+    """A label of the three-body terms on a site triple that does not depend on how the triple
+    is ordered: the least, over its six orderings, of the terms written by position."""
+    best = None
+    for order in itertools.permutations(triple):
+        pos = {s: k for k, s in enumerate(order)}
+        sig = tuple(sorted(tuple(sorted((pos[s], o) for s, o in zip(sites, ops))) + (w,)
+                           for sites, ops, w in terms))
+        if best is None or sig < best:
+            best = sig
+    return best
+
+
+def construct_colored_graph(vertex_weights, edges, triples=()):
     """Construct a colored undirected graph for pynauty with edge-type subdivision.
-    
-    Uses the subdivision trick for edge-colored graphs: for each pair (i,j) of 
-    interacting sites, an auxiliary vertex is inserted whose color encodes the 
-    bond type (the full set of coupling terms on that bond). This ensures that 
+
+    Uses the subdivision trick for edge-colored graphs: for each pair (i,j) of
+    interacting sites, an auxiliary vertex is inserted whose color encodes the
+    bond type (the full set of coupling terms on that bond). This ensures that
     nauty's automorphisms can only map bonds of the same type to each other.
-    
+    ``triples`` holds the three-body terms as ``((s1, s2, s3), (op1, op2, op3), coeff)``:
+    each triple of distinct sites gets an auxiliary vertex joined to its three sites and
+    coloured by :func:`_triple_signature`. That colour ignores the orientation of the
+    triple (a scalar chirality and its reverse look alike), so the group found may still
+    hold elements that reverse it; the exact term check that follows removes them.
+
     Returns:
         tuple: (graph, vertex_colors, idx_to_vid, vid_to_idx)
             - graph: pynauty Graph object
@@ -146,16 +165,29 @@ def construct_colored_graph(vertex_weights, edges):
     # Assign colors to unique bond signatures
     unique_sigs = sorted(set(bond_signatures.values()))
     sig_to_color = {sig: i for i, sig in enumerate(unique_sigs)}
-    
+
+    # Three-body terms, one auxiliary vertex per triple of distinct sites; a term that repeats
+    # a site constrains nothing here, and the exact check after the search still sees it.
+    triple_terms = _dd(list)
+    for sites, ops, coeff in triples:
+        if len(set(sites)) == 3 and all(s in vid_to_idx for s in sites):
+            c = complex(coeff)
+            triple_terms[tuple(sorted(sites))].append((sites, ops, _round_tuple((c.real, c.imag))))
+    triple_list = sorted(triple_terms)
+    triple_signatures = {t: _triple_signature(t, triple_terms[t]) for t in triple_list}
+    unique_triple_sigs = sorted(set(triple_signatures.values()))
+    triple_to_color = {sig: len(unique_sigs) + i for i, sig in enumerate(unique_triple_sigs)}
+
     n_bonds = len(bond_pairs)
-    n_total = n_original + n_bonds  # original vertices + auxiliary vertices
-    
-    _log.log(_log.DEBUG, "edge-coloured graph: %d vertices + %d auxiliary bond vertices, %d bond types",
-             n_original, n_bonds, len(unique_sigs))
-    
+    n_total = n_original + n_bonds + len(triple_list)  # original vertices + auxiliary vertices
+
+    _log.log(_log.DEBUG, "edge-coloured graph: %d vertices + %d auxiliary bond vertices (%d types) "
+             "+ %d triple vertices (%d types)", n_original, n_bonds, len(unique_sigs),
+             len(triple_list), len(unique_triple_sigs))
+
     # Build adjacency for expanded graph
     adjacency_dict = {i: [] for i in range(n_total)}
-    
+
     for bond_idx, (lo, hi) in enumerate(bond_pairs):
         aux_idx = n_original + bond_idx  # index of auxiliary vertex
         i, j = vid_to_idx[lo], vid_to_idx[hi]
@@ -164,6 +196,11 @@ def construct_colored_graph(vertex_weights, edges):
         adjacency_dict[aux_idx].append(i)
         adjacency_dict[j].append(aux_idx)
         adjacency_dict[aux_idx].append(j)
+    for t_idx, t in enumerate(triple_list):
+        aux_idx = n_original + n_bonds + t_idx
+        for s in t:
+            adjacency_dict[vid_to_idx[s]].append(aux_idx)
+            adjacency_dict[aux_idx].append(vid_to_idx[s])
     
     # Build vertex coloring
     # Original vertices: color from WL
@@ -178,7 +215,10 @@ def construct_colored_graph(vertex_weights, edges):
         aux_idx = n_original + bond_idx
         bond_color = max_vertex_color + sig_to_color[bond_signatures[pair]]
         color_to_vertices[bond_color].append(aux_idx)
-    
+    for t_idx, t in enumerate(triple_list):
+        color_to_vertices[max_vertex_color + triple_to_color[triple_signatures[t]]].append(
+            n_original + n_bonds + t_idx)
+
     coloring = [set(sorted(ids)) for _, ids in 
                 sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
     

@@ -26,7 +26,7 @@ orig = disc._run_full_automorphism_pipeline
 def counting(*a, **k):
     calls["n"] += 1
     out = orig(*a, **k)
-    calls["autos"] = len(out)
+    calls["autos"] = out[1]                 # nauty's |Aut|
     return out
 
 

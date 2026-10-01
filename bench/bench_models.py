@@ -19,8 +19,7 @@ def heisenberg_ring(N):
 def tri36():
     """(H, lattice, spatial): the 6x6 triangular torus, J1 Heisenberg; ``spatial`` names the
     space group p6m as the 36 translations (the momenta) times the site-centred point group
-    (the residues). A plain permutation list would leave the abelian part to the greedy
-    search, which picks a 12-element subgroup holding a rotation on this torus."""
+    (the residues), the split a plain permutation list of the same group also gets."""
     lat = qed.lattice.TriangularSupercell("36")
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     H = qed.input.HamiltonianBuilder(lat.N).heisenberg(bonds, 1.0).to_operator()

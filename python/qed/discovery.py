@@ -18,8 +18,8 @@ Permutation = list[int]
 
 def _operator_to_graph_records(
     operator: Operator,
-) -> tuple[dict[int, tuple[int, float, float]], list[dict[str, Any]]]:
-    """Build (vertex_weights, edges) records the
+) -> tuple[dict[int, tuple[int, float, float]], list[dict[str, Any]], list[tuple]]:
+    """Build (vertex_weights, edges, triples) records the
     ``automorphism_finder`` routines consume."""
     num_sites = int(operator.num_sites)
 
@@ -42,12 +42,15 @@ def _operator_to_graph_records(
             "type2": int(op2),
             "weight": (float(c.real), float(c.imag)),
         })
-    return vertex_weights, edges
+    triples = [((int(s1), int(s2), int(s3)), (int(o1), int(o2), int(o3)), complex(c))
+               for o1, s1, o2, s2, o3, s3, c in operator.iter_three_body_terms()]
+    return vertex_weights, edges, triples
 
 
 def _run_full_automorphism_pipeline(
     vertex_weights: dict[int, tuple[int, float, float]],
     edges: list[dict[str, Any]],
+    triples: list[tuple],
     construct_colored_graph,
     autgrp,
     AutomorphismFinder,
@@ -59,7 +62,7 @@ def _run_full_automorphism_pipeline(
     nothing is enumerated and the list is None (|Aut| reaches N! for field-only, empty or
     all-to-all H)."""
     graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(
-        vertex_weights, edges
+        vertex_weights, edges, triples
     )
     aut = autgrp(graph)
     # One auxiliary vertex per interacting pair, so the group of the expanded graph is that
@@ -89,13 +92,13 @@ def _run_full_automorphism_pipeline(
 def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> list[Permutation]:
     """Only the automorphisms that commute with the whole operator.
 
-    The colored graph is built from the one- and two-body terms, so its automorphisms
-    ignore three-body terms: a permutation that reverses the orientation of a scalar-
-    chirality triangle maps S_i.(S_j x S_k) to minus itself and still passes. On the 3x3
-    triangular torus with chirality on up-triangles, 1242 of the 1296 graph
-    automorphisms are not symmetries, and the projection lane folded k with -k from
-    them. The term-level check is exact and sees every term; the survivors are the
-    intersection of two groups, hence a group."""
+    The colored graph sees which site triples carry three-body terms, but not their
+    orientation: a permutation that reverses a scalar-chirality triangle maps
+    S_i.(S_j x S_k) to minus itself and is still a graph automorphism. Before the triples
+    entered the graph, 1242 of the 1296 automorphisms of the 3x3 triangular torus with
+    chirality on up-triangles were not symmetries, and the projection lane folded k with
+    -k from them. The term-level check is exact and sees every term; the survivors are
+    the intersection of two groups, hence a group."""
     if not autos or not any(True for _ in operator.iter_three_body_terms()):
         return autos
     from . import _core
@@ -374,10 +377,13 @@ class SymmetryReport:
         the identity alone without spatial symmetry) ...
     residues : list[Permutation]
         ... and one representative per coset of it (the point group).
+        Under a ``co_group_capped`` diagnostic the group was cut down:
+        ``abelian`` is then a maximal abelian subgroup, normal in the
+        subgroup the residues span with it.
     diagnostics : list[tuple[str, str]]
         (code, message) pairs, e.g. ``("aut_capped", ...)`` when the
         automorphism group was too large to enumerate and no spatial
-        symmetry is used.
+        symmetry is used, ``("co_group_capped", ...)`` when it was cut down.
     """
 
     num_sites: int
@@ -514,8 +520,10 @@ def find_symmetries(
     The automorphisms of H's coloured interaction graph that commute with H are split into
     the largest normal abelian subgroup (``report.abelian``, the momenta) and one
     representative per coset of it (``report.residues``, the point group): the split
-    ``Symmetry(spatial="auto")`` uses. A group of more than 4096 elements is not
+    ``Symmetry(spatial="auto")`` uses. A graph with more than 4096 automorphisms is not
     enumerated; the report then carries no spatial symmetry and says so in ``diagnostics``.
+    A group whose co-group would exceed 128 elements is cut down to a subgroup, also with a
+    diagnostic.
 
     The search is memoised on the operator's term content (+ lattice + flags), so a
     ``spatial="auto"`` sweep that calls this repeatedly on the same H pays it once.
@@ -609,7 +617,7 @@ def _find_symmetries_impl(
     # 2. Build (vertex_weights, edges) Python records that the
     #    automorphism_finder routines consume.
     # ------------------------------------------------------------------
-    vertex_weights, edges = _operator_to_graph_records(operator)
+    vertex_weights, edges, triples = _operator_to_graph_records(operator)
 
     # ------------------------------------------------------------------
     # 3. Run the automorphism pipeline (or just the translation filter).
@@ -643,19 +651,20 @@ def _find_symmetries_impl(
             "`pip install pynauty` (or skip find_symmetries "
             "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
-    from ._groups import close_group, maximal_abelian_subgroup, spatial_split
+    from ._groups import close_group, maximal_abelian_subgroup, normaliser_split, spatial_split
 
     diagnostics: list[tuple[str, str]] = []
     identity = [list(range(num_sites))]
     all_automorphisms, aut_order = _run_full_automorphism_pipeline(
-        vertex_weights, edges,
+        vertex_weights, edges, triples,
         construct_colored_graph, autgrp,
         AutomorphismFinder, filter_hamiltonian_automorphisms,
         cap=_AUT_ENUMERATION_CAP,
     )
     if all_automorphisms is None:
-        msg = (f"|Aut(H)| = {aut_order:.6g} exceeds {_AUT_ENUMERATION_CAP}: no spatial symmetry "
-               "is used. Pass Symmetry(spatial=[...]) with generators of a subgroup to use one.")
+        msg = (f"H's interaction graph has {aut_order:.6g} automorphisms, more than "
+               f"{_AUT_ENUMERATION_CAP}: no spatial symmetry is used. Pass "
+               "Symmetry(spatial=[...]) with generators of a subgroup to use one.")
         _log.log(note, "[qed.find_symmetries] %s", msg)
         diagnostics.append(("aut_capped", msg))
         all_automorphisms = identity
@@ -672,13 +681,13 @@ def _find_symmetries_impl(
             # momenta come from must stay abelian.
             translations = [tuple(t) for t in maximal_abelian_subgroup(translations)]
         if translations is not None and len(translations) > 1:
-            # The ENTIRE point group is this set's residue -- translations
-            # project, the point group folds the k sectors into isospectral
-            # stars (the textbook space-group split).
-            _t_keys = set(translations)
+            # The residues are the cosets of the translations in their normaliser: the
+            # point group that folds the k sectors into isospectral stars (the textbook
+            # space-group split). An accidental symmetry that does not normalise the
+            # translations has no place in this split.
+            T, point_group = normaliser_split(all_automorphisms, translations)
             translation_set = _generator_set(
-                [list(t) for t in translations],
-                [list(pp) for pp in all_automorphisms if tuple(pp) not in _t_keys],
+                T, point_group,
                 name="translation",
                 description=(
                     "Pure lattice translations (preserves all positions "

@@ -27,9 +27,9 @@ def build(j2, h):
 
 
 Hu, Hj, Hh = build(0, 0), build(0.5, 0), build(0, 0.3)
-ku = _find_symmetries_key(Hu, None, False, 512)
-kj = _find_symmetries_key(Hj, None, False, 512)
-kh = _find_symmetries_key(Hh, None, False, 512)
+ku = _find_symmetries_key(Hu, None, False)
+kj = _find_symmetries_key(Hj, None, False)
+kh = _find_symmetries_key(Hh, None, False)
 try:
     sorted(tuple(t) for t in Hj.transform_tuples())
     sort_err = None

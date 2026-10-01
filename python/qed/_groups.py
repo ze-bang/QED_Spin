@@ -24,7 +24,7 @@ import numpy as np
 from .errors import InvalidRequest
 
 __all__ = ["close_group", "normal_abelian_split", "spatial_split", "split_generator_set",
-           "split_nonabelian", "abelian_generators", "maximal_abelian_subgroup"]
+           "split_nonabelian", "abelian_generators", "maximal_abelian_subgroup", "normaliser_split"]
 
 _GROUP_CLOSURE_CAP = 4096   # G (and so A) must stay enumerable
 _CO_GROUP_CAP = 128         # |G'/A|: Oh (48) fits, and so do the accidental groups of small tori
@@ -33,6 +33,12 @@ _CO_GROUP_CAP = 128         # |G'/A|: Oh (48) fits, and so do the accidental gro
 def _compose(g, e):
     """(g.e)[i] = e[g[i]]."""
     return tuple(e[g[i]] for i in range(len(g)))
+
+
+def _rows(perms) -> list[tuple[int, ...]]:
+    """A permutation list (any sequence of rows, a numpy array included; None for none) as
+    tuples of ints."""
+    return [] if perms is None else [tuple(int(x) for x in p) for p in perms]
 
 
 def close_group(gens, cap=_GROUP_CLOSURE_CAP):
@@ -341,6 +347,16 @@ def maximal_abelian_subgroup(G) -> list[list[int]]:
     return [list(E.elems[i]) for i in _maximal_abelian(E)]
 
 
+def normaliser_split(G, A) -> tuple[list[list[int]], list[list[int]]]:
+    """``(A, residues)`` for the closed group ``G`` and an abelian subgroup ``A`` of it: one residue
+    per coset of A in its normaliser N_G(A), the largest part of G that stands with A as its
+    abelian part."""
+    E = _Enumerated(G)
+    A_idx = np.sort(E.lookup(np.asarray([[int(x) for x in a] for a in A], dtype=np.int64)))
+    N = _normalizer(E, A_idx)
+    return _checked(E, A_idx, N, _cosets(E, A_idx, N))
+
+
 def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list[int]], list[list[int]]]:
     """``(A, residues)`` for an explicit split: A the group the generators close (the identity alone
     without generators), residues one per coset of A among ``star_perms``. Raises InvalidRequest when
@@ -384,14 +400,14 @@ def split_nonabelian(symmetry_or_gens):
     """
     gens = getattr(symmetry_or_gens, "generators", None)
     if gens is not None:
-        star = list(getattr(symmetry_or_gens, "star_perms", None) or [])
-        if not gens and not star:
+        star = _rows(getattr(symmetry_or_gens, "star_perms", None))
+        if len(gens) == 0 and not star:
             return "the symmetry has no spatial generators"
         A, residues = split_generator_set(gens, star)
         if not residues:
             return "no point-group residue outside the abelian group"
         return A, residues
-    perms = [tuple(p) for p in (symmetry_or_gens or [])]
+    perms = _rows(symmetry_or_gens)
     if not perms:
         return "no generators given"
     G = close_group(perms)

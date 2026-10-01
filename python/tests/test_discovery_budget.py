@@ -196,6 +196,30 @@ def test_co_group_cap_uses_a_normaliser_and_matches_dense():
     np.testing.assert_allclose(np.sort(r.energies), _dense_oracle(H, 6), atol=1e-10)
 
 
+def test_three_body_terms_enter_the_graph():
+    """Scalar chirality alone, on the up-triangles of the 3x3 triangular torus: without two-body
+    terms the pair graph has 9! automorphisms, but the triples bring the graph's group under the
+    cap, and the term check keeps the orientation-preserving part, the translations included."""
+    from grid.models import triple
+    from qed._groups import close_group
+    L = 3
+    idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
+    code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
+    H = qed.Operator(L * L, 0.5)
+    for y in range(L):
+        for x in range(L):
+            for c, ops in triple(idx(x, y), idx(x + 1, y), idx(x, y + 1), 0.5):
+                if abs(c) > 1e-15:
+                    H.add_three_body(*[v for op, s in ops for v in (code[op], s)], c)
+    rep = qed.find_symmetries(H, verbose=False)
+    assert "aut_capped" not in _codes(rep.diagnostics)
+    G = set(close_group(rep.abelian + rep.residues))
+    xy = [(x, y) for y in range(L) for x in range(L)]
+    assert tuple(idx(x + 1, y) for x, y in xy) in G and tuple(idx(x, y + 1) for x, y in xy) in G
+    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
+                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+
+
 def test_clique_budget_is_deprecated_and_ignored():
     H = _ring(6)
     with pytest.warns(DeprecationWarning, match="clique_budget"):
