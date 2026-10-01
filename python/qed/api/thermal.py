@@ -42,14 +42,17 @@ class ThermalResult:
 @_log.replays
 def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
             samples: int = 40, krylov: Optional[int] = None, exact_states: int = 0,
-            seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None) -> ThermalResult:
+            seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None,
+            dense_max_dim: Optional[int] = None) -> ThermalResult:
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
     Lanczos; ``exact_states > 0`` treats that many lowest states of each block exactly),
     or ``"mtpq"`` (microcanonical thermal pure quantum states). ``krylov`` is the FTLM
     Lanczos depth (default 100) or the mTPQ step count (default: automatic). ``samples``
-    random vectors per block; ``seed`` 0 draws one.
+    random vectors per block; ``seed`` 0 draws one. ``dense_max_dim``: the sampled methods
+    diagonalise blocks up to this dimension exactly instead (a sampled trace needs a dimension
+    well above ``samples``); ``None`` is 512, 0 always samples.
 
     ``observables``: operators O whose thermal averages <O>(T) = Tr(e^{-H/T} O) / Z are
     returned in ``O`` (methods ``"exact"`` and ``"ftlm"`` without ``exact_states``). O may
@@ -67,6 +70,10 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     t.samples = int(samples)
     t.krylov = int(krylov) if krylov is not None else (0 if key == "mtpq" else 100)
     t.exact_states = int(exact_states)
+    if dense_max_dim is not None:
+        if int(dense_max_dim) < 0:
+            raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
+        t.dense_max_dim = int(dense_max_dim)
     t.seed = int(seed)
     t.device = _device.resolve(device)
     ops = [] if observables is None else list(observables)

@@ -7,14 +7,11 @@ little co-group has a 2-dim irrep, e.g. Gamma and M of a C4v square cluster) run
 out of device_blocks, while the plain momentum sectors of the same stars do run on the GPU.
 
 Model: 4x4 square torus J1-J2 (J2=0.3), sz/spin_flip/time_reversal off so the blocks are
-large (momentum sectors 4096). ED_SYM_LG_DENSE_FLOOR=100 keeps every block above the host
+large (momentum sectors 4096). dense_max_dim=100 keeps every block above the host
 dense crossover. eigs(k=1, prune=False, window=1e6) returns one level per block, carrying
 block_dim, irrep_dim and k0; a star is a W star when any of its levels has irrep_dim > 1."""
-import os
-
-os.environ["ED_SYM_LG_DENSE_FLOOR"] = "100"
-import numpy as np  # noqa: E402
-import qed  # noqa: E402
+import numpy as np
+import qed
 
 if qed._core.cuda_device_count() == 0:
     print("REPRO: INCONCLUSIVE no CUDA device")
@@ -36,7 +33,8 @@ FLOOR = 100
 
 def run(point_group):
     sym = qed.Symmetry(sz="off", spin_flip="off", time_reversal="off", point_group=point_group)
-    r = qed.eigs(H, 1, sym=sym, device="gpu", prune=False, window=1e6, allow_partial=True)
+    r = qed.eigs(H, 1, sym=sym, device="gpu", prune=False, window=1e6, allow_partial=True,
+                 dense_max_dim=FLOOR)
     keys = {}
     for L_ in r.levels:
         key = (L_.n_up, L_.sz_parity, L_.k0, L_.irrep, L_.flip_parity)

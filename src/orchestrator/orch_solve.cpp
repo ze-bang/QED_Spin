@@ -14,8 +14,6 @@
 
 namespace ed::workflows {
 
-using namespace orch_detail;
-
 namespace {
 
 // Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full

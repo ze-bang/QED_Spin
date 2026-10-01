@@ -36,6 +36,7 @@ struct DynamicsSpec {
     std::size_t         samples        = 30;   ///< T > 0: random vectors per source sector
     std::uint64_t       seed           = 0;    ///< 0 = draw one
     double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window
+    int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
     Device              device         = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
 };
 

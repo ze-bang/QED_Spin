@@ -5,12 +5,10 @@
 can watch the device code the C++ unit tests do not reach: rep-gather matvec, multi-vector batched gather
 (FTLM/mTPQ/FTLM-dynamics samples), batched cuSOLVER spectrum, device tower projector (total_spin),
 eigenvectors and expect. Prints device_blocks per call to prove the device was engaged."""
-import os
 import numpy as np
 import qed
 from grid.models import MODELS
 
-os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"          # small blocks onto the device path (as the grid does)
 if qed._core.cuda_device_count() == 0:
     print("REPRO: INCONCLUSIVE no GPU"); raise SystemExit(0)
 T = np.linspace(0.5, 3.0, 6)
@@ -26,8 +24,9 @@ for mname in ("chain12", "tri9chi"):
     for j in range(N):
         O.add_one_body(qed.OP_SZ, j, np.exp(-2j * np.pi * j / N) / np.sqrt(N))
     calls = [
-        ("eigs", lambda: qed.eigs(H, 4, sym=lg, device="gpu", prune=False).device_blocks),
-        ("eigs+vectors", lambda: qed.eigs(H, 2, sym=lg, vectors=True, device="gpu", prune=False).device_blocks),
+        ("eigs", lambda: qed.eigs(H, 4, sym=lg, device="gpu", prune=False, dense_max_dim=0).device_blocks),
+        ("eigs+vectors", lambda: qed.eigs(H, 2, sym=lg, vectors=True, device="gpu", prune=False,
+                                          dense_max_dim=0).device_blocks),
         ("spectrum", lambda: qed.spectrum(H, sym=lg, device="gpu").device_blocks),
         ("ftlm", lambda: qed.thermal(H, T, method="ftlm", sym=lg, samples=4, krylov=30, seed=3, device="gpu").device_blocks),
         ("mtpq", lambda: qed.thermal(H, T, method="mtpq", sym=lg, samples=2, seed=3, device="gpu").device_blocks),

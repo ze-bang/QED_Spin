@@ -9,15 +9,17 @@ silently solved on small blocks / default settings and refused on the walk lane.
 Test: 12-site Heisenberg chain + 0.3j S+_0 S-_1 with no conjugate partner, Sz=0 sector, no
 spatial symmetry (one 924-state block). Three subprocesses:
   (a) default settings (dense block),
-  (b) ED_SYM_LG_DENSE_FLOOR=0 (Krylov on the reduced CSR),
-  (c) ED_SYM_LG_DENSE_FLOOR=0 ED_SYM_REDUCED_CSR=0 (Krylov on the rep walk).
+  (b) dense_max_dim=0 (Krylov on the reduced CSR),
+  (c) dense_max_dim=0 and ED_SYM_REDUCED_CSR=0 (Krylov on the rep walk).
 Claim holds if (a)/(b) return energies while (c) raises the Hermiticity error."""
 import os
 import subprocess
 import sys
 
 CODE = r"""
+import sys
 import numpy as np, qed
+DMD = None if sys.argv[1] == "auto" else int(sys.argv[1])
 N = 12
 H = qed.Operator(N)
 for i in range(N - 1):
@@ -27,23 +29,23 @@ for i in range(N - 1):
 H.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.3j)   # no Hermitian partner
 sym = qed.Symmetry(spatial=None, sz=N // 2, spin_flip="off", time_reversal="off", point_group=False)
 try:
-    r = qed.eigs(H, 2, sym=sym, device="cpu")
+    r = qed.eigs(H, 2, sym=sym, device="cpu", dense_max_dim=DMD)
     print("RESULT OK", " ".join(f"{e:.10f}" for e in r.energies))
 except Exception as ex:
     print("RESULT RAISED", type(ex).__name__, str(ex)[:200].replace("\n", " "))
 """
 
 cases = {
-    "a_default": {},
-    "b_krylov_csr": {"ED_SYM_LG_DENSE_FLOOR": "0"},
-    "c_krylov_walk": {"ED_SYM_LG_DENSE_FLOOR": "0", "ED_SYM_REDUCED_CSR": "0"},
+    "a_default": ("auto", {}),
+    "b_krylov_csr": ("0", {}),
+    "c_krylov_walk": ("0", {"ED_SYM_REDUCED_CSR": "0"}),
 }
 out = {}
-for name, extra in cases.items():
+for name, (dmd, extra) in cases.items():
     env = dict(os.environ)
     env.update(extra)
     try:
-        p = subprocess.run([sys.executable, "-c", CODE], env=env, capture_output=True, text=True,
+        p = subprocess.run([sys.executable, "-c", CODE, dmd], env=env, capture_output=True, text=True,
                            timeout=150)
         line = next((l for l in p.stdout.splitlines() if l.startswith("RESULT")),
                     f"RESULT NONE rc={p.returncode} err={p.stderr[-200:]!r}")

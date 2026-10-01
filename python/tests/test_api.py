@@ -588,3 +588,39 @@ def test_sz_parity_must_agree_with_the_total_spin():
         qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="even"))
     np.testing.assert_allclose(qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="odd")).energies,
                                qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1)).energies, atol=1e-12)
+
+
+def test_dense_max_dim_is_the_eigs_crossover():
+    # One Sz block of dimension 252: below the automatic crossover it is solved densely; an
+    # explicit dense_max_dim is honoured exactly (0: Krylov-Schur), with the same levels.
+    H = _ring(10, 0.3)
+    sym = qed.Symmetry(spatial=None, sz=5, spin_flip="off", time_reversal="off")
+    auto = qed.eigs(H, 4, sym=sym)
+    dense = qed.eigs(H, 4, sym=sym, dense_max_dim=252)
+    krylov = qed.eigs(H, 4, sym=sym, dense_max_dim=251)
+    assert [b["lane"] for b in auto.block_stats] == ["dense"]
+    assert [b["lane"] for b in dense.block_stats] == ["dense"]
+    assert all(b["lane"] != "dense" for b in krylov.block_stats)
+    np.testing.assert_allclose(krylov.energies, dense.energies, atol=1e-10)
+    vk = qed.eigs(H, 1, sym=sym, vectors=True, dense_max_dim=0)
+    np.testing.assert_allclose(vk.energies, dense.energies[:1], atol=1e-10)
+    with pytest.raises(qed.errors.InvalidRequest, match="dense_max_dim"):
+        qed.eigs(H, 1, sym=sym, dense_max_dim=-1)
+
+
+def test_dense_max_dim_is_the_thermal_crossover():
+    # A 70-dim block: the sampled methods diagonalise it (it is below 512) unless
+    # dense_max_dim=0 asks for the sampled trace.
+    H = _ring(8, 0.3)
+    sym = qed.Symmetry(spatial=None, sz=4, spin_flip="off", time_reversal="off")
+    T = [1.0, 2.0, 4.0]
+    exact = qed.thermal(H, T, method="exact", sym=sym)
+    for method in ("ftlm", "mtpq"):
+        small = qed.thermal(H, T, method=method, sym=sym, samples=4, seed=3)
+        np.testing.assert_allclose(small.E, exact.E, atol=1e-10)
+        assert small.placement["host_dense"] == 1 and small.placement["host_krylov"] == 0
+        sampled = qed.thermal(H, T, method=method, sym=sym, samples=4, seed=3, dense_max_dim=0)
+        assert sampled.placement["host_krylov"] == 1 and sampled.placement["host_dense"] == 0
+        assert float(np.max(np.abs(sampled.E - exact.E))) > 1e-8
+    with pytest.raises(qed.errors.InvalidRequest, match="dense_max_dim"):
+        qed.thermal(H, T, method="ftlm", sym=sym, dense_max_dim=-5)

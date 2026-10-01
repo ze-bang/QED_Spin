@@ -20,7 +20,7 @@
 //             anything else -> true.   (Presence alone never enables a flag:
 //             FOO=0 means off.)
 //   tristate  unset or "" -> nullopt (the engine decides); otherwise as flag.
-//   integer / real   unset, "" or unparsable -> the default.
+//   real      unset, "" or unparsable -> the default.
 //   text      unset -> the default; "" is returned as "".
 // Accessors read the environment on every call (tests toggle gates without
 // restarting the process). A caller that needs a value fixed for the process
@@ -72,8 +72,6 @@ struct Row {
       "AGGREGATE reduced-CSR byte budget; over-budget sectors fall back to the CSR-free walk")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
-    X("ED_SYM_LG_DENSE_FLOOR", Integer, "little-group", "max(dense_max_dim, 4 * max_iter_cap)",\
-      "Raises the dense/Lanczos crossover so larger blocks solve exactly (=1 in tests forces the Lanczos path at toy dims)")\
     X("ED_CSR_FORCE", Tristate, "krylov", "-1 (use the dim cutoff)",           \
       "=1 always assemble CSR, =0 never (matrix-free always), unset -> use csr_cutoff_dim")\
     X("ED_CSR_DIM_MAX", Integer, "krylov", "the caller's default cutoff",\
@@ -82,8 +80,6 @@ struct Row {
       "=1 uses the atomic-scatter SpMV kernel instead of the lock-free row gather (for bisection)")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
       "=1 logs per-bucket us timers inside lanczos_kernel at Info (A/B against lanczos_real)")\
-    X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
-      "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
@@ -135,15 +131,6 @@ inline const std::vector<Row>& rows() {
 
 [[nodiscard]] inline bool flag(const char* name, bool dflt) {
     return tristate(name).value_or(dflt);
-}
-
-[[nodiscard]] inline long long integer(const char* name, long long dflt) {
-    const char* v = std::getenv(name);
-    if (v == nullptr || v[0] == '\0') return dflt;
-    errno = 0;
-    char* end = nullptr;
-    const long long x = std::strtoll(v, &end, 10);
-    return (errno != 0 || end == v) ? dflt : x;
 }
 
 [[nodiscard]] inline double real(const char* name, double dflt) {

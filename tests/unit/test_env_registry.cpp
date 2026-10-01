@@ -30,8 +30,8 @@ TEST_CASE("env registry: rows are unique and well formed", "[env]") {
         REQUIRE(std::string(r.scope).size() > 0);
     }
     REQUIRE(seen.size() > 10);
-    REQUIRE(ed::env::is_registered("ED_SYM_LG_DENSE_FLOOR"));
-    REQUIRE_FALSE(ed::env::is_registered("ED_SYM_LG_DENSE_FLOORR"));
+    REQUIRE(ed::env::is_registered("ED_SYM_SECTOR_CSR_BUDGET_GIB"));
+    REQUIRE_FALSE(ed::env::is_registered("ED_SYM_SECTOR_CSR_BUDGET_GIBB"));
 }
 
 TEST_CASE("env registry: a flag set to 0 is OFF, presence alone never enables", "[env]") {
@@ -57,33 +57,27 @@ TEST_CASE("env registry: a flag set to 0 is OFF, presence alone never enables", 
     }
 }
 
-TEST_CASE("env registry: numbers fall back to the default when unset, empty or unparsable", "[env]") {
-    const char* n = "ED_SYM_LG_DENSE_FLOOR";
-    ::unsetenv(n);
-    REQUIRE(ed::env::integer(n, 4) == 4);
-    { ScopedEnv e(n, "");     REQUIRE(ed::env::integer(n, 4) == 4); }
-    { ScopedEnv e(n, "abc");  REQUIRE(ed::env::integer(n, 4) == 4); }
-    { ScopedEnv e(n, "30");   REQUIRE(ed::env::integer(n, 4) == 30); }
-    { ScopedEnv e(n, "-2");   REQUIRE(ed::env::integer(n, 4) == -2); }
+TEST_CASE("env registry: a number falls back to the default when unset, empty or unparsable", "[env]") {
     const char* r = "ED_SYM_SECTOR_CSR_BUDGET_GIB";
     ::unsetenv(r);
     REQUIRE(ed::env::real(r, 1e-8) == 1e-8);
     { ScopedEnv e(r, "1e-6"); REQUIRE(ed::env::real(r, 1e-8) == 1e-6); }
+    { ScopedEnv e(r, "");     REQUIRE(ed::env::real(r, 1e-8) == 1e-8); }
     { ScopedEnv e(r, "x");    REQUIRE(ed::env::real(r, 1e-8) == 1e-8); }
 }
 
 TEST_CASE("env registry: snapshot lists what is set; unknown() catches a misspelt name", "[env]") {
-    ScopedEnv good("ED_SYM_LG_DENSE_FLOOR", "7");
-    ScopedEnv typo("ED_SYM_LG_DENSE_FLOR", "7");
+    ScopedEnv good("ED_SYM_SECTOR_CSR_BUDGET_GIB", "7");
+    ScopedEnv typo("ED_SYM_SECTOR_CSR_BUDGT_GIB", "7");
     ScopedEnv harness("ED_TEST_TMP_DIR", "x");
     bool in_snapshot = false;
     for (const auto& kv : ed::env::snapshot())
-        in_snapshot = in_snapshot || (kv.first == "ED_SYM_LG_DENSE_FLOOR" && kv.second == "7");
+        in_snapshot = in_snapshot || (kv.first == "ED_SYM_SECTOR_CSR_BUDGET_GIB" && kv.second == "7");
     REQUIRE(in_snapshot);
     const auto unk = ed::env::unknown();
     const std::set<std::string> u(unk.begin(), unk.end());
-    REQUIRE(u.count("ED_SYM_LG_DENSE_FLOR") == 1);
-    REQUIRE(u.count("ED_SYM_LG_DENSE_FLOOR") == 0);
+    REQUIRE(u.count("ED_SYM_SECTOR_CSR_BUDGT_GIB") == 1);
+    REQUIRE(u.count("ED_SYM_SECTOR_CSR_BUDGET_GIB") == 0);
     REQUIRE(u.count("ED_TEST_TMP_DIR") == 0);      // harness namespace is not scanned
-    REQUIRE(ed::env::dump("ED_SYM_LG_DENSE_FLOOR").find("ED_SYM_LG_DENSE_FLOOR") != std::string::npos);
+    REQUIRE(ed::env::dump("ED_SYM_SECTOR_CSR_BUDGET_GIB").find("ED_SYM_SECTOR_CSR_BUDGET_GIB") != std::string::npos);
 }

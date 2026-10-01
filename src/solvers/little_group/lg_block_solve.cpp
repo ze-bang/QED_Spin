@@ -70,8 +70,10 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // the device lane of the sectors eigensolve (lg_sectors.cpp) makes exactly the same dense-vs-Lanczos
 // decision as the CPU ``solve_block_lowest``.
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
-    // Sized by the eigenvalue-scan iteration cap max(40k, 400).
-    // ED_SYM_LG_DENSE_FLOOR is the explicit dense-crossover override.
+    // An explicit crossover (EigsOptions::dense_max_dim >= 0) is the caller's: 0 sends
+    // every block above dimension 2 to Krylov, a large value solves exactly.
+    if (dense_max_dim >= 0) return static_cast<std::uint64_t>(dense_max_dim);
+    // Automatic: sized by the eigenvalue-scan iteration cap max(40k, 400).
     const std::uint64_t max_iter_cap =
         std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
     // With the contiguous k-lowest Paige gate the Lanczos path is honest at
@@ -82,14 +84,9 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
     // the validated degenerate cases (the 4x4 n_up=8 blocks ~800) and
     // leaves larger blocks to Lanczos, where threaded zheevd would cost
     // 8-15 s of latency-bound time PER BLOCK in the serial star walk
-    // (an N=20 ring walk: 227 s dense vs 0.7 s). Raise
-    // ED_SYM_LG_DENSE_FLOOR when a mid-band block needs exact
-    // multiplicities.
-    std::uint64_t dense_floor = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(dense_max_dim), 4u * max_iter_cap);
-    if (const long long df = ed::env::integer("ED_SYM_LG_DENSE_FLOOR", -1); df >= 0)
-        dense_floor = static_cast<std::uint64_t>(df);
-    return dense_floor;
+    // (an N=20 ring walk: 227 s dense vs 0.7 s). Pass a larger
+    // dense_max_dim when a mid-band block needs exact multiplicities.
+    return 4u * max_iter_cap;
 }
 
 // Several lowest levels of one block above the dense crossover: thick-restart
@@ -196,9 +193,8 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // any dim: an unconverged low value truncates and flags, it is never
     // replaced by a higher one). Dense resolves true multiplicities and is
     // cheapest below ~4x the iteration cap. See lowest_dense_floor for the
-    // sizing and the ED_SYM_LG_DENSE_FLOOR override (raise it for exact
-    // multiplicities on a suspect block; set it to 1 in tests to force the
-    // Lanczos path at toy dims).
+    // sizing and the explicit dense_max_dim (raise it for exact multiplicities
+    // on a suspect block; 0 in tests forces the Lanczos path at toy dims).
     const std::uint64_t dense_floor = lowest_dense_floor(k, dense_max_dim);
     if (nb <= dense_floor || nb <= 2) {
         const std::vector<double> w = dense_block_eigenvalues(mv);  // ascending
@@ -396,7 +392,7 @@ solve_block_eigenpairs(const ed::matvec::MatVecOperator& mv, int want,
     }
     if (k == 1) {
         try {
-            auto [e0, v] = solve_gs_vector(mv, dense_max_dim);
+            auto [e0, v] = solve_gs_vector(mv);
             ev.push_back(e0);
             vv.push_back(std::move(v));
         } catch (const std::runtime_error&) {

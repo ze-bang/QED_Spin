@@ -65,6 +65,13 @@ def env_snapshot() -> dict:
     return dict(_core.env_snapshot())
 
 
+# Variables that became arguments: the hint names the argument.
+_REMOVED_ENV = {
+    "ED_SYM_LG_DENSE_FLOOR": "qed.eigs(..., dense_max_dim=...)",
+    "ED_THERMAL_EXACT_SMALL": "qed.thermal(..., dense_max_dim=0) to always sample",
+}
+
+
 def _check_environment() -> None:
     """A misspelt ``ED_*`` variable is read by nothing and would fail silently.
     Unknown names warn once at import; ``ED_ENV_STRICT=1`` turns the warning into an
@@ -79,7 +86,10 @@ def _check_environment() -> None:
     parts = []
     for n in sorted(unknown):
         near = difflib.get_close_matches(n, names, n=1, cutoff=0.75)
-        parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
+        if n in _REMOVED_ENV:
+            parts.append(f"{n} (removed: pass {_REMOVED_ENV[n]})")
+        else:
+            parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
     msg = ("qed: environment variable(s) not read by anything: " + ", ".join(parts)
            + ". See qed.debug_env() for the variables that exist.")
     if _os.environ.get("ED_ENV_STRICT", "") not in ("", "0"):

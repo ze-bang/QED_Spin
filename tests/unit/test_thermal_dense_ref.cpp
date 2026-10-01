@@ -44,10 +44,10 @@
 //
 // Which KERNEL runs
 // -----------------
-// N=6 (dim=64) sits under the orchestrator's SMALL_THERMAL_DIM=512 exact
-// fallback, which answers every sampling method exactly and would leave the
-// estimators this file exists to gate completely untested.  This file sets
-// ED_THERMAL_EXACT_SMALL=0 at static-init so the real kernels run.
+// N=6 (dim=64) sits under the orchestrator's exact fallback (ThermalOptions::
+// dense_max_dim, default 512), which answers every sampling method exactly and
+// would leave the estimators this file exists to gate completely untested.
+// Every option builder below sets dense_max_dim = 0 so the real kernels run.
 // test_thermal_exact_small_fallback pins the fallback itself.
 //
 // Both grids are precomputed and passed via ``opts.betas`` so they exactly
@@ -79,7 +79,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>          // setenv (ED_THERMAL_EXACT_SMALL)
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -111,15 +110,6 @@ constexpr uint64_t N_BROAD   = 15;
 constexpr double T_HIGH_MIN  = 3.0;
 constexpr double T_HIGH_MAX  = 10.0;
 constexpr uint64_t N_HIGH    = 10;
-
-// Force the sampling KERNELS. dim=64 < SMALL_THERMAL_DIM=512, so without this
-// the orchestrator answers every FTLM/mTPQ cell from an exact eigensolve
-// and this file silently stops testing the estimators at all. Set at static
-// init, before any thermal() call. See the "Which KERNEL runs" note above.
-const bool kForceSamplingKernels = [] {
-    ::setenv("ED_THERMAL_EXACT_SMALL", "0", /*overwrite=*/1);
-    return true;
-}();
 
 // Tolerances.
 constexpr double TOL_E  = 0.08;
@@ -230,6 +220,7 @@ void check_thermo_close(const ThermodynamicData& got,
 ThermalOptions make_ftlm_opts(uint64_t seed, bool allow_gpu = false) {
     ThermalOptions o;
     o.method       = ThermalOptions::Method::FTLM;
+    o.dense_max_dim = 0;   // dim 64: force the sampling kernel (see "Which KERNEL runs")
     o.num_samples  = 50;
     o.krylov_dim   = 60;
     o.betas        = BETAS_BROAD;
@@ -241,6 +232,7 @@ ThermalOptions make_ftlm_opts(uint64_t seed, bool allow_gpu = false) {
 ThermalOptions make_mtpq_opts(uint64_t seed, bool allow_gpu = false) {
     ThermalOptions o;
     o.method       = ThermalOptions::Method::mTPQ;
+    o.dense_max_dim = 0;   // dim 64: force the sampling kernel (see "Which KERNEL runs")
     // 50 samples: brings statistical error well below TOL_E=0.08 at T=T_HIGH_MIN.
     o.num_samples  = 50;
     // max_iter=200 with T_MIN=3.0 → L_auto≈1206, β_200≈0.331 ≈ 1/3.0.

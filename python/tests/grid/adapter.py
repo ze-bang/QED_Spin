@@ -3,9 +3,6 @@ content, the device and the task knobs, and returns plain numpy data for the ora
 `Missing` means the API has no route for the cell."""
 from __future__ import annotations
 
-import contextlib
-import os
-
 import numpy as np
 
 from qed.api import Symmetry
@@ -54,21 +51,9 @@ def _sym(m, content):
     raise Missing(f"content {content!r} is not in the sector-resolved API yet")
 
 
-@contextlib.contextmanager
-def _device_engaged(device):
+def _dense_max_dim(device):
     """Grid blocks are below the dense crossover; drop it so GPU cells run the device path."""
-    if device != "gpu":
-        yield
-        return
-    old = os.environ.get("ED_SYM_LG_DENSE_FLOOR")
-    os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"
-    try:
-        yield
-    finally:
-        if old is None:
-            os.environ.pop("ED_SYM_LG_DENSE_FLOOR")
-        else:
-            os.environ["ED_SYM_LG_DENSE_FLOOR"] = old
+    return 0 if device == "gpu" else None
 
 
 def _on_device(device, r):
@@ -84,15 +69,15 @@ def _on_device(device, r):
 
 def eigs(m, H, content, device, k):
     # GPU cells solve every block (prune=False), so the device path is what they measure.
-    with _device_engaged(device):
-        r = _eigs(H, k, sym=_sym(m, content), device=device, prune=(device == "cpu"))
+    r = _eigs(H, k, sym=_sym(m, content), device=device, prune=(device == "cpu"),
+              dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
     return np.sort(r.energies)
 
 
 def vectors(m, H, content, device, k):
-    with _device_engaged(device):
-        r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=False)
+    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=False,
+              dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
     return r.energies, r.vectors(basis="full")
 
@@ -103,10 +88,11 @@ def spectrum(m, H, content, device):
     return r.energies
 
 
-def thermal(m, H, content, device, method, T, samples, krylov, seed, observables=None):
+def thermal(m, H, content, device, method, T, samples, krylov, seed, observables=None,
+            dense_max_dim=None):
     r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
                  krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device,
-                 observables=observables)
+                 observables=observables, dense_max_dim=dense_max_dim)
     _on_device(device, r)
     return {"T": r.T, "E": r.E, "C": r.C, "O": r.O}
 

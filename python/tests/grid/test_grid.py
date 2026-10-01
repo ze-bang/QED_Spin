@@ -166,12 +166,11 @@ def _run(task, content, mname, device, monkeypatch):
                     [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
         Os = [Model("obs", m.N, t, [], (), []).operator() for t in ops]
         ref = orc.thermal_expect(sel, ops, T)
-        if method != "exact":
-            monkeypatch.setenv("ED_THERMAL_EXACT_SMALL", "0")
+        dmd = None if method == "exact" else 0     # grid blocks: sample them, never the exact fallback
 
         def run(dev, samples):
             return api.thermal(m, H, content, dev, method, T, samples=samples, krylov=60, seed=7,
-                               observables=Os)["O"]
+                               observables=Os, dense_max_dim=dmd)["O"]
 
         if method == "exact":
             err = float(np.max(np.abs(run(device, 1) - ref)))
@@ -191,13 +190,12 @@ def _run(task, content, mname, device, monkeypatch):
         T = T_EXACT if method == "exact" else T_SAMPLED
         if method == "mTPQ" and m.N < 12:   # mTPQ's own finite-size bias dominates N=9 below T~1
             T = T[T >= 1.0]
-        if method != "exact":
-            monkeypatch.setenv("ED_THERMAL_EXACT_SMALL", "0")
+        dmd = None if method == "exact" else 0     # grid blocks: sample them, never the exact fallback
         tol = {"exact": (1e-8, 1e-8), "FTLM": (0.01, 0.02), "mTPQ": (0.02, 0.04)}[method]
 
         def err(samples):
             got = api.thermal(m, H, content, device, method, T, samples=samples,
-                              krylov=60, seed=7)
+                              krylov=60, seed=7, dense_max_dim=dmd)
             ref = orc.thermo(ref_spec, got["T"])
             eE = float(np.max(np.abs(got["E"] - ref["E"]))) / m.N
             eC = float(np.max(np.abs(got["C"] - ref["C"]))) / m.N
@@ -209,7 +207,8 @@ def _run(task, content, mname, device, monkeypatch):
         if device == "gpu":
             # The CPU cell pins the method against the dense oracle. The device path must
             # reproduce the CPU path: same seeds, hence the same random vectors, at a few samples.
-            run = lambda dev: api.thermal(m, H, content, dev, method, T, samples=4, krylov=60, seed=7)  # noqa: E731
+            run = lambda dev: api.thermal(m, H, content, dev, method, T, samples=4, krylov=60, seed=7,  # noqa: E731
+                                          dense_max_dim=dmd)
             got, cpu = run("gpu"), run("cpu")
             d = max(float(np.max(np.abs(got[q] - cpu[q]))) for q in ("E", "C")) / m.N
             lim = GPU_VS_CPU[method]

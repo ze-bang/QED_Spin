@@ -16,9 +16,8 @@
 // Every lane returns the uniform Result shape from
 // `include/ed/core/results.h`; nothing is written to disk.
 //
-// Carries the include block every orchestrator translation unit needs, the
-// Hermitian-input guard the entry points share, and the declarations of
-// the shared plumbing helpers whose definitions live in orch_common.cpp.
+// Carries the include block every orchestrator translation unit needs and the
+// Hermitian-input guard the entry points share.
 // Nothing outside src/orchestrator/ includes this header: the public surface
 // is include/ed/orchestrator.h.
 //
@@ -26,7 +25,6 @@
 // pin_omp_threads_once -> select_backend).
 //
 // File map
-//   orch_common.cpp    shared plumbing: the exact-small thermal env probe
 //   orch_solve.cpp     solve() + the backend-templated solve_on<Backend>
 //                      lanes (Lanczos / KrylovSchur / FullDiag). The ONLY
 //                      translation unit
@@ -78,19 +76,6 @@
 #include <variant>
 
 namespace ed::workflows {
-
-// ---------------------------------------------------------------------------
-// Helpers shared by more than one orchestrator translation unit, with their
-// one definition in orch_common.cpp.
-// ---------------------------------------------------------------------------
-namespace orch_detail {
-
-/// ED_THERMAL_EXACT_SMALL=0 forces the real sampling kernel even at
-/// D <= SMALL_THERMAL_DIM. Read per call so a test can toggle it without
-/// restarting the process.
-[[nodiscard]] bool exact_small_thermal_enabled() noexcept;
-
-}  // namespace orch_detail
 
 // Every solver lane assumes a Hermitian operator (Lanczos tridiagonalises
 // the symmetric part silently; the rep kernels apply H^dagger).

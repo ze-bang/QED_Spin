@@ -44,7 +44,15 @@ Breaking changes so far:
     momentum;
   - the `spin` parameter and property of `Operator` and `HamiltonianBuilder`, and
     `dssf.OperatorSpec.spin_length`: sites are spin-1/2 (any other value solved a different
-    spin-1/2 model). Write `qed.Operator(N)`.
+    spin-1/2 model). Write `qed.Operator(N)`;
+  - the environment variables `ED_SYM_LG_DENSE_FLOOR` and `ED_THERMAL_EXACT_SMALL` (setting
+    them now warns at import): see `dense_max_dim` below.
+- **`dense_max_dim` is the dense crossover, and an argument of `eigs`, `thermal` and
+  `dynamics`.** Blocks up to that dimension are diagonalised densely. `eigs` used it only as a
+  lower bound (the crossover was max(dense_max_dim, 1600) for k <= 10, 160 k above); it now
+  honours it exactly, and `None` (the default) keeps the automatic value. `thermal`'s sampled
+  methods diagonalise blocks up to it (default 512; 0 always samples); `dynamics` passes it to
+  its ground-state solve.
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

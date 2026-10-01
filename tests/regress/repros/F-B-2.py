@@ -19,7 +19,6 @@ Expected: the 6 levels with multiplicity (k > restricted dim returns all)."""
 import os
 import signal
 
-os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import numpy as np  # noqa: E402
@@ -51,7 +50,7 @@ sym = qed.Symmetry(spatial=None, sz=NUP, spin_flip="off", time_reversal="off")
 
 def run(**kw):
     try:
-        r = qed.eigs(H, K, sym=sym, prune=False, **kw)
+        r = qed.eigs(H, K, sym=sym, prune=False, dense_max_dim=0, **kw)
         return "ok", np.sort(np.asarray(r.energies, float)), bool(r.complete)
     except Exception as ex:  # noqa: BLE001
         return "raised", f"{type(ex).__name__}: {str(ex)[:160]}", None

@@ -15,7 +15,7 @@ ceil(nb/b) = grow_cap, so after 3 no-lock cycles the kernel breaks (line 363) wi
 lg_sectors raises "N block(s) could not certify their lowest levels". The dependent column should be
 deflated (block size reduced) and the cycle continued, as in standard block Lanczos.
 
-Reached through ED_SYM_LG_DENSE_FLOOR=0, which the library's own test grid sets
+Reached through dense_max_dim=0 (ED_SYM_LG_DENSE_FLOOR=0 before 0.6.0), which the test grid sets
 (python/tests/grid/adapter.py:64) to force the Krylov lane at toy dimensions. Model: open Heisenberg
 chain with unequal bonds (no spatial symmetry, distinct one-magnon levels), Symmetry(sz=1): one block
 of dimension N. Expected: odd N (3, 5) with block_size=2 raises; even N (4) with block_size=2 and
@@ -26,7 +26,6 @@ same odd blocks."""
 import os
 import signal
 
-os.environ["ED_SYM_LG_DENSE_FLOOR"] = "0"
 os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import numpy as np  # noqa: E402
@@ -72,7 +71,7 @@ def qed_ground(N, n_up, **kw):
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, i + 1, 0.5 * BONDS[i])
     sym = qed.Symmetry(spatial=None, sz=n_up, spin_flip="off", time_reversal="off")
     try:
-        r = qed.eigs(H, 1, sym=sym, prune=False, **kw)
+        r = qed.eigs(H, 1, sym=sym, prune=False, dense_max_dim=0, **kw)
         e = np.asarray(r.energies, float)
         return ("ok", float(e[0]) if len(e) else None, bool(r.complete))
     except Exception as ex:  # noqa: BLE001

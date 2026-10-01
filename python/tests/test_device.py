@@ -103,11 +103,10 @@ def test_gpu_runs_every_krylov_solve_on_the_device():
 
 
 @gpu
-def test_gpu_refuses_a_block_without_a_device_kernel(monkeypatch):
+def test_gpu_refuses_a_block_without_a_device_kernel():
     # The 4x4 square torus with its C4v point group: Gamma and M have the 2-dim irrep E, whose
     # isotypic (W) blocks have no device kernel. With every block a Krylov solve (dense floor
     # 0), device='gpu' refuses them; device='auto' runs them on the host and says so.
-    monkeypatch.setenv("ED_SYM_LG_DENSE_FLOOR", "0")
     L = 4
     idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
     xy = [(x, y) for y in range(L) for x in range(L)]
@@ -118,8 +117,8 @@ def test_gpu_refuses_a_block_without_a_device_kernel(monkeypatch):
     H = b.to_operator()
     sym = qed.Symmetry(spatial=group, sz=8)
     with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic"):
-        qed.eigs(H, 1, sym=sym, device="gpu", prune=False)
-    assert qed.eigs(H, 1, sym=sym, device="auto", prune=False).placement["host_krylov"] > 0
+        qed.eigs(H, 1, sym=sym, device="gpu", prune=False, dense_max_dim=0)
+    assert qed.eigs(H, 1, sym=sym, device="auto", prune=False, dense_max_dim=0).placement["host_krylov"] > 0
 
 
 @gpu

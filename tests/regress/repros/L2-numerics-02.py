@@ -10,11 +10,10 @@ from S_1(omega).
 h = 5e-9 * sum Sz, probe O = S^+_q. Symmetry(spatial=None): every Sz block is small and dense, so
 energies are exact. At scale s = 1 the field splitting (5e-9) is inside the window; at s = 1000
 it is 5e-6 and outside. Lorentzian S scales as S_s(s w; s eta) = S_1(w; eta) / s in exact physics.
-(b) Informational: 13-site ring, translations only, time reversal off, ED_SYM_LG_DENSE_FLOOR=1 so the
+(b) Informational: 13-site ring, translations only, time reversal off, dense_max_dim=1 so the
 k and -k ground blocks go through the k = 1 Lanczos lane; ground_manifold is printed versus the
 scale s (the claim predicts it can drop when the first-pass error ~ (1e-7 ||H||)^2/gap > 1e-8).
-Run in a subprocess so the env override does not touch (a)."""
-import os
+Run in a subprocess (it once needed an environment override)."""
 import signal
 import subprocess
 import sys
@@ -57,7 +56,7 @@ except Exception as ex:
 
 dS = float(np.max(np.abs(res[1.0][1] - res[1000.0][1])) / max(np.max(np.abs(res[1.0][1])), 1e-300))
 
-# (b) informational, in a subprocess with the dense-floor override.
+# (b) informational, in a subprocess, with the dense crossover at 1.
 code_b = r'''
 import numpy as np, qed
 N = 13
@@ -75,14 +74,13 @@ for s in (1.0, 1e2, 1e3, 1e4, 1e5):
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * s)
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0 * s)
     try:
-        r = qed.dynamics(H, O, s * w, eta=0.05 * s, sym=sym)
+        r = qed.dynamics(H, O, s * w, eta=0.05 * s, sym=sym, dense_max_dim=1)
         print(f"(b) s={s:g}: ground_manifold={r.ground_manifold}", flush=True)
     except Exception as ex:
         print(f"(b) s={s:g}: raised {type(ex).__name__}: {str(ex)[:120]}", flush=True)
 '''
 try:
-    env = dict(os.environ, ED_SYM_LG_DENSE_FLOOR="1")
-    p = subprocess.run([sys.executable, "-c", code_b], env=env, capture_output=True, text=True, timeout=150)
+    p = subprocess.run([sys.executable, "-c", code_b], capture_output=True, text=True, timeout=150)
     for line in p.stdout.splitlines():
         if line.startswith("(b)"):
             print(line)

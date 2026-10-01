@@ -55,7 +55,6 @@ using CharConstraint = std::vector<std::pair<int, std::complex<double>>>;
 struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
-    int  dense_max_dim = 64;   ///< per-block dense/Lanczos crossover (lowest-k path)
     bool verbose       = false;
     /// Spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the

@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from .. import _core, _log
+from ..errors import InvalidRequest
 from . import _device
 from .symmetry import Labelled, Symmetry
 
@@ -99,7 +100,7 @@ class EigResult(Labelled):
 
 @_log.replays
 def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
-         dense_max_dim: int = 64, allow_partial: bool = False,
+         dense_max_dim: Optional[int] = None, allow_partial: bool = False,
          device: str = "cpu", prune: bool = True, window: float = 0.0) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
@@ -108,13 +109,18 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     whose short Lanczos estimate lies near the window (``prune=False``: every block).
     ``window > 0`` also returns every block's lowest level within ``window`` above the k-th
     (the partners of a degenerate level in other blocks); ``energies`` then lists them all.
+    ``dense_max_dim``: blocks up to this dimension are diagonalised densely (exact, and they
+    resolve every copy of a degenerate level at once), larger ones by Krylov-Schur; ``None``
+    picks it from ``k`` (1600 for ``k <= 10``), 0 sends every block above dimension 2 to Krylov.
     """
+    if dense_max_dim is not None and int(dense_max_dim) < 0:
+        raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
     n = int(H.num_sites)
     raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
-                             dense_max_dim=int(dense_max_dim),
+                             dense_max_dim=-1 if dense_max_dim is None else int(dense_max_dim),
                              allow_partial=bool(allow_partial), device=_device.resolve(device),
                              prune=bool(prune), window=float(window))
     rows = int(k) if window <= 0 else sum(int(L.multiplicity) for L in raw.levels)

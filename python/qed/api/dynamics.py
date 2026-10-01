@@ -33,7 +33,8 @@ class DynamicsResult:
 def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
              T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
              krylov: int = 200, samples: int = 30, seed: int = 0,
-             degeneracy_tol: float = 1e-8, device: str = "cpu") -> DynamicsResult:
+             degeneracy_tol: float = 1e-8, device: str = "cpu",
+             dense_max_dim: Optional[int] = None) -> DynamicsResult:
     """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.
 
     ``T=None``: the ground state, averaged over a degenerate ground manifold.
@@ -44,8 +45,11 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     ground state of those sectors, or their restricted ensemble at T > 0, flagged in
     ``diagnostics``); ``k0``, ``irrep`` and ``irrep_character`` name point-group blocks and
     raise :class:`qed.errors.Unsupported`. ``spin_flip`` / ``time_reversal='require'`` check
-    that H has the symmetry.
+    that H has the symmetry. ``dense_max_dim`` is the dense crossover of the ground-state
+    eigensolve at T = 0, as in :func:`qed.eigs`.
     """
+    if dense_max_dim is not None and int(dense_max_dim) < 0:
+        raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
     sym = Symmetry.auto() if sym is None else sym
     d = _core.sectors.DynamicsSpec()
     d.omega = [float(w) for w in omega]
@@ -59,6 +63,7 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.samples = int(samples)
     d.seed = int(seed)
     d.degeneracy_tol = float(degeneracy_tol)
+    d.dense_max_dim = -1 if dense_max_dim is None else int(dense_max_dim)
     d.device = _device.resolve(device)
     diagnostics: list = []
     r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H, diagnostics), O, d)

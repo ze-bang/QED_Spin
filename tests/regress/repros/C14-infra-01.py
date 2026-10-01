@@ -6,12 +6,12 @@
 dense_max_dim passed to qed.eigs. Test: H = Sz_0 + Sz_1 on 10 sites, the single Sz block
 n_up=5 (252 states), and the lane that solved it (block_stats: 'dense' when no Krylov
 apply ran).
-  A: env unset, dense_max_dim=100000          (expected dense)
-  B: env '1',   dense_max_dim=100000          (explicit argument should win -> dense)
-  C: env '1e5', default dense_max_dim         (if parsed as 100000 -> dense)
-  D: env '100000', default dense_max_dim      (control: dense)
-Restated after 1a573b0: the audit's version told the lanes apart by the Krylov lane missing
-copies of the 56-fold degenerate lowest level, which Krylov-Schur now finds."""
+Restated after P2.1 replaced the variable by the argument (owner-approved): the argument alone
+must decide the lane, whatever the environment says.
+  A: dense_max_dim=100000                      (dense)
+  B: env '1',   dense_max_dim=100000           (the argument wins -> dense)
+  C: env '1e5', default dense_max_dim          (automatic crossover 1600 -> dense)
+  D: env '100000', dense_max_dim=0             (the argument wins -> Krylov)"""
 import os
 
 import qed
@@ -41,17 +41,14 @@ def run(env_val, dmd):
 A = run(None, 100000)
 B = run("1", 100000)
 C = run("1e5", None)
-D = run("100000", None)
+D = run("100000", 0)
 for name, v in zip("ABCD", (A, B, C, D)):
     print(name, v)
 dense = ("ok", ("dense",))
-if A != dense or D != dense:
-    print(f"REPRO: INCONCLUSIVE the reference runs did not take the dense lane: A={A} D={D}")
+krylov = D[0] == "ok" and all(lane != "dense" for lane in D[1])
+if A != dense:
+    print(f"REPRO: INCONCLUSIVE the reference run did not take the dense lane: A={A}")
+elif B != dense or C != dense or not krylov:
+    print(f"REPRO: CONFIRMED the environment still decides the lane: B={B} C={C} D={D}")
 else:
-    prec = B != dense
-    parse = C != dense
-    if prec or parse:
-        print(f"REPRO: CONFIRMED explicit dense_max_dim overridden={prec} (B={B}); "
-              f"'1e5' misparsed={parse} (C={C})")
-    else:
-        print("REPRO: NOT_REPRODUCED B and C both took the dense lane")
+    print("REPRO: NOT_REPRODUCED the argument alone decides the lane (B, C dense; D Krylov)")

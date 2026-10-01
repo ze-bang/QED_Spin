@@ -372,6 +372,7 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("samples", &sec::ThermalSpec::samples)
         .def_readwrite("krylov", &sec::ThermalSpec::krylov)
         .def_readwrite("exact_states", &sec::ThermalSpec::exact_states)
+        .def_readwrite("dense_max_dim", &sec::ThermalSpec::dense_max_dim)
         .def_readwrite("seed", &sec::ThermalSpec::seed)
         .def_readwrite("device", &sec::ThermalSpec::device)
         .def_readwrite("observables", &sec::ThermalSpec::observables);
@@ -410,6 +411,7 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("samples", &sec::DynamicsSpec::samples)
         .def_readwrite("seed", &sec::DynamicsSpec::seed)
         .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol)
+        .def_readwrite("dense_max_dim", &sec::DynamicsSpec::dense_max_dim)
         .def_readwrite("device", &sec::DynamicsSpec::device);
 
     py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")
@@ -448,7 +450,7 @@ void bind_sectors(py::module_& m) {
               return sec::eigs(H, n_sites, spec, o);
           },
           py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("k") = 1,
-          py::arg("vectors") = false, py::arg("dense_max_dim") = 64,
+          py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
           py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
           py::arg("prune") = true, py::arg("prune_margin") = 0.02, py::arg("window") = 0.0,
           "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");

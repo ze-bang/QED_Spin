@@ -31,6 +31,7 @@ struct ThermalSpec {
     std::size_t   samples      = 40;
     std::size_t   krylov       = 100;   ///< FTLM Lanczos depth; mTPQ step count (0 = automatic)
     std::size_t   exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
+    std::uint64_t dense_max_dim = 512;  ///< FTLM / mTPQ diagonalise blocks up to this dimension; 0: always sample
     std::uint64_t seed         = 0;     ///< 0 = draw one
     Device        device       = Device::Cpu;
     /// Static observables <O>(T) (method Exact or FTLM without exact_states). Each O is

@@ -85,6 +85,9 @@ struct ThermalOptions {
     std::size_t num_samples    = 40;
     std::size_t krylov_dim     = 100;
     std::size_t num_exact      = 8;    ///< OFTLM: # low-lying states treated exactly (N_V).
+    /// Blocks up to this dimension are diagonalised exactly instead of sampled (a
+    /// sampled trace needs D >> samples); 0 always samples.
+    std::uint64_t dense_max_dim = 512;
     std::vector<double> betas;
     std::uint64_t random_seed  = 0;
     BackendConstraints backend;

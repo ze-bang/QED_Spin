@@ -163,7 +163,6 @@ set(ED_SOLVERS_CPU_SOURCES
     # file map). orch_solve.cpp is the single TU that instantiates the
     # backend-templated eigensolver lanes, so the CudaBackend
     # instantiation of the solve path is emitted there and nowhere else.
-    ${SRC_DIR}/orchestrator/orch_common.cpp
     ${SRC_DIR}/orchestrator/orch_solve.cpp
     ${SRC_DIR}/orchestrator/orch_thermal.cpp
 )

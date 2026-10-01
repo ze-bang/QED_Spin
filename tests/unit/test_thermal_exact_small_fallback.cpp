@@ -2,7 +2,7 @@
 // test_thermal_exact_small_fallback  (Catch2 v3)
 //
 // Pins the orchestrator's small-dimension exact-thermal fallback:
-// for D <= SMALL_THERMAL_DIM (512), every SAMPLING thermodynamics method
+// for D <= ThermalOptions::dense_max_dim (512), every SAMPLING thermodynamics method
 // (mTPQ / FTLM / OFTLM) is answered by an exact eigensolve instead of
 // its stochastic estimator.
 //
@@ -16,7 +16,7 @@
 // The fallback is invisible to a tolerance-based check -- it makes things
 // MORE accurate -- so it needs its own pin: assert machine precision, which
 // only the exact path can deliver. Conversely test_thermal_dense_ref sets
-// ED_THERMAL_EXACT_SMALL=0 so it keeps gating the real kernels; that escape
+// dense_max_dim = 0 so it keeps gating the real kernels; that escape
 // is pinned here too, since the two files' contracts are complementary and a
 // regression in either direction should fail exactly one of them.
 // =============================================================================
@@ -29,8 +29,6 @@
 #include <ed/orchestrator.h>
 
 #include <cmath>
-#include <cstdlib>
-#include <string>
 #include <vector>
 
 using namespace ed_tests;
@@ -38,7 +36,7 @@ using ed::workflows::ThermalOptions;
 
 namespace {
 
-constexpr uint64_t N_SITES = 6;      // dim = 64 << SMALL_THERMAL_DIM = 512
+constexpr uint64_t N_SITES = 6;      // dim = 64 << the default dense_max_dim = 512
 constexpr double   J       = 1.0;
 
 // A broad grid: an estimator stuck at E0 is indistinguishable from exact at
@@ -77,28 +75,10 @@ ThermalOptions base_opts(ThermalOptions::Method m) {
     return o;
 }
 
-struct EnvGuard {
-    const char* name;
-    std::string saved;
-    bool had;
-    EnvGuard(const char* n, const char* v) : name(n) {
-        const char* cur = std::getenv(n);
-        had = cur != nullptr;
-        if (had) saved = cur;
-        if (v) ::setenv(n, v, 1); else ::unsetenv(n);
-    }
-    ~EnvGuard() {
-        if (had) ::setenv(name, saved.c_str(), 1); else ::unsetenv(name);
-    }
-};
-
 }  // namespace
 
-TEST_CASE("ed::thermal: D <= SMALL_THERMAL_DIM is exact for every sampling method",
+TEST_CASE("ed::thermal: D <= dense_max_dim is exact for every sampling method",
           "[thermal][exact_fallback]") {
-    // Default behaviour (gate unset) -- do not inherit a stray value.
-    EnvGuard g("ED_THERMAL_EXACT_SMALL", nullptr);
-
     const auto E_exact = exact_energies();
 
     // The knobs above (4 samples, krylov 8) could not reach 1e-12 by sampling
@@ -118,17 +98,17 @@ TEST_CASE("ed::thermal: D <= SMALL_THERMAL_DIM is exact for every sampling metho
     }
 }
 
-TEST_CASE("ed::thermal: ED_THERMAL_EXACT_SMALL=0 restores the sampling kernel",
+TEST_CASE("ed::thermal: dense_max_dim = 0 restores the sampling kernel",
           "[thermal][exact_fallback]") {
     // The escape exists so accuracy tests can still gate the estimators
     // (test_thermal_dense_ref). If it silently stopped working, that file
     // would go on "passing" while testing nothing.
-    EnvGuard g("ED_THERMAL_EXACT_SMALL", "0");
-
     const auto E_exact = exact_energies();
 
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
-    auto R = ed::workflows::thermal(*H, base_opts(ThermalOptions::Method::FTLM));
+    auto opts = base_opts(ThermalOptions::Method::FTLM);
+    opts.dense_max_dim = 0;
+    auto R = ed::workflows::thermal(*H, opts);
     REQUIRE(R.thermo.energy.size() == BETAS.size());
 
     // With 4 samples / krylov 8 the estimator must MISS somewhere on this

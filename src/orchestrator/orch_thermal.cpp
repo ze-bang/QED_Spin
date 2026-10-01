@@ -9,15 +9,13 @@
 
 namespace ed::workflows {
 
-using namespace orch_detail;
-
 namespace {
 
 // ---------------------------------------------------------------------------
 // Exact canonical thermodynamics from a complete eigenspectrum.
 //
 // Used as a small-sector fallback for mTPQ: when the Hilbert-space
-// dimension is small (D <= SMALL_THERMAL_DIM), the stochastic mTPQ
+// dimension is small (D <= ThermalOptions::dense_max_dim), the stochastic mTPQ
 // estimator has large per-sample variance (no algorithmic bug — the inherent
 // limitation is that TPQ needs D >> num_samples for good typicality). For
 // the sz_spatial symmetry mode on N=8, the (n_up, k) sub-sectors have
@@ -33,7 +31,6 @@ namespace {
 // The absolute free energy (F carries ln(D) at high T) is exactly what
 // combine_sector_thermodynamics expects for the per-sector Boltzmann weight.
 // ---------------------------------------------------------------------------
-constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
 
 // Forwards to the single canonical implementation (and its guards) in
 // ed/symmetry/canonical_thermo.h.
@@ -120,7 +117,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // Small-sector exact-thermal fallback for EVERY sampling method.
     //
     // Every stochastic thermal method needs D >> num_samples for good
-    // typicality. For small sectors (D <= SMALL_THERMAL_DIM), the per-sample
+    // typicality. For small sectors (D <= opts.dense_max_dim), the per-sample
     // variance is too high for the dE tolerance even with 20+ samples (e.g.
     // within an n_up block, translation k-sectors have D ≈ 1–9 for N=8,
     // giving a statistical error of ~0.12 with 20 samples).
@@ -130,7 +127,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     // FTLM / OFTLM / mTPQ is identical -- canonical E(T)/C(T)/S(T) -- so
     // every sampling method takes the exact route.
     //
-    // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
+    // For any D <= opts.dense_max_dim, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
     // uses the same absolute free-energy convention (F includes ln(D) at
     // high T) as the mTPQ canonical estimator, so it plugs in
@@ -148,9 +145,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     bool host_only = false;   // the exact fallback and OFTLM run on the host whatever the backend
     const bool exact_small =
         is_sampling_thermo_method &&
-        exact_small_thermal_enabled() &&
         H.geometry().global_dim > 0 &&
-        H.geometry().global_dim <= SMALL_THERMAL_DIM &&
+        H.geometry().global_dim <= opts.dense_max_dim &&
         !R.thermo.temperatures.empty() &&
         // A seed transform restricts the stochastic trace to a
         // SUBSPACE (e.g. one spin tower). The exact fallback diagonalises

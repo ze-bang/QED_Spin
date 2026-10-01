@@ -180,21 +180,20 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
     return {E0, std::move(u)};
 }
 
-// GS eigenpair of the PLAIN k0 sector with an in-memory eigenvector:
-// dense for small blocks; above the dense crossover either the two-pass
-// no-reorth lane (large n -- see kLgTwoPassMinDim) or FullCGS2 Lanczos
-// + kept-basis Ritz vector (small n). Residual-
+// GS eigenpair of the PLAIN k0 sector with an in-memory eigenvector, for a block
+// above the caller's dense crossover: the two-pass no-reorth lane (large n -- see
+// kLgTwoPassMinDim) or FullCGS2 Lanczos + kept-basis Ritz vector (small n). Residual-
 // guarded -- a failed vector THROWS (the caller's point_group='full'
 // contract is loud, and there is no cheaper correct fallback for a
 // vector consumer).
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
+solve_gs_vector(const ed::matvec::MatVecOperator& hk)
 {
     const std::size_t n = hk.dim();
     if (n == 0) throw std::runtime_error("little_group: empty GS sector");
     double E0 = 0.0;
     std::vector<Complex> u(n);
-    if (n <= static_cast<std::size_t>(std::max(dense_max_dim, 2))) {
+    if (n <= 2) {   // the caller sends blocks below its dense crossover to a dense solve
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(hk));
         E0 = es.eigenvalues()(0);
         for (std::size_t i = 0; i < n; ++i)

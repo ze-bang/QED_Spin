@@ -29,11 +29,9 @@ while a k -> -k relabel of a time-reversal-breaking spectrum is.
 | `transport` | passes through the 9-digit text transport of the symmetry lanes | 1e-7 |
 | `stochastic` | fixed-seed sampling | 1e-10 |
 
-Thermal sampling kernels are pinned beyond the `qed.thermal` matrix: FTLM with
-`ED_THERMAL_EXACT_SMALL=0` (blocks of dimension <= 512 are otherwise diagonalised
-exactly and never sample), and one FTLM block of
-dimension 16384 (`heis_chain14`, `sz="off"`), where the CPU reductions go multi-threaded
--- its reference is valid at the gate's `OMP_NUM_THREADS=4` only.
+The sampled thermal records (FTLM, mTPQ, OFTLM) diagonalise the blocks of dimension <= 512
+exactly (the default `dense_max_dim` of `qed.thermal`) and sample the larger ones; the grid
+(`dense_max_dim=0`) and the C++ unit tests gate the sampling kernels on small blocks.
 
 `record` runs every case twice; a case whose two passes disagree is stored under
 `quarantine`, reported by `compare`, and never gates.

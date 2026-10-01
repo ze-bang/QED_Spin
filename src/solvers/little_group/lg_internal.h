@@ -784,10 +784,10 @@ star_partition(const EngineContext& cx, bool tr_on);
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
                    int dense_max_dim, bool* converged_out = nullptr);
 
-// lg_ground_state.cpp: certified lowest eigenpair of one block (dense / FullCGS2 /
-// two-pass by dimension); throws when the residual guard fails.
+// lg_ground_state.cpp: certified lowest eigenpair of one block (FullCGS2 / two-pass by
+// dimension); throws when the residual guard fails.
 [[nodiscard]] std::pair<double, std::vector<Complex>>
-solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim);
+solve_gs_vector(const ed::matvec::MatVecOperator& hk);
 
 // lg_block_solve.cpp: k levels of one block by Krylov-Schur; with vecs_out the Ritz
 // vectors (block coordinates) too.
