@@ -1,17 +1,13 @@
 // =============================================================================
 // test_auto_thermal  (Catch2 v3)
 //
-// Smoke-tests the unified `ed::workflows::thermal(H, opts)` orchestrator.
-// Covers the mTPQ path that the orchestrator currently routes
-// through `tpq_kernel<Backend>` (Phase 4.2 / 4.3 of the Minimalist ED
-// Collapse), plus a smoke test that the FTLM lane is wired.
+// Smoke-tests the unified `ed::workflows::thermal(H, opts)` orchestrator:
+// the mTPQ path (routed through `mtpq_kernel<Backend>` / `tpq_kernel`),
+// a check that the FTLM lane is wired, and backend-constraint handling.
 //
-// Migrated from the legacy `ed::auto_pilot::thermal(...)` API during the
-// ED Cleanup Sweep Phase 2 (May 2026). The legacy auto-pilot's per-Sz
-// + per-irrep decomposition is gone: it is now the caller's
-// responsibility to assemble the canonical partition function from
-// sector-wise `workflows::thermal` calls (or run `workflows::solve` for
-// the dense spectrum + `compute_thermodynamics_from_spectrum`).
+// `workflows::thermal` runs on the operator it is given; it does not
+// decompose into Sz or irrep sectors. Sector-resolved thermodynamics are
+// assembled by the caller (see ed/sectors/thermal.h).
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -48,7 +44,7 @@ TEST_CASE("workflows::thermal mTPQ produces a finite ground-state estimate "
     opts.krylov_dim   = 80;
     opts.random_seed  = 12345;
     // CPU-lane smoke test. Plain Operators advertise supports_device_matvec on
-    // WITH_CUDA builds (operator-collapse Phase 2a), but the GPU lane for these
+    // WITH_CUDA builds, but the GPU lane for these
     // tiny, high-iteration TPQ runs is dominated by kernel-launch overhead; GPU
     // thermal correctness is covered by the thermal::*_kernel<CudaBackend>
     // tests. Pin CPU so the smoke test stays fast and hardware-independent.
@@ -72,11 +68,9 @@ TEST_CASE("workflows::thermal mTPQ produces a finite ground-state estimate "
 
 TEST_CASE("workflows::thermal FTLM lane is wired",
           "[workflows][thermal][ftlm][ltlm]") {
-    // Phase 6 wired the FTLM lane through the unified
-    // orchestrator by routing it at the kernel-shim level
-    // (`ed::thermal::{ftlm_kernel,ltlm_kernel}`). This
+    // The orchestrator routes FTLM to `ed::thermal::ftlm_kernel`. This
     // test verifies the orchestrator actually executes the kernel
-    // and returns a populated ThermalResult.
+    // without throwing.
     auto H = build_heisen();
 
     const std::vector<double> betas = { 0.1, 1.0, 5.0 };

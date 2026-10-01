@@ -1,342 +1,105 @@
-# QED — Quantum Exact Diagonalization
+# QED_Spin — exact diagonalization of spin-1/2 Hamiltonians
 
-A modern C++17 / CUDA / MPI / Python toolkit for **exact diagonalization
-(ED)** of quantum spin Hamiltonians, with first-class support for
-ground states, finite-temperature thermodynamics, and dynamical /
-static structure factors.
-
-QED is built around a small, orthogonal public surface:
-
-```text
-                    OperatorSpec
-                          |
-                          v
-                ed::make_operator(spec)   ->  LinearOperator
-                          |
-   +----------------------+----------------------+
-   v                      v                      v
-ed::workflows::solve    thermal              spectral
-   |                      |                      |
-   v                      v                      v
-GroundStateResult     ThermalResult        SpectralResult
-```
-
-The same shape is exposed in Python as
-`qed.solve(H, **kw)` / `qed.thermal(H, **kw)` / `qed.spectral(dir, **kw)`.
-
-| Feature | Status |
-|---------|--------|
-| Ground state / low-lying spectrum (Lanczos, Block-Lanczos, Krylov-Schur, dense LAPACK) | production |
-| Finite-temperature thermodynamics (FTLM, LTLM, OFTLM, mTPQ) | production |
-| Static and dynamical structure factors (`S(Q)`, `S(Q,T)`, `S(Q,ω)`, `S(Q,ω,T)`) | production |
-| Symmetry: U(1) Sz / **Sz parity** × spatial groups × **∏σˣ flip** × time reversal × **point-group stars** × **full non-abelian (d≥2)** | production; matrix-free abelian rep walk at scale, factorized little-group engine for d≥2 |
-| Symmetry projection: **non-abelian** point groups (numerical irreps, `d_Γ ≥ 2`) | production for GS / finite-T / DSSF via the factorized little-group engine (one momentum per star + little-co-group isotypic projection, matrix-free); CPU and GPU (batched cuSOLVER block eigensolve) for GS/finite-T, CPU for the GS-DSSF continued fraction |
-| Representation policy: CSR vs matrix-free, rep-walk vs reduced-CSR, basis layout | sensible defaults + env-override leaf hooks (`ed/planner/*_policy_hook.h`); no planner |
-| Symmetry projection: SU(2) total-S | production (Jul 2026): `total_spin=` on `qed.solve` (Lowdin/Casimir targeting + certified labels), `qed.full_spectrum` (highest-weight spectral differencing), `qed.thermal` (per-tower Z = Σ_S (2S+1) Z_S); operator-level S² route, host-side targeting (device-resident Lowdin is the named follow-up) |
-| CPU (OpenMP) and single-GPU (CUDA / cuBLAS) lanes | production |
-| Multi-rank MPI | production for **one** thing: across-sector distribution of the `ED` CLI under `mpirun` (each rank builds and solves a dim-balanced subset of the symmetry sectors, spectrum `Allgatherv`'d). There is no within-sector (distributed-vector) lane — that family was removed in Jul 2026 |
-| Multi-GPU NCCL (`MultiGpuCommunicator`, `MpiCudaBackend`) | compiles (library `ed_multi_gpu`) and is unit-tested, but **no production lane selects it**: `select_backend` only picks the MPI backends for a distributed operator geometry, and no operator produces one any more |
-| First-class Python bindings (`import qed`) | production |
-
----
-
-## Quick start
-
-### Build the C++/CUDA/MPI core
-
-```bash
-git clone https://github.com/ze-bang/QED.git
-cd QED
-
-cmake -B build \
-      -DWITH_CUDA=ON -DWITH_MPI=ON \
-      -DED_BUILD_BENCHMARKS=ON
-cmake --build build -j
-
-# Smoke test (~30 s)
-ctest --test-dir build --output-on-failure -j$(nproc)
-```
-
-`-DWITH_CUDA=OFF` and `-DWITH_MPI=OFF` are honored if those backends
-are not needed. Detailed prerequisites, NUMA tuning, and platform
-notes: [`docs/guides/install.md`](docs/guides/install.md).
-
-### Install the Python package
-
-```bash
-pip install -v .   # builds the `qed` extension via scikit-build-core
-python -c "import qed; print(qed.__version__)"
-```
-
-### Run a 12-site Heisenberg ground state
-
-Python (recommended):
+QED_Spin computes spectra, eigenvectors, thermodynamics and dynamical correlations of
+spin-1/2 Hamiltonians with arbitrary one-, two- and three-body terms. Every calculation is
+resolved by the symmetries the Hamiltonian has, and runs on the CPU (OpenMP) or on one
+NVIDIA GPU (CUDA).
 
 ```python
+import cmath, math
+import numpy as np
 import qed
 
-N = 12
-H = (qed.input.HamiltonianBuilder(N)
-        .heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
-        .to_operator())
+N = 24
+b = qed.input.HamiltonianBuilder(N)
+b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
+H = b.to_operator()
 
-res = qed.solve(H, num_eigenvalues=3)
-print("E0 =", res.eigenvalues[0])
+r  = qed.eigs(H, 4)                                    # lowest 4 levels; symmetries found automatically
+th = qed.thermal(H, np.linspace(0.1, 4, 40), method="ftlm", device="gpu")
+
+Sz_pi = qed.Operator(N, 0.5)                           # S^z at q = pi
+for j in range(N):
+    Sz_pi.add_one_body(qed.OP_SZ, j, cmath.exp(-1j * math.pi * j) / math.sqrt(N))
+w  = np.linspace(0, 4, 400)
+S0 = qed.dynamics(H, Sz_pi, w, eta=0.05)                # T = 0: continued fraction
+S1 = qed.dynamics(H, Sz_pi, w, eta=0.05, T=[0.5])       # T > 0: finite-temperature Lanczos
 ```
 
-C++:
+## What it computes
 
-```cpp
-#include <ed/orchestrator.h>
-#include <ed/core/make_operator.h>
+| Verb | Result |
+|---|---|
+| `qed.eigs(H, k, vectors=False, window=0)` | the lowest `k` levels with multiplicity; vectors on demand (in the full basis or one Sz sector); `.expect(ops)`, `.matrix_element(O, i, j)`, `.save(path)` / `qed.load_eigs(path)` |
+| `qed.spectrum(H)` | every eigenvalue, block by block |
+| `qed.thermal(H, T, method=)` | `exact`, `ftlm` (`exact_states=` treats that many lowest states of each block exactly) or `mtpq`: E, C, S, F, ln Z, and M, χ when Sz is conserved; `observables=[O, ...]` adds ⟨O⟩(T) (exact and FTLM) |
+| `qed.dynamics(H, O, omega, eta, T=None)` | S(ω) = Σ \|⟨n\|O\|m⟩\|² δ(ω − E_n + E_m): averaged over the degenerate ground manifold at T = 0, Boltzmann-weighted by finite-temperature Lanczos at T > 0 |
+| `qed.expect(H, ops, k)` | ⟨O⟩ in each of the lowest levels, averaged over its symmetry multiplet |
 
-ed::OperatorSpec spec;
-spec.source    = ed::InMemoryOperator{build_heisenberg_chain(12)};
-spec.num_sites = 12;
-auto op = ed::make_operator(std::move(spec));
+The operators O may break every symmetry of H. Each is averaged over the symmetries a
+block uses, which leaves traces and multiplet averages unchanged, or it connects the
+sectors it maps between.
 
-ed::SolveOptions opts;
-opts.num_eigs = 3;
-auto res = ed::workflows::solve(*op, opts);
-std::cout << "E0 = " << res.eigenvalues[0] << "\n";
-```
+## Symmetries
 
-CLI:
+`qed.Symmetry` names what a calculation may use. `Symmetry.auto()`, the default, finds
+and uses everything H has:
+
+- **Sz**: U(1) sectors, or Sz parity when only that is conserved.
+- **Spatial**: any group of site permutations that commute with H, either found by graph
+  automorphism (`pynauty`) or given as generators. The abelian part gives momenta; the
+  point group gives little groups, with one- and higher-dimensional irreps.
+- **Spin flip** and **time reversal**.
+- **Total spin S** (`total_spin=S`) when H is SU(2) symmetric, including with a scalar
+  chirality term.
+
+`Symmetry.select(sz=, momentum={T: theta}, irrep_character={R: chi})` restricts any verb
+to some sectors. Each level reports its momentum (`result.momentum(i, translations)`) and
+its little-group characters (`result.irrep_characters(i)`).
+
+## Backends
+
+`device="cpu" | "gpu" | "auto"`:
+- `"gpu"` runs every block that has a device kernel on the GPU and never falls back to
+  the CPU silently. That covers momentum and group sectors, spin-projected blocks, the
+  finite-temperature kernels and the batched dense solves.
+- `"auto"` uses the GPU only above a size floor.
+
+On the GPU, sampled methods advance their random vectors together, so all samples share
+each matrix-vector product.
+
+## Build
 
 ```bash
-./build/ED /path/to/heisenberg_dir --method=LANCZOS --eigenvalues=3 --thermo
+scripts/build.sh --variant cpu            # -> build/cpu   (OpenMP)
+scripts/build.sh --variant cuda           # -> build/cuda  (CUDA; sm_90 unless CMAKE_CUDA_ARCHITECTURES is set)
+export PYTHONPATH=$PWD/python QED_CORE_DIR=$PWD/build/cuda/python/qed
 ```
 
-The backend (CPU or single-GPU) is auto-selected from the operator
-geometry and the build flags; pin manually with `device='cpu' | 'gpu'`
-in Python or `opts.backend_constraints` in C++. `device='gpu'` is a
-hard request: it raises when the build has `WITH_CUDA=OFF` or when no
-CUDA device is visible to the process, rather than serving the run
-from the host.
+Requirements: CMake ≥ 3.18, a C++17 compiler with OpenMP, BLAS/LAPACK, Eigen 3,
+pybind11 ≥ 2.10, NumPy. Automatic symmetry detection also needs `pynauty`. Site settings
+(modules, BLAS profile) live in `scripts/clusters/`.
 
-MPI is a property of the CLI run, not of `device=`: launch `ED` under
-`mpirun` and the across-sector distribution engages automatically for
-symmetry workloads (each rank owns a dim-balanced subset of the irrep
-sectors). `device='mpi'` / `'mpi_gpu'` raise in Python.
+## Verification
 
----
-
-## Symmetries — auto mode and per-symmetry toggles
-
-`symmetry="auto"` finds the maximal block diagonalisation for the
-Hamiltonian you pass in: the automorphism search runs internally, the
-largest commuting spatial group is used, and it composes with the
-independently auto-detected U(1) Sz axis, the spin-flip
-transporter/projector and the time-reversal sector pairing. Works on
-all three verbs and every backend (one asymmetry: `qed.spectral` does
-not exploit time reversal — `time_reversal="require"` raises there
-instead of silently doing nothing):
-
-```python
-qed.solve(H,  symmetry="auto", sz=N//2)               # GS
-qed.thermal(H, method="mTPQ", symmetry="auto")        # finite T
-qed.spectral(H, [S_zQ], omega=w, symmetry="auto",
-             sz=N//2, momentum_transfer=[0.5])        # DSSF
-qed.full_spectrum(H, symmetry="auto")                 # complete dense spectrum
-                                                      # (little-group blocks)
-qed.solve(H, symmetry=gen, sz="even")                 # Sz-parity half (U(1)-broken H)
-qed.solve(H, symmetry=gen, point_group="full")        # true non-abelian d>=2 blocks
-qed.solve(H, symmetry="translation", lattice=lat)     # T projector + point-group stars
-```
-
-Each discrete symmetry has its own four-state toggle, so you can mix
-and match — and the library tells you what your Hamiltonian actually
-has:
-
-| value | meaning |
-|---|---|
-| `"auto"` (default) | exploit the symmetry when H carries it, silently skip otherwise |
-| `"on"` | same, but REPORT: confirms detection, **warns and continues without it** when H lacks the symmetry |
-| `"off"` | never exploit it |
-| `"require"` | hard contract: throw when H lacks the symmetry |
-
-`point_group=` adds two more positions: `"auto"` (star folding — solve
-one momentum per point-group star, copy the spectrum) and `"full"`
-(genuine non-abelian projection: d≥2 irrep blocks ~dim/|G| on the
-factorized little-group engine, composed with the diagonal axis). The Sz axis itself is
-three-state: integer `sz=`, `sz="even"/"odd"` (the Z₂ parity remnant
-when S⁺S⁺-type terms break U(1)), or auto; `auto_sz=False` disables
-the whole diagonal axis.
-
-```python
-qed.solve(H, symmetry="auto", sz=N//2,
-          spin_flip="on", time_reversal="on")
-# [qed] symmetry='auto': U(1) Sz conserved; using generator set
-#       'full_automorphism' (|G| = 8).
-# [qed] spin_flip: Hamiltonian carries it -> exploiting.
-# [qed] time_reversal: Hamiltonian carries it -> exploiting.
-
-qed.solve(H_with_field, spin_flip="on", ...)
-# RuntimeWarning: spin_flip='on' requested but the Hamiltonian does
-# not carry this symmetry ([H, prod sigma^x] != 0 -- e.g. a Zeeman
-# field ...); running without it.
-```
-
-`qed._core.detect_hamiltonian_symmetries(H)` exposes the same
-term-level detection directly
-(`{"spin_flip": bool, "time_reversal": bool}`);
-`qed.find_symmetries(H)` reports the U(1) and spatial axes.
-
-Under the hood a sector is one `Subspace` (which computational basis
-states are enumerated) x one `ProjectorChain` (group representations
-applied on top); the composition layer
-([`include/ed/symmetry/sector_plan.h`](include/ed/symmetry/sector_plan.h))
-plans which sectors to build, which to solve, and which to copy from a
-partner (flip transport / mirror, time-reversal pairing). Full design:
-[`docs/architecture/SYMMETRY_V2_DESIGN.md`](docs/architecture/SYMMETRY_V2_DESIGN.md);
-measured speedups: [`docs/perf/`](docs/perf/) and
-`benchmarks/bench_auto_symmetry.py`.
-
----
-
-## Documentation
-
-```
-docs/
-├── index.md                              # Sphinx landing page
-├── guides/
-│   ├── install.md                        # build + dependencies
-│   ├── quickstart.md                     # C++ in 30 lines
-│   ├── python_quickstart.md              # Python in 30 lines
-│   ├── one_call_api.md                   # solve / thermal / spectral reference
-│   ├── workflow.md                       # end-to-end recipes
-│   ├── python_advanced.md                # device pinning, GPU, symmetries
-│   └── python_api_coverage.md            # C++/Python/CLI capability matrix
-├── architecture/
-│   ├── ARCHITECTURE.md                   # post-collapse architecture (read first)
-│   ├── UNIFIED_STACK.md                  # layer-by-layer stack + pipelines
-│   ├── SYMMETRY.md                       # Subspace × ProjectorChain math + workflows
-│   ├── SYMMETRY_V2_DESIGN.md             # symmetry-engine design + residual ledger
-│   ├── DSSF.md                           # structure-factor lanes
-│   ├── CODEMAP.md                        # directory-level tour
-│   ├── SCALING.md                        # memory + N envelope, env knobs
-│   ├── ADD_NEW_BASIS_POLICY.md           # extending the matvec
-│   └── ADD_NEW_GPU_CELL.md               # extending the GPU lane
-├── benchmarks/
-│   ├── BENCHMARKS.md                     # head-to-head vs QuSpin / SciPy
-│   ├── bench_vs_xdiag.md                 # head-to-head vs XDiag
-│   └── ORTHOGONAL_SYMMETRY.md            # 4 × 6 symmetry × workflow sweep
-├── perf/                                 # dated benchmark snapshots + capability matrices
-├── api/
-│   ├── cpp.rst                           # Doxygen + Breathe C++ ref
-│   └── python.rst                        # autodoc Python ref
-└── history/                              # legacy phase summaries
-```
-
-| Want to… | Read |
-|----------|------|
-| Get up and running | [`docs/guides/install.md`](docs/guides/install.md) + [`docs/guides/python_quickstart.md`](docs/guides/python_quickstart.md) |
-| Use the one-call API | [`docs/guides/one_call_api.md`](docs/guides/one_call_api.md) |
-| See worked recipes | [`docs/guides/workflow.md`](docs/guides/workflow.md) |
-| Understand the architecture | [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md) |
-| Understand the symmetry math | [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) |
-| Know how big a problem fits | [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md) |
-| Extend the matvec / GPU lanes | [`docs/architecture/ADD_NEW_*.md`](docs/architecture/) |
-| See performance numbers | [`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md) |
-| Run an example | [`examples/README.md`](examples/README.md) |
-| Contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Read the version history | [`CHANGELOG.md`](CHANGELOG.md) |
-
----
-
-## Examples
-
-[`examples/tour/`](examples/tour/) is the canonical usage
-documentation: five short, heavily-commented scripts that cover every
-real knob, one verb per file --
-
-| script | covers |
-|---|---|
-| [`01_ground_state.py`](examples/tour/01_ground_state.py) | `qed.solve`: `symmetry="auto"`, per-symmetry toggles, solvers, devices, per-sector attribution |
-| [`02_finite_temperature.py`](examples/tour/02_finite_temperature.py) | `qed.thermal`: mTPQ/FTLM/LTLM, the sector pool + flip/TR/star copies, Sz windows |
-| [`03_dynamics_dssf.py`](examples/tour/03_dynamics_dssf.py) | `qed.spectral`: S^z_Q / S^±_Q probes, GS + finite-T DSSF through the sector machinery |
-| [`04_symmetry_toolkit.py`](examples/tour/04_symmetry_toolkit.py) | `find_symmetries`, `GeneratorSet.describe()`, sector selection, env escapes |
-| [`05_tpq_dssf.py`](examples/tour/05_tpq_dssf.py) | finite-temperature DSSF from persisted mTPQ states (`initial_state=` seeding) |
-
-Each runs standalone in seconds (`python3 examples/tour/01_ground_state.py`)
-and the `linux-tour` CI lane executes all of them on every push.
-Exhaustive per-configuration coverage lives in the test suites and the
-dense-verified capability matrix
-([`docs/perf/capability_matrix_2026-07-20.md`](docs/perf/capability_matrix_2026-07-20.md)).
----
-
-## Performance
-
-Benchmarks live under [`benchmarks/`](benchmarks/) and produce
-machine-readable JSON; the canonical write-ups are
-[`docs/benchmarks/BENCHMARKS.md`](docs/benchmarks/BENCHMARKS.md)
-(QED vs QuSpin / SciPy),
-[`docs/benchmarks/bench_vs_xdiag.md`](docs/benchmarks/bench_vs_xdiag.md)
-(QED vs XDiag), and
-[`docs/benchmarks/ORTHOGONAL_SYMMETRY.md`](docs/benchmarks/ORTHOGONAL_SYMMETRY.md)
-(the full 4 × 6 symmetry × workflow sweep on CPU and GPU).
-
-Headline numbers (CPU SpMV at `dim ≈ 4 096 – 262 144`):
-
-* `Operator::apply` beats QuSpin's `hamiltonian.dot` by **11× – 170×**.
-* QED Lanczos beats `scipy.sparse.linalg.eigsh` by **1.5 × 10³ – 9.7 × 10³**
-  at `tol = 1e-10`.
-* GPU Lanczos crosses over the CPU near `dim ≈ 2.6 × 10⁵` and continues
-  to scale with the workload.
-
-Reproducer:
-
-```bash
-python3 benchmarks/bench_all_backends.py \
-        --build-dir build --sizes 12 14 16 18 \
-        --threads $(nproc) \
-        --output bench_all_backends.json
-```
-
----
+- `python/tests/grid` checks every task × symmetry × backend cell against a dense
+  reference.
+- `tests/golden` holds recorded results on CPU and GPU.
+- `bench/` holds timed cases against recorded baselines.
+- `scripts/gate/` runs all of these, plus the C++ unit tests and the examples, as SLURM
+  arrays.
 
 ## Layout
 
 ```
-QED/
-├── include/ed/                # public headers (one folder per subsystem)
-│   ├── core/                  # Operator, FixedSzOperator, LinearOperator, make_operator
-│   ├── matvec/                # CPU + GPU matvec template family (BasisPolicy)
-│   ├── symmetry/              # Subspace × ProjectorChain composition
-│   ├── krylov/                # Lanczos / Block-Lanczos / Krylov-Schur kernels
-│   ├── solvers/               # cpu drivers for the kernels
-│   ├── thermal/               # FTLM / OFTLM / mTPQ kernels (LTLM = FTLM trace)
-│   ├── observables/           # expectation, static + dynamical correlator primitives
-│   ├── dssf/                  # cross-sector observables (Sz-resolved + orbit-basis)
-│   ├── parallel/              # NUMA + thread budget + NCCL multi-GPU comm
-│   ├── gpu/                   # CUDA lane (operator + solvers)
-│   ├── input/                 # ed_input lattice + Hamiltonian builder
-│   └── orchestrator.h         # the three workflow verbs
-├── src/                       # implementations
-├── python/qed/                # pybind11 surface + Python facades
-├── examples/                  # one runnable example per use case
-├── benchmarks/                # benchmark drivers + JSON snapshots
-├── tests/{unit,integration}/  # Catch2 + integration tests (ctest)
-├── docs/                      # documentation tree (see above)
-├── cmake/                     # CMake helpers
-└── configs/                   # canned `./ED` config files
+python/qed/        the package: verbs (qed/api), symmetry discovery, Hamiltonian builders
+include/ed/, src/  the engine: symmetry sectors, matvec kernels (CPU, CUDA), Krylov,
+                   thermal and dynamics kernels, backends
+tests/             C++ unit tests and the golden suite (python/tests: API tests, the grid)
+examples/          one runnable script per family of verbs
+bench/             benchmark cases and results
+docs/              architecture page and API reference (Sphinx + Doxygen)
 ```
 
----
-
-## Status
-
-The codebase is production-ready for serial, single-node multi-threaded,
-GPU, and multi-rank (across-sector MPI) use. The May 2026 surface
-collapse retired the legacy `auto_pilot` / `ed_wrapper` / `dispatch`
-families; **new code targets the three orchestrator verbs**
-(`ed::workflows::{solve, thermal, spectral}`) and their Python
-mirrors. The orthogonal symmetry composition (May 2026) opens explicit
-seams for spin-flip / time-reversal / SU(2) axes without further
-operator-hierarchy surgery.
-
-Full release history is in [`CHANGELOG.md`](CHANGELOG.md).
-
-## License & citation
-
-See [`LICENSE`](LICENSE) and [`CITATION.cff`](CITATION.cff).
+See [`docs/architecture.md`](docs/architecture.md) for how the pieces fit together and
+[`CHANGELOG.md`](CHANGELOG.md) for the history.

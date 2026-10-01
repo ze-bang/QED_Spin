@@ -1,5 +1,5 @@
 // =============================================================================
-// test_full_diagonalization (Catch2 v3, P1.8 / audit Q12)
+// test_full_diagonalization (Catch2 v3)
 //
 // Drives the CPU `full_diagonalization()` entry point end-to-end on a small
 // Heisenberg chain (N=4, dim=16; N=6, dim=64) and cross-checks its spectrum

@@ -165,8 +165,7 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
     // Blocks per cycle. The per-cycle Krylov subspace is m_blocks*b vectors; it
     // must be large enough to converge k eigenvalues, or every cycle locks
     // nothing and the thick restart makes no progress (returns 0 eigenvalues on
-    // a large sector -- the block analogue of the single-vector KS subspace-cap
-    // bug). So we size it like single-vector KS: a 2k+20-vector floor, GROWN by
+    // a large sector). So we size it like single-vector KS: a 2k+20-vector floor, GROWN by
     // the user's `max_iter` budget (interpreted in Krylov-vector units, divided
     // by the block width), and only then capped by N/b. `max_iter` thus GROWS
     // the subspace rather than only shrinking it.
@@ -347,12 +346,10 @@ BlockKrylovSchurResult block_krylov_schur_kernel(Backend&                       
         // because the per-cycle cost is O(m_blocks^2) with reorth_period=1; an
         // uncapped grow-to-full-dim is pathologically slow on small sectors. The
         // cap is generous enough to converge typical gaps; harder cases return
-        // the converged prefix (>= the ground state) rather than hang. Use
-        // BLOCK_LANCZOS for the efficient degeneracy solve.
+        // the converged prefix (>= the ground state) rather than hang.
         // ``2k+20`` is the base subspace floor (matching krylov_subspace_dim's
         // floor before the max_iter growth); 8x its block count is a generous
-        // growth ceiling. (Was ``floor_dim`` before that local was folded into
-        // krylov_subspace_dim.)
+        // growth ceiling.
         const std::size_t floor_blocks = (2 * k + 20 + b - 1) / b;
         const std::size_t grow_cap =
             std::min(max_blocks_dim,

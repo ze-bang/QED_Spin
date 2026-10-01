@@ -1,7 +1,6 @@
 // =============================================================================
 // src/orchestrator/orch_thermal.cpp -- ed::workflows::thermal and its lanes
-// (exact-small eigenspectrum fallback, mTPQ sampling, FTLM / OFTLM,
-// the all-Sz sweep).
+// (exact-small eigenspectrum fallback, mTPQ sampling, FTLM / OFTLM).
 // Part of the workflow orchestrator; see orchestrator_internal.h for the
 // file map.
 // =============================================================================
@@ -36,9 +35,8 @@ namespace {
 // ---------------------------------------------------------------------------
 constexpr std::uint64_t SMALL_THERMAL_DIM = 512;
 
-// Audit 2026-07-31: forwards to the single canonical implementation in
-// ed/symmetry/canonical_thermo.h (this used to be one of three
-// byte-equivalent copies; the guards live there now).
+// Forwards to the single canonical implementation (and its guards) in
+// ed/symmetry/canonical_thermo.h.
 static ThermodynamicData compute_canonical_thermo_from_eigs(
     const std::vector<double>& eigs,
     const std::vector<double>& temperatures)
@@ -50,11 +48,9 @@ static ThermodynamicData compute_canonical_thermo_from_eigs(
 
 ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     require_hermitian_input(H, "ed::thermal");
-    // All lanes are wired: mTPQ dispatches through the unified
-    // `tpq_kernel` via the Phase 2.4 facades; FTLM / OFTLM
-    // dispatch through their own `*_kernel<Backend>` templates (CPU
-    // implementations today, GPU when the kernels migrate). The variant
-    // visit at each lane keeps the dispatch backend-agnostic.
+    // mTPQ and FTLM dispatch through their `*_kernel<Backend>` templates
+    // (CPU and CUDA); OFTLM is CPU-only. The variant visit at each lane
+    // keeps the dispatch backend-agnostic.
     using Complex = std::complex<double>;
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(H.geometry().local_dim));
@@ -88,15 +84,12 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         ed::core::guard_working_set(D * vecs * elem, "ed::thermal");
     }
 
-    // Surface unification follow-up (May 2026): when the caller does
-    // not supply an explicit ``opts.betas`` grid, construct one from
-    // the temperature-scan knobs (``temp_min``, ``temp_max``,
-    // ``num_temp_bins``) and -- crucially -- mirror the resulting
+    // When the caller does not supply an explicit ``opts.betas`` grid,
+    // construct one from the temperature-scan knobs (``temp_min``,
+    // ``temp_max``, ``num_temp_bins``) and mirror the resulting
     // temperature axis into ``R.thermo.temperatures`` so downstream
-    // Python / CLI consumers can read the scan back without
-    // recomputing it from ``opts.*``. Mirrors the legacy
-    // ``finite_temperature_lanczos`` contract that every call site
-    // relied on.
+    // consumers can read the scan back without recomputing it from
+    // ``opts.*``.
     if (opts.betas.empty() && opts.num_temp_bins > 0
         && opts.temp_min > 0.0 && opts.temp_max > opts.temp_min) {
         opts.betas.reserve(opts.num_temp_bins);
@@ -129,17 +122,14 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
     //
     // Every stochastic thermal method needs D >> num_samples for good
     // typicality. For small sectors (D <= SMALL_THERMAL_DIM), the per-sample
-    // variance is too high for the dE tolerance even with 20+ samples. The
-    // original symptom was the sz_spatial mTPQ failure: within an n_up block,
-    // translation k-sectors have D ≈ 1–9 for N=8, giving a statistical error
-    // of ~0.12 with 20 samples (vs the 0.08 tolerance).
+    // variance is too high for the dE tolerance even with 20+ samples (e.g.
+    // within an n_up block, translation k-sectors have D ≈ 1–9 for N=8,
+    // giving a statistical error of ~0.12 with 20 samples).
     //
-    // Jul 2026: the gate used to require mTPQ specifically, so FTLM kept
-    // sampling in a regime where the exact solve is both free and machine
-    // precise -- measured at dim=64 (N=6 ring): mTPQ 1.4e-15 (this fallback)
-    // vs FTLM 2.3e-02 (sampling), i.e. 13 orders for microseconds of
-    // eigensolve. The deliverable of FTLM / OFTLM / mTPQ is identical
-    // here -- canonical E(T)/C(T)/S(T) -- so all four take the exact route.
+    // Here the exact solve is both free and machine precise (at dim=64,
+    // N=6 ring: 1.4e-15 exact vs 2.3e-02 FTLM sampling). The deliverable of
+    // FTLM / OFTLM / mTPQ is identical -- canonical E(T)/C(T)/S(T) -- so
+    // every sampling method takes the exact route.
     //
     // For any D <= SMALL_THERMAL_DIM, diagonalise exactly and compute the
     // canonical partition function directly. The resulting ThermodynamicData
@@ -161,7 +151,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         H.geometry().global_dim > 0 &&
         H.geometry().global_dim <= SMALL_THERMAL_DIM &&
         !R.thermo.temperatures.empty() &&
-        // Stage 12f: a seed transform restricts the stochastic trace to a
+        // A seed transform restricts the stochastic trace to a
         // SUBSPACE (e.g. one spin tower). The exact fallback diagonalises
         // the whole block and would silently ignore the restriction --
         // stand down and let the sampling kernel honour the projection.
@@ -193,31 +183,26 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             ed::thermal::MtpqOptions kopts;
             kopts.num_samples = opts.num_samples;
             kopts.random_seed = opts.random_seed;
-            kopts.seed_transform = opts.seed_transform;  // Stage 12f
+            kopts.seed_transform = opts.seed_transform;
             if constexpr (!std::is_same_v<B, ed::matvec::CpuBackend>)
                 kopts.batch_matvec = H.bind_cuda_multi();   // samples share each device H apply
             auto matvec = H.template bind<B>();
 
             // -------------------------------------------------------------
-            // SOTA mTPQ auto-tune (June 2026).
+            // mTPQ auto-tune.
             //
             // The microcanonical iteration |psi_{k+1}> = (L*I - H)|psi_k>
             // advances the effective inverse temperature by
             //   Delta_beta ~ 2 / (L - <H>),     beta_k = 2 k / (L - E_k).
             // So L sets BOTH (a) the high-temperature resolution (small
             // Delta_beta needs large L) and -- together with the step
-            // count -- (b) the coldest temperature reached.
+            // count -- (b) the coldest temperature reached. Coupling L to
+            // ``temp_min`` would let a colder target shrink L, coarsening
+            // Delta_beta and biasing the specific heat / entropy (and
+            // risking L < E_max, which makes (L - H) indefinite and
+            // corrupts the trajectory).
             //
-            // The previous heuristic used ``log2(global_dim)`` as a
-            // stand-in for the spectral ceiling E_max and coupled L to
-            // ``temp_min`` via ``L = 2*max_iter/beta_target + proxy``.
-            // That is doubly wrong: the dim proxy has nothing to do with
-            // the actual band edge, and lowering ``temp_min`` to reach
-            // colder T *shrank* L, coarsening Delta_beta and biasing the
-            // specific heat / entropy (and risking L < E_max, which makes
-            // (L - H) indefinite and corrupts the trajectory).
-            //
-            // SOTA recipe:
+            // Recipe:
             //   1. Measure the true spectral bounds (E_min, E_max) with a
             //      short Lanczos (estimate_spectral_bounds).
             //   2. Pick L from ONE resolution knob: Delta_beta_target.
@@ -313,9 +298,8 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 const double L_stab = e_max_est + std::max(0.05 * W, 1e-9);
                 L_auto = std::max(L_res, L_stab);
             } else {
-                // Non-CPU backend or failed estimate: resolution-driven
-                // floor plus a conservative dim-based pad (never below
-                // the historical behaviour for high-T runs).
+                // Failed estimate: resolution-driven floor plus a
+                // conservative dim-based pad.
                 const double bandwidth_proxy = std::log2(
                     static_cast<double>(std::max<std::uint64_t>(
                         H.geometry().global_dim, 2)));
@@ -351,12 +335,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             R.ground_state_energy = kres.energies.empty()
                 ? 0.0 : *std::min_element(kres.energies.begin(),
                                           kres.energies.end());
-            // SOTA: aggregate per-sample (beta_k, E_k, var_k) trajectories
+            // Aggregate per-sample (beta_k, E_k, var_k) trajectories
             // into ThermodynamicData on the requested temperature grid.
-            // Closes the gap where mTPQ via qed.thermal raised
-            // ``RuntimeError: solver returned no thermodynamic data``.
             if (!R.thermo.temperatures.empty()) {
-                // Audit 2026-09: say so when the trajectory never reached the
+                // Say so when the trajectory never reached the
                 // coldest requested temperature -- the aggregator otherwise
                 // extrapolates silently (measured: E(T=0.2) off by 12% at
                 // N = 20 with a 100-step cap).
@@ -382,7 +364,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                     kres.sample_variances, R.thermo.temperatures,
                     static_cast<double>(H.geometry().global_dim));
                 if (!td.energy.empty()) {
-                    // Mirror the LTLM/FTLM contract: the caller's T grid
+                    // As for FTLM, the caller's T grid
                     // is authoritative -- overwrite R.thermo with the
                     // aggregator's output (which uses our T grid).
                     R.thermo = std::move(td);
@@ -390,10 +372,9 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             }
         }, variant);
     } else if (opts.method == ThermalOptions::Method::FTLM) {
-        // Phase E of the "Close CPU/GPU Gaps" plan (May 2026): the
-        // FTLM kernel facade now dispatches on Backend type internally
-        // (see ftlm_kernel.h, mirroring LTLM at the block below).
-        // Both CpuBackend and CudaBackend are supported.
+        // The FTLM kernel facade dispatches on Backend type internally
+        // (see ftlm_kernel.h). Both CpuBackend and CudaBackend are
+        // supported.
         std::visit([&](auto& backend_uptr) {
             using BPtr = std::decay_t<decltype(backend_uptr)>;
             using B = typename BPtr::element_type;
@@ -417,7 +398,7 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
                 kopts.krylov_dim  = opts.krylov_dim ? opts.krylov_dim : 100;
                 kopts.betas       = opts.betas;
                 kopts.random_seed = opts.random_seed;
-                kopts.seed_transform = opts.seed_transform;  // Stage 12f
+                kopts.seed_transform = opts.seed_transform;
                 for (const auto& O : opts.observables) {
                     if (!std::is_same_v<B, ed::matvec::CpuBackend> && !O->geometry().supports_device_matvec)
                         throw std::invalid_argument("ed::thermal: an observable has no device kernel for the selected GPU lane");
@@ -465,14 +446,10 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
             "ed::thermal: unknown ThermalOptions::Method enumerator.");
     }
 
-    // Surface unification follow-up (May 2026): populate
-    // ``R.thermo.free_energy = E - T * S`` post-hoc so downstream
+    // Populate ``R.thermo.free_energy = E - T * S`` post-hoc so downstream
     // consumers see the full thermodynamic quintet (T, E, Cv, S, F).
-    // The FTLM / OFTLM kernel facades return E/Cv/S only; the
-    // legacy ``finite_temperature_lanczos`` populated F from the
-    // partition function (F = -T ln Z), which is mathematically
-    // equivalent to E - T S once normalised. We use the latter form
-    // here since the kernel does not expose ln Z.
+    // The FTLM / OFTLM kernel facades return E/Cv/S only and do not expose
+    // ln Z; E - T S equals F = -T ln Z once normalised.
     if (R.thermo.free_energy.empty()
         && !R.thermo.energy.empty()
         && R.thermo.energy.size() == R.thermo.entropy.size()
@@ -485,15 +462,12 @@ ThermalResult thermal(const LinearOperator& H, ThermalOptions opts) {
         }
     }
 
-    // Phase D (May 2026): truthful lane reporting -- pull the lane
-    // label from the actual ``BackendVariant`` ``select_backend``
-    // returned, NOT the host operator's memory_space. SectorView (and
-    // every other host-resident operator that lazily wires a GPU
-    // mirror through ``bind_cuda()``) reports ``Host`` memory_space
-    // but ``select_backend`` picks ``CudaBackend`` when
-    // ``allow_gpu=true`` and ``supports_device_matvec=true``. Reading
-    // the variant directly is the only way the label can tell the
-    // truth across all symmetry / non-symmetry workflows.
+    // Pull the lane label from the actual ``BackendVariant``
+    // ``select_backend`` returned, NOT the host operator's memory_space:
+    // a host-resident operator that wires a GPU matvec through
+    // ``bind_cuda()`` reports ``Host`` memory_space, but
+    // ``select_backend`` picks ``CudaBackend`` when ``allow_gpu=true``
+    // and ``supports_device_matvec=true``.
     R.backend.lane = ed::lane_label_from_variant(variant);
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =

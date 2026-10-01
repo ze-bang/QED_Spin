@@ -1,11 +1,10 @@
 #pragma once
 // =============================================================================
 // include/ed/thermal/tpq_thermo.h -- TPQ trajectory -> ThermodynamicData
-// aggregation (Stage 11b relocation of the last surviving TPQ.{h,cpp}
-// function into the thermal kernel family it serves).
+// aggregation.
 //
-// Takes the per-sample (beta_k, E_k, var_k) trajectories DIRECTLY (no
-// HDF5/text round-trip) and interpolates onto the caller's temperature
+// Takes the per-sample (beta_k, E_k, var_k) trajectories in memory
+// and interpolates onto the caller's temperature
 // grid. Called by the unified ``ed::workflows::thermal`` orchestrator for
 // the mTPQ lane (the backend-templated kernel in ``mtpq_kernel.h``
 // emits these trajectories).
@@ -52,8 +51,7 @@ namespace ed::thermal {
  *                            Boltzmann weight in
  *                            ``combine_sector_thermodynamics`` (U(1)/Sz and
  *                            spatial recombination). When ``0`` (default) the
- *                            legacy zero-baseline integration ``S(T_min)=0``
- *                            is used (kept for backwards compatibility).
+ *                            zero-baseline integration ``S(T_min)=0`` is used.
  */
 inline ThermodynamicData compute_tpq_thermo_from_trajectories(
     const std::vector<std::vector<double>>& sample_inv_temps,
@@ -114,11 +112,9 @@ inline ThermodynamicData compute_tpq_thermo_from_trajectories(
     //     the first trajectory point (which is the beta=0 baseline,
     //     <H> on the random seed -- the high-T limit).
     //
-    // This per-sample boundary clamp replaces the previous per-bin
-    // "nearest covered bin" hole-filler, which produced incorrect E(T)
-    // at T_min when the trajectory bracketed (β_max_traj) was just
-    // below β_target = 1/T_min and the aggregator silently copied the
-    // value from the next-warmer bin.
+    // The clamp is per sample, never per bin: filling an uncovered bin
+    // from its warmer neighbour gives a wrong E(T_min) whenever a
+    // trajectory's β_max_traj stops just below β_target = 1/T_min.
     bool any_covered = false;
     for (std::size_t s = 0; s < num_samples; ++s) {
         const auto& tr = sorted[s];
@@ -187,9 +183,9 @@ inline ThermodynamicData compute_tpq_thermo_from_trajectories(
         // since at beta=0 the integral vanishes and S = ln(D)) and gives
         // the ABSOLUTE free energy. Crucially, the absolute F is what makes
         // each sector's free energy usable as a Boltzmann weight inside
-        // ``combine_sector_thermodynamics``; the previous zero-baseline
-        // integration dropped the per-sector ln(dim_s) constant and so
-        // produced a systematically biased Sz / spatial recombination.
+        // ``combine_sector_thermodynamics``; a zero-baseline integration
+        // drops the per-sector ln(dim_s) constant and so biases the
+        // Sz / spatial recombination.
         //
         // The [0, beta_first] head segment must be anchored at the TRUE
         // beta=0 energy <E>(0) = Tr(H)/D, NOT at the warmest target's
@@ -245,9 +241,9 @@ inline ThermodynamicData compute_tpq_thermo_from_trajectories(
             prev_E    = E_t;
         }
     } else {
-        // Legacy: trapezoidal integration of C_v / T -> entropy (zero
-        // baseline at the coldest target). F = E - T S. Kept for callers
-        // that do not supply the Hilbert dimension.
+        // No Hilbert dimension supplied: trapezoidal integration of
+        // C_v / T -> entropy (zero baseline at the coldest target).
+        // F = E - T S.
         for (std::size_t i = 1; i < num_T; ++i) {
             const double T1 = target_temperatures[i - 1];
             const double T2 = target_temperatures[i];

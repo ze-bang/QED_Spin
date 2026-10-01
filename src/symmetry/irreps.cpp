@@ -43,7 +43,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 // One decomposition attempt with a given RNG seed. Returns false (and leaves
 // `out` untouched) if the random Hermitian commutant element failed to separate
 // the irreps cleanly (caller retries with a new seed). Works purely from the
-// (mult, inverse) tables -- the group can be abstract (Stage 7 little
+// (mult, inverse) tables -- the group can be abstract (little
 // co-groups have no faithful site-permutation realisation).
 [[nodiscard]] bool try_decompose(const std::vector<int>& inverse,
                                  const std::vector<std::vector<int>>& mult,

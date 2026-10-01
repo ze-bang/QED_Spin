@@ -1,8 +1,8 @@
 // =============================================================================
 // include/ed/symmetry/group.h
 //
-// `ed::sym` -- a small, programmatic DSL for site-permutation groups
-// (P2.11 / audit §3.10): the permutation algebra (identity / validate /
+// `ed::sym` -- a small, programmatic DSL for site-permutation groups:
+// the permutation algebra (identity / validate /
 // compose / power / order), the common builders (translation,
 // reflection_1d, site_swap) and `generate_group`, which closes a list of
 // generators into the full group. Exposed to Python as `qed._core.sym`.
@@ -22,6 +22,8 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -99,20 +101,29 @@ inline void validate(const Permutation& g, int n_sites) {
     return out;
 }
 
-/// Smallest `k > 0` with `g^k == identity`, capped at `g.size()!` (which
-/// is way more than any realistic group element actually needs). Throws
-/// if no such `k` is found within the cap (cannot happen for a valid
-/// permutation, but keeps the loop bounded as a defensive measure).
+/// Smallest `k > 0` with `g^k == identity`: the least common multiple of the cycle lengths.
+/// Throws when `g` is not a permutation of 0..n-1.
 [[nodiscard]] inline int order(const Permutation& g) {
-    const Permutation id = identity(static_cast<int>(g.size()));
-    Permutation cur = g;
-    for (int k = 1; k <= static_cast<int>(g.size()) * 2 + 1; ++k) {
-        if (cur == id) return k;
-        cur = compose(g, cur);
+    const int n = static_cast<int>(g.size());
+    std::vector<char> hit(static_cast<std::size_t>(n), 0), seen(static_cast<std::size_t>(n), 0);
+    for (int x : g) {
+        if (x < 0 || x >= n || hit[static_cast<std::size_t>(x)])
+            throw std::invalid_argument("ed::sym::order: input is not a permutation");
+        hit[static_cast<std::size_t>(x)] = 1;
     }
-    throw std::runtime_error(
-        "ed::sym::order: ran past 2*n_sites+1 iterations without "
-        "returning to identity (input is probably not a permutation)");
+    long long k = 1;
+    for (int s = 0; s < n; ++s) {
+        if (seen[static_cast<std::size_t>(s)]) continue;
+        long long len = 0;
+        for (int t = s; !seen[static_cast<std::size_t>(t)]; t = g[static_cast<std::size_t>(t)]) {
+            seen[static_cast<std::size_t>(t)] = 1;
+            ++len;
+        }
+        k = k / std::gcd(k, len) * len;
+        if (k > std::numeric_limits<int>::max())
+            throw std::overflow_error("ed::sym::order: the order does not fit in an int");
+    }
+    return static_cast<int>(k);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,4 @@
 // Lanczos algorithm implementation for exact diagonalization
-// filepath: /home/pc_linux/exact_diagonalization_cpp/src/lanczos.h
 #pragma once
 #if defined(WITH_MKL)
 #define EIGEN_USE_MKL_ALL
@@ -18,7 +17,7 @@
 #include <cmath>
 #include <ed/core/blas_lapack_wrapper.h>
 #include <ed/core/construct_ham.h>
-#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function (Phase 4)
+#include <ed/matvec/matvec.h>            // MatVecOperator + as_apply_function
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>
@@ -89,7 +88,7 @@ void estimate_spectral_bounds(
     double& e_max);
 
 // -----------------------------------------------------------------------------
-// Real-arithmetic Lanczos.                                   Phase 6 #7
+// Real-arithmetic Lanczos.
 //
 // When the Hamiltonian is real and we use a real starting vector, the entire
 // Krylov basis stays real in exact arithmetic and to machine precision in
@@ -110,10 +109,9 @@ void estimate_spectral_bounds(
 // -----------------------------------------------------------------------------
 //
 // ``iters_out`` / ``converged_out`` (optional): number of Lanczos steps taken
-// and whether the Ritz-value test fired before ``max_iter`` (audit 2026-09:
-// the orchestrator used to report ``converged = true`` unconditionally).
+// and whether the Ritz-value test fired before ``max_iter``.
 //
-// ``LanczosRealExtras`` (audit 2026-09, optional): deterministic start vector,
+// ``LanczosRealExtras`` (optional): deterministic start vector,
 // a per-iteration basis-vector hook (two-pass eigenvector reconstruction),
 // a fixed-iteration mode (pass 2 replays pass 1 exactly), and the final
 // tridiagonal + Ritz residual bounds |beta_m| |z_{m,i}| on output.
@@ -141,7 +139,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                   LanczosRealExtras* extras = nullptr);
 
 // Dense full diagonalization (LAPACK) of a block inside the dense window
-// (ED_FULLDIAG_DENSE_MAX, default 120000); larger blocks throw.
+// (dimension <= 120000); larger blocks throw.
 //
 // `op_for_dense` (optional): when non-null AND it supports it
 // (`try_build_dense_columns`), the dense matrix is assembled DIRECTLY from the

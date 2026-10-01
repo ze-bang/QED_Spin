@@ -1,9 +1,8 @@
 // canonical_thermo.h - exact canonical thermodynamics from a full eigenvalue list.
 //
-// Extracted from the retired symmetry_adapted.{h,cpp} (Consolidation Family 6):
-// this reduction is a generic "thermodynamics from a full spectrum" helper with
-// no dependence on the symmetry-adapted-basis solve machinery, and is used by
-// the production little-group solver. Kept header-only inline.
+// A generic "thermodynamics from a full spectrum" helper with no dependence on
+// the symmetry-adapted-basis solve machinery; used by the little-group solver.
+// Header-only inline.
 #pragma once
 
 #include <ed/core/thermal_types.h>   // ThermodynamicData
@@ -16,13 +15,9 @@ namespace ed::symmetry {
 
 // Exact canonical thermodynamics from a full eigenvalue list (multiplicities
 // already folded in). Z(β)=Σ e^{-βE}; reference-shifted by E0 for stability.
-//
-// Audit 2026-07-31: this is now the SINGLE implementation -- the
-// orchestrator's file-local compute_canonical_thermo_from_eigs and the
-// SU(2) tower binding's su2_exact_thermo_from_eigs were byte-equivalent
-// twins and forward here. Their T<=0 / Z<=0 guards were folded in
-// (a non-positive temperature leaves that grid point at zero instead of
-// dividing by zero).
+// This is the single implementation; other callers forward here. A
+// non-positive temperature (or Z <= 0) leaves that grid point at zero
+// instead of dividing by zero.
 inline ThermodynamicData
 canonical_thermo_from_eigs(const std::vector<double>& eigs,
                            const std::vector<double>& T) {

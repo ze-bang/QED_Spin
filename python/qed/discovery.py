@@ -6,7 +6,6 @@ momenta) plus the retained point-group residues -- inside a ``SymmetryReport``.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Union
 
@@ -104,7 +103,7 @@ def _translation_autos_from_lattice(
     verbose: bool,
 ) -> list[Permutation]:
     """Convert ``Lattice`` into the dict + list[np.array] layout the
-    legacy filter expects, and apply it."""
+    translation filter expects, and apply it."""
     import numpy as np
 
     positions = list(lattice.positions)
@@ -129,7 +128,7 @@ def _translation_autos_from_lattice(
     cluster_dims = _infer_cluster_dims(positions, nonzero_lat)
 
     # Trim the position arrays AND lattice vectors to the lattice
-    # dimensionality so the legacy filter's S_inv = inv(S) is well-defined.
+    # dimensionality so the filter's S_inv = inv(S) is well-defined.
     # (Kagome and other 2D lattices embed in 3D, so each non-zero lattice
     # vector has 3 components but only 2 are non-trivial; filter requires
     # a square matrix: num_vectors == vector_dimension.)
@@ -219,14 +218,6 @@ def _generators_equal(a: list[Permutation], b: list[Permutation]) -> bool:
     return sorted(tuple(p) for p in a) == sorted(tuple(p) for p in b)
 
 
-# ---------------------------------------------------------------------------
-# Thermal vs eigenvalue solver classification
-#
-# Mirror ed/core/ed_method_traits.h. We don't bind those predicates from
-# C++ because pybind doesn't expose constexpr functions cleanly and the
-# enum is small enough that maintaining the lists in two places (C++ +
-# Python) is cheap.
-
 @dataclass
 class GeneratorSet:
     """A named candidate set of commuting permutation generators.
@@ -283,7 +274,7 @@ class GeneratorSet:
     generators: list[Permutation] = field(default_factory=list)
     orders: list[int] = field(default_factory=list)
     group_size: int = 1
-    # Stage 7a: automorphisms of the FULL (possibly non-abelian) group
+    # Automorphisms of the FULL (possibly non-abelian) group
     # that lie outside the abelian subgroup spanned by ``generators``.
     # The projector cannot use them, but the star-reduction plan can:
     # they permute the abelian irreps, making related sectors
@@ -517,13 +508,6 @@ def _find_symmetries_key(operator, lattice, translation_only, clique_budget):
 _DEFAULT_CLIQUE_BUDGET = 512
 
 
-def _resolve_clique_budget(clique_budget):
-    if clique_budget is not None:
-        return int(clique_budget)
-    env = os.environ.get("ED_SYM_CLIQUE_BUDGET")
-    return int(env) if env else _DEFAULT_CLIQUE_BUDGET
-
-
 def find_symmetries(
     operator: Operator,
     *,
@@ -534,25 +518,23 @@ def find_symmetries(
 ) -> SymmetryReport:
     """Inspect ``operator`` for U(1) Sz + lattice automorphisms.
 
-    B9: the colored-graph automorphism search + group closure (~0.5 s) is
+    The colored-graph automorphism search + group closure (~0.5 s) is
     memoised on the operator's term content (+ lattice + flags), so a
     ``symmetry="auto"`` sweep that calls this repeatedly on the same H pays
-    the search once. ``ED_SYM_NO_DETECT_MEMO=1`` disables the cache.
+    the search once.
 
     ``clique_budget``: above this automorphism-group size the exact
     maximum-clique search (NP-hard; hours at |Aut| ~ 3e4) is replaced by a
     greedy maximal-abelian clique, with the full non-abelian residue still
     retained as coset-representative ``star_perms`` -- so the factorized
     little-group lane keeps the whole point group either way. Default 512
-    (env ``ED_SYM_CLIQUE_BUDGET``). A greedy maximal (not maximum) clique
+    (``_DEFAULT_CLIQUE_BUDGET``). A greedy maximal (not maximum) clique
     is always valid: a smaller abelian core only folds less; the residue
     grows correspondingly and the projection lane recovers the reduction.
     """
-    _budget = _resolve_clique_budget(clique_budget)
-    _memo_ok = os.environ.get("ED_SYM_NO_DETECT_MEMO") != "1"
-    _key = _find_symmetries_key(operator, lattice, translation_only,
-                                _budget) \
-        if _memo_ok else None
+    _budget = (int(clique_budget) if clique_budget is not None
+               else _DEFAULT_CLIQUE_BUDGET)
+    _key = _find_symmetries_key(operator, lattice, translation_only, _budget)
     if _key is not None:
         hit = _FIND_SYM_MEMO.get(_key)
         if hit is not None:
@@ -643,7 +625,7 @@ def _find_symmetries_impl(
             sz_sectors.append((n_up, math.comb(num_sites, n_up)))
 
     # ------------------------------------------------------------------
-    # 2. Build (vertex_weights, edges) Python records that the existing
+    # 2. Build (vertex_weights, edges) Python records that the
     #    automorphism_finder routines consume.
     # ------------------------------------------------------------------
     vertex_weights, edges = _operator_to_graph_records(operator)
@@ -684,7 +666,7 @@ def _find_symmetries_impl(
             "entirely and pass your own permutations: qed.Symmetry(spatial=[...]))."
         ) from e
 
-    # The legacy pipeline prints quite a lot. The cheapest way to silence
+    # The automorphism pipeline prints quite a lot. The cheapest way to silence
     # it is to redirect stdout for the duration of the call.
     if verbose:
         all_automorphisms = _run_full_automorphism_pipeline(
@@ -720,7 +702,7 @@ def _find_symmetries_impl(
                     "modulo the supercell)."
                 ),
             )
-            # Stage 7a: the ENTIRE point group is this set's residue --
+            # The ENTIRE point group is this set's residue --
             # translations project, the point group folds the k sectors
             # into isospectral stars (the textbook space-group split).
             _t_keys = {tuple(pp) for pp in translation_autos}
@@ -765,7 +747,7 @@ def _find_symmetries_impl(
                     "automorphism group."
                 ),
             )
-            # Stage 7a: retain the non-abelian residue (automorphisms
+            # Retain the non-abelian residue (automorphisms
             # outside the abelian clique) for star reduction and group
             # structure reporting.
             _clique_keys = {tuple(pp) for pp in clique}

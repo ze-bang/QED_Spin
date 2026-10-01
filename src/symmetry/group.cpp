@@ -2,7 +2,7 @@
 // src/symmetry/group.cpp
 //
 // Implementation of `ed::sym::generate_group` declared in
-// `ed/symmetry/group.h` (P2.11 / audit §3.10).
+// `ed/symmetry/group.h`.
 // =============================================================================
 
 #include <ed/symmetry/group.h>

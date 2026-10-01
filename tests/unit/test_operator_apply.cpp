@@ -1,5 +1,5 @@
 // =============================================================================
-// test_operator_apply (Catch2 v3, P1.8 / audit Q12)
+// test_operator_apply (Catch2 v3)
 //
 // Sanity tests for the matrix-free Operator::apply() path on tiny Heisenberg
 // chains. We cross-check against:
@@ -8,7 +8,9 @@
 //   * hermiticity of the dense matrix,
 //   * matrix-vector consistency (apply(v) == Hdense * v) on random v,
 //   * OBC vs PBC ground-state ordering for N=4,
-//   * adding a zero-coefficient term does not perturb the spectrum.
+//   * adding a zero-coefficient term does not perturb the spectrum,
+//   * GATHER == SCATTER kernel equivalence, apply_real == apply, and the
+//     cache-invalidation invariants of the term storage.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -28,11 +30,11 @@
 using namespace ed_tests;
 
 // =============================================================================
-// Phase 1 of the SOTA matrix-apply plan: GATHER == SCATTER equivalence gate.
+// GATHER == SCATTER equivalence gate.
 //
-// The default shared-memory matrix-free SpMV is now the lock-free row GATHER
+// The default shared-memory matrix-free SpMV is the lock-free row GATHER
 // (apply_terms_gather + precomputed diagonal). ED_MATVEC_SCATTER=1 selects the
-// legacy SCATTER kernel (apply_terms, atomic + radix sort). Both forms must
+// SCATTER kernel (apply_terms, atomic + radix sort). Both forms must
 // produce bit-for-bit identical results (to ~1e-12). We pin the equivalence
 // across {Full} x {complex, real} x {1/2/3-body} by toggling the env
 // var around backend construction (the tunables are read once, when the lazy
@@ -40,9 +42,8 @@ using namespace ed_tests;
 // matrix-free path (otherwise the tiny dims would route through assembled CSR
 // and the two kernels would never be exercised).
 //
-// The symmetry orbit-CSR and on-the-fly representative paths are unchanged by
-// this plan (orbit-CSR is already a lock-free row gather; rep stays scatter),
-// so their existing dedicated tests remain the equivalence gate there.
+// The symmetry orbit-CSR (a lock-free row gather) and on-the-fly
+// representative (scatter) paths have their own dedicated tests.
 // =============================================================================
 namespace {
 
@@ -228,7 +229,7 @@ TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
 
 TEST_CASE("Operator::apply_real: matches Operator::apply on real Heisenberg",
           "[operator_apply][apply_real][audit-2.1-phase-1]") {
-    // Audit §2.1 Phase 1: the real-typed SpMV must be byte-equivalent to the
+    // The real-typed SpMV must be byte-equivalent to the
     // complex SpMV when the operator is real and the input vector is real.
     // We use the dim>=1024 threshold from apply()'s dispatch, so N=10 (dim=1024)
     // exercises both the apply_real direct path and the apply() dispatch path.
@@ -268,16 +269,12 @@ TEST_CASE("Operator::apply_real: matches Operator::apply on real Heisenberg",
 TEST_CASE("Operator: isReal() cache invalidates when a complex coefficient "
           "is added between calls",
           "[operator_apply][regression][s0]") {
-    // Regression test mirroring the structural-audit Python-binding
-    // finding: ``isReal()`` caches its first answer in ``real_check_done_``,
-    // so a real-only operator that gets queried once and then has a
-    // complex coefficient pushed in would keep claiming real -- routing
-    // a subsequent lanczos() call through the lanczos_real fast path
-    // with the wrong matvec. The Python bindings now call
-    // ``invalidateMatrixCaches()`` from every ``op_add_*`` helper, but
-    // this test exercises the underlying invariant: an explicit
-    // ``invalidateMatrixCaches()`` after a direct AoS push must reset
-    // the isReal() cache too.
+    // ``isReal()`` caches its first answer in ``real_check_done_``, so a
+    // real-only operator that is queried once and then gets a complex
+    // coefficient would keep claiming real -- routing a subsequent
+    // solve through the real fast path with the wrong matvec. An
+    // explicit ``invalidateMatrixCaches()`` after a direct AoS push must
+    // reset the isReal() cache too.
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     REQUIRE(op->isReal());
 
@@ -310,7 +307,7 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
 }
 
 // =============================================================================
-// S0 regression: AoS cache invalidation (audit S0 #2, May 2026).
+// AoS cache invalidation.
 //
 // Sequence:
 //   1. build the operator
@@ -319,11 +316,11 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
 //      typed setters and any explicit invalidateMatrixCaches() call)
 //   4. call apply() again
 //
-// Before the May 2026 size-tracking fix, step (4) returned the SoA cache
-// from step (2), silently dropping the term added in step (3). The fix
-// records the AoS sizes at every commit and rebuilds the SoA cache when
-// they diverge from the live sizes. This regression test asserts that
-// the new term participates in the second apply.
+// Without size tracking, step (4) would reuse the SoA cache from step (2)
+// and silently drop the term added in step (3). The operator records the
+// AoS sizes at every commit and rebuilds the SoA cache when they diverge
+// from the live sizes; this test asserts that the new term participates
+// in the second apply.
 // =============================================================================
 TEST_CASE("Operator: direct AoS push between applies is honoured "
           "(size-tracking cache invalidation)",
@@ -357,20 +354,16 @@ TEST_CASE("Operator: direct AoS push between applies is honoured "
 }
 
 // =============================================================================
-// S0 regression: GATHER three-body kernel respects complex coefficients
-// (audit S0 #5, May 2026).
+// GATHER three-body kernel respects complex coefficients.
 //
-// Before the May 2026 fix, ``gather_row`` collapsed a three-body
-// coupling to ``coefficient.real()``, silently dropping the imaginary
-// part. The distributed CPU SpMV reaches this kernel via
-// ``DistributedOperator::apply``, so any Hamiltonian with a complex
-// three-body term gave a different answer between the serial CPU
-// (SCATTER) and distributed CPU (GATHER) paths.
+// ``gather_row`` must carry the full complex three-body coupling; taking
+// only ``coefficient.real()`` would silently drop the imaginary part and
+// make the GATHER and SCATTER kernels disagree for any Hamiltonian with
+// a complex three-body term.
 //
-// We exercise gather_row directly against the SCATTER ``apply_terms``
-// for a tiny 3-site Hamiltonian with an imaginary-only 3-body coupling:
-// S+_0 S-_1 Sz_2 with i. Both kernels must produce the same y[r] for
-// every r.
+// We exercise gather_row directly against ``Operator::apply`` for a tiny
+// 3-site Hamiltonian with an imaginary-only 3-body coupling:
+// S+_0 S-_1 Sz_2 with i. Both must produce the same y[r] for every r.
 // =============================================================================
 TEST_CASE("matvec::kernel::gather_row: complex three-body matches SCATTER",
           "[matvec][kernel][regression][s0][three_body]") {
@@ -380,8 +373,8 @@ TEST_CASE("matvec::kernel::gather_row: complex three-body matches SCATTER",
     const double spin           = 0.5;
 
     TermStorage T;
-    // i * S+_0 S-_1 Sz_2 -- intentionally pure imaginary so the .real()
-    // bug zeros out the entire term.
+    // i * S+_0 S-_1 Sz_2 -- intentionally pure imaginary so a .real()
+    // truncation would zero out the entire term.
     T.add_three_body(/*op1=*/0, /*site1=*/0,
                      /*op2=*/1, /*site2=*/1,
                      /*op3=*/2, /*site3=*/2,
@@ -400,7 +393,7 @@ TEST_CASE("matvec::kernel::gather_row: complex three-body matches SCATTER",
         y_gather[r] = kernel::gather_row(r, v[r], T, spin, get_v);
     }
 
-    // ----- SCATTER path (drive ``Operator::apply``) ------------------
+    // ----- Reference path (drive ``Operator::apply``) ----------------
     auto op = std::make_unique<Operator>(N, /*spin_l=*/0.5f);
     op->addThreeBodyTerm(/*op1=*/0, /*site1=*/0,
                          /*op2=*/1, /*site2=*/1,
@@ -417,8 +410,8 @@ TEST_CASE("matvec::kernel::gather_row: complex three-body matches SCATTER",
     INFO("||y_gather - y_scatter||_2 = " << std::sqrt(diff_sq));
     REQUIRE(std::sqrt(diff_sq) < 1e-12);
 
-    // Also assert the imaginary part actually carried through (pre-fix
-    // y_gather would have been identically zero for this pure-imag
+    // Also assert the imaginary part actually carried through (a .real()
+    // truncation would leave y_gather identically zero for this pure-imag
     // coupling).
     double scatter_norm_sq = 0.0;
     for (std::uint64_t r = 0; r < dim; ++r) {

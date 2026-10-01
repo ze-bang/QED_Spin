@@ -45,10 +45,9 @@ __all__ = [
 def momentum_labels(irrep_characters, t1, t2, Lx, Ly, abelian_group=None):
     """(k1, k2) crystal momentum for each RAW abelian irrep index.
 
-    The little-group project lane's ``k_raw`` / ``block_k_raw`` indices
+    The sector engine's ``k_raw`` indices (``_core.sectors.Level.k_raw``)
     follow the engine's irrep-decomposition order, which is NOT
-    momentum-ordered (index 0 is generally not the Gamma point -- a
-    36-site campaign was nearly mislabeled by assuming it was). The
+    momentum-ordered (index 0 is generally not the Gamma point). The
     physically unambiguous decode reads the momentum off the translation
     generators' character phases. Column ``j`` of ``irrep_characters`` is the
     j-th element of the ``abelian_group`` THE CALLER PASSED to the engine, in the

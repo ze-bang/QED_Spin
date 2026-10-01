@@ -9,8 +9,8 @@
   * argument validation (empty inputs / wrong-shape vectors / unknown types)
 
 We deliberately avoid asserting matrix elements -- the apply() correctness
-is covered by the C++ ctest baseline. This file checks the *bookkeeping* the
-HDF5 schema and downstream Python notebooks rely on.
+is covered by the C++ ctest baseline. This file checks the *bookkeeping*
+(pair counts, names and ordering) that downstream consumers rely on.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def test_build_pairs_transverse_emits_NSF_then_SF():
     assert len(pairs) == 2
     assert len(pairs.obs_1) == 2
     assert len(pairs.obs_2) == 2
-    # Legacy ordering: NSF first, then SF -- lock that in.
+    # Ordering: NSF first, then SF -- lock that in.
     assert "_NSF" in pairs.names[0]
     assert "_SF" in pairs.names[1]
 

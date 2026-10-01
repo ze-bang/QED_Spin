@@ -3,8 +3,7 @@
 // include/ed/symmetry/compiled_group.h
 //
 // CompiledGroup: the compiled action of a (unitary) symmetry group on
-// computational basis states -- Stage 1 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md).
+// computational basis states.
 //
 // Each group element acts as
 //
@@ -12,7 +11,7 @@
 //
 // which covers every unitary symmetry this package projects on:
 // translations, arbitrary point-group elements, their products, and
-// (Stage 5) internal Z2 flips such as the global spin flip
+// internal Z2 flips such as the global spin flip
 // (flip_mask = (1<<N)-1). U(1) Sz is a Subspace, not a group element;
 // time reversal is antiunitary and is handled as sector-pairing
 // metadata, never through this class.
@@ -21,13 +20,12 @@
 // input byte b with value v contributes ``lut[(g*BPW + b)*256 + v]``
 // to the output word, so ``apply`` is BPW (= ceil(N/8), 4 at N=32)
 // L1/L2-resident loads + ORs + one XOR instead of an N-iteration
-// scalar bit scatter. This generalizes the uint32 N<=32 LUT that
-// ``RepSectorData::build_perm_lut`` introduced for the SpMV rep walk
-// (same layout convention, widened to uint64 / N<=64) so construction
-// and matvec share one compiled form.
+// scalar bit scatter. It uses the same layout convention as the uint32
+// N<=32 LUT of ``RepSectorData::build_perm_lut`` (the SpMV rep walk),
+// widened to uint64 / N<=64.
 //
 // ``content_hash()`` is a canonical FNV-1a over (n_sites, elements):
-// the key for the Stage-3 persistent basis cache. It deliberately does
+// the key for the persistent basis cache. It deliberately does
 // NOT include Hamiltonian couplings -- the symmetry-adapted basis
 // depends only on the group and the subspace.
 //
@@ -58,8 +56,8 @@ public:
                       n_sites);
     }
 
-    /// Compile permutation + XOR-flip elements (Stage 5: spin-flip Z2 and
-    /// sublattice flips ride the same table).
+    /// Compile permutation + XOR-flip elements (spin-flip Z2 and sublattice
+    /// flips ride the same table).
     [[nodiscard]] static CompiledGroup
     from_elements(const std::vector<std::vector<int>>& perms,
                   const std::vector<std::uint64_t>&    flip_masks,
@@ -90,13 +88,13 @@ public:
 
     /// True iff element ``g`` fixes every state (identity permutation and
     /// zero flip). Useful for skip-identity micro-optimizations; callers
-    /// that require bit-identity with legacy loops should not skip.
+    /// whose floating-point summation order must stay fixed should not skip.
     [[nodiscard]] bool is_identity(std::size_t g) const noexcept {
         return identity_[g] != 0;
     }
 
     /// Canonical FNV-1a content hash over (n_sites, per-element perm+flip).
-    /// Stage-3 cache key material.
+    /// Basis-cache key material.
     [[nodiscard]] std::uint64_t content_hash() const noexcept { return hash_; }
 
 private:

@@ -1,32 +1,27 @@
 # scripts/
 
-Build, test and small stand-alone tools. Nothing here is imported by the library.
+Build, test and gate tooling. Nothing here is imported by the library.
 
 ```
 scripts/
 ├── build.sh                 the one build entry point (see its header); clusters/*.env per site
-├── build_core.sbatch        build the Python extension inside a SLURM job
 ├── check_env_registry.sh    the ED_* environment contract (registry <-> sources, no raw getenv)
-├── check_local.sh           quick local build + test loop
-├── run_ctests.sbatch        C++ unit tests (+ the registry check) on a compute node
-├── run_python_tests.sbatch  the Python suite on a compute node
-├── golden/                  golden-master gates: build, CPU/GPU compare, consumers (QED_NLCE_Spin)
-├── bench_mtpq_matrix.py     mTPQ benchmark matrix
-└── utils/                   HDF5 inspection, TPQ output parsing, gamma-matrix printout
+├── gate/                    the gate: build job + CPU and GPU task arrays (tasks.sh lists the stages)
+├── golden/                  golden suite: build, CPU/GPU compare, record, bless
+├── run_ctests.sbatch        C++ unit tests on a compute node
+├── run_grid.sbatch          the coverage grid on a compute node
+└── run_python_tests.sbatch  the Python suite on a compute node
 ```
 
-Campaign code (model-specific drivers, plotting and analysis pipelines, the old
-`research/`, `plotting/`, `analysis/` and `archive/` trees) lives in the separate
-repository QED_Spin_research, with its history.
+## Gate (Alliance clusters; never on a login node)
 
-## Gate recipe (Alliance clusters; never on a login node)
+`gate/submit.sh <account>` submits the build and, depending on it, one CPU and one GPU job
+array; every task appends `<stage> <exit code>` to `logs/gate/<build id>/rc`. Summary:
 
 ```
-B=$(sbatch --parsable scripts/golden/build.sbatch)
-sbatch --dependency=afterok:$B --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/cpu.json.gz scripts/golden/run.sbatch
-sbatch --dependency=afterok:$B --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/pre-refactor-2026-09/gpu.json.gz scripts/golden/run.sbatch
-sbatch --gpus-per-node=h100:1 --export=ALL,QED_CTEST_VARIANT=cuda scripts/run_ctests.sbatch   # steps that touch GPU code
-sbatch --dependency=afterok:$B scripts/golden/run_consumers.sbatch
-sbatch --dependency=afterok:$B scripts/run_ctests.sbatch
-sbatch scripts/run_python_tests.sbatch        # after the others: it rebuilds _core in build/cpu
+awk '{c[$1]=$2} END {for (k in c) print k, c[k]}' logs/gate/<build id>/rc
 ```
+
+A change is ready when every stage reports 0. Run the gate from a snapshot of the tree
+(a worktree synced with `rsync --checksum`), not the tree being edited: the tasks import
+`python/` while they run.

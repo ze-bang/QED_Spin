@@ -1,8 +1,7 @@
 // =============================================================================
 // tests/unit/test_compiled_group.cpp
 //
-// Stage-1 bit-identity contract of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md):
+// Bit-identity contract of CompiledGroup:
 //
 //   CompiledGroup::apply(s, g) == applyPermutation(s, perm[g]) ^ flip[g]
 //

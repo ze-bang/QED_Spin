@@ -1,13 +1,10 @@
 #pragma once
 // =============================================================================
-// include/ed/core/construct_ham.h  — BACKWARD-COMPATIBLE UMBRELLA HEADER
+// include/ed/core/construct_ham.h  — UMBRELLA HEADER
 //
-// This file was previously a 5422-line monolith.  Its contents have been
-// split into focused single-responsibility headers; this file now simply
-// includes them in dependency order so that every existing consumer that
-// does `#include <ed/core/construct_ham.h>` continues to compile unchanged.
+// Includes the operator-construction headers in dependency order.
 //
-// New code should include only the specific header it needs:
+// Code that needs only part of this should include the specific header:
 //
 //   #include <ed/core/basis_utils.h>           // popcount, applyPermutation, ...
 //   #include <ed/core/operator.h>              // Operator (full Hilbert space)

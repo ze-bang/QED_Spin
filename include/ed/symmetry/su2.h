@@ -2,8 +2,7 @@
 // =============================================================================
 // include/ed/symmetry/su2.h
 //
-// Stage 12b of the SU(2) rollout (docs/architecture/SYMMETRY_V2_DESIGN.md):
-// term-level detection of full SU(2) spin-rotation invariance,
+// Term-level detection of full SU(2) spin-rotation invariance,
 // [H, S^a_tot] = 0 for a = x, y, z.
 //
 // A spin-1/2 term Hamiltonian commutes with the total-spin algebra iff it

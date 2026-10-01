@@ -1,23 +1,21 @@
 // =============================================================================
 // src/symmetry/streaming_symmetry_gpu_mirror.cpp
 //
-// CPU-only stub for the lazy GPU sector mirror entry points.
+// CPU-only stubs for the GPU sector-matvec factories declared in
+// ed/symmetry/sector_gpu_mirror.h.
 //
-// When WITH_CUDA is OFF this TU is the sole provider of
-// ``StreamingSymmetryOperator::bind_cuda_for_sector`` and
-// ``FixedSzStreamingSymmetryOperator::bind_cuda_for_sector``. The real
-// implementation lives in ``streaming_symmetry_gpu_mirror.cu`` (compiled
-// into ``ed_solvers_gpu`` only when WITH_CUDA is ON). When WITH_CUDA is
-// ON this file is an empty TU -- the strong definitions come from the
-// .cu sibling.
+// When WITH_CUDA is OFF this TU is the sole provider of the
+// ``make_sector_matvec_gpu_rep*`` factories. The real implementation lives
+// in ``streaming_symmetry_gpu_mirror.cu`` (compiled into ``ed_solvers_gpu``
+// only when WITH_CUDA is ON). When WITH_CUDA is ON this file is an empty
+// TU -- the strong definitions come from the .cu sibling.
 //
-// The stub throws ``std::logic_error`` with a clear message so callers
+// The stubs throw ``std::logic_error`` with a clear message so callers
 // that misroute to ``bind_cuda()`` on a non-CUDA build get a loud,
 // localised failure rather than a silent fallback. The
-// ``select_backend`` gate (Phase 1c plumbing) avoids calling this on
-// a non-CUDA build because ``Geometry::supports_device_matvec`` is
-// only set when WITH_CUDA is defined AND the build runtime has at
-// least one GPU.
+// ``select_backend`` gate avoids calling these on a non-CUDA build
+// because ``Geometry::supports_device_matvec`` is only set when WITH_CUDA
+// is defined AND the build runtime has at least one GPU.
 // =============================================================================
 
 #ifndef WITH_CUDA

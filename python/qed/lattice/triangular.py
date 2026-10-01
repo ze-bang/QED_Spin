@@ -1,13 +1,13 @@
 """Triangular lattice on a (tilted) torus: sites, bond shells, the space group as site
 permutations, an XXZ / J1-J2 / nematic Hamiltonian, and physical names (high-symmetry
-point, Mulliken irrep) for the blocks of :mod:`qed.little_group`.
+point, Mulliken irrep) for the symmetry-sector blocks (:class:`qed.Symmetry`).
 
 Conventions
   a1 = (1, 0), a2 = (1/2, sqrt3/2); a site is (n1, n2) in this basis, wrapped on the
   superlattice T1 = (a, b), T2 = (c, d) (rows, in the same basis). Permutations follow
   qed: p[i] = image of site i.
   A momentum is kappa = (k.a1, k.a2) / 2pi, a pair of Fractions in [0, 1); this is the
-  reduced momentum qed.little_group reports for the generators momentum_generators().
+  reduced momentum the sector engine reports for the generators momentum_generators().
 
   H = sum_<ij>  J1 (1 + eta [bond || a1]) [ (S+S- + S-S+)/2 + Delta SzSz ]
     + sum_<<ij>> J2                      [ (S+S- + S-S+)/2 + Delta SzSz ]
@@ -122,7 +122,7 @@ class TriangularSupercell:
                                          for (t1, t2) in self.sites})]
 
     def momentum_generators(self):
-        """Translations by a1 and a2: qed.little_group reports kappa against these."""
+        """Translations by a1 and a2: the generators kappa is reported against."""
         return [self.translation(1, 0), self.translation(0, 1)]
 
     def point_group(self, nematic=False):
@@ -155,7 +155,7 @@ class TriangularSupercell:
         return ops
 
     def space_group(self, nematic=False):
-        """(abelian_group, residue_perms, residue_labels) ready for qed.little_group."""
+        """(abelian_group, residue_perms, residue_labels): the abelian part and the point-group residues."""
         pg = self.point_group(nematic=nematic)
         return self.translation_group(), [p for _, p in pg], [l for l, _ in pg]
 
@@ -215,7 +215,7 @@ class TriangularSupercell:
         return f"{letter}{1 if mir[ref] > 0 else 2}"
 
     def namer(self, residue_labels):
-        """A ``namer`` for qed.little_group.solve_blocks: level -> (point, irrep)."""
+        """A ``namer`` for levels carrying ``momenta`` and ``characters``: level -> (point, irrep)."""
         def name(level):
             point = self.point_name(level.momenta)
             chi = {("E" if e < 0 else residue_labels[e]): c for e, c in level.characters.items()}

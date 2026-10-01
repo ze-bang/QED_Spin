@@ -12,17 +12,16 @@
 //            <r|H|c> v[c] into y[r].
 //
 // GATHER is the natural shape when the output row r is "owned" by the
-// current process / thread / GPU block and the input vector v is accessed
-// via a generic callable (e.g. MPI lookup table, NCCL get_v, page-fault-
-// triggered remote read). It keeps writes scalar (one accumulator per r)
-// at the cost of more conditional reads.
+// current thread / GPU block and the input vector v is accessed via a
+// generic callable. It keeps writes scalar (one accumulator per r) at the
+// cost of more conditional reads.
 //
 // The bit-flip / Sz / popcount semantics MUST stay byte-identical with
 // the SCATTER kernel in ``term_kernels.h`` -- this header is the single
 // source of truth for the GATHER direction, and it's tested against the
-// SCATTER path via the distributed-equivalence unit tests.
+// SCATTER path in the matvec unit tests.
 //
-// Op-type encoding (unchanged across both kernels):
+// Op-type encoding (same in both kernels):
 //   0 = S+ (raise), 1 = S- (lower), 2 = Sz (diagonal)
 // =============================================================================
 
@@ -65,13 +64,12 @@ inline Scalar gather_row_terms(std::uint64_t r_idx,
 /**
  * @brief GATHER one row's worth of H * v at output index r.
  *
- * Legacy (FullBasisPolicy-only) signature kept as a thin wrapper around
- * the generic ``gather_row<BasisPolicy>`` below: the bitstring r IS the
+ * FullBasisPolicy-only form over a ``TermStorage``: the bitstring r IS the
  * global array index in the full-Hilbert basis, so this overload simply
- * threads through ``c = r XOR pattern`` directly.
+ * threads through ``c = r XOR pattern`` directly. The policy-generic form
+ * is ``gather_row_terms`` below.
  *
  * @tparam GetV     Callable ``Complex(std::uint64_t c)`` returning v[c].
- *                  The caller resolves local vs. off-rank lookup.
  * @param r              Global output basis index.
  * @param v_local_at_r   v[r] (passed by value for diagonal-only terms,
  *                       saving one GetV call per diag term).
@@ -84,11 +82,8 @@ inline Scalar gather_row_terms(std::uint64_t r_idx,
  *
  * Complexity: O(|terms_in_each_bin|) -- one pass per SoA bin.
  *
- * The three-body branch now mirrors the complex SCATTER path in
- * ``term_kernels.h`` byte-for-byte (the imaginary part of the coupling
- * is no longer dropped). The distributed CPU SpMV reaches this kernel
- * via ``DistributedOperator::apply``; complex three-body couplings now
- * give the same result as the serial CPU path.
+ * The three-body branch carries the full complex coupling, matching the
+ * complex SCATTER path in ``term_kernels.h``.
  */
 template <class GetV>
 inline std::complex<double>
@@ -115,9 +110,8 @@ gather_row(std::uint64_t r,
     //  ROW bit after the operator acted equals ``op_type``
     //  (S+ (op 0) leaves the flipped site up=0; S- (op 1) leaves it
     //  down=1). The column bit is the complement -- exactly the SCATTER
-    //  gate transposed. (The earlier ``!= op_type`` form computed the
-    //  Hermitian-conjugate element; for real symmetric couplings it
-    //  coincides, but it dropped/swapped asymmetric & complex weights.)
+    //  gate transposed. (A ``!= op_type`` gate would compute the
+    //  Hermitian-conjugate element, wrong for asymmetric/complex weights.)
     for (const auto& t : terms.offdiag_one_body) {
         const std::uint64_t bit = (r >> t.site_index) & 1ULL;
         if (bit == t.op_type) {
@@ -163,9 +157,8 @@ gather_row(std::uint64_t r,
     // the XOR of (1<<site_k) for each S+/- operator. Then walk the same
     // gating sequence the SCATTER kernel uses (with `b` as the source);
     // we require the final walked state to equal r (self-consistency).
-    // ``scalar`` starts as the full complex coupling -- the previous
-    // version of this kernel projected to .real() which silently dropped
-    // the imaginary part on every distributed run with complex couplings.
+    // ``scalar`` starts as the full complex coupling (projecting to .real()
+    // would drop the imaginary part of complex couplings).
     for (const auto& tdata : terms.three_body) {
         bool valid = true;
         std::uint64_t flip_xor = 0;
@@ -203,20 +196,14 @@ gather_row(std::uint64_t r,
 }
 
 // ===========================================================================
-// gather_row<BasisPolicy, Scalar=Complex>: the GATHER kernel for one row of
-// the trivial policies:
-//
-//   * Full    -- BasisPolicy = FullBasisPolicy
-//   * FixedSz -- BasisPolicy = FixedSzBasisPolicy
-//
+// gather_row_basis<BasisPolicy, Scalar>: the GATHER kernel for one row of
+// a trivial policy (e.g. FullBasisPolicy) over a ``TermStorage``
 // (single row, single computational state).
 //
 // @tparam BasisPolicy   compile-time basis description (see basis_policy.h)
 // @tparam GetV          callable Complex(std::uint64_t c_global_idx)
-//                       returning v[c]. Caller resolves local vs.
-//                       off-rank lookup. The argument is a GLOBAL ARRAY
-//                       INDEX (not a bitstring) because the gather
-//                       kernel needs to drive the halo lookup table.
+//                       returning v[c]. The argument is a GLOBAL ARRAY
+//                       INDEX (not a bitstring).
 //
 // @param r_idx          Global ARRAY-index of the output row.
 // @param v_local_at_r   v[r_idx], passed by value (saves one get_v call
@@ -230,12 +217,11 @@ gather_row(std::uint64_t r,
 // Off-diagonal terms read the row bitstring via ``basis.state_of``,
 // XOR the flip pattern, and resolve the destination ARRAY-index via
 // ``basis.index_of``. When ``index_of`` returns -1 the column lies
-// outside the basis (Fixed-Sz popcount mismatch / symmetry off-orbit)
+// outside the basis (only possible for ``may_leave_basis`` policies)
 // and the term is skipped, exactly as in the SCATTER kernel.
 //
-// For trivial policies (Full / FixedSz) the additional ``index_of``
-// call is the same O(1) (Full) / O(1) hash (FixedSz) the rest of the
-// stack already pays.
+// For the full basis the additional ``index_of`` call is an O(1)
+// identity.
 // ===========================================================================
 template <class BasisPolicy, class Scalar, class GetV>
 inline Scalar
@@ -248,8 +234,8 @@ gather_row_basis(std::uint64_t r_idx,
 {
     // Thin delegator: ``gather_row_terms`` (below) is the single source of
     // truth for the GATHER row math. Passing the SoA bins of ``terms`` keeps
-    // the MPI / distributed callers (TermStorage-based) bit-identical with the
-    // shared-memory ``apply_terms_gather`` driver.
+    // TermStorage-based callers bit-identical with the ``apply_terms_gather``
+    // driver.
     return gather_row_terms<BasisPolicy, Scalar>(
         r_idx, v_local_at_r, basis, spin_l,
         terms.diag_one_body, terms.offdiag_one_body,
@@ -264,18 +250,17 @@ gather_row_basis(std::uint64_t r_idx,
 // SoA term bins (same field-name contract as ``apply_terms`` in
 // ``term_kernels.h``). ``gather_row_basis`` (TermStorage) and the OpenMP
 // ``apply_terms_gather`` driver both delegate here so the bit-flip / Sz /
-// popcount semantics cannot drift between the SCATTER and GATHER kernels or
-// between the shared-memory and distributed lanes.
+// popcount semantics cannot drift between the SCATTER and GATHER kernels.
 //
 // Diagonal note: callers that precompute the Hamiltonian diagonal (the
 // ``apply_terms_gather`` fast path) pass EMPTY ``diag_one_body`` /
 // ``diag_two_body`` bins here and add ``diag[r] * v[r]`` themselves, so the
 // per-row term loop only walks the off-diagonal bins.
 // ===========================================================================
-// Audit F1 (2026-09): the row bitstring is now a parameter so a driver that
-// enumerates rows sequentially (Gosper stepping in the tableless fixed-Sz
-// mode) can hand it in; ``gather_row_terms`` below keeps the old signature
-// and resolves ``state_of`` itself.
+// gather_row_terms_state takes the row bitstring as a parameter so a driver
+// that enumerates rows sequentially (``next_state`` stepping) can hand it in;
+// ``gather_row_terms`` below takes the row index and resolves ``state_of``
+// itself.
 template <class BasisPolicy, class Scalar,
           class DiagOneBodyVec, class OffDiagOneBodyVec, class DiagTwoBodyVec,
           class MixedTwoBodyVec, class OffDiagTwoBodyVec, class ThreeBodyVec,
@@ -437,10 +422,9 @@ gather_row_terms(std::uint64_t r_idx,
                  const ThreeBodyVec&      three_body,
                  GetV&&                   get_v) noexcept
 {
-    // Get the bitstring of the row. For FullBasisPolicy this is the
-    // identity; for FixedSzBasisPolicy it reads basis_states[r_idx] (or
-    // unranks it in tableless mode -- sequential drivers avoid that via
-    // ``for_each_row_state`` + ``gather_row_terms_state``).
+    // Get the bitstring of the row (the identity for FullBasisPolicy).
+    // Sequential drivers avoid a per-row ``state_of`` via
+    // ``for_each_row_state`` + ``gather_row_terms_state``.
     return gather_row_terms_state<BasisPolicy, Scalar>(
         basis.state_of(r_idx), v_local_at_r, basis, spin_l,
         diag_one_body, offdiag_one_body, diag_two_body, mixed_two_body,
@@ -451,9 +435,9 @@ gather_row_terms(std::uint64_t r_idx,
 // for_each_row_state<BasisPolicy>(basis, f): call f(r, r_state) for every
 // row r in [0, dim) with the SAME static contiguous partition as
 // ``#pragma omp for schedule(static)``. Policies that expose
-// ``sequential_states()`` / ``next_state()`` (the tableless fixed-Sz basis,
-// audit F1) get one ``state_of`` per thread chunk and Gosper stepping for
-// the rest; every other policy calls ``state_of`` per row as before.
+// ``sequential_states()`` / ``next_state()`` get one ``state_of`` per thread
+// chunk and ``next_state`` stepping for the rest; every other policy calls
+// ``state_of`` per row.
 // ===========================================================================
 namespace detail {
 template <class P, class = void>
@@ -508,7 +492,7 @@ inline void for_each_row_state(const BasisPolicy& basis, F&& f)
 // ===========================================================================
 // apply_terms_gather<BasisPolicy, Scalar, ...SoA vecs>:
 //
-// The SOTA lock-free, row-owned GATHER SpMV driver for the shared-memory CPU
+// The lock-free, row-owned GATHER SpMV driver for the shared-memory CPU
 // lane. ``out = H * in`` computed one output row at a time:
 //
 //   * Each thread owns a disjoint contiguous range of output rows
@@ -571,8 +555,8 @@ inline void apply_terms_gather(
     auto get_v = [in](std::uint64_t c) noexcept -> Scalar { return in[c]; };
     (void)par_threshold;
 
-    // Same static row partition as the former ``omp for schedule(static)``;
-    // sequential policies (tableless fixed-Sz) step rows with Gosper's hack.
+    // Static contiguous row partition (as ``omp for schedule(static)``);
+    // sequential policies step rows with ``next_state``.
     for_each_row_state(basis, [&](std::uint64_t r, std::uint64_t r_state) {
         const Scalar v_r = in[r];
         Scalar acc = gather_row_terms_state<BasisPolicy, Scalar>(

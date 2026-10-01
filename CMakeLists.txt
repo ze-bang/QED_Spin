@@ -9,30 +9,26 @@ cmake_minimum_required(VERSION 3.18)
 # Available profiles (set via -DBLAS_PROFILE=<profile>):
 #   AUTO      - Auto-detect best available (default)
 #   FLEXIBLAS - FlexiBLAS wrapper (recommended for HPC clusters)
-#   MKL       - Intel MKL (full stack including ScaLAPACK)
+#   MKL       - Intel MKL
 #   AOCL      - AMD AOCL (BLIS + libflame)
 #   OPENBLAS  - OpenBLAS
 #   GENERIC   - System BLAS/LAPACK (reference implementation)
 #
-# ScaLAPACK compatibility matrix:
-#   MKL profile      -> MKL ScaLAPACK (requires Intel MPI or compatible OpenMPI)
-#   FLEXIBLAS        -> System ScaLAPACK (FlexiBLAS backend at runtime)
-#   OPENBLAS/GENERIC -> System ScaLAPACK (built against same LAPACK)
-#   AOCL             -> ScaLAPACK disabled (ABI conflicts with system ScaLAPACK)
+# No target links ScaLAPACK. SCALAPACK_ROOT and the SCALAPACK_* variables set
+# by the profiles only feed the configuration summary and QEDConfig.cmake.
 # =============================================================================
 
 set(BLAS_PROFILE "AUTO" CACHE STRING "BLAS/LAPACK library profile (AUTO, FLEXIBLAS, MKL, AOCL, OPENBLAS, GENERIC)")
 set_property(CACHE BLAS_PROFILE PROPERTY STRINGS AUTO FLEXIBLAS MKL AOCL OPENBLAS GENERIC)
 
-# Optional custom ScaLAPACK root (for AOCL or custom builds)
+# Custom ScaLAPACK root (informational; see above)
 set(SCALAPACK_ROOT "" CACHE PATH "Root path to a custom ScaLAPACK installation")
 # Optional custom LAPACKE root (to avoid system BLAS/LAPACK alternatives)
 set(LAPACKE_ROOT "" CACHE PATH "Root path to a custom LAPACKE installation")
 
 # -----------------------------------------------------------------------------
-# Local-developer cache variables (P0.10).
-# Replaces the previously hardcoded /home/pc_linux/exact_diagonalization_clean/...
-# paths. Set these via -D on the command line or in a local.cmake file:
+# Local-developer cache variables. Set these via -D on the command line or in
+# a local.cmake file:
 #
 #   cmake --preset default -DED_LAPACKE_ROOT=/path/to/lapacke_ref/install \
 #                          -DED_BLAS_SHIM_DIR=/path/to/blas_shim
@@ -40,12 +36,10 @@ set(LAPACKE_ROOT "" CACHE PATH "Root path to a custom LAPACKE installation")
 # Both default to empty; when empty, the system search paths are used.
 # -----------------------------------------------------------------------------
 set(ED_LAPACKE_ROOT "" CACHE PATH
-    "Optional override: path to a local LAPACKE install (used when LAPACKE_ROOT is unset). \
-P0.10 / audit Q7.")
+    "Optional override: path to a local LAPACKE install (used when LAPACKE_ROOT is unset).")
 set(ED_BLAS_SHIM_DIR "" CACHE PATH
     "Optional override: directory containing libblas.so.3 to PREPEND to RPATH \
-(used by the AOCL profile to avoid MKL alternatives via liblapacke). \
-P0.10 / audit Q7.")
+(used by the AOCL profile to avoid MKL alternatives via liblapacke).")
 
 # Make CMake search cmake/ for our project-local modules.
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -53,7 +47,7 @@ list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Host platform detection (CPU vendor + AVX2/FMA reporting).
 include(EDPlatform)
 
-# Legacy option compatibility - map old options to BLAS_PROFILE
+# Map the per-vendor switches USE_AOCL_BLIS / WITH_MKL / USE_FLEXIBLAS to BLAS_PROFILE
 if(DEFINED USE_AOCL_BLIS AND USE_AOCL_BLIS AND BLAS_PROFILE STREQUAL "AUTO")
     set(BLAS_PROFILE "AOCL")
 endif()
@@ -97,7 +91,7 @@ endif()
 
 message(STATUS "BLAS/LAPACK profile: ${BLAS_PROFILE}")
 
-# Derive legacy flags from BLAS_PROFILE for compatibility
+# Derive the per-vendor flags from BLAS_PROFILE
 set(WITH_MKL OFF)
 set(USE_ONEMKL OFF)
 set(USE_AOCL_BLIS OFF)
@@ -155,7 +149,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Source directories - new organized layout
+# Source directories
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(SOLVERS_CPU_DIR ${SRC_DIR}/solvers/cpu)
@@ -163,7 +157,7 @@ set(SOLVERS_GPU_DIR ${SRC_DIR}/solvers/gpu)
 set(DSSF_DIR ${SRC_DIR}/dssf)
 set(SYMMETRY_DIR ${SRC_DIR}/symmetry)
 set(PARALLEL_DIR ${SRC_DIR}/parallel)
-set(MATVEC_DIR ${SRC_DIR}/matvec)  # Matvec-unification revamp (Phase 1)
+set(MATVEC_DIR ${SRC_DIR}/matvec)
 
 # Include directories - public headers in include/, private in src/
 include_directories(${INCLUDE_DIR})
@@ -186,7 +180,7 @@ include(EDBlasProfile)
 # OTHER DEPENDENCIES
 # =============================================================================
 # Eigen3, optional CUDAToolkit (gated by
-# WITH_CUDA), and ARPACK. Each is independent of the BLAS profile above.
+# WITH_CUDA). Each is independent of the BLAS profile above.
 include(EDDependencies)
 
 # CPU optimization flags must be defined before EDLibraries so the static
@@ -220,7 +214,7 @@ if(WITH_MKL AND USE_ONEMKL AND MKL_FOUND)
 endif()
 
 # =============================================================================
-# INSTALL RULES + QEDConfig.cmake export (P1.7 / audit Q5)
+# INSTALL RULES + QEDConfig.cmake export
 #
 # Allows the package to be installed into a prefix and consumed by downstream
 # CMake projects via:
@@ -321,7 +315,7 @@ message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
 _ed_report_cpu_features()
 
 # =============================================================================
-# Optional Python bindings (P2.7 / audit "modern python interface").
+# Optional Python bindings.
 #
 # When enabled, builds the `qed._core` pybind11 extension using the
 # project's static-library stack. Two ways to enable:
@@ -365,15 +359,6 @@ if(ED_BUILD_DOCS)
 endif()
 
 # =============================================================================
-# DMRG: removed in P0.9 (audit Q13).
-# The DMRG scaffold (include/ed/dmrg/, tests/test_dmrg.cpp) was an explicit
-# "implement the TODOs" placeholder with no working iDMRG backend. Rather
-# than carry dead code, it has been deleted entirely. If DMRG is needed in
-# the future, prefer integrating an established library (ITensor) over
-# rebuilding the scaffold from scratch.
-# =============================================================================
-
-# =============================================================================
 # ED test suite (CPU).
 #
 # A small, fast set of regression tests that exercise the matrix-free Operator
@@ -384,7 +369,7 @@ endif()
 option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 
 # -----------------------------------------------------------------------------
-# Google-Benchmark micro-benchmarks (P2.13). Off by default to keep the
+# Google-Benchmark micro-benchmarks. Off by default to keep the
 # default build short; opt in with `-DED_BUILD_BENCHMARKS=ON`. The CI nightly
 # job (.github/workflows/benchmarks.yml) flips this to ON.
 # -----------------------------------------------------------------------------
@@ -397,18 +382,18 @@ endif()
 if(BUILD_ED_TESTS)
     enable_testing()
 
-    # Catch2 v3 (P1.8 / audit Q12). Brought in via FetchContent with a
+    # Catch2 v3, brought in via FetchContent with a
     # system-wide find_package fallback. Defines Catch2::Catch2WithMain.
     include(EDCatch2)
 
     # Helper to declare a test executable. Each test gets its own binary so
     # CTest can run them in parallel and report failures independently.
     # Tests link against ed_solvers_cpu (which transitively pulls in ed_core,
-    # BLAS/LAPACK/ARPACK/OpenMP), and against ed_solvers_gpu
+    # BLAS/LAPACK/OpenMP), and against ed_solvers_gpu
     # when CUDA is enabled. This guarantees tests are compiled against the
     # exact same TUs as the production binaries.
     #
-    # Tests that opt into the new Catch2 v3 harness pass USE_CATCH2 as a
+    # Tests that use the Catch2 v3 harness pass USE_CATCH2 as a
     # third argument, in which case the helper links Catch2::Catch2WithMain
     # and registers the binary with `catch_discover_tests` so CTest sees
     # each TEST_CASE individually.
@@ -454,32 +439,13 @@ if(BUILD_ED_TESTS)
     endfunction()
 
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp USE_CATCH2)
-    # Krylov-kernel unification Phase A: one Lanczos algorithm shared by
-    # CPU / GPU via the abstract Backend interface.
-    # This test pins agreement with the legacy sequential-MGS body and
+    # One Lanczos algorithm shared by CPU / GPU via the abstract Backend
+    # interface: pins agreement with a sequential-MGS reference and
     # orthogonality of the CGS2 basis.
     ed_add_test(test_lanczos_kernel             tests/unit/test_lanczos_kernel.cpp USE_CATCH2)
-    # test_square_operator was retired in the minimalist-architecture rev
-    # (May 2026) together with `ed/core/square_operator.h`,
-    # `ed/core/square_operator_factories.h`,
-    # `ed/core/rectangular_operator.h`, and
-    # `ed/core/basis_policy_runtime.h`. Those types had zero production
-    # consumers -- the only call sites were this test and the headers
-    # mutually including each other. Solvers consume the unified
-    # `ed::matvec::MatVecOperator` (which `Operator` /
-    # `FixedSzOperator` / `DistributedOperator` /
-    # `StreamingSymmetryOperator` all derive from) directly. If a
-    # future workstream needs a runtime BasisPolicy + wrapper, build
-    # it fresh against an actual consumer.
-    ed_add_test(test_kernel_facades             tests/unit/test_kernel_facades.cpp USE_CATCH2)
+    ed_add_test(test_kernel_facades            tests/unit/test_kernel_facades.cpp USE_CATCH2)
     ed_add_test(test_orchestrator               tests/unit/test_orchestrator.cpp USE_CATCH2)
     ed_add_test(test_minimalist_collapse        tests/unit/test_minimalist_collapse.cpp USE_CATCH2)
-    # test_method_canonicalize retired in the minimalist-architecture rev
-    # (May 2026): all the deprecated `_GPU`/`_FIXED_SZ`/`_MPI`/`_CUDA`
-    # enum aliases and ARPACK/SCALAPACK/DAVIDSON/LOBPCG variants this
-    # test was pinning have been removed; the canonicalizer is no longer
-    # required because GPU/MPI/fixed-Sz are now first-class EDParameters
-    # flags rather than embedded in the DiagonalizationMethod enum.
     ed_add_test(test_full_diagonalization       tests/unit/test_full_diagonalization.cpp USE_CATCH2)
     # Smoke-test the unified orchestrator
     # `ed::workflows::solve(LinearOperator&, SolveOptions)` — Sz guard,
@@ -491,12 +457,6 @@ if(BUILD_ED_TESTS)
     # matvec wiring through the virtual `LinearOperator::apply` and
     # the orchestrator's solver-family switch in one place.
     ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
-    # Full Unified-Interface Collapse, Wave F-partial (May 2026):
-    # `tests/unit/test_dispatch_streaming_thermo.cpp` and its target
-    # were removed together with `include/ed/core/dispatch.h`. The
-    # streaming-symmetry + FTLM end-to-end behaviour is now covered by
-    # `tests/unit/test_auto_thermal.cpp` (which uses the unified entry
-    # `ed::workflows::thermal(...)`).
     # One canonical finite-T entry point: `ed::workflows::thermal(...)`.
     # Exercises auto-Sz + auto-symmetry + Z-recombination via both the
     # in-memory and the directory overloads.
@@ -514,14 +474,14 @@ if(BUILD_ED_TESTS)
     # (every sampling method) and the ED_THERMAL_EXACT_SMALL=0 escape that
     # test_thermal_dense_ref relies on to keep gating the real kernels.
     ed_add_test(test_thermal_exact_small_fallback tests/unit/test_thermal_exact_small_fallback.cpp USE_CATCH2)
-    # WP10: the Backend-templated FTLM body (both lanes) honours full
+    # The Backend-templated FTLM body (both lanes) honours full
     # reorthogonalisation and fills ground_state_estimate.
     ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp USE_CATCH2)
-    # WP10 C3/C6: the FTLM body draws the shared per-sample seed recipe
+    # The FTLM body draws the shared per-sample seed recipe
     # (sample_seed.h), is run-to-run bit-identical, and is what the CPU
     # front door returns.
     ed_add_test(test_ftlm_sample_seed           tests/unit/test_ftlm_sample_seed.cpp USE_CATCH2)
-    # Phase 3a #4: OpenMP thread-pinning hook (env-knob default + parsing,
+    # OpenMP thread-pinning hook (env-knob default + parsing,
     # idempotent pinning).
     ed_add_test(test_numa                       tests/unit/test_numa.cpp USE_CATCH2)
     # The environment registry: one meaning of "set" per value type, unique rows,
@@ -533,39 +493,27 @@ if(BUILD_ED_TESTS)
     # ed_input library lockdown (lattice generators + HamiltonianBuilder).
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp USE_CATCH2)
     target_link_libraries(test_input_library PRIVATE ed_input)
-    # Retired in the minimalist-architecture rev (May 2026):
-    #   * test_thermal_methods   (Hybrid thermal + GPU/MPI alias paths gone)
-    #   * test_ftlm_jp           (FTLM double-Lanczos dynamical kernel gone)
-    #   * test_ftlm_ltlm_dyn     (LTLM dynamical kernel gone)
-    #   * test_ftlm_sssf         (FTLM SSSF static-structure-factor kernel gone)
-    # The dynamical-correlator coverage moves to Phase 6 primitives.
-    # (execution-planner test removed with the planner)
-    # Stage-1 SymmetryEngine v2: compiled byte-LUT group action bit-identity
+    # Symmetry engine: compiled byte-LUT group action bit-identity
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp USE_CATCH2)
-    # Stage-2 SymmetryEngine v2: fused OrbitTable (hash, Burnside sum rule)
+    # Fused OrbitTable (hash, Burnside sum rule)
     ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp USE_CATCH2)
-    # Stage-3 SymmetryEngine v2: content-addressed OrbitTable cache (registry + disk)
+    # Content-addressed OrbitTable cache (registry + disk)
     ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp USE_CATCH2)
-    # Stage-5 SymmetryEngine v2: spin-flip commutation check (SectorTransporter gate)
+    # Spin-flip commutation check (SectorTransporter gate)
     ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp USE_CATCH2)
-    # Stage-6 SymmetryEngine v2: the real-Hamiltonian gate of time-reversal pairing
+    # The real-Hamiltonian gate of time-reversal pairing
     ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp USE_CATCH2)
-    # Stage-12a SU(2) rollout: S^2 Casimir in the TermStorage schema + labeling
+    # SU(2): S^2 Casimir in the TermStorage schema + labeling
     ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp USE_CATCH2)
-    # Stage-12b SU(2) rollout: term-level [H, S_tot] = 0 detector
+    # SU(2): term-level [H, S_tot] = 0 detector
     ed_add_test(test_su2_detect                 tests/unit/test_su2_detect.cpp USE_CATCH2)
-    # Stage-12c SU(2) rollout: S-resolved dims (highest-weight Burnside differencing)
+    # SU(2): S-resolved dims (highest-weight Burnside differencing)
     ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp USE_CATCH2)
-    # Stage-12d SU(2) rollout: Lowdin total-spin projector + targeting wrapper
+    # SU(2): Lowdin total-spin projector + targeting wrapper
     ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp USE_CATCH2)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp USE_CATCH2)
-    # Phase E (TPQ dynamical correlator) -- retired in the
-    # minimalist-architecture rev (May 2026). TPQ dynamical correlators
-    # become workflow-level compositions of mtpq_kernel +
-    # time_evolution_correlator (Phase 6 / Phase 7).
-    # "Optimized symmetry ED + NLCE" (Jun 2026), Phase 1 gate: the CPU
-    # on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
+    # The CPU on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
     # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
     # reproduces an independent full-space reference (H applied to the
     # expanded symmetric states) in every momentum sector of the
@@ -578,7 +526,7 @@ if(BUILD_ED_TESTS)
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
     )
 
-    # P2.11: lock down the programmatic symmetry DSL (ed::sym::Permutation
+    # Lock down the programmatic symmetry DSL (ed::sym::Permutation
     # algebra + generate_group closure). Lives in ed_symmetry.
     ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp USE_CATCH2)
     target_link_libraries(test_symmetry_dsl PRIVATE ed_symmetry)
@@ -591,15 +539,13 @@ if(BUILD_ED_TESTS)
     # has no NVIDIA hardware attached.
     # -------------------------------------------------------------------------
     if(WITH_CUDA)
-        # Phase 2 of the matvec-unification (May 2026): CudaBackend BLAS-1
-        # round-trips + agreement of `lanczos_kernel<Backend&>` between
-        # CpuBackend and CudaBackend on a 6-site Heisenberg chain. First
-        # production consumer of `ed/matvec/backends/cuda_backend.cuh`.
+        # CudaBackend BLAS-1 round-trips + agreement of
+        # `lanczos_kernel<Backend&>` between CpuBackend and CudaBackend on a
+        # 6-site Heisenberg chain.
         ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp USE_CATCH2)
     endif()
 
-    # Phase 1 of the Minimalist ED Collapse (May 2026): Backend BLAS-3
-    # surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
+    # Backend BLAS-3 surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
     # (+ CudaBackend when WITH_CUDA).
     ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp USE_CATCH2)
 endif()

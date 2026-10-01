@@ -2,10 +2,8 @@
 // =============================================================================
 // include/ed/solvers/little_group_solve.h
 //
-// Stage 7 (SymmetryEngine v2): FACTORIZED non-abelian reduction via little
-// co-groups -- the scalable alternative to the monolithic SAB engine
-// (`symmetry_adapted_solve.h`, which stores O(d·dim) SAB amplitudes and is
-// capped at moderate N).
+// FACTORIZED non-abelian reduction via little co-groups: never stores
+// symmetry-adapted amplitudes over the full space, so it scales to large N.
 //
 // Structure exploited: G = A ⋊ P with A the abelian clique (translations)
 // and P the retained residue (point-group coset representatives,
@@ -14,7 +12,7 @@
 // momenta):
 //
 //   1. Solve only the star representative k0; every member contributes the
-//      same spectrum (multiplicity |star| -- the proven Stage-7a folding).
+//      same spectrum (multiplicity |star|).
 //   2. The little co-group P_k0 = {p : p·k0 = k0} acts WITHIN the k0
 //      sector. On the matrix-free rep basis {|ψ^{k0}_i⟩} its action is a
 //      MONOMIAL matrix M_p (index permutation + unit phase): with
@@ -25,8 +23,7 @@
 //   3. The abstract little co-group (elements close modulo A; the factor
 //      system ω(p,q) = χ_{k0}(a_{pq}) must be trivial -- checked) is
 //      decomposed with `decompose_irreps_tables`; per irrep σ a sparse
-//      isotypic basis W_σ over the k0 REP INDICES (SVD per index-orbit,
-//      the same construction as `build_sab_partition0` one level up).
+//      isotypic basis W_σ over the k0 REP INDICES (SVD per index-orbit).
 //   4. Block = W_σ† H_{k0} W_σ with H_{k0} the MATRIX-FREE rep-kernel
 //      matvec -- memory O(#reps(k0)), never O(2^N). Eigenvalues carry
 //      multiplicity |star| × d_σ.
@@ -54,15 +51,15 @@ struct LittleGroupOptions {
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
     int  dense_max_dim = 64;   ///< per-block dense/Lanczos crossover (lowest-k path)
     bool verbose       = false;
-    /// Stage 9a: spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
+    /// Spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the
     /// little co-group). SymToggle convention: -1 auto (engage when
     /// [H, prod sigma^x] = 0 AND the subspace is flip-invariant: n_up = N/2,
-    /// parity with N even, or the full space; ED_SYM_LG_FLIP=0 vetoes),
+    /// parity with N even, or the full space),
     /// 0 off, 1 require (throws when the symmetry or admissibility is absent).
     int  spin_flip     = -1;
-    /// Stage 9b: time-reversal folding (star-level k <-> conj(k) merge +
-    /// conjugate-irrep pairing). Same SymToggle convention; dormant until 9b.
+    /// Time-reversal folding (star-level k <-> conj(k) merge +
+    /// conjugate-irrep pairing). Same SymToggle convention.
     int  time_reversal = -1;
     /// Solve ONLY these star representatives (extended irrep indices -- the
     /// same ``k0`` that ``LittleGroupStarInfo::k0`` reports). Empty = every
@@ -105,13 +102,11 @@ struct LittleGroupStarInfo {
                                ///< k + s*n_irr_raw when flip is engaged)
     int  star_size     = 1;    ///< |star| (spectrum multiplicity factor)
     int  little_order  = 1;    ///< |P_k0| actually used (1 = plain fallback)
-    int  flip_parity   = -1;   ///< 9a: 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int  flip_parity   = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
     /// Every extended irrep index folded into this star (always includes
-    /// ``k0``). The engine has always known this -- the star loop iterates
-    /// ``(k0, members)`` -- but only published ``star_size``, which is not
-    /// enough to answer "which star holds MY momentum?". Naming a block needs
-    /// exactly that: ``only_k0`` filters on REPRESENTATIVES, so a caller whose
-    /// momentum is a non-representative member has to find its star first.
+    /// ``k0``). Answers "which star holds MY momentum?": ``only_k0`` filters
+    /// on REPRESENTATIVES, so a caller whose momentum is a non-representative
+    /// member has to find its star first.
     /// Members are isospectral by construction (the residue maps them onto
     /// each other), so the representative's spectrum answers for all of them.
     std::vector<int> members;
@@ -123,10 +118,9 @@ struct LittleGroupStarInfo {
     // `LittleGroupBlockTag::irrep` is an index into decompose_irreps' own
     // ordering -- engine-internal, exactly like `k_raw` (which is NOT the
     // momentum). Momentum is nameable because the abelian irrep characters give
-    // chi_k over the ABELIAN group; the co-group's characters had no such
-    // table, so a `irrep=<index>` API would have handed callers an internal
-    // convention and called it physics. These three fields are that missing
-    // table.
+    // chi_k over the ABELIAN group; these three fields are the corresponding
+    // character table for the co-group, so callers never depend on the
+    // internal index convention.
     //
     //   little_elems[e]        -- which residue is co-group element e: an index
     //                             into the caller's own `residue_perms`, or -1

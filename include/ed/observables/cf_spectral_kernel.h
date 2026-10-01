@@ -9,14 +9,9 @@
 // G(z) = <phi| (z - H + E_shift)^-1 |phi> for a caller-built |phi>
 // (typically O|psi_0> assembled across sectors), weighted by ||phi||^2.
 //
-// Same algorithmic content as the legacy
-// `::compute_dynamical_correlation_state_cf` (retired 2026-07-31 in the
-// Family-3 consolidation; this kernel is its surviving lift), templated
-// so any Backend can drive it: the only Backend-specific operations are the Lanczos tridiag build
-// (already templated via `lanczos_kernel<Backend>`) and the |phi>
-// staging (copy / nrm2 / scale --- all in `Backend`).
-//
-// Phase 2.5 of the Minimalist ED Collapse (May 2026).
+// Templated so any Backend can drive it: the only Backend-specific
+// operations are the Lanczos tridiag build (`lanczos_kernel<Backend>`)
+// and the |phi> staging (copy / nrm2 / scale --- all in `Backend`).
 // =============================================================================
 
 #include <algorithm>
@@ -41,12 +36,12 @@ struct CfSpectralOptions {
     std::size_t krylov_dim       = 200;
     double      broadening       = 0.05;
     /// If 0 (default) the kernel auto-detects via the smallest tridiag
-    /// eigenvalue (matches the legacy ftlm.cpp behaviour).
+    /// eigenvalue.
     double      energy_shift     = 0.0;
     /// Convergence tolerance for the Lanczos tridiag build.
     double      tolerance        = 1e-12;
-    /// Global problem dimension for the per-cycle Lanczos cap on
-    /// distributed backends. 0 means "use local_n".
+    /// Global problem dimension, forwarded as the Lanczos dimension cap.
+    /// 0 means "use local_n".
     std::uint64_t global_n       = 0;
     bool        verbose          = false;
 };
@@ -55,7 +50,7 @@ struct CfSpectralResult {
     std::vector<double> frequencies;
     std::vector<double> spectral_function;
     std::size_t         tridiag_size = 0;
-    /// 2026-09-11: max |S_m - S_{m/2}| / max S_m -- the change of the continued
+    /// max |S_m - S_{m/2}| / max S_m -- the change of the continued
     /// fraction between half and full Krylov depth. Above ~0.05 the spectrum
     /// is not converged at this krylov_dim (an unconverged CF at eta = 0.05 on a
     /// 2.7e6-state block varied by 30 % between otherwise identical runs).
@@ -71,8 +66,7 @@ struct CfSpectralResult {
 // Use when phi was computed externally (e.g. by applying a cross-sector
 // observable to a ground state stored in a *different* sector basis): just
 // pass phi in target-sector memory and the spectral weight is folded in via
-// ||phi||^2, exactly as in the legacy ::compute_ground_state_dssf path. This
-// is the kernel underneath the ed::sectors dynamics verb
+// ||phi||^2. This is the kernel underneath the ed::sectors dynamics verb
 // (src/solvers/little_group/lg_sectors_dynamics.cpp).
 //
 // Phi is normalised before the Lanczos build, but ||phi||^2 is preserved as

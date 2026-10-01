@@ -1,4 +1,4 @@
-"""Python-side tests for the ``ed::sym`` pybind11 bindings (P2.11).
+"""Python-side tests for the ``ed::sym`` pybind11 bindings.
 
 The C++ side is covered by ``tests/unit/test_symmetry_dsl.cpp`` and the
 ``Catch2`` ctest suite. This module checks the *bridge*: that the helpers are

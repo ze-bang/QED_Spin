@@ -10,8 +10,8 @@ source checkout needs to be told which build to use:
 still resolves from the source package. An installed package (wheel or
 ``cmake --install``) carries the extension beside ``__init__.py`` and needs nothing.
 
-Two ways this used to go wrong, both now loud:
-  * a stale ``_core*.so`` left in the source package by an old in-tree build would
+Two failure modes are made loud:
+  * a stale ``_core*.so`` left in the source package by an in-tree build would
     shadow or contradict ``QED_CORE_DIR`` -> RuntimeWarning naming both files;
   * no extension anywhere -> ImportError that says how to get one.
 """
@@ -38,7 +38,7 @@ def extend_package_path(package_path, package_dir):
             warnings.warn(
                 f"qed: using the extension from QED_CORE_DIR ({built[0]}); a second copy "
                 f"sits in the source package ({in_tree[0]}) and is ignored -- delete it, "
-                "in-tree builds are no longer produced.", RuntimeWarning, stacklevel=3)
+                "the package is built out of tree.", RuntimeWarning, stacklevel=3)
         path.insert(0, core_dir)
     elif not in_tree:
         raise ImportError(

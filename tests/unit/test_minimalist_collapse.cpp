@@ -1,17 +1,16 @@
 // =============================================================================
 // tests/unit/test_minimalist_collapse.cpp
 //
-// Phase 7a of the Minimalist ED Collapse (May 2026): focused unit tests
-// for the architectural seams introduced in Phases 3-4:
+// Focused unit tests for three architectural seams:
 //
-//   * LinearOperator concept (Geometry + bind<Backend>)        [Phase 3.1]
-//   * select_backend decision tree                              [Phase 4.1]
-//   * LocalDGKS3 reorthogonalization policy via lanczos_kernel  [Phase 2.1]
+//   * LinearOperator concept (Geometry + bind<Backend>)
+//   * select_backend decision tree
+//   * LocalDGKS3 reorthogonalization policy via lanczos_kernel
 //
-// The full solve / thermal / spectral integration sweep lives in
-// `test_orchestrator.cpp`; the kernel-facade round-trips live in
-// `test_kernel_facades.cpp`. This file targets the three seams that
-// don't have a direct kernel/orchestrator counterpart.
+// Orchestrator solve / thermal coverage lives in `test_orchestrator.cpp`,
+// `test_auto_solve.cpp` and `test_auto_thermal.cpp`; the kernel-facade
+// round-trips live in `test_kernel_facades.cpp`. This file targets the
+// three seams that have no direct kernel/orchestrator counterpart.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -28,7 +27,7 @@
 #include <vector>
 
 // -----------------------------------------------------------------------------
-// Phase 3.1 — LinearOperator concept
+// LinearOperator concept
 // -----------------------------------------------------------------------------
 TEST_CASE("LinearOperator: Operator reports a host-only single-rank geometry",
           "[linear_operator][concept][phase3]") {
@@ -70,7 +69,7 @@ TEST_CASE("LinearOperator: bind<CpuBackend> returns a callable matvec",
 }
 
 // -----------------------------------------------------------------------------
-// Phase 4.1 — select_backend
+// select_backend
 // -----------------------------------------------------------------------------
 TEST_CASE("select_backend: host-only operator picks CpuBackend by default",
           "[select_backend][phase4]") {
@@ -115,7 +114,7 @@ TEST_CASE("select_backend: allow_gpu=false honored even when CUDA is built",
 }
 
 // -----------------------------------------------------------------------------
-// Phase 2.1 — LocalDGKS3 reorthogonalization in lanczos_kernel
+// LocalDGKS3 reorthogonalization in lanczos_kernel
 // -----------------------------------------------------------------------------
 TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
           "[lanczos][reorth][local_dgks3][phase2]") {

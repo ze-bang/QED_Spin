@@ -3,43 +3,15 @@
 // include/ed/matvec/term_storage.h
 //
 // TermStorage: the canonical, single-source-of-truth Structure-of-Arrays
-// term schema for a spin-system Hamiltonian. Owned by `Operator` (and by
-// any future `GpuOperator` / `DistributedOperator` once they migrate).
+// term schema for a spin-system Hamiltonian. Owned by `Operator`, which
+// routes its AoS term list (``transform_data_`` / ``three_body_data_``) into
+// it via ``classify_route`` in ``commitPendingTransforms``.
 //
-// Background
-// ----------
-// Before the term-storage unification (May 2026), `Operator` carried THREE
-// coexisting term representations:
+// The matvec kernels read only these SoA bins. The bit-flip schema (field
+// names, op_type encodings) is the one ``ed::matvec::kernel::apply_terms``
+// and ``ed::matvec::CpuMatVecBackend`` consume.
 //
-//   1. ``transforms_``         std::vector<std::function<...>>  -- legacy
-//   2. ``transform_data_``     std::vector<TransformData> (AoS) -- legacy
-//   3. ``diag_one_body_``,
-//      ``offdiag_one_body_``,
-//      ``diag_two_body_``,
-//      ``mixed_two_body_``,
-//      ``offdiag_two_body_``,
-//      ``three_body_data_``    std::vector<...>           (SoA) -- hot path
-//
-// External code pushed into (2); a lazy ``separateTransformsByType()`` call
-// on first ``apply()`` fanned the AoS list into the SoA bins, guarded by a
-// ``transforms_separated_`` flag. ``invalidateMatrixCaches()`` did NOT clear
-// that flag, so a sequence like::
-//
-//     op.transform_data_.push_back(t);
-//     op.invalidateMatrixCaches();
-//     op.apply(in, out, n);
-//
-// silently dropped the new term: the SoA bins (populated on first apply) were
-// not refreshed, and the matvec kernel reads only the SoA. The lazy fan-out
-// also needed a ``const_cast`` inside the otherwise-const apply() chain.
-//
-// This header collapses the storage to a single SoA `TermStorage` struct,
-// exposes typed setters that classify-and-route at the call site (no lazy
-// fan-out), and keeps the bit-flip schema (field names, op_type encodings)
-// identical to what ``ed::matvec::kernel::apply_terms`` and
-// ``ed::matvec::CpuMatVecBackend`` already consume.
-//
-// op_type encoding (unchanged from the legacy API):
+// op_type encoding:
 //   0 = S+   (raising spin operator)
 //   1 = S-   (lowering spin operator)
 //   2 = Sz   (diagonal spin operator)
@@ -61,9 +33,9 @@ using Complex = std::complex<double>;
 
 // -----------------------------------------------------------------------------
 // Term-record structs (one per kernel branch). Field names are duck-typed by
-// ``term_kernels.h`` and the CSR triplet emitter in ``matvec_backend.h``, so
-// callers that previously referenced ``Operator::DiagonalOneBody`` etc. keep
-// working through type aliases in ``operator.h``.
+// ``term_kernels.h`` and the CSR assembly in ``term_kernels_assemble.h``;
+// ``operator.h`` exposes them as ``Operator::DiagonalOneBody`` etc. through
+// type aliases.
 // -----------------------------------------------------------------------------
 
 /// One-body diagonal (Sz only). New basis state == input basis state.
@@ -164,12 +136,9 @@ struct TermStorage {
 
     // -------- Classify-and-route helpers ----------------------------------
     //
-    // The "raw" interface that mirrors the legacy ``TransformData`` shape.
-    // Routes the term to the right SoA bin based on op_type{,_2} values.
-    // This is exactly the classification logic that lived in the old
-    // ``Operator::separateTransformsByType()`` -- now executed eagerly at
-    // the point of insertion, with no lazy fan-out and no flag to keep in
-    // sync with cache invalidation.
+    // The "raw" interface in the ``Operator::TransformData`` shape. Routes
+    // the term to the right SoA bin based on op_type{,_2} values at the
+    // point of insertion.
 
     /**
      * @brief Append a one-body term. `op_type` is the op encoding
@@ -248,26 +217,22 @@ struct TermStorage {
      * @tparam Sink   Any object exposing the six typed setters used below
      *                (``add_diag_one_body``, ``add_offdiag_one_body``,
      *                ``add_diag_two_body``, ``add_mixed_two_body``,
-     *                ``add_offdiag_two_body``, ``add_three_body``). Both
-     *                ``ed::matvec::TermStorage`` (host) and the GPU's
-     *                ``GpuSoaBinSink`` adapter (which forwards to the
-     *                cuDoubleComplex SoA vectors) satisfy this concept.
+     *                ``add_offdiag_two_body``, ``add_three_body``), e.g.
+     *                ``ed::matvec::TermStorage``.
      * @tparam Aos    Range of structs exposing ``op_type``, ``site_index``,
      *                ``coefficient``, ``site_index_2``, ``op_type_2``,
-     *                ``is_two_body`` (the legacy ``TransformData`` shape;
-     *                ``GPUTransformData`` also satisfies it).
+     *                ``is_two_body`` (the ``Operator::TransformData`` shape).
      * @tparam Aos3   Range of structs matching the three-body schema:
      *                ``op_type_{1,2,3}``, ``site_index_{1,2,3}``,
      *                ``coefficient``.
      * @tparam Conv   Callable that converts an AoS scalar coefficient
-     *                (e.g. ``std::complex<double>`` or ``cuDoubleComplex``)
-     *                to the sink's coefficient type. Default = identity.
+     *                to the sink's coefficient type.
      *
      * This is the SINGLE source of truth for the
      *   op_type \in {0,1,2} -> {diag,offdiag,mixed} \times {one,two}body
-     * decision tree. CPU ``commitPendingTransforms`` and GPU
-     * ``separateTransformsByType`` both delegate here so the classification
-     * cannot drift between backends.
+     * decision tree. ``Operator::commitPendingTransforms`` and the
+     * little-group engine both delegate here so the classification cannot
+     * drift between callers.
      */
     template <class Sink, class Aos, class Aos3, class Conv>
     static void classify_route(Sink& sink, const Aos& aos, const Aos3& aos3,
@@ -281,10 +246,10 @@ struct TermStorage {
                     sink.add_offdiag_one_body(t.site_index, t.op_type, coeff);
                 }
             } else if (t.site_index == t.site_index_2 && !(t.op_type == 2 && t.op_type_2 == 2)) {
-                // Correctness (2026-09-11): a product of two operators on the SAME
-                // site. The gather/scatter gates test the row bit for both factors
-                // at once, which no state satisfies for S+S-, so these terms were
-                // silently DROPPED. Rewrite with the spin-1/2 identities (product
+                // A product of two operators on the SAME site. The gather/scatter
+                // gates test the row bit for both factors at once, which no state
+                // satisfies for S+S-, so such a term would be silently dropped.
+                // Rewrite with the spin-1/2 identities (product
                 // O1 O2, O2 acting first; set bit = down):
                 //   S+S- = 1/2 + Sz   S-S+ = 1/2 - Sz   S+S+ = S-S- = 0
                 //   Sz S+ = +S+/2     S+ Sz = -S+/2     Sz S- = -S-/2    S- Sz = +S-/2
@@ -292,9 +257,9 @@ struct TermStorage {
                 // kernel evaluates the same-site sign product to +1).
                 const std::uint64_t s = t.site_index;
                 const std::uint8_t a = t.op_type, b = t.op_type_2;   // 0 S+, 1 S-, 2 Sz
-                // The coefficient type is the sink's (std::complex<double> on the
-                // host, cuDoubleComplex on the device sink); both are two
-                // consecutive doubles, so scale through that layout.
+                // The coefficient type is the sink's (any complex type laid out
+                // as two consecutive doubles, e.g. std::complex<double> or
+                // cuDoubleComplex), so scale through that layout.
                 auto scaled = [&coeff](double f) {
                     using C = std::decay_t<decltype(coeff)>;
                     const double* pr = reinterpret_cast<const double*>(&coeff);
@@ -343,11 +308,7 @@ struct TermStorage {
     }
 
     /**
-     * @brief Returns true iff every coupling in every bin is purely real
-     *        (|imag| <= tol). Linear in the number of terms.
-     */
-    /**
-     * @brief Structural Hermiticity check (2026-09-11): every off-diagonal
+     * @brief Structural Hermiticity check: every off-diagonal
      *        product must have an adjoint partner (S+ <-> S-, Sz fixed, sites
      *        as a multiset) carrying the conjugate coefficient, and every
      *        diagonal coefficient must be real. Split / duplicated records are
@@ -378,6 +339,10 @@ struct TermStorage {
         return true;
     }
 
+    /**
+     * @brief Returns true iff every coupling in every bin is purely real
+     *        (|imag| <= tol). Linear in the number of terms.
+     */
     [[nodiscard]] bool is_real(double tol = 1e-15) const noexcept {
         auto real_run = [tol](const auto& vec) {
             for (const auto& t : vec) {

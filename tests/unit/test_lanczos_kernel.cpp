@@ -318,11 +318,9 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
 // hook — when set, the kernel calls it every
 // `convergence_check_interval` iterations with the current
 // (alpha, beta) tridiagonal. Returning `true` terminates the loop
-// without consuming the rest of `max_iter`. The CPU+MPI distributed
-// kernel wires this through `make_smallest_ritz_convergence(exct, tol)`
-// to reproduce the legacy distributed Lanczos's relative-Δλ early-exit
-// behaviour. Without a unit test the callback can rot silently across
-// kernel refactors.
+// without consuming the rest of `max_iter`. `workflows::solve` wires this
+// through `make_smallest_ritz_convergence` for its relative-Δλ early
+// exit. Without a unit test the callback can rot silently.
 //
 // Two sections:
 //   1. A counting probe verifies the callback fires at exactly
@@ -435,7 +433,7 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
 //
 // PeriodicCGS2 is implemented in the kernel but nothing in the
 // production tree calls `lanczos_kernel` with it. Without a test the
-// policy can rot silently across kernel refactors. This pins:
+// policy can rot silently. This pins:
 //
 //   1. `reorth_freq = 1` (fire every step) is **numerically
 //      equivalent** to `FullCGS2`. Same matrix elements, same basis,

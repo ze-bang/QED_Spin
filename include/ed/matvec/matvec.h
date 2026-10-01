@@ -3,15 +3,10 @@
 // include/ed/matvec/matvec.h
 //
 // MatVecOperator: the single polymorphic interface every solver in the ED
-// library consumes. Replaces the previous parallel hierarchies:
-//
-//   - std::function<void(const Complex*, Complex*, int)> (CPU solvers)
-//   - DistributedOperator::apply(v_local, y_local) (MPI solvers)
-//
-// Each is now a concrete subclass of MatVecOperator advertising its
+// library consumes. Concrete operators subclass it and advertise their
 // MemorySpace; solvers consume the base class.
 //
-// Design (Hybrid pattern, per architecture decision May 2026):
+// Design (hybrid pattern):
 //   * Virtual at the boundary --- one virtual call per matvec, free at ED
 //     dimensions (matvec body is microseconds to seconds).
 //   * Internal kernels stay templated (see term_kernels.h) so the inner
@@ -20,16 +15,14 @@
 // The interface intentionally exposes only the four pieces of metadata
 // every Krylov / thermal solver in this codebase actually needs:
 //   * dim()          : size of the local input/output buffer (in elements)
-//   * global_dim()   : sum of dim() across all ranks (== dim() if not MPI)
+//   * global_dim()   : total problem dimension (defaults to dim())
 //   * memory_space() : where the bytes live
 //   * is_hermitian() : whether the surrounding solver may use Hermitian
 //                      shortcuts (real eigenvalues, two-term Lanczos, ...)
 //
-// All five existing matvec consumers in the codebase (Lanczos, FTLM,
-// TPQ, CG/LOBPCG, time evolution) are expressible in terms of
-// this base class plus a matching Backend (axpy/dot/norm/scale/copy).
-//
-// Phase 1 of the matvec-unification revamp.
+// The matvec consumers (Lanczos, FTLM, TPQ, CG/LOBPCG, time evolution)
+// are expressed in terms of this base class plus a matching Backend
+// (axpy/dot/norm/scale/copy).
 // =============================================================================
 
 #include <complex>
@@ -83,8 +76,8 @@ public:
     // is REENTRANT (it reads only const term data + does const basis lookups; no
     // backend CSR/scratch is touched), so implementations may parallelize over
     // columns. Returns true if it built the matrix; false (the default) tells
-    // the caller to fall back to the matvec column build. Only the lanes whose
-    // basis lookups are pure (full space, fixed-Sz) implement it today.
+    // the caller to fall back to the matvec column build. Operator implements
+    // it for the full Hilbert space.
     [[nodiscard]] virtual bool try_build_dense_columns(Complex* /*dense*/,
                                                        std::size_t /*N*/) const {
         return false;
@@ -95,13 +88,6 @@ public:
     [[nodiscard]] virtual std::string description() const {
         return "MatVecOperator";
     }
-
-    // nnz_per_row_estimate() was retired in the minimalist-architecture
-    // rev (May 2026): no concrete subclass overrode it and no solver
-    // path called it. The matrix-free decision is implicit in
-    // ``MemorySpace``. For estimates use
-    // ``Operator::getTransformData().size()`` /
-    // ``getThreeBodyData().size()``.
 
     // -------------------------------------------------------------------
     // Sanity helpers shared by all subclasses. Inlined into the hot
@@ -121,24 +107,16 @@ public:
     }
 };
 
-// CrossSectorMatVecOperator (rectangular matvec base for DSSF) was
-// retired in the minimalist-architecture rev (May 2026): zero
-// implementors in tree across its full lifetime. ``CrossSectorObservable``
-// (DSSF) carries its own ``apply(in, out)`` and does NOT derive from
-// this. The DSSF + spatial symmetry workstream (S1 #37) will need a
-// rectangular orbit-basis operator -- it will land as a fresh
-// ``CrossSectorOrbitObservable`` rather than reviving this base class.
+// Rectangular (cross-sector) operators such as ``CrossSectorOrbitObservable``
+// carry their own ``apply(in, out)`` and do NOT derive from MatVecOperator.
 
 // =============================================================================
-// Legacy-bridge adapter. Many existing CPU solvers in this codebase take a
-// `std::function<void(const Complex*, Complex*, int)>` for the matvec.
-// Rather than touch every solver signature, this small free function turns
-// any MatVecOperator into that callable shape --- so callers can write:
+// Callable adapter. Some CPU solvers take a
+// `std::function<void(const Complex*, Complex*, int)>` for the matvec;
+// this small free function turns any MatVecOperator into that callable
+// shape:
 //
-//     ed::workflows::solve(H, ...)                // H is a LinearOperator
-//        -> uses H.apply(...) via virtual dispatch                  (best)
-//
-//     legacy_solver(as_apply_function(some_matvec_op), N, ...);    (bridge)
+//     full_diagonalization(as_apply_function(H_op), N, ...);
 //
 // The returned callable holds a reference to the passed operator; the
 // caller must keep the operator alive for the lifetime of the callable.

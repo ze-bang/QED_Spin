@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_su2_detect.cpp
 //
-// Stage 12b of the SU(2) rollout: the term-level [H, S_tot] = 0 detector
+// The term-level [H, S_tot] = 0 detector
 // ``hamiltonian_is_su2_symmetric`` (include/ed/symmetry/su2.h).
 //
 // Cases pinned:

@@ -2,10 +2,8 @@
 // =============================================================================
 // include/ed/symmetry/sym_profile.h
 //
-// Stage 0 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): make symmetry-construction
-// cost visible. ``ED_SYM_PROFILE=1`` prints one stderr line per
-// construction phase:
+// Makes symmetry-construction cost visible. ``ED_SYM_PROFILE=1`` prints
+// one stderr line per construction phase:
 //
 //     [sym-profile] <phase>: <seconds> s  (<items> items)
 //

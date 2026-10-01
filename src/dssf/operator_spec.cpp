@@ -2,18 +2,10 @@
 // src/dssf/operator_spec.cpp
 //
 // Implementation of `ed::dssf::build_observable_pairs`. See the header
-// for the full design rationale (P1.10 / DSSF PR-A).
+// for the design rationale.
 //
-// The body is a direct lift-and-shift of the legacy
-// `construct_operators_from_config` from src/apps/ed_main.cpp, with the
-// following minimal changes:
-//   * lives in a namespace
-//   * returns a struct rather than three out-parameters
-//   * argument validation throws std::invalid_argument instead of writing
-//     stderr warnings (the CLI layer is now responsible for translating
-//     them into user-friendly messages)
-//   * private helpers for the cross-product / normalization arithmetic so
-//     ed_main.cpp doesn't need to keep its own copies
+// Argument validation throws std::invalid_argument; private helpers carry
+// the cross-product / normalization arithmetic.
 // =============================================================================
 
 #include <ed/dssf/operator_spec.h>

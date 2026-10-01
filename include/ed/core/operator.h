@@ -19,8 +19,7 @@
 //   * Assembled matrix:    getSparseMatrix (for dense diagonalisation /
 //                          debug dumps; not used by the SpMV hot path)
 //
-// Depends on: basis_utils.h, symmetry_metadata.h, ed::matvec subsystem,
-//             Eigen.
+// Depends on: basis_utils.h, ed::matvec subsystem, Eigen.
 // =============================================================================
 
 #include <algorithm>
@@ -47,18 +46,15 @@
 
 using Complex = std::complex<double>;
 
-// Operator now implements the matvec-unification boundary
-// (ed::matvec::MatVecOperator). This makes apply(), dim(),
-// memory_space() and is_hermitian() virtual, which lets solvers and
-// dispatchers consume Operator / symmetry-
-// adapted operators through one interface --- no more dispatching by
-// inspecting concrete pointer types or by wrapping apply() inside a
-// std::function. The virtual destructor also fixes the latent slicing
-// hazard that auto_pilot::solve previously worked around manually.
+// Operator implements the matvec interface (ed::matvec::MatVecOperator):
+// apply(), dim(), memory_space() and is_hermitian() are virtual, so solvers
+// and dispatchers consume Operator and symmetry-adapted operators through
+// one interface. The virtual destructor makes deletion through a base
+// pointer safe.
 class Operator : public ed::LinearOperator {
 public:
     // ========================================================================
-    // Term storage (post term-storage-unification, May 2026).
+    // Term storage.
     //
     // Layout
     // ------
@@ -74,23 +70,21 @@ public:
     //
     // Cache freshness
     // ---------------
-    // The SoA cache is gated by ``terms_fresh_``, which IS reset by
-    // ``invalidateMatrixCaches()``. (The historical
-    // ``transforms_separated_`` flag was NOT reset on invalidation,
-    // silently dropping any term added between
-    // ``invalidateMatrixCaches()`` and the next ``apply()``.)
+    // The SoA cache is gated by ``terms_fresh_``, which is reset by
+    // ``invalidateMatrixCaches()``, so a term added after an invalidation
+    // is always picked up by the next ``apply()``.
     //
     // API
     // ---
     // The preferred public mutation surface is the typed setters
     // ``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``.
     // Direct pushes into
-    // ``transform_data_`` / ``three_body_data_`` remain supported for
-    // backward compatibility -- they update the canonical AoS, and the
-    // SoA cache is rebuilt automatically on the next apply.
+    // ``transform_data_`` / ``three_body_data_`` are also supported --
+    // they update the canonical AoS, and the SoA cache is rebuilt
+    // automatically on the next apply.
     //
-    // Type aliases (``Operator::DiagonalOneBody`` et al.) keep the
-    // historical names available; the SoA bins live on ``terms_``.
+    // Type aliases (``Operator::DiagonalOneBody`` et al.) name the SoA
+    // bin record types; the SoA bins live on ``terms_``.
     // External code that reads the SoA directly does so via
     // ``op.getTerms()`` (returns a fresh const reference after
     // implicitly calling ``commitPendingTransforms()``); the size-
@@ -106,9 +100,8 @@ public:
     using OffDiagonalTwoBody    = ed::matvec::OffDiagTwoBody;
     using ThreeBodyTransformData = ed::matvec::ThreeBodyTerm;
 
-    /// AoS one/two-body term record. The canonical "shape" used by all
-    /// legacy AoS readers (streaming_symmetry, distributed-CPU code,
-    /// auto/solve Sz-conservation check, etc.).
+    /// AoS one/two-body term record; the canonical term shape read by all
+    /// AoS consumers.
     struct TransformData {
         uint8_t op_type{0};         ///< 0 = S+, 1 = S-, 2 = Sz
         uint64_t site_index{0};
@@ -124,18 +117,13 @@ public:
     /// SoA cache _and_ invalidates the backend CSR cache whenever they
     /// change.
     ///
-    /// API GUIDANCE (audit S2 #28, May 2026): the recommended API is the
-    /// typed setters below (``addOneBodyTerm`` / ``addTwoBodyTerm`` /
-    /// ``addThreeBodyTerm``); they encode intent at the call site and
-    /// proactively invalidate via ``invalidateMatrixCaches()`` so a
-    /// subsequent ``isReal()`` call returns a fresh answer without
-    /// waiting for the next matvec. Direct push patterns remain
-    /// supported -- and safe -- because of the size-aware
-    /// ``commitPendingTransforms`` (S0 #2 fix), but new code should
-    /// prefer the typed setters. The members will move to
-    /// ``protected:`` once every in-tree caller (Python bindings,
-    /// Hamiltonian builder, ed_distributed_main, tests, examples) has
-    /// migrated.
+    /// The recommended API is the typed setters below
+    /// (``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``);
+    /// they encode intent at the call site and proactively invalidate via
+    /// ``invalidateMatrixCaches()`` so a subsequent ``isReal()`` call
+    /// returns a fresh answer without waiting for the next matvec. Direct
+    /// pushes are safe because ``commitPendingTransforms`` is size-aware,
+    /// but new code should prefer the typed setters.
     std::vector<TransformData>           transform_data_;
     std::vector<ThreeBodyTransformData>  three_body_data_;
 
@@ -199,11 +187,8 @@ public:
     /// Replace this operator's canonical AoS term storage with a verbatim
     /// copy of ``src``'s terms, then invalidate the derived SoA / CSR
     /// caches. Provided so that builders which assemble a fresh operator
-    /// from an existing host operator (e.g. the per-sector lazy
-    /// builders in ``sector_set.h``) do not have to reach into
-    /// the public ``transform_data_`` / ``three_body_data_`` members
-    /// directly -- keeping that coupling behind a single intentional API
-    /// as the members migrate toward ``protected:``.
+    /// from an existing host operator do not have to reach into the
+    /// public ``transform_data_`` / ``three_body_data_`` members directly.
     void copyTermsFrom(const Operator& src) {
         transform_data_  = src.transform_data_;
         three_body_data_ = src.three_body_data_;
@@ -218,32 +203,26 @@ public:
      * Called automatically by ``term_view_()`` (and therefore by all of
      * ``apply``, ``apply_real`` etc.) before the
      * matvec kernel reads ``terms_``. Public so that callers reading the
-     * SoA bins directly (e.g. the distributed code's parity-mask
-     * collection) can force a refresh after touching the AoS vectors.
+     * SoA bins directly can force a refresh after touching the AoS vectors.
      *
-     * The size-tracking trick (vs a plain ``terms_fresh_`` flag) is what
+     * The size-tracking check (vs a plain ``terms_fresh_`` flag) is what
      * makes direct pushes to ``transform_data_`` / ``three_body_data_``
      * safe: a caller that forgot to invoke ``invalidateMatrixCaches()``
      * after appending a term still gets a correct SoA rebuild on the
      * next ``apply()``, because the recorded AoS sizes diverge from the
      * live ones. The typed setters above (``addOneBodyTerm`` &c.) are
-     * still preferred -- they invalidate the backend CSR cache too --
-     * but the direct-push escape hatch is no longer a correctness
-     * footgun (only a CSR-staleness one, which fires only after at
-     * least one ``apply()`` has built the CSR).
+     * still preferred -- they invalidate the backend CSR cache eagerly.
      */
     void commitPendingTransforms() const {
         const std::size_t aos_n  = transform_data_.size();
         const std::size_t aos3_n = three_body_data_.size();
         // Double-checked locking: the fast path is one acquire load per
-        // matvec; the rebuild is serialized. THREAD SAFETY IS LOAD-BEARING
-        // (F6, Jul 2026): ``term_view_()`` is reached from inside OMP
-        // parallel regions (the dense column assemblers, the sector-parallel
-        // FULL loop), and racing the first rebuild dropped terms -- a
-        // 14-site XXZ tree's full 16384-dim dense spectrum shipped WRONG
-        // eigenvalues (E0 off by 2.25) with no error. The release store of
-        // ``terms_fresh_`` is last, so a reader that passes the acquire
-        // check sees the fully built SoA.
+        // matvec; the rebuild is serialized. Thread safety is load-bearing:
+        // ``term_view_()`` is reached from inside OMP parallel regions (the
+        // dense column assemblers, the sector-parallel FULL loop), and an
+        // unsynchronised first rebuild would drop terms silently and give
+        // wrong eigenvalues. The release store of ``terms_fresh_`` is last,
+        // so a reader that passes the acquire check sees the fully built SoA.
         if (terms_fresh_.load(std::memory_order_acquire) &&
             aos_n  == terms_committed_aos_size_ &&
             aos3_n == terms_committed_three_aos_size_) {
@@ -258,10 +237,9 @@ public:
         }
         self->terms_.clear();
         // ``classify_route`` is the single source of truth for the
-        // op_type -> {diag,offdiag,mixed} x {one,two}body decision tree.
-        // Used here for the CPU path; the GPU's analogous routine should
-        // call the same helper with a GPU-side sink adapter to ensure
-        // identical classification across backends.
+        // op_type -> {diag,offdiag,mixed} x {one,two}body decision tree;
+        // every backend that bins terms should call it so classification
+        // is identical across backends.
         ed::matvec::TermStorage::classify_route(
             self->terms_,
             self->transform_data_,
@@ -279,8 +257,8 @@ public:
     /// Invalidate ALL caches derived from the term list (the ``isReal()``
     /// cache, the SoA ``terms_`` cache, and the matvec backend's
     /// assembled CSR). Cheap; safe to call from any term-list mutator.
-    /// Crucially, resetting ``terms_fresh_`` here is what fixes the
-    /// historical invalidation bug.
+    /// Resetting ``terms_fresh_`` here guarantees that terms added after
+    /// this call reach the next ``apply()``.
     virtual void invalidateMatrixCaches() {
         real_check_done_                = false;
         hermitian_check_done_           = false;
@@ -294,16 +272,13 @@ public:
     float    getSpin()    const { return spin_l_; }
 
     /// Canonical AoS term storage. The matvec hot path reads from the
-    /// derived SoA cache (``terms_``); this accessor is for legacy
-    /// builders / inspectors that want the original term records.
+    /// derived SoA cache (``terms_``); this accessor returns the original
+    /// term records.
     ///
-    /// DEPRECATION (audit S2 #29, May 2026): no in-tree caller. The
-    /// public ``transform_data_`` field is the canonical AoS surface;
-    /// out-of-tree readers should switch to reading that member
-    /// directly. Scheduled for removal in the next operator-API rev.
+    /// Deprecated: no in-tree caller. The public ``transform_data_`` field
+    /// is the canonical AoS surface; read that member directly.
     [[deprecated("Operator::getTransformData has no in-tree callers; "
-                 "read ``transform_data_`` directly. See "
-                 "STRUCTURAL_AUDIT.md S2 #29.")]]
+                 "read ``transform_data_`` directly.")]]
     const std::vector<TransformData>& getTransformData() const { return transform_data_; }
 
     /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
@@ -316,10 +291,8 @@ public:
     }
 
     // -------------------------------------------------------------------
-    // MatVecOperator interface (matvec-unification revamp, Phase 2).
-    // apply() is overridden above near the top of the public block;
-    // dim() / memory_space() / is_hermitian() / description() are
-    // declared here to keep the polymorphic surface in one place.
+    // MatVecOperator interface: dim() / memory_space() / is_hermitian() /
+    // description(). apply() is defined with the matvec entry points below.
     // -------------------------------------------------------------------
     [[nodiscard]] std::size_t dim() const override {
         return static_cast<std::size_t>(1ULL << n_bits_);
@@ -328,8 +301,7 @@ public:
         return ed::matvec::MemorySpace::Host;
     }
     [[nodiscard]] bool is_hermitian() const override {
-        // Correctness (2026-09-11): a structural check on the committed term
-        // list (adjoint partners with conjugate coefficients, real diagonal),
+        // A structural check on the committed term list (adjoint partners with conjugate coefficients, real diagonal),
         // cached until the term list changes. Every solver lane assumes
         // Hermiticity (the rep kernels apply H^dagger; Lanczos tridiagonalises
         // the symmetric part silently), so the orchestrator refuses
@@ -364,8 +336,8 @@ public:
     //
     // The contract: cloning an Operator copies the TERM LIST. The new
     // backend is rebuilt lazily on the next apply() against the new
-    // term list (this matches the existing semantics --- ``other``'s CSR
-    // caches were tied to ``other``'s term list anyway).
+    // term list (``other``'s CSR caches are tied to ``other``'s term list
+    // and are not reusable).
     // -------------------------------------------------------------------
     Operator(const Operator& other)
         : LinearOperator(other),
@@ -436,7 +408,7 @@ public:
     }
 
     // ========================================================================
-    // Matvec entry points (post matvec-unification revamp, May 2026).
+    // Matvec entry points.
     //
     // The operator exposes exactly two SpMV entry points:
     //
@@ -445,7 +417,7 @@ public:
     //                                    must have verified isReal()
     //
     // Both are one-line delegations to the matvec backend (ed::matvec::
-    // CpuMatVecBackend), which encapsulates ALL the historical dispatch
+    // CpuMatVecBackend), which encapsulates all the dispatch
     // logic (assembled-CSR vs matrix-free, real vs complex, threshold
     // selection, scratch-buffer reuse) behind one strategy object. The
     // backend is constructed lazily on the first apply* call via the
@@ -456,9 +428,7 @@ public:
     //   ED_CSR_FORCE      0|1   force matrix-free / force assembled (default
     //                           is dim-based heuristic)
     //   ED_CSR_DIM_MAX    N     CSR cutoff dim (default 1<<20 for full
-    //                           basis, 1<<22 for fixed-Sz)
-    //   (The legacy ED_USE_SPARSE / ED_SPARSE_DIM_MAX / ED_FIXED_SZ_*
-    //   aliases were retired in the Jul-2026 debt cleanup.)
+    //                           basis, 1<<22 for restricted bases)
     // ========================================================================
     void apply(const Complex* in, Complex* out, std::size_t size) const override {
         const std::uint64_t dim = 1ULL << n_bits_;
@@ -523,11 +493,8 @@ public:
         const std::uint64_t D = static_cast<std::uint64_t>(dim());
         if (static_cast<std::size_t>(D) != N) return false;
         // Commit the SoA term cache BEFORE the parallel loop (the
-        // basis-restricted overrides do too) -- besides skipping the
-        // per-thread first-call contention, this was the F6 (Jul 2026)
-        // corruption site before commitPendingTransforms was made
-        // thread-safe: a cold operator's first term_view_() raced across
-        // the OMP team and dropped terms from the assembled matrix.
+        // basis-restricted overrides do too) so the OMP team does not
+        // contend on the first-call rebuild of a cold operator.
         commitPendingTransforms();
         #pragma omp parallel for schedule(static)
         for (std::uint64_t j = 0; j < D; ++j) {
@@ -539,15 +506,12 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Wave 1.1 of the SOTA Performance rollout (May 2026): expose the
-    // real-Hermitian fast path through ``LinearOperator``'s virtuals so
-    // ``ed::workflows::solve`` can dispatch to ``lanczos_real``.
+    // Expose the real-Hermitian fast path through ``LinearOperator``'s
+    // virtuals so ``ed::workflows::solve`` can dispatch to ``lanczos_real``.
     //
     // ``is_real_hermitian()`` is the AND of (i) ``isReal()`` -- the
-    // existing per-coefficient scan with its own cache -- and
-    // (ii) ``is_hermitian()`` from the ``MatVecOperator`` base (true
-    // by default for the spin / fermion operators built via this
-    // class). ``bind_real_cpu()`` returns a lambda directly over
+    // per-coefficient scan with its own cache -- and (ii) the structural
+    // ``is_hermitian()`` check above. ``bind_real_cpu()`` returns a lambda directly over
     // ``apply_real`` (already routed through the matvec backend's
     // native double path), avoiding the complex<->real shuttle that
     // the ``LinearOperator`` default would impose.
@@ -566,7 +530,7 @@ public:
     // ========================================================================
     // isReal: tests (and caches) whether all stored couplings are purely real.
     //
-    // A pre-existing operator with a sub-eps imaginary part that is "really"
+    // An operator with a sub-eps imaginary part that is "really"
     // floating-point noise from JSON parsing is still classified as real.
     // The default tolerance (1e-15) is the IEEE-754 round-off floor; raise
     // it if you load coefficients from low-precision text files.
@@ -607,19 +571,13 @@ public:
      * ColMajor matrix on every call (no internal caching) to keep the
      * Operator footprint small.
      *
-     * DEPRECATION (audit S2 #29, May 2026): no in-tree caller. The
-     * legacy dense-build path (``full_diagonalization``) now builds H
-     * columnwise via repeated ``H(e_j, col_j)`` instead of going
-     * through a materialised Eigen sparse matrix. Out-of-tree callers
-     * that genuinely need an assembled matrix can either inline this
-     * function body or transition to
-     * ``emit_term_triplets`` directly. Scheduled for removal in the
-     * next operator-API rev.
+     * Deprecated: no in-tree caller (dense diagonalisation assembles H
+     * columnwise). Callers that need an assembled matrix can use
+     * ``emit_term_triplets`` directly.
      */
     [[deprecated("Operator::getSparseMatrix has no in-tree callers; "
                  "construct triplets via "
-                 "ed::matvec::kernel::emit_term_triplets if needed. "
-                 "See STRUCTURAL_AUDIT.md S2 #29.")]]
+                 "ed::matvec::kernel::emit_term_triplets if needed.")]]
     Eigen::SparseMatrix<Complex> getSparseMatrix() const {
         const uint64_t dim = 1ULL << n_bits_;
 
@@ -651,29 +609,26 @@ protected:
 
     /// Freshness flag for the SoA cache ``terms_``. Set by
     /// ``commitPendingTransforms()`` on rebuild; cleared by
-    /// ``invalidateMatrixCaches()``. (Historically the equivalent flag
-    /// ``transforms_separated_`` was not reset by cache invalidation,
-    /// silently dropping any term added between ``invalidateMatrixCaches()``
-    /// and the next ``apply()``; ``terms_fresh_`` closes that hole.)
+    /// ``invalidateMatrixCaches()``.
     // Atomic + paired with ``terms_commit_mutex_``: ``term_view_()`` is
-    // reached from OMP-parallel loops on cold operators (see the F6 note
-    // in commitPendingTransforms). Plain-bool + unlocked rebuild shipped
-    // wrong dense spectra.
+    // reached from OMP-parallel loops on cold operators (see the note
+    // in commitPendingTransforms); an unlocked rebuild drops terms.
     mutable std::atomic<bool> terms_fresh_{false};
     mutable std::mutex terms_commit_mutex_;
 
     /// AoS-vector sizes recorded at the last ``commitPendingTransforms()``
     /// call. Used to detect direct ``transform_data_`` / ``three_body_data_``
     /// pushes that bypass ``invalidateMatrixCaches()`` (the typical pattern
-    /// from Python bindings, fixture builders, and historical examples).
+    /// from Python bindings and fixture builders).
     /// On the next commit we compare these to the live sizes and rebuild
     /// the SoA if they differ -- this is what keeps direct pushes safe.
     mutable std::size_t terms_committed_aos_size_       = 0;
     mutable std::size_t terms_committed_three_aos_size_ = 0;
 
-    // Cache for ``isReal()``. Invalidated by ``invalidateMatrixCaches()``.
+    // Caches for ``isReal()`` / ``is_hermitian()``. Invalidated by
+    // ``invalidateMatrixCaches()``.
     mutable bool real_check_done_ = false;
-    mutable bool hermitian_check_done_ = false;   // audit 2026-09-11
+    mutable bool hermitian_check_done_ = false;
     mutable bool hermitian_cached_     = true;
     mutable bool real_cache_      = false;
 
@@ -690,7 +645,7 @@ protected:
      *
      * Returns a CpuMatVecBackend parameterised on the appropriate basis
      * policy. Operator returns a FullBasisPolicy backend; other basis types
-     * (symmetry-projected sectors, distributed, GPU) plug in the same way.
+     * (e.g. symmetry-projected sectors) plug in the same way.
      */
     [[nodiscard]] virtual std::unique_ptr<ed::matvec::MatVecBackendBase>
     make_backend_() const {

@@ -5,7 +5,7 @@
 # compile options on the executable targets.
 #
 # Exposed cache option:
-#   ED_ENABLE_FAST_MATH   default OFF.  See P0.16 / audit Q12: -ffast-math
+#   ED_ENABLE_FAST_MATH   default OFF. -ffast-math
 #                         breaks NaN/Inf checks, signed-zero handling, and
 #                         reduction associativity. Opt in only when you have
 #                         a benchmark that justifies the numerical risk.
@@ -18,13 +18,10 @@
 # Application of CPU_OPT_FLAGS to specific targets is done in CMakeLists.txt
 # (after the targets are defined) via target_compile_options(); this file
 # only computes the list.
-#
-# P0.16 / P1.1 / audit Q5+Q12.
 # =============================================================================
 
 option(ED_ENABLE_FAST_MATH
-    "Enable -ffast-math (UNSAFE: breaks NaN handling, signed zero, reductions). \
-P0.16 / audit Q12."
+    "Enable -ffast-math (UNSAFE: breaks NaN handling, signed zero, reductions)."
     OFF)
 
 # The instruction set the objects are compiled for. "native" is fastest but ties the

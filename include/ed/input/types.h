@@ -6,7 +6,7 @@
 // builder.
 //
 // All terms speak the canonical (S+, S-, Sz) basis used by the C++
-// `Operator` (`include/ed/core/construct_ham.h`), so building an Operator is a
+// `Operator` (`include/ed/core/operator.h`), so building an Operator is a
 // one-step translation with no basis change.
 // =============================================================================
 

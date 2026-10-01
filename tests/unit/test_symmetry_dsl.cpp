@@ -1,5 +1,5 @@
 // =============================================================================
-// test_symmetry_dsl (Catch2 v3, P2.11)
+// test_symmetry_dsl (Catch2 v3)
 //
 // Lock down the programmatic `ed::sym` DSL (`ed/symmetry/group.h`):
 //
@@ -50,6 +50,13 @@ TEST_CASE("ed::sym permutation algebra basics", "[symmetry][p2-11][dsl]") {
     auto R = reflection_1d(6);
     REQUIRE(order(R) == 2);
     REQUIRE(is_identity(power(R, 2)));
+
+    // The order is the lcm of the cycle lengths, which can exceed the site count:
+    // cycles of length 2, 3 and 5 on 10 sites have order 30.
+    const Permutation g{1, 0, 3, 4, 2, 6, 7, 8, 9, 5};
+    REQUIRE(order(g) == 30);
+    REQUIRE(is_identity(power(g, 30)));
+    REQUIRE_THROWS(order(Permutation{0, 0, 2}));
 
     // Dihedral relation: R T R == T^{-1} == T^{N-1}.
     auto lhs = compose(R, compose(T, R));

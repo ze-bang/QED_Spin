@@ -1,8 +1,7 @@
 // =============================================================================
 // tests/unit/test_symmetry_cache.cpp
 //
-// Stage-3 guards of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md):
+// Symmetry-table cache guards:
 //
 //   * the cache key the acquire_*_compiled front-ends compute without
 //     building reproduces the content_hash the builders stamp (the table

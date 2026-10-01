@@ -1,145 +1,58 @@
-# Contributing to QED
+# Contributing to QED_Spin
 
-QED is a research-grade exact-diagonalization toolkit. Contributions
-from collaborators are welcome. The goal is "research-grade with sane
-engineering": fast iteration, scientifically correct output, easy to
-debug, easy for new lab members to pick up.
-
-## TL;DR
+## Build and test
 
 ```bash
-git clone https://github.com/ze-bang/QED.git
-cd QED
-pre-commit install                  # one-time, after `pip install pre-commit`
-cmake --preset default              # Release + OpenBLAS, no CUDA/MPI
-cmake --build --preset default -j   # build
-ctest --preset default              # all tests must pass
+scripts/build.sh --variant cpu --tests          # -> build/cpu, with the C++ unit tests
+ctest --test-dir build/cpu --output-on-failure
+export PYTHONPATH=$PWD/python QED_CORE_DIR=$PWD/build/cpu/python/qed
+python -m pytest python/tests                   # API tests; add `-m grid` for the coverage grid
 ```
 
-If `ctest` is not 100 % green on `main`, that is a bug — file an issue.
+`scripts/build.sh --variant cuda` builds the CUDA variant into `build/cuda`. On a cluster,
+run builds and tests inside jobs; `scripts/gate/` submits the whole gate as SLURM arrays:
+the build, the C++ unit tests, pytest, the grid, the golden suite and the examples. A
+change is ready when every stage of the gate reports 0.
 
-## Build presets
-
-See `CMakePresets.json` for the full list. The most common ones:
-
-| Preset             | Use when                                                 |
-|--------------------|----------------------------------------------------------|
-| `default`          | First-time setup, no CUDA, no MPI                        |
-| `debug`            | Stepping through with `gdb`                              |
-| `debug-asan`       | Hunting memory bugs / undefined behavior (slow)          |
-| `release-mpi`      | CLI runs under mpirun (symmetry sectors split across ranks)|
-| `release-cuda`     | GPU Lanczos / FTLM / TPQ                                 |
-| `release-cuda-mpi` | Full HPC build (NCCL + CUDA + MPI)                       |
-| `ci-linux`         | What CI uses; pinned to system `gcc`/`g++`               |
-
-## Local developer overrides
-
-The two paths the upstream `CMakeLists.txt` used to hardcode (LAPACKE
-root, BLAS shim dir) are cache variables:
-
-```cmake
--DED_LAPACKE_ROOT=/path/to/your/lapacke
--DED_BLAS_SHIM_DIR=/path/to/blas_shim
-```
-
-If you want them set automatically every time you configure, copy
-`local.cmake.example` to `local.cmake` (gitignored) and pass it via
-`cmake --preset default -C local.cmake`.
+`CMakePresets.json` has one preset, `ci-linux`, which the GitHub CI uses. Local LAPACKE and
+BLAS-shim locations can be set with `-DED_LAPACKE_ROOT=` and `-DED_BLAS_SHIM_DIR=`.
 
 ## Style
 
-- C++17 (CUDA: C++17). No C++20 modules.
-- `clang-format` enforces formatting. Run `clang-format -i
-  path/to/file.cpp` before committing, or rely on the `pre-commit` hook.
-- `clang-tidy` runs in CI as warnings-only.
-- 4-space indent, 100-col, pointer/reference attached to type. See
-  `.clang-format`.
-- `#pragma once` for include guards (no `#ifndef X_H` boilerplate).
-- Use `std::filesystem`, not `system("mkdir -p ...")`.
+- C++17, CUDA C++17. `clang-format` enforces formatting (`.clang-format`; the pre-commit
+  hook runs it). `#pragma once` in headers.
+- Comments describe the code as it is: what it does and why. History goes in commit
+  messages and `CHANGELOG.md`.
+- Environment variables are read only through `ed::env` and must be rows of
+  `include/ed/config/env_registry.h` (`scripts/check_env_registry.sh` checks both ways).
 
 ## Tests
 
-- All new C++ code should land with at least one Catch2 test under
-  `tests/unit/`. Integration tests live under `tests/integration/`.
-- For numerics-changing PRs, add a regression test that pins a
-  known-good value (energy, spectral peak, etc.) on a small system
-  you can compute analytically.
-- Cross-checks: a CPU/GPU equivalence test on a 4–6 site lattice
-  catches 90 % of GPU bugs and runs in seconds. Tag it
-  `[gpu][cpu-equivalent]` so CI can opt in/out.
-- New Python code should land with at least one `pytest` test under
-  `python/tests/`.
-
-## Commits and PRs
-
-- One logical change per commit. Big refactors land as a series of
-  small commits where every intermediate state still builds and
-  `ctest` is green.
-- Commit messages: imperative subject ("add", "fix", "refactor"),
-  72-col first line, then a body that explains *why*.
-- PRs: small, focused, one author. Self-review before requesting
-  review.
-- CI must be green before merge. No exceptions for `main`.
+- C++ code lands with a Catch2 test under `tests/unit/`; Python code with a pytest test
+  under `python/tests/`.
+- A new task, symmetry or backend path gets grid cells (`python/tests/grid`) checked
+  against the dense reference; sampled GPU paths must reproduce the CPU path at the same
+  seeds.
+- Changes that move numbers on purpose re-bless the golden suite
+  (`tests/golden/golden.py bless`) with a reason.
 
 ## Where things live
 
-When extending the codebase, the relevant entry points are:
+- **A task or a symmetry**: the sector drivers in `src/solvers/little_group/lg_sectors*.cpp`,
+  the star walk and block operators in `lg_walk.h`, and the Python verbs in
+  `python/qed/api/`. See [`docs/architecture.md`](docs/architecture.md).
+- **A kernel**: `include/ed/krylov/`, `include/ed/thermal/`, `include/ed/observables/`,
+  written once against the backend interface (`include/ed/matvec/backend.h`).
+- **A device kernel**: `include/ed/matvec/term_kernels_gpu.cuh` and
+  `src/symmetry/streaming_symmetry_gpu_mirror.cu`.
+- **An example**: `examples/`, one script per family of verbs; the gate runs them all.
 
-- **A new solver / kernel** — under `include/ed/krylov/` (Krylov
-  family) or `include/ed/thermal/` (finite-T family), plus
-  implementation under `src/solvers/`. Register the new
-  `DiagonalizationMethod` enum in `include/ed/core/ed_types.h` and
-  wire it into the matching lane under `src/orchestrator/` (`orch_solve.cpp`,
-  `orch_thermal.cpp` or `orch_spectral.cpp`; the file map is in
-  `src/orchestrator/orchestrator_internal.h`).
-- **A new symmetry axis** (spin-flip Z2, time reversal, SU(2)
-  total-S, etc.) — see
-  [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md) §6
-  for the design pattern: extend `ProjectorChain` with a new
-  `Projector` (in `include/ed/symmetry/projector.h`) or add a new
-  `Subspace` specialisation (in `include/ed/symmetry/subspace.h`).
-  The operator hierarchy stays untouched.
-- **A new basis policy** — see
-  [`docs/architecture/ADD_NEW_BASIS_POLICY.md`](docs/architecture/ADD_NEW_BASIS_POLICY.md).
-- **A new GPU lane** — see
-  [`docs/architecture/ADD_NEW_GPU_CELL.md`](docs/architecture/ADD_NEW_GPU_CELL.md).
-- **A new MPI lane** — there is none to extend. MPI parallelism sits
-  above the matvec, in the CLI's across-sector distribution
-  (`ed::make_sector_operators_tagged(spec, rank, size)` in
-  `src/cli/workflows.cpp`); the within-sector distributed family was
-  removed in Jul 2026.
-- **A new example** — the per-cell example tree was retired; the
-  canonical usage documentation is now the tour
-  (`examples/tour/0N_<topic>.py`, one verb per file, heavily
-  commented, runs standalone in seconds). Extend the existing script
-  for the matching verb rather than adding a new file; if a genuinely
-  new verb/workflow needs its own script, add it to the tour, index it
-  in `examples/README.md` and the top-level `README.md`, and make sure
-  it passes in the `linux-tour` CI lane (which runs every tour script
-  on each push). Exhaustive per-configuration coverage belongs in the
-  test suites, not in examples.
+## Commits
+
+One logical change per commit, imperative subject line, a body that says why. Every
+commit on `main` passes the gate.
 
 ## Reporting bugs
 
-Open a GitHub issue with:
-
-- The exact `cmake` command you used (or the preset name).
-- The compiler version (`g++ --version`, `nvcc --version`).
-- The full `ctest` output (`ctest --output-on-failure`).
-- A minimal config that reproduces (`configs/<your_repro>.cfg`) or a
-  short Python script.
-
-## Architecture documents
-
-- [`docs/architecture/ARCHITECTURE.md`](docs/architecture/ARCHITECTURE.md)
-  — post-collapse architectural picture (read first).
-- [`docs/architecture/SYMMETRY.md`](docs/architecture/SYMMETRY.md)
-  — symmetry math + `Subspace × ProjectorChain` decomposition.
-- [`docs/architecture/CODEMAP.md`](docs/architecture/CODEMAP.md)
-  — directory-by-directory tour.
-- [`docs/architecture/SCALING.md`](docs/architecture/SCALING.md)
-  — memory + N envelope, env-var knobs.
-- [`docs/history/`](docs/history/) — historical phase summaries
-  (frozen time capsules).
-- [`CHANGELOG.md`](CHANGELOG.md) — versioned release notes.
-- [`README.md`](README.md) — user-facing introduction.
+Include the build command, compiler and CUDA versions, and a short Python script that
+reproduces the problem.

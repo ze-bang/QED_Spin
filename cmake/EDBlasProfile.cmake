@@ -19,8 +19,6 @@
 #   EXTRA_LINALG_LIBRARIES, BLAS_VENDOR, SCALAPACK_COMPATIBLE,
 #   plus profile-specific compile definitions (-DUSE_AOCL_BLIS,
 #   -DUSE_FLEXIBLAS, -DWITH_MKL, ...).
-#
-# P1.1 / audit Q5.
 # =============================================================================
 
 set(BLAS_LIBRARIES "")
@@ -28,7 +26,7 @@ set(LAPACK_LIBRARIES "")
 set(LAPACKE_LIBRARIES "")
 set(EXTRA_LINALG_LIBRARIES "")
 set(BLAS_VENDOR "Unknown")
-set(SCALAPACK_COMPATIBLE ON)  # Whether ScaLAPACK can be safely used
+set(SCALAPACK_COMPATIBLE ON)  # Informational only: no target links ScaLAPACK
 
 # -----------------------------------------------------------------------------
 # Profile: FLEXIBLAS - Runtime-switchable BLAS (ideal for HPC clusters)
@@ -311,8 +309,7 @@ endif()
 
 # -----------------------------------------------------------------------------
 # Profile: AOCL_BLIS - AMD BLIS for BLAS + Reference LAPACK
-# This profile is ScaLAPACK-compatible (all gfortran ABI)
-# Use with custom ScaLAPACK built against BLIS + reference LAPACK
+# All components share the gfortran ABI.
 # -----------------------------------------------------------------------------
 if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
     message(STATUS "Configuring AMD BLIS + Reference LAPACK (ScaLAPACK-compatible)")
@@ -348,8 +345,6 @@ if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
 
     # Default LAPACKE_ROOT to a user-provided ED_LAPACKE_ROOT if set; otherwise
     # leave empty and let the search below fall back to system paths.
-    # (The previous version hard-coded a per-user absolute path; that has been
-    # replaced by the ED_LAPACKE_ROOT cache variable as part of P0.10.)
     if(NOT LAPACKE_ROOT AND ED_LAPACKE_ROOT AND EXISTS "${ED_LAPACKE_ROOT}")
         set(LAPACKE_ROOT "${ED_LAPACKE_ROOT}")
         message(STATUS "  LAPACKE_ROOT (from ED_LAPACKE_ROOT): ${LAPACKE_ROOT}")
@@ -371,7 +366,7 @@ if(BLAS_PROFILE STREQUAL "AOCL_BLIS")
 
         # BLAS shim to override system libblas (avoids MKL alternatives via liblapacke).
         # Set ED_BLAS_SHIM_DIR via -DED_BLAS_SHIM_DIR=... or in local.cmake to point
-        # at a directory containing libblas.so.3. Hard-coded path removed in P0.10.
+        # at a directory containing libblas.so.3.
         if(ED_BLAS_SHIM_DIR AND EXISTS "${ED_BLAS_SHIM_DIR}/libblas.so.3")
             list(PREPEND CMAKE_BUILD_RPATH ${ED_BLAS_SHIM_DIR})
             list(PREPEND CMAKE_INSTALL_RPATH ${ED_BLAS_SHIM_DIR})

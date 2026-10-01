@@ -5,8 +5,6 @@
 // 1D Heisenberg rings. Useful for tracking BLAS-vendor regressions
 // (OpenBLAS / MKL / AOCL / FlexiBLAS) since this kernel is dominated
 // by ZHEEV inside `full_diagonalization()`.
-//
-// Audit ref: P2.13.
 // =============================================================================
 
 #include <benchmark/benchmark.h>

@@ -1,17 +1,15 @@
 // =============================================================================
 // tests/unit/test_orchestrator.cpp
 //
-// Phase 4.2 of the Minimalist ED Collapse (May 2026): smoke tests for
-// `ed::workflows::solve` / `ed::workflows::thermal`. Drives them on the
+// Smoke tests for `ed::workflows::solve` / `ed::workflows::thermal` on the
 // same small Heisenberg chain used elsewhere in the unit suite, asserting:
 //
-//   * `ed::workflows::solve` returns the textbook ground-state energy
-//     of the 6-site periodic AFM Heisenberg chain (E_0 = -2.8027757...).
-//   * `ed::workflows::thermal` returns a positive set of TPQ energies.
+//   * `ed::workflows::solve` lands near the ground-state energy of the
+//     6-site periodic AFM Heisenberg chain (E_0 = -2.8027757...).
+//   * `ed::workflows::thermal` runs the mTPQ lane end-to-end.
 //
-// These tests exercise the full BackendVariant dispatch path
-// (single-rank lane only --- the multi-rank and GPU lanes are validated
-// in the distributed / gpu test trees).
+// Both exercise the BackendVariant dispatch path on the CPU lane; the
+// GPU backend is covered by test_cuda_backend.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -36,7 +34,7 @@ TEST_CASE("workflows::solve recovers the 6-site Heisenberg ground state",
     opts.tolerance      = 1e-10;
     opts.compute_vectors = false;
     opts.method         = ed::SolveMethod::Lanczos;
-    // Single-rank CPU-lane smoke test; pin the CPU lane explicitly.
+    // CPU-lane smoke test; pin the CPU lane explicitly.
     opts.backend.allow_gpu = false;
 
     auto res = ed::workflows::solve(*H, opts);
@@ -61,7 +59,7 @@ TEST_CASE("workflows::thermal runs the mTPQ lane end-to-end",
     opts.num_samples = 1;
     opts.krylov_dim  = 50;
     opts.random_seed = 7;
-    opts.backend.allow_gpu = false;  // single-rank CPU-lane smoke test (see above)
+    opts.backend.allow_gpu = false;  // CPU-lane smoke test (see above)
 
     auto res = ed::workflows::thermal(*H, opts);
     REQUIRE(res.backend.lane == "cpu");

@@ -1,5 +1,5 @@
 // =============================================================================
-// test_numa (Catch2 v3, Phase 3a #4)
+// test_numa (Catch2 v3)
 //
 // Coverage for the OpenMP thread-pinning hook in include/ed/parallel/numa.h.
 // The knob is default-off and must never change numerical results -- only

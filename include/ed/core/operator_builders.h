@@ -2,13 +2,12 @@
 // =============================================================================
 // include/ed/core/operator_builders.h
 //
-// Free term-builder functions that replace the concrete operator subclass zoo
-// (the former ``operator_types.h`` / ``fixed_sz_operator_types.h``). Each builder
-// takes an ``Operator`` by reference and appends terms via
+// Free term-builder functions for position-dependent observables. Each
+// builder takes an ``Operator`` by reference and appends terms via
 // the canonical typed AoS API (``addOneBodyTerm`` / ``addTwoBodyTerm``),
 // reusing the shared geometry / phase math in ``operator_types_detail.h``.
 //
-// Op-type conventions (unchanged from the legacy zoo):
+// Op-type conventions:
 //   * basis-aligned single-op : op in {0=S+, 1=S-, 2=Sz}     (matches file fmt)
 //   * Cartesian single-op     : op in {0=Sx, 1=Sy, 2=Sz}     (use_xyz = true)
 //
@@ -54,7 +53,7 @@ inline void add_sum(OperatorT& op, std::uint64_t which,
 
 // ---------------------------------------------------------------------------
 // add_sublattice : add_sum restricted to sublattice_idx + k * unit_cell_size
-//   (basis-aligned op only, matching the legacy SublatticeOperator)
+//   (basis-aligned op only)
 // ---------------------------------------------------------------------------
 template <class OperatorT>
 inline void add_sublattice(OperatorT& op,

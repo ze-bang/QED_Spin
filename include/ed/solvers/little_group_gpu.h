@@ -2,15 +2,8 @@
 // =============================================================================
 // include/ed/solvers/little_group_gpu.h
 //
-// Batched GPU eigensolver for the little-group engine's dense blocks.
-//
-// History: this kernel first shipped as the SAB engine's GPU twin
-// (`sym_blocks_batched_eigenvalues_gpu`, src/solvers/gpu/symmetry_adapted_gpu.cu)
-// and the little-group full-spectrum lane consumed it. Consolidation Family 6
-// removed the SAB engine and took the kernel down with it; recovered
-// 2026-07-20 and re-homed here as a little-group-owned kernel with no SAB
-// dependencies. Its consumer is the ed::sectors dense batch (DenseBatch,
-// lg_walk.h).
+// Batched GPU eigensolver for the little-group engine's dense blocks. Its
+// consumer is the ed::sectors dense batch (DenseBatch, lg_walk.h).
 //
 // Design (minimal host<->device traffic): the host builds every dense block
 // (irregular orbit/isotypic work), ONE cudaMemcpy uploads all packed blocks,

@@ -1,10 +1,11 @@
 // =============================================================================
 // src/symmetry/streaming_symmetry_gpu_mirror.cu
 //
-// Lazy per-sector GPU mirror for the SectorView::bind_cuda() path.
-// Compiled into ed_solvers_gpu (so we have nvcc + thrust available);
-// the matching ed_core .cpp file ``streaming_symmetry_gpu_mirror.cpp``
-// only contributes the throwing stub when WITH_CUDA is OFF.
+// On-the-fly representative GPU sector matvec (the definitions behind
+// ed/symmetry/sector_gpu_mirror.h). Compiled into ed_solvers_gpu (so we
+// have nvcc + thrust available); the matching ed_core .cpp file
+// ``streaming_symmetry_gpu_mirror.cpp`` only contributes the throwing
+// stubs when WITH_CUDA is OFF.
 //
 // On first bind, uploads a device-resident snapshot of the CSR-free
 // representative sector data (``RepSectorData``: representatives, inverse
@@ -57,16 +58,9 @@ inline void cuda_check(cudaError_t err, const char* what) {
 }
 }  // namespace detail
 
-// (Stage 11c-2b: the legacy orbit-CSR device mirror -- GpuSectorMirror, its
-// build_mirror, launch_symmetry_matvec, and the ED_GPU_SYMMETRY_MIRROR_V2
-// tuning helpers -- was deleted together with make_sector_matvec_gpu and the
-// ED_GPU_SYMMETRY_REP escape. The on-the-fly representative mirror below is
-// THE device representation.)
-
 // =============================================================================
-// GpuRepSectorMirror -- on-the-fly representative SpMV device snapshot.
-//
-// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
+// GpuRepSectorMirror -- on-the-fly representative SpMV device snapshot, the
+// only device representation of a symmetry sector.
 //
 // Holds NO orbit CSR and NO O(full-Sz-dim) projection table. The
 // resident footprint is:
@@ -79,10 +73,9 @@ inline void cuda_check(cudaError_t err, const char* what) {
 // The group action + projection are regenerated arithmetically inside the
 // kernel; per-SpMV traffic is just the in/out vectors -> the genuine /|G|.
 // =============================================================================
-// Stage-4 device twin (Jul 2026): ONE rank -> shared-rep-index table per
-// (N, n_up) subspace, co-owned by every irrep sector's mirror through a
-// content-keyed weak registry. Kills the per-sector C(N, n_up) x int32
-// duplication (2.4 GiB EACH at N=32 half filling).
+// ONE rank -> shared-rep-index table per (N, n_up) subspace, co-owned by
+// every irrep sector's mirror through a content-keyed weak registry. Avoids
+// a per-sector C(N, n_up) x int32 copy (2.4 GiB EACH at N=32 half filling).
 struct GpuSharedRankTable {
     thrust::device_vector<std::int32_t> d_shared_of_rank;
 };
@@ -99,9 +92,9 @@ acquire_gpu_shared_rank(
     // (N, n_up) subspaces, so a tiny strong cache pins the recent tables.
     static std::vector<std::pair<std::uint64_t,
                                  std::shared_ptr<GpuSharedRankTable>>> keep;
-    // Jul 2026: BYTE-aware eviction. A count cap of 4 pinned up to 4 x 36 GB
-    // at N >= 34 half filling -- guaranteed device OOM the moment a job
-    // touched two subspaces. ED_GPU_SYM_CACHE_GIB (default 24) bounds the
+    // BYTE-aware eviction: a count cap would pin up to 4 x 36 GB at N >= 34
+    // half filling -- device OOM the moment a job touches two subspaces.
+    // ED_GPU_SYM_CACHE_GIB (default 24) bounds the
     // strong cache; the weak registry still dedups concurrent co-owners.
     static const double kBudgetBytes = [] {
         double gib = 24.0;
@@ -145,11 +138,11 @@ struct GpuRepSectorMirror {
     thrust::device_vector<double>          d_inv_norms;
     thrust::device_vector<int>             d_perms;
     thrust::device_vector<cuDoubleComplex> d_characters;
-    thrust::device_vector<std::uint64_t>   d_flips;   // Stage 8b: flip masks
+    thrust::device_vector<std::uint64_t>   d_flips;   // flip masks
     thrust::device_vector<std::uint64_t>   d_perm_lut; // byte-LUT fast path
     int                                     perm_lut_bpw = 0;
     thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
-    // Stage-4 device twin: shared table (co-owned) + per-sector remap.
+    // Two-level lookup: shared table (co-owned) + per-sector remap.
     std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
     thrust::device_vector<std::int32_t>    d_local_of_shared;
 
@@ -270,19 +263,11 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     // Device combinadic rank() reads a Pascal triangle from constant memory.
     ed::gpu::combinadic::detail::upload_pascal();
 
-    // Reverse table. Stage-4 device twin (Jul 2026): when the host sector
-    // carries the two-level lookup, upload the small per-sector remap and
-    // co-own ONE shared rank table per (N, n_up) -- the per-sector dense
-    // table below is then never built (this was 2.4 GiB PER SECTOR at
-    // N=32 half filling). Fallback: the dense per-sector table, built
-    // from reps only (no orbit walk).
-    // Reverse lookup (Jul 2026 consolidation): the shared two-level table
-    // when the host sector carries one (Stage 4 -- the production abelian
-    // lane), otherwise the device BINARY SEARCH over the resident sorted
-    // ``reps``. The per-sector dense rank table this replaced was strictly
-    // dominated (2.4 GiB per sector at N=32; 36 GiB impossible at N=36) and
-    // its ED_SYM_GPU_NO_RANKTABLE test hook is retired with it -- binary
-    // search is now the default-tested path wherever two-level is absent.
+    // Reverse lookup: when the host sector carries the two-level lookup,
+    // upload the small per-sector remap and co-own ONE shared rank table per
+    // (N, n_up); otherwise the device BINARY SEARCH over the resident sorted
+    // ``reps``. No dense per-sector rank table is built (it would cost
+    // 2.4 GiB per sector at N=32 and 36 GiB at N=36).
     if (data.has_two_level()) {
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
@@ -304,12 +289,12 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     mirror->d_inv_norms         = data.inv_norms;
     mirror->d_perms             = data.perms_flat;
     mirror->d_characters        = h_characters;
-    if (data.has_flips()) {   // Stage 8b: flip-extended sector
+    if (data.has_flips()) {   // flip-extended sector
         mirror->d_flips         = data.flip_masks;
     }
-    // Byte-LUT permutation fast path (Jul 2026): reuse the host-built table
+    // Byte-LUT permutation fast path: reuse the host-built table
     // when the caller carries one, else build it here from perms_flat --
-    // the ~740 KB (N=36, |G|=72) upload replaces the serial n_sites-loop
+    // the ~740 KB (N=36, |G|=72) upload avoids a serial n_sites-loop
     // walk in the device canonicalization hot path.
     if (!data.perm_lut_data.empty()) {
         mirror->d_perm_lut   = data.perm_lut_data;
@@ -348,7 +333,7 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
     const auto basis = mirror.basis_view();
     const auto terms = mirror.terms_view();
 
-    // DEFAULT: SOTA lock-free row GATHER (one write per row, no atomics, no
+    // DEFAULT: lock-free row GATHER (one write per row, no atomics, no
     // pre-zero memset; the diagonal is fused inline). Bisection fallback to the
     // validated atomic scatter via ED_MATVEC_SCATTER=1.
     static const bool use_scatter = []() {
@@ -377,13 +362,11 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
 // =============================================================================
 // make_sector_matvec_gpu_rep -- on-the-fly representative GPU matvec entry.
 //
-// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
-//
 // Builds a resident GpuRepSectorMirror from a CSR-free RepSectorData (reps +
 // inv_norms + |G| characters + group perms) and returns a DEVICE-pointer
-// MatvecFn driving ``apply_terms_rep_symmetry_scatter``. No orbit CSR / no
-// O(full-Sz-dim) projection table is allocated or streamed -- this is the
-// resident N=32 Sz+Symm path.
+// MatvecFn driving the rep-symmetry kernels (launch_rep_symmetry_matvec).
+// No orbit CSR / no O(full-Sz-dim) projection table is allocated or
+// streamed.
 // =============================================================================
 namespace ed::symmetry::gpu_mirror::detail {
 
@@ -394,7 +377,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
                    const ed::matvec::TermStorage& terms)
 {
 
-    // B7: memoise the resident device mirror across binds. A single GS solve
+    // Memoise the resident device mirror across binds. A single GS solve
     // binds the operator several times (phase-1 scan, phase-2 refine, vector
     // pull); without this each rebuilds the mirror and re-uploads reps + terms
     // (~150 MB at an N=32 sector).
@@ -413,10 +396,9 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold:
         // the plain XOR-multiply mix is structurally degenerate on the
         // sign-patterned character values this key exists to separate --
-        // on a Z8 ring, chi_{k+4}(g) = (-1)^g chi_k(g) hashed IDENTICALLY
-        // to chi_k, so conjugate-partner sectors reused each other's
-        // mirror (the exact wrong-mirror bug the content key was built to
-        // prevent; caught by test_rep_symmetry_gpu Z8 sectors 5/7).
+        // on a Z8 ring, chi_{k+4}(g) = (-1)^g chi_k(g) would hash
+        // IDENTICALLY to chi_k, so conjugate-partner sectors would reuse
+        // each other's mirror.
         auto mix = [&h](std::uint64_t v) {
             v += 0x9E3779B97F4A7C15ULL;
             v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -512,7 +494,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         static std::mutex mtx;
         static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
         static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
-        // Jul 2026: byte-aware strong cache (count cap 4 pinned ~4 x 4 GB of
+        // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of
         // sector arrays at N=36). Shares ED_GPU_SYM_CACHE_GIB semantics.
         static const double kKeepBudget = [] {
             double gib = 16.0;
@@ -629,7 +611,7 @@ ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData
 // Lanczos (host vectors); the staging traffic is O(dim) against the kernel's
 // O(dim * terms * |G|) walk.
 // ---------------------------------------------------------------------------
-// WP7 step 1: per-apply staging accounting for the host-pointer twin, under
+// Per-apply staging accounting for the host-pointer twin, under
 // ED_SYM_PROFILE only. Both the clock reads AND the extra device sync (without
 // it the blocking D2H absorbs the kernel and the split is a lie) sit behind
 // the gate, so an unprofiled run is untouched. ONE summary when the last copy

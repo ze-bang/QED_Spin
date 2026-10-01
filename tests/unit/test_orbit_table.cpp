@@ -1,8 +1,7 @@
 // =============================================================================
 // tests/unit/test_orbit_table.cpp
 //
-// Stage-2 guards of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md):
+// OrbitTable guards:
 //
 //   1. The OrbitTable content hash separates subspaces and groups.
 //   2. Burnside sum rule: summing the closed-form survivor counts over

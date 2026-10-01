@@ -36,22 +36,22 @@
 //     versa --- there is no defensive copy_to/from_host in here. The
 //     `Backend::make_zero_vector` helper produces a properly-spaced
 //     pointer.
-//   * `local_n` is the rank-local slab dimension. Global dimension N
-//     only enters as a convergence/breakdown sanity check (not used here).
+//   * `local_n` is the vector length (the problem dimension on the CPU
+//     and single-GPU backends).
 //
-// This header is host-only (no CUDA-only types). The GPU backends will
-// implement their own Backend specialisations in cuh files; this file
-// remains a single compilation unit shared by everyone.
+// This header is host-only (no CUDA-only types). The GPU backend
+// implements its Backend in a .cuh file; this header is shared by all
+// backends.
 // =============================================================================
 
 #include <ed/config/env_registry.h>
 #include <algorithm>
-#include <chrono>     // Wave 5.1: ED_LANCZOS_KERNEL_PROFILE wallclock timers
+#include <chrono>     // ED_LANCZOS_KERNEL_PROFILE wallclock timers
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>     // Wave 5.1: profile summary to stderr
-#include <cstdlib>    // Wave 5.1: getenv
+#include <cstdio>     // profile summary to stderr
+#include <cstdlib>    // getenv
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -131,8 +131,7 @@ struct LanczosKernelOptions {
     /// Stride (in iterations) between `convergence_check` invocations.
     /// 0 disables the check entirely (the kernel doesn't call the
     /// callback). Default 0. Typical values: 1 (check every step --
-    /// expensive but most responsive), 5 (the historical
-    /// `distributed_lanczos` cadence), 10 (cheap stability check at the
+    /// expensive but most responsive), 10 (cheap stability check at the
     /// cost of a few extra Krylov iterations near convergence).
     std::size_t convergence_check_interval = 0;
 
@@ -170,15 +169,11 @@ struct LanczosKernelOptions {
     ///
     ///     cap = min(max_iter, dim_cap > 0 ? dim_cap : local_n)
     ///
-    /// Default 0 means "use `local_n`", which is the correct serial /
+    /// Default 0 means "use `local_n`", which is the correct CPU /
     /// single-GPU value (`local_n == global_dim` in those backends).
-    /// Distributed backends MUST set this to the global problem
-    /// dimension, otherwise on a rank with a small slab (e.g. global
-    /// dim 6 split across 4 ranks gives `local_n ∈ {1,2}`) the kernel
-    /// would silently terminate after a single iteration. The legacy
-    /// `distributed_lanczos` body had no such cap; it relied on
-    /// `max_iter` plus the breakdown check, and we preserve that
-    /// semantics by letting MPI callers pass the global dim here.
+    /// A caller whose vectors are shorter than the problem dimension
+    /// must pass the global dimension here, otherwise the kernel would
+    /// stop early at `local_n` iterations.
     std::size_t dim_cap = 0;
 
     /// Optional FIXED set of vectors (in backend memory) that every
@@ -201,10 +196,9 @@ struct LanczosKernelOptions {
     /// against `aux_ortho_ptrs`. The caller is responsible for handing
     /// the kernel a v0 that is already orthogonal to every entry of
     /// `aux_ortho_ptrs`; the per-step CGS2 then keeps V_1, V_2, ...
-    /// orthogonal to both `aux_ortho_ptrs` and to V_0. This matches
-    /// the historical thick-restart KS body, which pre-orthogonalises
-    /// its restart seed against the locked Ritz set before entering
-    /// the per-cycle Lanczos.
+    /// orthogonal to both `aux_ortho_ptrs` and to V_0. The Krylov-Schur
+    /// kernel pre-orthogonalises its restart seed against the locked
+    /// Ritz set before entering the per-cycle Lanczos.
     ///
     /// Default empty (the kernel only orthogonalises against its own
     /// growing basis). NOT consulted when `reorth == None`.
@@ -214,22 +208,18 @@ struct LanczosKernelOptions {
     /// retains. Range: 1..N. Only consulted when
     /// ``reorth == LocalDGKS3``.
     ///
-    /// Default 1: K=1 local DGKS matches the legacy `lanczos_real`
-    /// fast path (`src/solvers/cpu/lanczos.cpp:1146-1154`) and is
-    /// the optimum for our Krylov dimensions on real-Hermitian /
-    /// well-conditioned spectra (validated to 1e-9 by the Apr 25
-    /// xdiag bake-off + the SOTA-symmetry suite). K=3 was the
-    /// pre-Wave-2.1 default and remains reachable via env
-    /// ``ED_LANCZOS_REORTH_K`` (read by the solve
-    /// orchestrator) or by setting this field explicitly when
-    /// constructing options manually. Raise it for problems with
+    /// Default 1: K=1 local DGKS (as in `lanczos_real`) is the optimum
+    /// for our Krylov dimensions on real-Hermitian / well-conditioned
+    /// spectra (validated to 1e-9 against xdiag). Set this field
+    /// explicitly when constructing options manually for a wider
+    /// ring. Raise it for problems with
     /// near-degenerate ground states where loss of orthogonality
     /// across a small window is observable.
     std::size_t local_ring_size = 1;
 
     /// Threshold below which a LocalDGKS3 projection is skipped (the
     /// resulting correction sits below the round-off floor). Default
-    /// sqrt(eps) ~= 1.49e-8, matching the legacy lanczos.cpp constant.
+    /// sqrt(eps) ~= 1.49e-8 (the same constant as `lanczos_real`).
     double local_ortho_threshold = 1.49011611938476562e-08;
 };
 
@@ -253,8 +243,8 @@ struct LanczosKernelResult {
 // THE KERNEL.
 // ---------------------------------------------------------------------------
 
-/// Run a Lanczos iteration on `H` starting from `v0_local` (rank-local
-/// dimension `local_n`). The matvec callable signature is
+/// Run a Lanczos iteration on `H` starting from `v0_local` (dimension
+/// `local_n`). The matvec callable signature is
 ///
 ///     void matvec(const Complex* in, Complex* out, std::size_t local_n);
 ///
@@ -278,10 +268,8 @@ LanczosKernelResult lanczos_kernel(
     using ed::matvec::Backend;
 
     // ------------------------------------------------------------------
-    // Wave 5.1 of the SOTA Performance rollout (May 2026): per-bucket
-    // microsecond timers, opt-in via env ``ED_LANCZOS_KERNEL_PROFILE=1``.
-    // Mirrors the same gauges in ``lanczos_real`` so we can A/B the two
-    // engines on identical workloads. Zero cost when the env is unset
+    // Per-bucket microsecond timers, opt-in via env
+    // ``ED_LANCZOS_KERNEL_PROFILE=1``. Zero cost when the env is unset
     // (the gate is a single getenv at kernel entry, the per-iter cost
     // is just `if (profile_on) accumulate`).
     // ------------------------------------------------------------------
@@ -344,7 +332,7 @@ LanczosKernelResult lanczos_kernel(
 
     const std::size_t expected_total = opts.max_iter;
 
-    R.beta.push_back(0.0);  // beta[0] unused, matches legacy ABI.
+    R.beta.push_back(0.0);  // beta[0] unused (kept for index alignment).
 
     // Normalise the initial vector in-place (we own a fresh copy).
     be.copy(v0_local, v_curr.get(), local_n);
@@ -403,12 +391,12 @@ LanczosKernelResult lanczos_kernel(
     for (std::size_t j = 0; j < cap; ++j) {
         const double t0 = profile_on ? now_us() : 0.0;
         // w = H * v_curr (matvec is opaque to this kernel --- it may
-        // be a halo-aware distributed apply, a cuBLAS-backed SpMV, etc.)
+        // be a host term-matvec, a cuBLAS-backed SpMV, etc.)
         matvec(v_curr.get(), w.get(), local_n);
         const double t1 = profile_on ? now_us() : 0.0;
         if (profile_on) t_apply_us += (t1 - t0);
 
-        // Fused recurrence (performance audit 2026-09, F5): the four
+        // Fused recurrence: the four
         // BLAS-1 sweeps {w -= beta v_prev; alpha = <v_curr,w>; w -= alpha
         // v_curr; overlap = <v_curr,w>} become two single-pass calls, and
         // for LocalDGKS3 with K <= 2 the projection onto v_curr is folded
@@ -468,8 +456,8 @@ LanczosKernelResult lanczos_kernel(
             // ----- CGS2 pass 2 (reprojection), DGKS-gated -----
             // "Twice is enough" (Daniel-Gragg-Kaufman-Stewart): a second
             // projection is only needed when the first one removed a
-            // substantial part of w. Two norms (two sweeps over w) replace
-            // an unconditional 2m-sweep second pass (audit F3).
+            // substantial part of w. Two norms (two sweeps over w) are
+            // cheaper than an unconditional 2m-sweep second pass.
             const double n_after = be.nrm2(w.get(), local_n);
             if (n_after < kDgksKappa * n_before) {
                 be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
@@ -479,18 +467,12 @@ LanczosKernelResult lanczos_kernel(
                              ortho_ptrs.size(), w.get(), local_n);
             }
         } else if (opts.reorth == ReorthPolicy::LocalDGKS3) {
-            // Wave 2.3 of the SOTA Performance rollout (May 2026):
-            // for the common cases K=1 and K=2 (the new defaults
-            // post-Wave 2.1) the kernel already holds the basis
-            // vectors we need to project against in ``v_curr`` (= V_j)
-            // and ``v_prev`` (= V_{j-1}). Use them directly and skip
-            // the ring buffer entirely. For K>=3 we still need V_{j-2}
-            // and beyond, so fall back to the ring storage path.
-            //
-            // This matches the `lanczos_real` zero-copy reorth in
-            // `src/solvers/cpu/lanczos.cpp:1146-1154` and eliminates
-            // the per-iter O(n) ``be.copy(v_curr -> ring[slot])``
-            // dominant for large-N small-state-space workloads.
+            // For the common cases K=1 and K=2 the kernel already holds
+            // the basis vectors we need to project against in
+            // ``v_curr`` (= V_j) and ``v_prev`` (= V_{j-1}). Use them
+            // directly and skip the ring buffer entirely, avoiding the
+            // per-iter O(n) ``be.copy(v_curr -> ring[slot])``. For K>=3
+            // we still need V_{j-2} and beyond, so use the ring storage.
             const std::size_t K = opts.local_ring_size;
             if (K <= 2) {
                 // K>=1: project against V_j (= v_curr). The overlap was
@@ -539,8 +521,7 @@ LanczosKernelResult lanczos_kernel(
         const double t3 = profile_on ? now_us() : 0.0;
         if (profile_on) t_reorth_us += (t3 - t2);
 
-        // beta[j+1] = ||w||  (already-reduced for distributed backends),
-        // fused with the deferred K == 1 projection when there is one.
+        // beta[j+1] = ||w||, fused with the deferred K == 1 projection when there is one.
         const double bnext = defer_axpy
             ? be.axpy_nrm2(defer_coef, v_curr.get(), w.get(), local_n)
             : be.nrm2(w.get(), local_n);
@@ -553,7 +534,7 @@ LanczosKernelResult lanczos_kernel(
         // "exact zero") rather than the user-facing Ritz `tol`,
         // because at full Krylov dimension the residual collapses to
         // O(eps * ||H||) but the Krylov subspace is still valid (and
-        // downstream consumers like LTLM rely on the full tridiag).
+        // downstream consumers like FTLM rely on the full tridiag).
         // See the LanczosKernelOptions::breakdown_tol comment.
         if (bnext < opts.breakdown_tol) break;
 
@@ -564,7 +545,7 @@ LanczosKernelResult lanczos_kernel(
         std::swap(v_prev, v_curr);
         std::swap(v_curr, w);
 
-        // Update the LocalDGKS3 ring buffer with V_{j+1}. Wave 2.3: only
+        // Update the LocalDGKS3 ring buffer with V_{j+1}. Only
         // for K >= 3 -- the K <= 2 reorth path reads v_curr/v_prev directly.
         if (ring_needed) {
             const std::size_t cap_ring = opts.local_ring_size;

@@ -2,27 +2,23 @@
 // =============================================================================
 // include/ed/core/linear_operator.h
 //
-// LinearOperator: the unified operator concept consumed by the Phase-4
-// orchestrators (`ed::solve`, `ed::thermal`, `ed::spectral`). Folds the
-// existing `MatVecOperator` polymorphic apply with the geometry + binding
+// LinearOperator: the operator concept consumed by the orchestrators
+// (`ed::workflows::solve`, `ed::workflows::thermal`). Combines the
+// `MatVecOperator` polymorphic apply with the geometry + binding
 // metadata an orchestrator needs to pick a Backend at runtime.
 //
 // Design:
 //   * `LinearOperator` derives from `ed::matvec::MatVecOperator`, so every
-//     existing concrete operator (`MatVecOperator`, `DistributedOperator`,
-//     ...) remains usable via the
-//     legacy `MatVecOperator*` API; the new entry points just need them
-//     to also expose `geometry()` and the matching `bind<Backend>` lane.
+//     concrete operator is also usable via the `MatVecOperator*` API; the
+//     orchestrators additionally need `geometry()` and the matching
+//     `bind<Backend>` lane.
 //   * `Geometry` captures every piece of metadata `ed::select_backend`
-//     reads to choose a backend (rank-local dim, global dim, MPI comm,
-//     memory space).
+//     reads to choose a backend (local dim, global dim, memory space).
 //   * `bind<Backend>` returns a `std::function` matching the matvec
 //     signature kernels already consume (`(const Complex*, Complex*,
 //     std::size_t) -> void`). The default implementation is a thin
 //     wrapper over `apply()` --- concrete operators with a faster
 //     backend-specialised path override the specific lane.
-//
-// Phase 3.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
 #include <complex>
@@ -40,22 +36,21 @@ namespace ed {
 using Complex = std::complex<double>;
 
 // ---------------------------------------------------------------------------
-// Geometry --- the geometry/runtime metadata a Phase-4 orchestrator
-// needs to pick a Backend. Constructible from a `MatVecOperator*` for
-// the non-distributed cases (single-rank or single-GPU operators).
+// Geometry --- the geometry/runtime metadata an orchestrator needs to
+// pick a Backend.
 // ---------------------------------------------------------------------------
 struct Geometry {
-    /// Rank-local dimension (= global_dim for single-rank cases).
+    /// Dimension of the vectors apply() acts on (= global_dim unless the
+    /// operator is partitioned).
     std::size_t           local_dim    = 0;
-    /// Global Hilbert-space dimension across all ranks.
+    /// Global Hilbert-space dimension.
     std::uint64_t         global_dim   = 0;
-    /// Offset of this rank's slab in the global ordering. 0 on single-rank.
+    /// Offset of the local slab in the global ordering (0 when unpartitioned).
     std::uint64_t         local_offset = 0;
     /// Where the apply() expects its buffers to live.
     ed::matvec::MemorySpace memory_space = ed::matvec::MemorySpace::Host;
 
-    /// Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    /// (May 2026). Decouples DEVICE CAPABILITY from STORAGE: when
+    /// Decouples DEVICE CAPABILITY from STORAGE: when
     /// `true`, the host operator advertises that it can lazily
     /// promote to a GPU mirror via `bind_cuda()`. `select_backend`
     /// inspects this flag to decide whether to pick `CudaBackend`,
@@ -67,8 +62,7 @@ struct Geometry {
     ///   2. The mirror must obey the same semantics as the host
     ///      `apply()` (bit-exact within FP atomic-ordering tol).
     ///
-    /// Default `false` keeps every existing host-only operator
-    /// unchanged. The little-group ``RepSectorMatVec`` flips this to
+    /// Default `false` (host-only operator). The little-group ``RepSectorMatVec`` flips this to
     /// `true` on CUDA builds (its bind_cuda builds the device rep
     /// mirror).
     bool                  supports_device_matvec = false;
@@ -84,11 +78,9 @@ struct Geometry {
 class LinearOperator : public ed::matvec::MatVecOperator {
 public:
     /// Geometry + memory-space metadata used by `ed::select_backend`.
-    /// Default implementation derives geometry from the existing
-    /// `MatVecOperator` getters (dim / global_dim / memory_space), so
-    /// every existing operator becomes a single-rank `LinearOperator`
-    /// for free. Override when the rank-local offset differs from the
-    /// trivial single-rank value.
+    /// Default implementation derives geometry from the
+    /// `MatVecOperator` getters (dim / global_dim / memory_space).
+    /// Override when the local offset is not zero.
     [[nodiscard]] virtual Geometry geometry() const {
         Geometry g;
         g.local_dim    = this->dim();
@@ -107,15 +99,13 @@ public:
     // backend-specialised path override the appropriate overload below.
     // The template is non-virtual; specialisation happens via the
     // backend-tagged virtual hooks `bind_cpu`, `bind_cuda`. Each defaults
-    // to the legacy `apply()` so an operator that doesn't yet specialise
-    // still works.
+    // to `apply()` so an operator without a specialised path still works.
     // -------------------------------------------------------------------
 
     using MatvecFn = std::function<void(const Complex*, Complex*, std::size_t)>;
     /// Real-valued matvec lambda --- only meaningful when
-    /// ``is_real_hermitian() == true``. Default implementation throws
-    /// to make sure the orchestrator never silently routes a complex
-    /// operator through the real-only Lanczos lane.
+    /// ``is_real_hermitian() == true``; the orchestrator never routes a
+    /// complex operator through the real-only Lanczos lane.
     using RealMatvecFn =
         std::function<void(const double*, double*, std::size_t)>;
 
@@ -134,24 +124,20 @@ public:
     [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
 
     // -------------------------------------------------------------------
-    // Wave 1.1 of the SOTA Performance rollout (May 2026): orchestrator
-    // real-Hermitian fast-path dispatch.
+    // Orchestrator real-Hermitian fast-path dispatch.
     //
-    // Every solver in the project consumes a complex matvec by default
-    // because the matvec abstraction (`MatVecOperator::apply`) is
-    // complex-valued. However a large fraction of production workloads
-    // (Heisenberg, t-J, Hubbard with real hoppings, all real spin
-    // chains) are real-Hermitian, and the legacy `lanczos_real` lane
-    // (`src/solvers/cpu/lanczos.cpp:1110-1258`) is 30-50% faster than
-    // the unified complex `lanczos_kernel<CpuBackend>` thanks to
-    // fused BLAS-1 and a native-double recurrence.
+    // Every solver consumes a complex matvec by default because the
+    // matvec abstraction (`MatVecOperator::apply`) is complex-valued.
+    // However a large fraction of workloads (Heisenberg, XXZ, any real
+    // spin model) are real-Hermitian, and the `lanczos_real` lane
+    // (`src/solvers/cpu/lanczos.cpp`) is 30-50% faster than the complex
+    // `lanczos_kernel<CpuBackend>` thanks to fused BLAS-1 and a
+    // native-double recurrence.
     //
     // The two virtuals below let the orchestrator detect such cases
-    // and dispatch. The defaults are conservative: ``is_real_hermitian``
-    // returns false, ``bind_real_cpu`` throws. Concrete subclasses
-    // (notably ``Operator``, ``SectorView``, ``DistributedOperator``)
-    // override only when their internal storage
-    // genuinely supports a `double*`-typed apply.
+    // and dispatch. The default ``is_real_hermitian`` returns false.
+    // Concrete subclasses (notably ``Operator``) override only when
+    // their internal storage genuinely supports a `double*`-typed apply.
     // -------------------------------------------------------------------
 
     /// Whether the operator is both real-coefficient AND Hermitian (so

@@ -8,7 +8,7 @@
 // A symmetry sector is applied through the rep policy
 // (RepSymmetryBasisPolicy): hold only the orbit-rep list (O(#reps) memory)
 // and regenerate the projection arithmetically per emit (~|G| group ops via
-// the N<=32 perm-LUT), or build the reduced sector matrix once and run a
+// the N<=64 perm-LUT), or build the reduced sector matrix once and run a
 // plain SpMV. ED_SYM_REDUCED_CSR overrides the choice; the budget below
 // guards the CSR.
 // =============================================================================
@@ -75,25 +75,22 @@ enum class SymMatvecRepr : int {
     return 1u;
 }
 
-/// Stage 9f consolidation: ONE budget decision for materializing a reduced
-/// sector matrix, shared by the abelian CpuMatVecBackend and the little-group
-/// engine's RepSectorMatVec. (Twin-lane drift here is exactly how the abelian
-/// lane shipped WITHOUT a guard while the engine had one -- keep a single
-/// definition.) The estimate is an UPPER BOUND: each off-diagonal term
+/// ONE budget decision for materializing a reduced sector matrix, shared by
+/// the abelian CpuMatVecBackend and the little-group engine's
+/// RepSectorMatVec; keep a single definition so the two lanes cannot drift.
+/// The estimate is an UPPER BOUND: each off-diagonal term
 /// contributes at most one entry per source row; the budget knob is
 /// ``ED_SYM_SECTOR_CSR_BUDGET_GIB`` (default 8, read per call so tests can
 /// toggle without restart). An over-budget sector falls back to the CSR-free
 /// walk on its own -- frontier sectors (N=36 half filling: hundreds of GB)
 /// need no env var.
 ///
-/// Jul 2026 audit: the budget is an AGGREGATE, not per-sector. It used to be
-/// evaluated per sector with no knowledge of the outer fan-out, so N sector
-/// threads could each pass an 8 GiB check and allocate N x 8 GiB against a
-/// guard that believed it was bounding one -- the same OOM class Stage 9f was
-/// written to close, reachable when blocks are solved inside an outer
-/// parallel loop. Dividing by the concurrent builder count keeps the
-/// TOTAL in-flight CSR footprint under the knob regardless of thread count;
-/// an over-budget sector still degrades to the CSR-free walk, never OOMs.
+/// The budget is an AGGREGATE, not per-sector: it is divided by the number of
+/// concurrent sector builders, so when blocks are solved inside an outer
+/// parallel loop the TOTAL in-flight CSR footprint stays under the knob
+/// regardless of thread count (a per-sector check would let N threads each
+/// allocate the full budget). An over-budget sector degrades to the CSR-free
+/// walk, never OOMs.
 [[nodiscard]] inline bool sector_csr_within_budget(
         std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
     const std::uint64_t est_bytes =

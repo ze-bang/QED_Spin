@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_casimir_projector.cpp
 //
-// Stage 12d of the SU(2) rollout: the Lowdin total-spin projector
+// The Lowdin total-spin projector
 // (include/ed/symmetry/casimir_projector.h).
 //
 // Pinned:
@@ -15,7 +15,7 @@
 //   * `project` restores the exact (unnormalised) P_S v against a dense
 //     eigenbasis reference;
 //   * CasimirProjectedOperator preserves H's action on the targeted tower
-//     and scrubs off-tower drift.
+//     and shifts off-tower drift above the block spectrum.
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -260,10 +260,10 @@ TEST_CASE("CasimirProjectedOperator preserves H on the tower and scrubs "
     }
     REQUIRE(std::sqrt(d2 / n2) < 1e-10);
 
-    // Drift handling (ghost-shift contract, audit 2026-07-30): contaminate
+    // Drift handling (ghost-shift contract): contaminate
     // the input with an S = 1 component. The wrapper maps the off-tower
-    // part to mu * (that part) -- NOT to zero: annihilating it left the
-    // complement as an exact eigenvalue-0 kernel, and Lanczos converged a
+    // part to mu * (that part) -- NOT to zero: annihilating it would leave the
+    // complement as an exact eigenvalue-0 kernel, and Lanczos would converge a
     // ghost 0 below any tower whose true minimum is positive. Subtracting
     // mu * dirt from the output must land back in the S = 0 eigenspace,
     // and mu must sit above the block's spectral radius so no

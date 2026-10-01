@@ -1,10 +1,8 @@
 // =============================================================================
 // benchmarks/bench_dssf_omega_parallel.cpp
 //
-// Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026): track the
-// speed-up of the omega-parallel inner Lehmann sum used by the
-// FtlmDynamical single-T lane (compute_spectral_function /
-// compute_spectral_function_complex in src/solvers/cpu/ftlm.cpp).
+// Speed-up of an omega-parallel Lorentzian Lehmann sum, the spectral
+// reconstruction loop of the FTLM dynamics kernels.
 //
 // What we measure
 // ---------------
@@ -12,9 +10,9 @@
 //
 //     S(omega) = sum_n w_n * (eta/pi) / ((omega - E_n)^2 + eta^2)
 //
-// that mirrors the pragma'd loop body byte-for-byte. We sweep the omega
+// with an OpenMP-parallel omega loop. We sweep the omega
 // grid size in {64, 256, 1024, 4096} for a fixed Krylov dimension
-// (n_states = 200, matching the orchestrator default) and report wall
+// (n_states = 200) and report wall
 // time + speed-up factor against the same kernel compiled without the
 // `#pragma omp parallel for`. The serial baseline is reproduced inline
 // (so the speed-up number does not need an external reference run).
@@ -67,7 +65,7 @@ void populate_inputs(std::vector<double>& ritz,
     }
 }
 
-// Mirror of `compute_spectral_function`'s pragma'd body (real weights).
+// omega-parallel Lehmann sum (real weights).
 double run_omega_parallel(const std::vector<double>& ritz,
                           const std::vector<double>& weights,
                           const std::vector<double>& omega,

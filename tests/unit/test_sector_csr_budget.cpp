@@ -3,14 +3,13 @@
 //
 // Pins ed::planner::sector_csr_within_budget -- THE single reduced-CSR budget
 // decision, shared by the abelian CpuMatVecBackend build sites and the
-// little-group engine's RepSectorMatVec. (Twin drift here is exactly how the
-// abelian lane once shipped with no guard at all while the engine had one.)
+// little-group engine's RepSectorMatVec, so the two lanes cannot drift apart.
 //
 // The property that matters is that the knob bounds the TOTAL in-flight CSR
 // footprint, not one sector's. The sector-parallel lanes build each sector's
-// CSR lazily inside an `omp parallel for` over sectors, so before the Jul-2026
-// audit N threads could each pass an 8 GiB check independently and allocate
-// N x 8 GiB -- a guard that believed it was bounding one.
+// CSR lazily inside an `omp parallel for` over sectors; a per-sector check
+// would let N threads each pass an 8 GiB check independently and allocate
+// N x 8 GiB.
 // =============================================================================
 
 #include "common/catch2_harness.h"

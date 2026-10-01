@@ -4,8 +4,7 @@
 // Leaf-level memory guard: a cheap "estimated working set vs available RAM"
 // check to throw a CLEAN error BEFORE a large allocation, instead of letting
 // the run OOM-crash mid-flight. This is NOT a planner / cost model -- it is one
-// estimate and one comparison. It replaces only the "completion guarantee"
-// safety net that the execution planner used to provide.
+// estimate and one comparison.
 //
 // Override with ED_MEM_GUARD_OFF=1 (dispatch anyway, accepting the OOM risk).
 // If available RAM cannot be determined, the guard is a no-op (never blocks).
@@ -112,7 +111,7 @@ inline void guard_working_set(std::uint64_t est_bytes, const char* what) {
             std::string(what) + ": estimated working set ~" + GiB(est_bytes) +
             " GiB exceeds ~" + GiB(budget) + " GiB available RAM. Reduce the "
             "problem (sz / symmetry / fewer samples / smaller Krylov dim), give "
-            "it more memory or MPI ranks, or set ED_MEM_GUARD_OFF=1 to override.");
+            "it more memory, or set ED_MEM_GUARD_OFF=1 to override.");
     }
 }
 

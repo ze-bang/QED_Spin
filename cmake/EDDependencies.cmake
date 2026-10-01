@@ -6,8 +6,6 @@
 #
 #   * Eigen3              REQUIRED   linear algebra (header-only)
 #   * CUDAToolkit         optional   gated by WITH_CUDA
-#
-# P1.1 / audit Q5.
 # =============================================================================
 
 # Find Eigen3
@@ -24,7 +22,5 @@ if(WITH_CUDA)
     message(STATUS "CUDA Toolkit include directories: ${CUDAToolkit_INCLUDE_DIRS}")
 endif()
 
-# ARPACK is no longer a dependency: the ARPACK_SM / ARPACK_LM /
-# ARPACK_SHIFT_INVERT / ARPACK_ADVANCED solvers were retired in the
-# minimalist-architecture rev (May 2026). All Krylov needs are served
-# by the in-tree LANCZOS / BLOCK_LANCZOS / KRYLOV_SCHUR kernels.
+# No ARPACK: every Krylov solve uses the in-tree LANCZOS / BLOCK_LANCZOS /
+# KRYLOV_SCHUR kernels.

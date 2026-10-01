@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_cuda_backend.cpp
 //
-// Phase 2 of the matvec-unification (May 2026): pin agreement between
+// Pins agreement between
 // `lanczos_kernel<CpuBackend>` and `lanczos_kernel<CudaBackend>` on a
 // small Heisenberg chain. Two independent lanes:
 //
@@ -184,7 +184,7 @@ TEST_CASE("matvec::CudaBackend batched dot_many matches the sequential reference
           "[cuda-backend][batched-primitives][phase1]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
 
-    // Phase 1 gap-fill regression: `dot_many` is overridden via one
+    // `dot_many` is overridden via one
     // `cublasZgemv` over a staged contiguous (n x M) basis buffer. Pin
     // that the override returns the same coefficient vector as M
     // sequential `dot()` calls within strict tolerance. Runs across a
@@ -241,7 +241,7 @@ TEST_CASE("matvec::CudaBackend batched axpy_many matches the sequential referenc
           "[cuda-backend][batched-primitives][phase1]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
 
-    // Phase 1 gap-fill regression: `axpy_many` is overridden via one
+    // `axpy_many` is overridden via one
     // `cublasZgemv(OP_N)` over the same staged basis buffer. Pin that
     // the override produces the same result as the equivalent loop of
     // M `axpy` calls.
@@ -301,10 +301,9 @@ TEST_CASE("matvec::CudaBackend fused axpby (cublasZgeam) matches scale+axpy",
           "[cuda-backend][batched-primitives][phase1]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
 
-    // Phase 1 gap-fill regression: axpby is now a single cublasZgeam.
-    // Pin element-wise agreement against the previous two-launch
-    // (scale + axpy) decomposition, which is exactly the abstract
-    // semantics the Backend interface promises.
+    // axpby is a single cublasZgeam. Pin element-wise agreement against
+    // the two-launch (scale + axpy) decomposition, which is exactly the
+    // abstract semantics the Backend interface promises.
     ed::matvec::CudaBackend cuda;
     constexpr std::size_t n = 4096;
 
@@ -343,7 +342,7 @@ TEST_CASE("matvec::CudaBackend pool-backed allocator survives a churn loop",
           "[cuda-backend][allocator][phase1]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
 
-    // Phase 1 gap-fill smoke test: the allocator is now backed by
+    // The allocator is backed by
     // `cudaMallocAsync` / `cudaFreeAsync` on the default device pool.
     // A long churn loop must not exhaust device memory (the pool
     // reuses returned allocations) and must remain functionally
@@ -513,17 +512,6 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[0]) >
             std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
 }
-
-// REMOVED: "thermal::ltlm_kernel<CudaBackend> matches CpuBackend".
-// ltlm_kernel (and ed/thermal/ltlm_kernel.h) were deleted in consolidation
-// Family 1 (Jul 2026). This case pinned CPU/GPU AGREEMENT between the two LTLM
-// lanes -- and they did agree, because both reimplemented the same
-// GS-local-DOS bug (each summed |<0|psi_n>|^2 e^{-bE_n} instead of the thermal
-// trace). A parity test between twins that share a defect cannot see it; this
-// one passed for months while LTLM returned E0 at every temperature. The
-// replacement pin compares LTLM against an INDEPENDENT reference rather than
-// its own twin: test_thermal_dense_ref's "LTLM thermodynamics IS the FTLM
-// trace" (identical knobs, 1e-12) plus its dense-reference cells.
 
 #else   // !WITH_CUDA
 

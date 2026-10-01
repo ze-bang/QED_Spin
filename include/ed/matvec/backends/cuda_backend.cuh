@@ -23,27 +23,21 @@
 // include it. CPU-only code paths see this header through forward
 // declaration only.
 //
-// Phase 2 (May 2026) -- closes Gap #2 of the minimalist-architecture
-// rollout. The previous skeleton headers under the same path were
-// retired in May 2026 (no implementation, no consumers); this is the
-// real first version.
-//
-// Phase 1 of the gap-fill rollout (May 2026 day 11+) added:
+// Performance features:
 //   * Pool-backed `allocate` / `deallocate` via `cudaMallocAsync` on
 //     the default stream. The default device memory pool is configured
 //     with `cudaMemPoolAttrReleaseThreshold = UINT64_MAX` so freed
-//     allocations stay in the pool ready for reuse (eliminates the
+//     allocations stay in the pool ready for reuse (avoids the
 //     ~50us per-cudaMalloc latency that bites Krylov runs at M=100).
-//   * Overrides for the batched primitives `dot_many` / `axpy_many`
-//     via a single `cublasZgemv` each, replacing the M sequential
-//     `cublasZdotc` / `cublasZaxpy` calls that the Backend default
-//     would otherwise loop over. The kernel passes the same growing
-//     basis pointer set on every CGS2 pass within a Lanczos step,
-//     so the staging copy is cached with a pointer-fingerprint and
+//   * Batched primitives `dot_many` / `axpy_many` as a single
+//     `cublasZgemv` each, instead of the M sequential `cublasZdotc` /
+//     `cublasZaxpy` calls of the Backend default. The kernel passes the
+//     same growing basis pointer set on every CGS2 pass within a Lanczos
+//     step, so the staging copy is cached with a pointer-fingerprint and
 //     incrementally extended (only the new column is staged per
 //     Lanczos iteration).
-//   * Fused `axpby` via `cublasZgeam` -- one launch instead of the
-//     prior `scale` + `axpy` two-kernel decomposition.
+//   * Fused `axpby` via `cublasZgeam` -- one launch instead of a
+//     `scale` + `axpy` pair.
 // =============================================================================
 
 #include <algorithm>
@@ -108,10 +102,10 @@ inline cublasOperation_t to_cublas_op(char op) {
 
 class CudaBackend : public Backend {
 public:
-    /// Audit 2026-07-31: every cuBLAS BLAS-1 entry point takes a 32-bit
-    /// count. The old bare `static_cast<int>` silently wrapped at
-    /// n >= 2^31 (a 32 GiB complex vector -- reachable on 80 GB parts)
-    /// and computed garbage; guard the narrowing once, loudly.
+    /// Every cuBLAS BLAS-1 entry point takes a 32-bit count. A bare
+    /// `static_cast<int>` would silently wrap at n >= 2^31 (a 32 GiB
+    /// complex vector -- reachable on 80 GB parts) and compute garbage;
+    /// guard the narrowing once, loudly.
     [[nodiscard]] static int as_blas_int(std::size_t n) {
         if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             throw std::length_error(
@@ -266,8 +260,8 @@ public:
     // run at M=100 (one cudaMalloc per basis vector) and ~50us
     // (amortised pool hits).
     //
-    // Fallback to synchronous `cudaMalloc` when the device doesn't
-    // expose a default pool; preserves the previous behaviour.
+    // Falls back to synchronous `cudaMalloc` when the device doesn't
+    // expose a default pool.
     // ------------------------------------------------------------------
     [[nodiscard]] Complex* allocate(std::size_t n) const override {
         if (n == 0) return nullptr;
@@ -377,8 +371,8 @@ public:
     // We model the vector as an (n x 1) column-major matrix; A=x,
     // B=y, C=y (in-place output is permitted: cuBLAS documents that
     // C and B can overlap). One launch + the per-launch ~3us
-    // overhead, vs the prior two-launch `scale` + `axpy` shape that
-    // forced an implicit sync between the two kernels.
+    // overhead, vs a two-launch `scale` + `axpy` pair with an
+    // implicit sync between the two kernels.
     void axpby(Complex alpha, const Complex* x,
                Complex beta,  Complex* y, std::size_t n) const override {
         if (n == 0) return;
@@ -413,8 +407,8 @@ public:
     // column) + 1 cublasZgemv launch + 1 D2H memcpy of M coeffs.
     // That replaces M individual cublasZdotc launches, each with
     // its own implicit host-sync. The win is most pronounced at
-    // small/medium n, where the original implementation was
-    // launch-bound rather than bandwidth-bound.
+    // small/medium n, where per-vector launches are launch-bound
+    // rather than bandwidth-bound.
     // ------------------------------------------------------------------
     void dot_many(const Complex* const* basis,
                   std::size_t           num_basis,
@@ -489,9 +483,8 @@ public:
     }
 
     // ------------------------------------------------------------------
-    // Level-3 BLAS via cuBLAS / cuSolver (Phase 1 of the Minimalist
-    // ED Collapse, May 2026). All matrices column-major; pointers are
-    // device pointers.
+    // Level-3 BLAS via cuBLAS / cuSolver. All matrices column-major;
+    // pointers are device pointers.
     // ------------------------------------------------------------------
     void gemm(char opA, char opB,
               std::size_t m, std::size_t n, std::size_t k,
@@ -628,7 +621,7 @@ private:
     mutable Complex*     coeffs_dev_      = nullptr;
     mutable std::size_t  coeffs_capacity_ = 0;  // bytes
 
-    // Phase 1 / qr_thin: persistent cuSolver scratch.
+    // qr_thin: persistent cuSolver scratch.
     mutable void*       qr_work_dev_      = nullptr;
     mutable std::size_t qr_work_capacity_ = 0;  // bytes
     mutable Complex*    qr_tau_dev_       = nullptr;

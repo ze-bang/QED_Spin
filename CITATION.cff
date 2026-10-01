@@ -1,14 +1,13 @@
 # https://citation-file-format.github.io
-# Validated by `cffconvert --validate` (one-shot, manual).
 
 cff-version: 1.2.0
-title: "exact_diagonalization_cpp: A C++/CUDA toolkit for exact diagonalization of quantum lattice models"
+title: "QED_Spin: exact diagonalization of spin-1/2 Hamiltonians on CPUs and GPUs"
 message: "If you use this software in your research, please cite it as below."
 type: software
-version: "0.0.0-dev"
-date-released: "2026-04-24"
-url: "https://github.com/zhouzb79/exact_diagonalization_clean"
-repository-code: "https://github.com/zhouzb79/exact_diagonalization_clean"
+version: "0.5.0"
+date-released: "2026-09-30"
+url: "https://github.com/ze-bang/QED_Spin"
+repository-code: "https://github.com/ze-bang/QED_Spin"
 license: MIT
 
 authors:
@@ -19,24 +18,20 @@ authors:
 keywords:
   - "exact diagonalization"
   - "Lanczos"
-  - "thermal pure quantum"
-  - "FTLM"
+  - "finite-temperature Lanczos"
+  - "thermal pure quantum states"
   - "quantum magnetism"
-  - "spectral function"
-  - "DSSF"
+  - "dynamical structure factor"
+  - "symmetry"
   - "CUDA"
-  - "MPI"
-  - "scientific computing"
 
 abstract: >
-  exact_diagonalization_cpp is a research-grade C++/CUDA toolkit for
-  exact diagonalization (ED) of quantum spin lattice models. It supports
-  full diagonalization (LAPACK / ScaLAPACK), the Lanczos family
-  (standard, selective reorthogonalization, block, shift-invert,
-  Chebyshev-filtered, implicitly restarted, thick-restart, Krylov-Schur),
-  ARPACK with auto-tuning, finite-temperature methods (FTLM, LTLM,
-  Hybrid, microcanonical TPQ, canonical TPQ), and dynamical/static
-  spin structure factors (DSSF/SSSF). GPU acceleration is provided
-  for Lanczos / FTLM / TPQ via CUDA. MPI parallelism is supported for
-  TPQ sample-parallel runs and ScaLAPACK distributed full diagonalization.
-  A numerical linked-cluster expansion (NLCE) workflow is included.
+  QED_Spin computes lowest levels and eigenvectors, full spectra, thermodynamics
+  (exact, finite-temperature Lanczos, microcanonical thermal pure quantum states,
+  thermal expectation values) and dynamical correlations at zero and finite
+  temperature for spin-1/2 Hamiltonians with one-, two- and three-body terms.
+  Every calculation is resolved by the Hamiltonian's symmetries -- Sz or its
+  parity, lattice momenta and point-group little groups (including
+  higher-dimensional irreps), spin flip, time reversal and total spin -- and runs
+  on the CPU (OpenMP) or on an NVIDIA GPU (CUDA), from a Python interface over a
+  C++ engine.

@@ -4,17 +4,14 @@
 //
 // Pure declaration of the reusable per-sector GPU matvec entry point.
 //
-// This header carries NO CUDA includes, so CPU translation units (e.g.
-// ``sector_operator.h`` consumed by ed_core / ed_solvers_cpu) can include
-// it freely. The definition lives in
+// This header carries NO CUDA includes, so CPU translation units (in
+// ed_core / ed_solvers_cpu) can include it freely. The definition lives in
 // ``src/symmetry/streaming_symmetry_gpu_mirror.cu`` (compiled into
 // ``ed_solvers_gpu`` when WITH_CUDA is ON); a throwing stub lives in the
 // ``.cpp`` sibling for non-CUDA builds.
 //
-// Stage 11c-2b (Jul 2026): the legacy orbit-CSR device mirror
-// (``make_sector_matvec_gpu`` + GpuSectorMirror) was retired together with
-// its ``ED_GPU_SYMMETRY_REP=0`` escape -- the on-the-fly representative
-// mirror below is THE device representation for symmetry sectors.
+// The on-the-fly representative mirror below is the only device
+// representation for symmetry sectors.
 // =============================================================================
 
 #include <ed/core/linear_operator.h>     // ed::LinearOperator::MatvecFn
@@ -24,13 +21,12 @@
 namespace ed::symmetry {
 
 /// Build a RESIDENT on-the-fly representative GPU matvec for one symmetry
-/// sector ("On-the-fly representative SpMV" plan, Jun 2026). Consumes a
-/// CSR-free ``RepSectorData`` (representatives + ``1/norm`` + the |G|
-/// per-sector characters + the group permutations) and returns a complex
-/// matvec callable taking DEVICE pointers. Allocates NO orbit CSR and NO
-/// O(full-Sz-dim) projection table: the group action + projection are
-/// regenerated arithmetically on the device, so per-SpMV traffic is just
-/// the in/out vectors (the genuine /|G| win for the N=32 Sz+Symm mTPQ run).
+/// sector. Consumes a CSR-free ``RepSectorData`` (representatives +
+/// ``1/norm`` + the |G| per-sector characters + the group permutations) and
+/// returns a complex matvec callable taking DEVICE pointers. Allocates NO
+/// orbit CSR and NO O(full-Sz-dim) projection table: the group action +
+/// projection are regenerated arithmetically on the device, so per-SpMV
+/// traffic is just the in/out vectors (a genuine 1/|G| memory saving).
 ///
 /// Requires ``rep.usable()``; fixed-Sz sectors use the combinadic rank
 /// reverse lookup, full-Hilbert (sym-only) sectors the identity rank.

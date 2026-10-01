@@ -3,7 +3,7 @@
 // include/ed/symmetry/irreps.h
 //
 // Numerical irreducible-representation decomposition for a finite group given
-// as a set of site permutations (the `max_clique` of a SymmetryGroupInfo).
+// as a set of site permutations (`max_clique`: the full list of group elements).
 //
 // This is the engine for FULL (possibly non-abelian) symmetry-adapted ED. The
 // abelian path only ever needs 1-D characters χ(g); a genuinely non-abelian
@@ -76,7 +76,7 @@ struct GroupIrreps {
 [[nodiscard]] GroupIrreps
 decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
 
-/// Stage 7 (SymmetryEngine v2): decompose an ABSTRACT finite group given only
+/// Decompose an ABSTRACT finite group given only
 /// its multiplication table (mult[a][b] = index of a·b). Element 0 need not be
 /// the identity. Used for little co-groups, whose elements close only modulo
 /// the abelian translation subgroup and therefore have no faithful

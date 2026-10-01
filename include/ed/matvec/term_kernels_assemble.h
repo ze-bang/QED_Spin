@@ -2,8 +2,8 @@
 // =============================================================================
 // include/ed/matvec/term_kernels_assemble.h
 //
-// CSR-triplet emission kernel. The third (and final) form of the unified
-// term-kernel decision tree:
+// CSR-triplet emission kernel. The third form of the unified term-kernel
+// decision tree:
 //
 //   SCATTER (term_kernels.h)         : y[c] += <c|H|b> v[b]
 //   GATHER  (term_kernels_gather.h)  : y[r] += <r|H|c> v[c]
@@ -12,16 +12,9 @@
 // All three share byte-identical op_type / bit-flip / popcount semantics
 // (op_type encoding: 0=S+, 1=S-, 2=Sz). The SCATTER kernel is the canonical
 // reference; this header replicates that decision tree but emits sparse
-// matrix triplets instead of a dense write to y[].
-//
-// Historically the assembly logic was duplicated three times: once inside
-// ed::matvec::CpuMatVecBackend (private ``emit_triplets_``), once in
-// ed::Operator::buildSparseMatrix (legacy std::function-only path, which
-// silently produced INCOMPLETE matrices when callers populated the typed
-// AoS via addOneBodyTerm/addTwoBodyTerm — a latent correctness bug), and
-// once in ed::FixedSzOperator::buildFixedSzMatrix (via unit-vector
-// probing). Factoring the assembly out here makes the bit-flip semantics
-// shared by construction.
+// matrix triplets instead of a dense write to y[]. Every sparse-matrix
+// assembly (CpuMatVecBackend's CSR cache, Operator::getSparseMatrix) goes
+// through this header, so the bit-flip semantics are shared by construction.
 //
 // BasisPolicy contract (identical to term_kernels.h):
 //   * BasisPolicy::dim() -> uint64_t
@@ -46,7 +39,7 @@
 #endif
 
 #include <ed/matvec/term_storage.h>
-#include <ed/matvec/term_kernels_gather.h>  // for_each_row_state (audit F1/F4)
+#include <ed/matvec/term_kernels_gather.h>  // for_each_row_state
 
 #include <stdexcept>
 #include <utility>
@@ -75,7 +68,7 @@ template <class Scalar>
  * Parallelism: OpenMP-parallelised over the basis index. Thread-local
  * triplet vectors are merged at the end.
  *
- * @tparam BasisPolicy   Compile-time basis (full Hilbert / fixed-Sz / ...).
+ * @tparam BasisPolicy   Compile-time basis (e.g. FullBasisPolicy).
  * @tparam Scalar        Triplet value type. ``Complex`` for general
  *                       Hamiltonians, ``double`` for real ones (caller is
  *                       responsible for verifying ``TermStorage::is_real()``).
@@ -120,8 +113,7 @@ inline void emit_term_triplets(const BasisPolicy& basis,
     }
 
     // ------------------------------------------------------------------
-    // emit helpers (mirror CpuMatVecBackend's private emit_ /
-    // emit_if_in_basis_).
+    // emit helpers (diagonal / off-diagonal with optional basis check).
     // ------------------------------------------------------------------
     auto emit_diag = [](auto& local, std::uint64_t i, Scalar value) {
         if (std::abs(value) > 1e-15) {
@@ -256,10 +248,10 @@ inline void emit_term_triplets(const BasisPolicy& basis,
 }
 
 // ===========================================================================
-// Audit F4 (2026-09): direct two-pass CSR assembly in GATHER form.
+// Direct two-pass CSR assembly in GATHER form.
 //
 // The Eigen triplet route costs 24 B/nnz of temporaries plus a serial
-// ``setFromTriplets`` sort (measured ~47 s at N = 24 in the audit). Here the
+// ``setFromTriplets`` sort (measured ~47 s at N = 24). Here the
 // row kernel's gates are walked twice -- once to count each row's merged
 // entries, once to fill -- so the peak memory is the final CSR and every
 // stage is parallel over rows. Entry order and duplicate handling match

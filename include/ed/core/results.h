@@ -2,12 +2,10 @@
 // =============================================================================
 // include/ed/core/results.h
 //
-// Result types of the orchestrators (`ed::solve`, `ed::thermal`): one shape
-// per workflow, with the Backend identity carried in a `BackendMetadata`
-// blob so downstream consumers can branch on lane without re-reading the
-// function signature.
-//
-// Phase 3.3 of the Minimalist ED Collapse (May 2026).
+// Result types of the orchestrators (`ed::workflows::solve`,
+// `ed::workflows::thermal`): one shape per workflow, with the Backend
+// identity carried in a `BackendMetadata` blob so downstream consumers can
+// branch on lane without re-reading the function signature.
 // =============================================================================
 
 #include <complex>
@@ -25,10 +23,8 @@ using Complex = std::complex<double>;
 
 // ---------------------------------------------------------------------------
 // BackendMetadata --- carries the runtime identity of the lane that
-// produced a result. Replaces the implicit knowledge previously
-// embedded in the result type itself ("EDResults" => CPU,
-// "DistributedLanczosGPUResult" => MPI+GPU). Lets all orchestrators
-// return the SAME struct regardless of which backend ran the kernel.
+// produced a result, so all orchestrators return the SAME struct
+// regardless of which backend ran the kernel.
 // ---------------------------------------------------------------------------
 struct BackendMetadata {
     /// One of: "cpu", "gpu". Set by the orchestrator
@@ -42,10 +38,8 @@ struct BackendMetadata {
 
 // ---------------------------------------------------------------------------
 // KrylovDiagnostics --- the Lanczos / Krylov-Schur
-// internals every orchestrator carries through. Replaces the bespoke
-// `tridiag_alpha` / `tridiag_eigenvalues` fields the existing distributed
-// result types each spelled differently. Set sparingly --- callers that
-// only want eigenvalues need not inspect this.
+// internals every orchestrator carries through. Set sparingly --- callers
+// that only want eigenvalues need not inspect this.
 // ---------------------------------------------------------------------------
 struct KrylovDiagnostics {
     std::vector<double> alpha;
@@ -85,7 +79,7 @@ struct GroundStateResult {
 };
 
 // ---------------------------------------------------------------------------
-// ThermalResult --- output of `ed::thermal(H, opts)`. Folds the FTLM /
+// ThermalResult --- output of `ed::workflows::thermal(H, opts)`. Covers the FTLM /
 // OFTLM / mTPQ family.
 // ---------------------------------------------------------------------------
 struct ThermalResult {

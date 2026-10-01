@@ -4,8 +4,6 @@
 // Ground-state Lanczos micro-benchmark on 1D Heisenberg rings (PBC).
 // Tracks the wall time of one full Lanczos run to find the bottom
 // eigenvalue, which is the canonical workload for ED ground-state runs.
-//
-// Audit ref: P2.13.
 // =============================================================================
 
 #include <benchmark/benchmark.h>
@@ -110,17 +108,12 @@ void BM_LanczosGroundState(benchmark::State& state) {
     state.counters["krylov_dim"] = static_cast<double>(kry);
 }
 
-// Wave 1.4 of the SOTA Performance rollout (May 2026): a companion
-// benchmark that measures the SAME workload through the real-only
-// `lanczos_real` fast path. The Heisenberg ring built above is purely
-// real-Hermitian so this is the apples-to-apples comparison against
-// the Apr 25 baseline (`bench_vs_xdiag_*.json`) which used the
-// `qed.lanczos` Python entry that already dispatches to
-// `lanczos_real` for real H (see
-// `python/qed/_bindings/qed_bindings.cpp:422-427`).
+// The SAME workload through the real-only `lanczos_real` fast path. The
+// Heisenberg ring built above is purely real-Hermitian, so the two
+// benchmarks compare the real and complex lanes on identical input.
 //
-// The complex bench above remains the conservative regression gate
-// for the unified `lanczos_kernel<CpuBackend>` lane.
+// The complex bench above is the regression gate for the
+// `lanczos_kernel<CpuBackend>` lane.
 void BM_LanczosGroundState_Real(benchmark::State& state) {
     const auto N      = static_cast<uint64_t>(state.range(0));
     const auto kry    = static_cast<uint64_t>(state.range(1));
@@ -144,11 +137,6 @@ void BM_LanczosGroundState_Real(benchmark::State& state) {
     state.counters["N"]          = static_cast<double>(N);
     state.counters["krylov_dim"] = static_cast<double>(kry);
 }
-
-// ARPACK companion benchmark retired May 2026: the in-tree
-// `include/ed/solvers/arpack.h` wrapper was removed as part of the
-// solver-shell cleanup. ARPACK/IRLM comparison now lives in
-// `bench_vs_quspin.py` (scipy.sparse.linalg.eigsh, which wraps ARPACK).
 
 }  // namespace
 

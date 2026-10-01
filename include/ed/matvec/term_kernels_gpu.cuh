@@ -76,9 +76,7 @@ load_coeff(const ed::matvec::Complex& c) {
 // ---------------------------------------------------------------------------
 // Complex atomicAdd (CUDA has no native complex atomic; we split into
 // two atomicAdd(double*) calls). Required compute capability >= 6.0
-// (double-precision atomicAdd), which is the existing minimum the GPU
-// operators target (verified by the cuSPARSE / cuBLAS preconditions in
-// the surrounding code).
+// (double-precision atomicAdd), the minimum the GPU lanes target.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ void
 atomic_add_complex(cuDoubleComplex* dst, cuDoubleComplex val) {
@@ -138,8 +136,7 @@ struct ScalarTraits<double> {
 // state ``s`` with an optional ``pre_phase`` multiplier and atomicAdd the
 // contributions into ``out``.
 //
-// The shared term-walk body of the representative kernels: one body keeps the
-// scatter kernel's term logic identical to the validated reference; the
+// The shared term-walk body of the representative scatter kernel; the
 // destination index + projection lookup is delegated to the BasisPolicy.
 //
 // Compile-time branches (gated on the BasisPolicy traits):
@@ -333,7 +330,7 @@ __device__ __forceinline__ void process_source_terms(
 // ---------------------------------------------------------------------------
 // apply_terms_rep_symmetry_scatter -- on-the-fly representative SpMV.
 //
-// HERMITIAN-ONLY CONTRACT (audit 2026-07-30): this scatter emits
+// HERMITIAN-ONLY CONTRACT: this scatter emits
 // ``in[i] * inv_norm_i * (h * proj)`` with NO conjugation, while the
 // reduced-CSR gather assembles ``A[r,c] = inv_norm_r * conj(h * proj)``.
 // For a Hermitian operator the two apply the SAME matrix (the scatter's
@@ -343,23 +340,19 @@ __device__ __forceinline__ void process_source_terms(
 // a dense reference. This is intrinsic to scatter-from-source under this
 // normalisation -- do NOT "fix" it by conjugating the emit (that flips
 // which lane is the adjoint, it does not reconcile them). Every operator
-// that reaches this kernel today honours MatVecOperator::is_hermitian()
+// that reaches this kernel honours MatVecOperator::is_hermitian()
 // == true (all construction paths emit Hermitian-paired terms;
 // CrossSectorOrbitObservable, the non-Hermitian-probe carrier, is
-// CPU-only). If a future carrier routes unpaired terms here, add a
-// fingerprint-time Hermitian-pairing scan to the mirror registry and
-// refuse the device lane for unpaired term decks.
+// CPU-only). Any carrier that routes unpaired terms here needs a
+// fingerprint-time Hermitian-pairing scan in the mirror registry that
+// refuses the device lane for unpaired term decks.
 //
-// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
-//
-// One thread per orbit representative ``i``. Unlike
-// an orbit-CSR scatter, this does NOT walk an
+// One thread per orbit representative ``i``. This does NOT walk an
 // orbit CSR: it applies the Hamiltonian terms to the single representative
 // ``reps[i]`` (``basis.state_of(i)``) with ``pre_phase = inv_norms[i]``, and
 // the policy's ``index_and_projection`` regenerates the destination orbit
 // index + projection phase arithmetically from the group action (no orbit
-// table). The shared ``process_source_terms`` body guarantees identical term
-// logic to the validated reference kernel; only the source/pre_phase differ.
+// table). The term walk is the shared ``process_source_terms`` body.
 //
 // Requires ``BasisPolicy`` to be ``DeviceRepSymmetryBasisPolicy`` (or any
 // policy with ``needs_orbit_walk == false`` + ``has_coeff_modifier == true``
@@ -389,7 +382,7 @@ __global__ void apply_terms_rep_symmetry_scatter(
 }
 
 // ---------------------------------------------------------------------------
-// Host-side launcher for the on-the-fly representative kernel. Same contract
+// Host-side launcher for the on-the-fly representative kernel.
 // ``d_out`` MUST be pre-zeroed by the caller (the kernel only atomicAdds).
 // ---------------------------------------------------------------------------
 template <class BasisPolicy, class Scalar>
@@ -419,7 +412,7 @@ inline cudaError_t launch_apply_terms_rep_symmetry_gpu(
 }
 
 // ===========================================================================
-// REP-SYMMETRY GATHER device kernel ("Optimized symmetry ED" plan, Phase C).
+// REP-SYMMETRY GATHER device kernel.
 //
 // The lock-free row-GATHER twin of ``apply_terms_rep_symmetry_scatter``. One
 // thread OWNS each output orbit row ``r``: it applies H to the single
@@ -433,8 +426,8 @@ inline cudaError_t launch_apply_terms_rep_symmetry_gpu(
 //
 // Each ``out[r]`` is written exactly ONCE -- NO atomicAdd, NO output pre-zero.
 // The diagonal is included naturally (diagonal terms emit ``rep_r`` which maps
-// back to ``r``), so no separate diag[] array is uploaded -- the GPU-appropriate
-// "precomputed diagonal" (Phase B).
+// back to ``r``), so no separate diag[] array is uploaded (the GPU counterpart
+// of the host precomputed diagonal).
 //
 // Mirrors ``process_source_terms`` term-by-term (same FORWARD gates, applying
 // H to ``rep_r``), differing only in the gather accumulation vs atomic scatter.
@@ -572,8 +565,8 @@ __global__ void apply_terms_rep_symmetry_gather(
 }
 
 // ---------------------------------------------------------------------------
-// Host-side launcher for the rep-symmetry GATHER kernel. Like the trivial
-// gather launcher the caller does NOT pre-zero ``d_out`` (every row written).
+// Host-side launcher for the rep-symmetry GATHER kernel. The caller does NOT
+// pre-zero ``d_out`` (every row is written).
 // ---------------------------------------------------------------------------
 template <class BasisPolicy, class Scalar>
 inline cudaError_t launch_apply_terms_rep_symmetry_gpu_gather(

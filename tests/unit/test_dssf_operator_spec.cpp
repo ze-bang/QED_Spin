@@ -1,24 +1,22 @@
 // =============================================================================
-// test_dssf_operator_spec (Catch2 v3, P1.10 / P2.5 / DSSF PR-A+F lockdown)
+// test_dssf_operator_spec (Catch2 v3)
 //
 // Sanity tests for `ed::dssf::build_observable_pairs` /
-// `ed::dssf::compute_transverse_bases`. These library functions are the
-// single source of truth for DSSF observable construction; they replaced
-// ~500 LOC of duplicated logic that used to live in `src/apps/ed_main.cpp`
-// and the now-deleted `src/apps/TPQ_DSSF.cpp` (P2.14).
+// `ed::dssf::compute_transverse_bases`, the single source of truth for
+// DSSF observable construction.
 //
 // What we lock down here:
 //   * `compute_transverse_bases`: Q × polarization basis math, including
 //     the parallel fallback to {y, polarization} or {x, polarization}.
 //   * `build_observable_pairs`:
 //       - `sum`              -> 1 pair per (combo, Q), correct names
-//       - `transverse`       -> 2 pairs per (combo, Q) (SF then NSF)
+//       - `transverse`       -> 2 pairs per (combo, Q) (NSF then SF)
 //       - `sublattice` filter / no-filter modes
 //       - `single_obs_only`  -> obs_2 stays empty, names use single op
 //       - argument validation: empty inputs / wrong sizes throw
 //
 // We deliberately avoid asserting the matrix elements of the constructed
-// Operators (that's covered by test_operator_apply / test_observables);
+// Operators (that's covered by test_operator_apply);
 // here we only assert the *shape* of the output and the bookkeeping that
 // downstream observable naming depends on.
 // =============================================================================
@@ -127,7 +125,7 @@ TEST_CASE("build_observable_pairs: transverse operator -- 2 pairs per (combo, Q)
     REQUIRE(out.obs_2.size() == 2);
     REQUIRE(out.names.size() == 2);
 
-    // Legacy ordering: NSF then SF. Lock that in.
+    // Output ordering is NSF then SF; downstream names depend on it.
     REQUIRE(out.names[0].find("_NSF") != std::string::npos);
     REQUIRE(out.names[1].find("_SF")  != std::string::npos);
 }

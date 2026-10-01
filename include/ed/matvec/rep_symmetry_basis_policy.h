@@ -6,8 +6,8 @@
 // ``ed::matvec::basis::DeviceRepSymmetryBasisPolicy``
 // (include/ed/matvec/device_basis_policy.cuh).
 //
-// "Optimized symmetry ED + NLCE" plan (Jun 2026) -- the CPU port of the
-// on-the-fly representative SpMV. Like the device policy it stores NO orbit
+// The CPU form of the on-the-fly representative SpMV. Like the device
+// policy it stores NO orbit
 // CSR; it keeps only the per-orbit representative state + ``1/norm``, the |G|
 // site permutations, and the per-sector characters ``chi_k(g)``. The group
 // action and the projection phase are regenerated arithmetically inside
@@ -17,22 +17,23 @@
 // Reverse lookup ``state -> orbit index``:
 //   * PRIMARY: binary search on the sorted ``reps`` array (O(log dim), zero
 //     extra memory). ``reps`` is guaranteed ascending by the producer
-//     (``unique_orbit_reps_`` is ``std::sort``-ed; ``getRepSectorData`` keeps
+//     (``OrbitTable::reps`` is ascending and sector construction keeps
 //     survivors in that order).
 //   * OPTIONAL O(1): when ``rep_index_of_rank`` is supplied (length
 //     C(n_sites, n_up)) the combinadic rank of the representative indexes it
-//     directly, exactly as the device policy does. Off by default (the dense
-//     table costs C(N,n_up) int32 which is only worth it when reused).
+//     directly, exactly as the device policy does. The dense table costs
+//     C(N,n_up) int32, so it is built only within a memory budget (see
+//     ``rep_rank_table_enabled`` in rep_sector_data.h).
 //
-// Math (matches the orbit-CSR reference bit-for-bit; see the device policy
-// header for the full derivation):
+// Math (equivalent to the explicit orbit-sum formulation; see the device
+// policy header for the full derivation):
 //   For a connected state ``s'`` reached by a term from ``reps[i]`` the
 //   destination orbit index ``k`` has representative ``r_b = min_g g(s')`` and
 //   projection ``conj(beta_{s'}) / norm_k`` with
 //       conj(beta_{s'}) = sum_{h: h(s') = r_b}  conj(chi_k(h)).
 //   The rep-symmetry kernel supplies ``pre_phase = inv_norms[i]`` for the
 //   single representative row; the group_norm (1/|G|) and the orbit walk of
-//   the orbit-CSR reference collapse into this single representative term.
+//   the orbit-sum form collapse into this single representative term.
 //
 // This is a non-owning POD view: the backing arrays live in a
 // ``RepSectorData`` (or any caller-owned buffers) that MUST outlive the
@@ -66,20 +67,19 @@ struct RepSymmetryBasisPolicy {
     const std::int32_t*                       rep_index_of_rank = nullptr;
     const ed::core::combinadic::BinomialTable* binom            = nullptr;
 
-    // Stage 5b (SymmetryEngine v2): per-element XOR flip masks (nullptr =
-    // pure permutations). Applied AFTER the permutation; for the global
+    // Per-element XOR flip masks (nullptr = pure permutations). Applied AFTER the permutation; for the global
     // spin flip (all-ones mask) the order is immaterial since the mask is
     // permutation-invariant.
     const std::uint64_t* flips = nullptr;
 
-    // Stage 4 (SymmetryEngine v2) two-level O(1) lookup, preferred when set:
+    // Two-level O(1) lookup, preferred when set:
     // rank -> SHARED rep index (one dense table per (N, n_up), shared across
     // every irrep sector) -> this sector's local index via the small
     // ``local_of_shared`` remap (-1 = orbit cancels in this irrep).
     const std::int32_t* shared_rank_of  = nullptr;  // C(N,n_up) entries, shared
     const std::int32_t* local_of_shared = nullptr;  // per sector, shared-rep count
 
-    // Optional byte-decomposition LUT for fast apply_perm (N≤32).
+    // Optional byte-decomposition LUT for fast apply_perm (N <= 64).
     // When non-null, replaces the N-iteration scalar bit-scatter loop with
     // ``perm_lut_bpw`` table lookups (5 for N=36). Pointer into
     // RepSectorData::perm_lut_data; null when not built. 64-bit words so
@@ -100,8 +100,8 @@ struct RepSymmetryBasisPolicy {
     // Apply the g'th site permutation (same bit convention as the host
     // ``applyPermutation`` and the device ``apply_perm``).
     //
-    // N≤32 fast path: uses the byte-decomposition LUT (4 table lookups instead
-    // of N scalar bit-scatter ops). At N=32, |G|=32 this saves ~60% of
+    // Fast path: uses the byte-decomposition LUT (ceil(N/8) table lookups
+    // instead of N scalar bit-scatter ops). At N=32, |G|=32 this saves ~60% of
     // instruction count vs the scalar loop (4 L2 hits vs 32 iterations×3 ops).
     [[nodiscard]] inline std::uint64_t
     apply_perm(std::uint64_t s, int g) const noexcept {
@@ -114,7 +114,7 @@ struct RepSymmetryBasisPolicy {
                 r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
             return r ^ flip;
         }
-        // Scalar fallback for N>32 (or when LUT not built).
+        // Scalar fallback when the LUT is not built.
         const int* p = perms + static_cast<std::size_t>(g) * n_sites;
         std::uint64_t r = 0;
         for (int i = 0; i < n_sites; ++i)

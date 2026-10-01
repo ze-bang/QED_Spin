@@ -27,3 +27,14 @@ for i in range(0, len(T), 3):
           f"{exact.chi[i]:9.5f}")
 # method="exact" diagonalises every symmetry block; the sampled methods scale to far
 # larger blocks. device="gpu" runs the blocks that have a device kernel on the GPU.
+
+# Thermal averages <O>(T) of operators that need not share H's symmetries: the
+# nearest-neighbour correlation on one bond, exactly and by FTLM.
+bond = qed.input.HamiltonianBuilder(N)
+bond.heisenberg([bonds[0]], J=1.0)
+O = bond.to_operator()
+ex = qed.thermal(H, T, method="exact", observables=[O])
+fl = qed.thermal(H, T, method="ftlm", samples=30, seed=1, observables=[O])
+print("   T    <S0.S1> exact   ftlm")
+for i in range(0, len(T), 6):
+    print(f"{T[i]:5.2f}  {ex.O[0, i].real:12.6f} {fl.O[0, i].real:9.6f}")

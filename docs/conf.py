@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 # -- Project information -----------------------------------------------------
 
-project = "exact_diagonalization"
+project = "QED_Spin"
 author = "Hauke Bui-Janzso and contributors"
 copyright = f"2024-2026, {author}"
 
@@ -86,7 +86,7 @@ autoclass_content = "both"
 
 # Avoid hard import failures during a docs-only build (e.g. when the
 # pybind11 _core extension hasn't been compiled yet).
-autodoc_mock_imports = ["qed._core", "h5py", "numpy"]
+autodoc_mock_imports = ["qed._core", "numpy"]
 
 # -- intersphinx -------------------------------------------------------------
 
@@ -94,7 +94,6 @@ intersphinx_mapping = {
     "python":   ("https://docs.python.org/3", None),
     "numpy":    ("https://numpy.org/doc/stable/", None),
     "scipy":    ("https://docs.scipy.org/doc/scipy/", None),
-    "h5py":     ("https://docs.h5py.org/en/stable/", None),
 }
 
 # -- HTML output -------------------------------------------------------------
@@ -131,11 +130,8 @@ myst_enable_extensions = [
 #     language tag for code references). Sphinx silently retries in
 #     "relaxed" mode and the block renders correctly either way.
 #
-# Both categories are pre-existing warnings in long-form architecture /
-# history docs that pre-date this repo's docs CI lane. Suppressing them
-# keeps the build green while still surfacing genuinely new errors (broken
-# autodoc, missing references in the cpp/python domain, toctree gaps,
-# etc.) for review.
+# Both categories come from long-form Markdown pages; suppressing them keeps the build
+# green while still surfacing new errors (broken autodoc, missing references, toctree gaps).
 suppress_warnings = [
     "myst.xref_missing",
     "misc.highlighting_failure",

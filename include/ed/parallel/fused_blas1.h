@@ -1,7 +1,7 @@
 #pragma once
 
 // =============================================================================
-// include/ed/parallel/fused_blas1.h                              (Phase 6 #5)
+// include/ed/parallel/fused_blas1.h
 //
 // Fused real BLAS-1 kernels for the ``lanczos_real`` inner loop.
 //

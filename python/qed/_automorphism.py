@@ -487,16 +487,13 @@ class MaximalAbelianSubgroupFinder:
     def find_minimal_generators(self, permutations):
         """Find minimal generators of the maximal abelian subgroup.
 
-        Ports the C++ ``maximal_abelian_subgroup_generators`` algorithm
-        (src/symmetry/group.cpp) which correctly handles non-abelian input
-        groups (e.g. the full automorphism group of a 3×3 kagome PBC lattice
-        has 18 elements, non-abelian, but the largest abelian subgroup is
-        Z₃² of order 9, not Z₂³ of order 8).
+        Handles non-abelian input groups (e.g. the full automorphism group of
+        a 3×3 kagome PBC lattice has 18 elements, non-abelian, but the
+        largest abelian subgroup is Z₃² of order 9, not Z₂³ of order 8).
 
-        Three key improvements over the prior greedy approach:
+        Three rules make the greedy search correct:
         1. Commutativity check: only add a generator that commutes with all
-           current generators — the previous code could build a non-abelian
-           group by accident.
+           current generators, so the result is always abelian.
         2. Sort order: fixed-point-free elements (pure translations) first,
            then by descending order — prevents low-order involutions from
            being chosen over higher-order translations.

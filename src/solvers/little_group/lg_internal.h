@@ -26,33 +26,33 @@
 
 #include <ed/solvers/little_group_solve.h>
 #include <ed/config/env_registry.h>              // typed environment accessors
-#include <ed/solvers/little_group_blocks.h>      // U1a: owned block handles
+#include <ed/solvers/little_group_blocks.h>      // owned block handles
 
 #include <ed/core/basis_utils.h>                 // applyPermutation
-#include <ed/core/linear_operator.h>             // U1a: blocks ARE LinearOperators
+#include <ed/core/linear_operator.h>             // blocks ARE LinearOperators
 #include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
-#include <ed/matvec/backends/cpu_backend.h>      // 9d: CpuBackend for the GS Lanczos
-#include <ed/krylov/lanczos_kernel.h>            // 9d: keep_basis Ritz-vector GS
+#include <ed/matvec/backends/cpu_backend.h>      // CpuBackend for the GS Lanczos
+#include <ed/krylov/lanczos_kernel.h>            // keep_basis Ritz-vector GS
 #include <ed/krylov/krylov_schur_kernel.h>       // multi-level blocks: locked KS
 #include <ed/krylov/block_krylov_schur_kernel.h> // ... and its block form (multiplicities)
 #include <ed/krylov/subspace_policy.h>          // memory-capped Krylov basis
 #include <ed/core/mem_guard.h>                  // job-aware available RAM
-#include <ed/core/blas_lapack_wrapper.h>         // 9d: LAPACKE_dstevd
-#include <ed/planner/sym_matvec_policy_hook.h>   // 9e: RepReducedCsr default
-#include <ed/parallel/thread_budget.h>           // 2026-07-30: serial-BLAS scope
+#include <ed/core/blas_lapack_wrapper.h>         // LAPACKE_dstevd
+#include <ed/planner/sym_matvec_policy_hook.h>   // RepReducedCsr default
+#include <ed/parallel/thread_budget.h>           // serial-BLAS scope
                                                  // for the CPU dense batch
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#include <ed/matvec/reduced_symmetry_csr.h>     // B4: build_reduced_symmetry_csr_rep
+#include <ed/matvec/reduced_symmetry_csr.h>     // build_reduced_symmetry_csr_rep
 #include <ed/matvec/term_storage.h>
 #include <ed/symmetry/compiled_group.h>
 #include <ed/symmetry/irreps.h>
 #include <ed/symmetry/orbit_table.h>
-#include <ed/symmetry/symmetry_cache.h>   // B8: acquire_orbit_table_* (Stage-3 cache)
+#include <ed/symmetry/symmetry_cache.h>   // acquire_orbit_table_* (orbit-table cache)
 #include <ed/symmetry/rep_sector_data.h>
-#include <ed/symmetry/spin_flip.h>            // B5: sz_axis_of (compose Sz)
-#include <ed/symmetry/time_reversal.h>        // 9b: hamiltonian_is_real
+#include <ed/symmetry/spin_flip.h>            // sz_axis_of (compose Sz)
+#include <ed/symmetry/time_reversal.h>        // hamiltonian_is_real
 #include <ed/symmetry/sector_gpu_mirror.h>    // GPU rep matvec (host-ptr twin)
 #include <ed/core/select_backend.h>           // ed::have_cuda()
 #include <ed/solvers/little_group_gpu.h>      // batched GPU block eigensolve
@@ -88,76 +88,37 @@ namespace lg_detail {
 // Dim floor above which the GS vector is built by the TWO-PASS no-reorth
 // Lanczos below instead of FullCGS2 + keep_basis. keep_basis stores every
 // Krylov vector (16 B * n per iteration): at frontier block dims (N=36 half
-// filling, n ~ 4e8) that is ~6 GB PER ITERATION and OOM-killed the first
-// 4x3 correlator campaign at 187 G around iteration ~30. Override with
-// ED_SYM_LG_TWO_PASS_MIN_DIM (validation suites set it to 1 to force the
-// two-pass lane at toy sizes).
-[[nodiscard]] inline std::size_t lg_two_pass_min_dim() {
-    if (const long long x = ed::env::integer("ED_SYM_LG_TWO_PASS_MIN_DIM", -1); x > 0)
-        return static_cast<std::size_t>(x);
-    return std::size_t{1} << 22;   // 4.2M: FullCGS2 basis ~13 GB cap below
-}
+// filling, n ~ 4e8) that is ~6 GB PER ITERATION.
+inline constexpr std::size_t kLgTwoPassMinDim = std::size_t{1} << 22;   // 4.2M
 
 // Iteration budget for the lowest-k eigenvalue Lanczos scan
 // (solve_block_lowest). The default max(40k, 400) converges every
-// validated campaign block; at frontier tower dims (~7e8, kagome 4x3
+// validated block; at frontier tower dims (~7e8, kagome 4x3
 // N=36) 400 no-reorth steps cannot pull even E0's Paige bound under the
-// gate, so the honest contiguous gate returns NOTHING (correct refusal,
-// nothing to report). There is no restart lane here -- the scan is
-// eigenvalues-only with no stored basis to reseed from -- so the budget
-// is the only lever, and it was previously not reachable from a job
-// script. ED_SYM_LG_LOWEST_MAX_ITER overrides ABSOLUTELY. The dense
-// crossover (lowest_dense_floor) deliberately stays sized by the DEFAULT
-// cap: a frontier budget raise must not drag mid-band blocks into
-// minutes-long dense eigensolves.
+// gate, so the honest contiguous gate returns NOTHING (correct refusal).
 // ``dflt`` = 0 selects the eigenvalue-scan default max(40k, 400); the
 // vector lane passes its own tighter default (stored-basis memory).
 [[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k,
                                                       std::uint64_t dflt = 0) {
-    if (const long long x = ed::env::integer("ED_SYM_LG_LOWEST_MAX_ITER", -1); x > 0)
-        return static_cast<std::uint64_t>(x);
     if (dflt > 0) return dflt;
     return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
 }
 
-// Per-attempt iteration budget for the certified GS-vector lanes
-// (solve_gs_vector / solve_gs_vector_two_pass). Defaults: 600 for the
-// two-pass no-reorth lane (x (1 + restarts) attempts), 200 for the
-// small-n FullCGS2 lane. Both lanes are residual-guarded and THROW on a
-// miss, so exhausting the budget is loud -- but before this knob the
-// only lever was relaxing ED_SYM_LG_GS_RESID_TOL (the 4x3 kagome
-// campaign's small-|Jpm| points died at ~1e-7 after exhausting the
-// restarts, 11.8 h in). NOTE: the small-n lane STORES the Krylov basis
-// -- memory there is 16 B x dim x iterations.
-[[nodiscard]] inline std::size_t lg_gs_max_iter(std::size_t dflt) {
-    if (const long long x = ed::env::integer("ED_SYM_LG_GS_MAX_ITER", -1); x > 0)
-        return static_cast<std::size_t>(x);
-    return dflt;
-}
+// Per-attempt iteration budgets for the certified GS-vector lanes: the
+// two-pass no-reorth lane (x (1 + restarts) attempts) and the small-n
+// FullCGS2 lane. Both lanes are residual-guarded and THROW on a miss.
+// The small-n lane STORES the Krylov basis -- memory there is
+// 16 B x dim x iterations.
+inline constexpr std::size_t kLgGsTwoPassMaxIter = 600;
+inline constexpr std::size_t kLgGsSmallMaxIter   = 200;
 
-// Restart count for the two-pass GS lane (audit 2026-08-01, second half
-// of the ED_SYM_LG_GS_MAX_ITER fix): the 4x3 kagome post-mortem showed
-// the RESTART count, not the per-attempt budget, was the binding
-// constraint (task 49669202_2 exhausted 4 restarts near residual ~1e-7,
-// 11.8 h in) -- and the shipped mitigation was loosening the acceptance
-// tolerance because this number needed a rebuild to change.
-[[nodiscard]] inline int lg_gs_restarts() {
-    if (const long long x = ed::env::integer("ED_SYM_LG_GS_RESTARTS", -1); x >= 0)
-        return static_cast<int>(x);
-    return 4;
-}
+// Restart count for the two-pass GS lane.
+inline constexpr int kLgGsRestarts = 4;
 
-// Residual acceptance for the certified GS vector. 1e-8 is calibrated
-// for the CF/DSSF consumer; diagonal-correlator consumers may relax via
-// ED_SYM_LG_GS_RESID_TOL. Shared by the two-pass INNER accept-or-restart
-// loop and the outer guard in solve_gs_vector -- before 2026-08-01 the
-// inner loop hardcoded 1e-8, so relaxing the env still burned every
-// restart chasing a tolerance the caller had explicitly waived.
-[[nodiscard]] inline double lg_gs_resid_tol() {
-    if (const double t = ed::env::real("ED_SYM_LG_GS_RESID_TOL", -1.0); t > 0.0)
-        return t;
-    return 1e-8;
-}
+// Residual acceptance for the certified GS vector, calibrated for the
+// CF/DSSF consumer. Shared by the two-pass INNER accept-or-restart loop
+// and the outer guard in solve_gs_vector.
+inline constexpr double kLgGsResidTol = 1e-8;
 
 
 // U-composition convention (matches irreps.cpp): U(g)U(h) = U(g·h) with
@@ -180,13 +141,12 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 // -----------------------------------------------------------------------------
 // H restricted to one abelian momentum sector, MATRIX-FREE: the CSR-free rep
 // kernel over an in-memory RepSectorData (reps + 1/norms + chi_k + A perms).
-// Memory O(#reps), never O(2^N) -- this is what lets the factorized engine
-// scale past the monolithic SAB cap.
+// Memory O(#reps), never O(2^N).
 // -----------------------------------------------------------------------------
-// U1a: derives from ed::LinearOperator (not bare MatVecOperator) so the block
+// Derives from ed::LinearOperator (not bare MatVecOperator) so the block
 // handles can feed the orchestrator verbs directly (ed::workflows::thermal
 // consumes any LinearOperator; geometry()/bind_cpu() are synthesized from
-// dim()/apply()). Still a MatVecOperator for every existing use site.
+// dim()/apply()).
 class RepSectorMatVec final : public ed::LinearOperator {
 public:
     using TV = ed::matvec::TermViewT<
@@ -226,13 +186,12 @@ public:
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        // 9e: the production regime is build-the-reduced-block-ONCE +
-        // SpMV per apply (the same RepReducedCsr default the abelian
-        // lane has used since Stage 2b); the arithmetic-regeneration
+        // The production regime is build-the-reduced-block-ONCE + SpMV per
+        // apply (the RepReducedCsr default); the arithmetic-regeneration
         // gather walk is the memory-budget fallback only. Without this,
         // every Lanczos iteration re-derives the matrix elements and
         // the gather cost eats the entire projection win.
-        // force_gpu_ (GS-DSSF GPU lane, 2026-07-20): an explicit GPU
+        // force_gpu_ (GS-DSSF GPU lane): an explicit GPU
         // request tries the device rep-gather FIRST (dimension floor
         // dropped) instead of letting the reduced CSR short-circuit it;
         // if the device build fails the CSR is still built as fallback.
@@ -243,7 +202,7 @@ public:
                 return;
             }
         }
-        // GPU rep gather (Jul 2026): when the reduced CSR is over budget
+        // GPU rep gather: when the reduced CSR is over budget
         // (the 36-site regime: ~0.5 TB per momentum block) the arithmetic
         // gather walk is the only representation, and it is exactly the
         // workload the resident device mirror was built for. Engage it for
@@ -303,11 +262,10 @@ public:
         return *rd_;
     }
 
-    // B4: the reduced sector matrix H_k assembled DIRECTLY from the rep policy
+    // The reduced sector matrix H_k assembled DIRECTLY from the rep policy
     // -- O(|G|*nnz), PARALLEL over rows -- instead of dim column matvecs. This
-    // is the same matrix element the gather backend applies (pinned bit-for-bit
-    // by test_reduced_symmetry_csr.cpp); densifying / sandwiching it retires the
-    // materialize() column crawl.
+    // is the same matrix element the gather backend applies; densifying /
+    // sandwiching it avoids the materialize() column crawl.
     [[nodiscard]] ed::matvec::ReducedSymmetryCsr<Complex> reduced_csr() const {
         return ed::matvec::build_reduced_symmetry_csr_rep<
             ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
@@ -318,7 +276,7 @@ public:
     }
 
 private:
-    // 9e: lazily build the reduced sector matrix when (a) the policy hook
+    // Lazily build the reduced sector matrix when (a) the policy hook
     // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 /
     // ED_SYM_REP=0 fall back to the gather walk) and (b) an UPPER-BOUND
     // memory estimate fits the budget (ED_SYM_SECTOR_CSR_BUDGET_GIB,
@@ -445,13 +403,13 @@ struct SparseColumns {
 #endif
 }
 
-// WP7: per-phase accounting for ProjectedBlockOp::apply, under ED_SYM_PROFILE
+// Per-phase accounting for ProjectedBlockOp::apply, under ED_SYM_PROFILE
 // only -- the clock reads themselves are gated, so a production run pays
 // nothing at all. ONE summary per block, emitted when the block dies: a
 // frontier star runs thousands of applies and a per-apply line would bury
-// every other signal in the log. ``non-W`` is the fraction the WP7 device
-// block operator could actually remove (zero + scatter + gather, i.e.
-// everything that is not H_k0 itself).
+// every other signal in the log. ``non-H`` is the host overhead of the
+// projection (zero + scatter + gather, i.e. everything that is not H_k0
+// itself).
 struct BlockApplyProfile {
     bool          on    = false;
     std::uint64_t calls = 0;
@@ -475,7 +433,7 @@ struct BlockApplyProfile {
 // Projected block operator y = W^dagger (H (W x)) -- the factorized
 // little-group matvec (still matrix-free through H_k0).
 //
-// U1a: owns its inputs via shared_ptr (all irrep blocks of one star co-own
+// Owns its inputs via shared_ptr (all irrep blocks of one star co-own
 // the star's H_k0), and derives from LinearOperator so the orchestrator
 // verbs can consume it directly. Scratch is allocated LAZILY on first
 // apply: block handles are also built in plan/enumeration passes where a
@@ -527,7 +485,6 @@ public:
         // -- several columns of one index-orbit hit the same row) would need
         // a transpose of W that does not exist. Splitting over columns
         // instead would need atomics AND would reorder each row's sum.
-        // WP7 step 4's device CSR over rep rows is where this gets fixed.
         for (std::size_t c = 0; c < W_.cols.size(); ++c)
             for (const auto& [i, w] : W_.cols[c])
                 scratch_in_[static_cast<std::size_t>(i)] += w * in[c];
@@ -571,18 +528,16 @@ public:
 private:
     const RepSectorMatVec&                  hk_;
     const SparseColumns&                    W_;
-    std::shared_ptr<const RepSectorMatVec>  keep_hk_;   // U1a keepalives
+    std::shared_ptr<const RepSectorMatVec>  keep_hk_;   // keepalives
     std::shared_ptr<const SparseColumns>    keep_W_;
+    // Pageable host buffers: pinning them (cudaHostRegister) would need
+    // <cuda_runtime.h>, and this header is compiled by the HOST compiler in
+    // every engine TU.
     mutable std::vector<Complex>  scratch_in_, scratch_out_;
-    // WP7: cudaHostRegister-pinning scratch_in_/scratch_out_ would halve the
-    // pageable H2D/D2H cost of the GPU rep lane, but it needs <cuda_runtime.h>
-    // and this header is compiled by the HOST compiler in every engine TU.
-    // Deferred to WP7 step 3, where ProjectedBlockOp::bind_cuda owns the
-    // staging buffers from a real .cu translation unit.
     mutable BlockApplyProfile     prof_;
 };
 
-// B4: dense H_k (plain block) or W^dagger H_k W (projected block) assembled
+// Dense H_k (plain block) or W^dagger H_k W (projected block) assembled
 // from the reduced CSR of H_k -- built ONCE, parallel, O(|G|*nnz) -- instead
 // of ``dim`` matvec columns (each a per-column OMP fork/join over a tiny
 // payload). ``W == nullptr`` => the plain k0 block; otherwise the isotypic
@@ -655,10 +610,9 @@ struct EngineContext {
     std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed-Sz: shared rank table, or null
     ed::symmetry::CompiledGroup          cg;            // A (or A'), byte-LUT
     int                                  n_sites = 0;
-    // Stage 9a: A' = A x Z2 (global spin flip as an XOR element). Element
+    // A' = A x Z2 (global spin flip as an XOR element). Element
     // index convention: a in [0,|A|) pure, a+|A| = flip*a. Irrep index
-    // convention: k + s*n_irr_raw, s in {0,1} the flip parity -- the same
-    // synthetic-id arithmetic the sector_plan flip slots use.
+    // convention: k + s*n_irr_raw, s in {0,1} the flip parity.
     bool                                 flip_half = false;
     std::uint64_t                        flip_mask = 0;
     int                                  n_irr_raw = 0;
@@ -679,7 +633,7 @@ struct FlipEngagement {
 };
 
 // -----------------------------------------------------------------------------
-// U1a: per-star block construction -- everything a star walk does
+// Per-star block construction -- everything a star walk does
 // EXCEPT the eigensolves: k0 sector build, monomial little co-group with
 // the numeric [M_p, H] = 0 probe, abstract-table decomposition, isotypic
 // bases, TR sigma/sigma* pairing, and the graceful decline to the plain
@@ -770,7 +724,7 @@ build_star_blocks(const ::Operator&         op,
 }  // namespace lg_detail
 
 // =============================================================================
-// U1a: LittleGroupBlock -- the owned handle over one (star, irrep) block.
+// LittleGroupBlock -- the owned handle over one (star, irrep) block.
 // Impl references the engine-private concrete types above; the pimpl keeps them
 // off the public surface. `pop == nullptr` marks the plain fallback-floor
 // block, whose operator IS the star's H_k0.
@@ -780,7 +734,7 @@ struct LittleGroupBlock::Impl {
     std::shared_ptr<lg_detail::RepSectorMatVec>      hk;    // shared across the star's blocks
     std::shared_ptr<const lg_detail::SparseColumns>  W;     // null => plain floor block
     std::unique_ptr<lg_detail::ProjectedBlockOp>     pop;   // null => op() is *hk
-    // Group-sector block (Sep 2026, lg_group_sector.cpp): a 1-dim irrep solved in the rep basis of the FULL little group
+    // Group-sector block (lg_group_sector.cpp): a 1-dim irrep solved in the rep basis of the FULL little group
     // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on `gsec`; `hk`
     // stays the star's k-sector (rep_data(), the lift target). Null on isotypic (W) and plain blocks.
     std::shared_ptr<const ed::symmetry::RepSectorData> gsec;

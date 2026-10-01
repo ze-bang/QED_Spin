@@ -15,14 +15,11 @@ namespace lg_detail {
 
 // Dense eigenvalues (ascending) of a materialized block through LAPACK
 // divide-and-conquer (dsyevd / zheevd) -- the SAME threaded solver the
-// abelian / full-diag lanes use (lanczos.cpp, orchestrator.cpp) --
-// instead of Eigen's SelfAdjointEigenSolver, whose tridiagonalisation is
-// single-threaded: a 19,264-dim projected block spun for HOURS on one
-// core while the whole OpenMP pool sat idle (gdb-confirmed 2026-07-24),
-// and at the lowest-path dense crossover the same wall made the serial
-// star walk look hung (audit 2026-07-30). Real blocks (real momenta
-// under time reversal) take the ~2x cheaper dsyevd real path, matching
-// the abelian lane's arithmetic. The Eigen matrix is column-major ==
+// full-diag lane uses (lanczos.cpp) -- not Eigen's SelfAdjointEigenSolver,
+// whose tridiagonalisation is single-threaded (a 19,264-dim projected block
+// spins for HOURS on one core while the OpenMP pool sits idle). Real blocks
+// (real momenta under time reversal) take the ~2x cheaper dsyevd real path.
+// The Eigen matrix is column-major ==
 // LAPACK_COL_MAJOR, so the complex solve runs in place on its storage.
 [[nodiscard]] std::vector<double>
 dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
@@ -60,16 +57,9 @@ dense_block_eigenvalues(const ed::matvec::MatVecOperator& mv) {
     return dense_eigenvalues_inplace(Hb);
 }
 
-// Full-spectrum: dense eigenvalues of the (projected or plain) block.
-//
-// Dense LAPACK divide-and-conquer (dsyevd/zheevd), threaded through the linked
-// BLAS/LAPACK (AOCL here) -- the SAME solver the abelian / full-diag lane uses
-// (lanczos.cpp, orchestrator.cpp). The previous Eigen SelfAdjointEigenSolver is
-// single-threaded: on a 19,264-dim projected block it spun for hours on ONE
-// core while the whole OpenMP pool sat idle, so the non-abelian little-group
-// lane lost to the abelian lane it is supposed to beat (gdb-confirmed
-// 2026-07-24). Real blocks (real momenta under time reversal) take the ~2x
-// cheaper real path, matching the abelian lane's real arithmetic.
+// Full-spectrum: dense eigenvalues of the (projected or plain) block, through
+// dense_eigenvalues_inplace (threaded LAPACK divide-and-conquer; real blocks
+// take the ~2x cheaper real path).
 [[nodiscard]] std::vector<double>
 solve_block_full(const ed::matvec::MatVecOperator& mv) {
     if (mv.dim() == 0) return {};
@@ -80,28 +70,21 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // the device lane of the sectors eigensolve (lg_sectors.cpp) makes exactly the same dense-vs-Lanczos
 // decision as the CPU ``solve_block_lowest``.
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
-    // DEFAULT iteration cap on purpose (not lg_lowest_max_iter): raising
-    // ED_SYM_LG_LOWEST_MAX_ITER for a frontier campaign must not widen
-    // the dense band 4x with it. ED_SYM_LG_DENSE_FLOOR remains the
-    // explicit dense-crossover override.
+    // Sized by the eigenvalue-scan iteration cap max(40k, 400).
+    // ED_SYM_LG_DENSE_FLOOR is the explicit dense-crossover override.
     const std::uint64_t max_iter_cap =
         std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
-    // Audit 2026-07-30: the crossover was 32x the Lanczos cap (~1.3e4 at
-    // k <= 10), sized to keep the OLD convergence gate -- which could
-    // return converged top-of-spectrum values as the "lowest k" -- away
-    // from any block it might corrupt. With the contiguous k-lowest
-    // Paige gate the Lanczos path is honest at every dim (wrong is now
-    // impossible; at worst a budget-capped block returns fewer values
-    // flagged unconverged), so the floor only needs to cover the S1
-    // within-block-degeneracy regime: dense resolves true multiplicities
-    // that a single-vector recurrence cannot. 4x the cap (1600 at k <=
-    // 10) still covers every historically-degenerate validated case
-    // (the 4x4 n_up=8 blocks ~800) while releasing the 2e3-1.3e4 band
-    // to Lanczos -- where the serial star walk was paying 8-15 s of
-    // latency-bound threaded zheevd PER BLOCK (measured: the N=20 ring
-    // walk cost 227 s against the abelian lane's 0.7 s). Raise
+    // With the contiguous k-lowest Paige gate the Lanczos path is honest at
+    // every dim (at worst a budget-capped block returns fewer values flagged
+    // unconverged), so the floor only needs to cover the within-block
+    // degeneracy regime: dense resolves true multiplicities that a
+    // single-vector recurrence cannot. 4x the cap (1600 at k <= 10) covers
+    // the validated degenerate cases (the 4x4 n_up=8 blocks ~800) and
+    // leaves larger blocks to Lanczos, where threaded zheevd would cost
+    // 8-15 s of latency-bound time PER BLOCK in the serial star walk
+    // (an N=20 ring walk: 227 s dense vs 0.7 s). Raise
     // ED_SYM_LG_DENSE_FLOOR when a mid-band block needs exact
-    // multiplicities (the documented S1 mitigation, unchanged).
+    // multiplicities.
     std::uint64_t dense_floor = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(dense_max_dim), 4u * max_iter_cap);
     if (const long long df = ed::env::integer("ED_SYM_LG_DENSE_FLOOR", -1); df >= 0)
@@ -119,8 +102,7 @@ solve_block_full(const ed::matvec::MatVecOperator& mv) {
 // Budgets. The per-cycle basis (m length-nb vectors) is capped by the RAM this job
 // may still allocate (cgroup-aware); a cap too small to hold k + 8 vectors is a
 // clean refusal, never a silent fall-back to the ghost-prone scan. The total
-// iteration budget is max(200k, 2000) or ED_SYM_LG_LOWEST_MAX_ITER, spent
-// as restart cycles -- so the environment lever keeps its meaning.
+// iteration budget is max(200k, 2000), spent as restart cycles.
 [[nodiscard]] std::vector<double>
 solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_t k,
                                 int block_size, bool* converged_out,
@@ -139,7 +121,6 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     }
     // Default max(200k, 2000): each cycle restarts from ONE Ritz vector, so many
     // levels need many cycles (k = 10 left a block unconverged at the scan's 400).
-    // ED_SYM_LG_LOWEST_MAX_ITER still overrides absolutely.
     const std::uint64_t budget = lg_lowest_max_iter(
         k, std::max<std::uint64_t>(200u * static_cast<std::uint64_t>(k), 2000u));
     // A cycle never exceeds the whole iteration budget (a starved budget must yield
@@ -153,9 +134,8 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     // otherwise, so the cycle length is imposed through that cap.
     const std::uint64_t cycle_cap = (cap > 0) ? std::min<std::uint64_t>(cap, per_cycle)
                                               : static_cast<std::uint64_t>(per_cycle);
-    // absolute residual ||H x - theta x||; ED_SYM_LG_KS_TOL tightens it when vectors feed
-    // observables (the error of <O> is first order in the vector error ~ residual / gap)
-    const double tol = ed::env::real("ED_SYM_LG_KS_TOL", 1e-9);
+    // absolute residual ||H x - theta x||
+    const double tol = 1e-9;
 
     auto apply_H = [&mv](const Complex* in, Complex* out, std::size_t nn) {
         mv.apply(in, out, nn);
@@ -165,10 +145,7 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     std::vector<std::vector<Complex>> vv;    // Ritz vectors (block coordinates)
     bool conv = false;
     if (block_size <= 1) {
-        std::uint64_t seed = 0x51ED0B70ULL;       // same stream as the k = 1 scan
-        seed ^= static_cast<std::uint64_t>(ed::env::integer("ED_SYM_LG_SEED", 0))
-                * 0x9E3779B97F4A7C15ULL;
-        std::mt19937_64 gen(seed);
+        std::mt19937_64 gen(0x51ED0B70ULL);       // same stream as the k = 1 scan
         std::normal_distribution<double> nd(0.0, 1.0);
         std::vector<Complex> v0(nb);
         for (auto& v : v0) v = Complex(nd(gen), nd(gen));
@@ -217,18 +194,12 @@ solve_block_lowest_krylov_schur(const ed::matvec::MatVecOperator& mv, std::size_
     return ev_sorted;
 }
 
-// Lowest-k: dense on small blocks, Lanczos otherwise.
-// Stage-9f verification fix (2026-07-12). The previous body delegated to the
-// legacy ``::lanczos`` wrapper with an iteration budget of ``max_it = 2k+40``
-// -- far too small to converge k eigenvalues on near-degenerate little-group
-// blocks -- and no residual guard, so partially-converged and ghost Ritz
-// values (K=1 local-ring reorth) were returned as eigenvalues (caught at 4x4
-// J1-J2, J2=0.15, n_up=8, k=10: ghost -8.461485 beside the true -8.461508
-// doublet, spurious -8.44734 between genuine levels).  Replaced with a
-// direct kernel call: dense values-only eigensolve (mirroring
-// ``solve_block_full``) below a crossover, and above it the kernel Lanczos
-// with a LocalDGKS3 ring of 8, no stored basis, a real iteration budget,
-// and a k-lowest Ritz stationarity gate.
+// Lowest-k: dense values-only eigensolve (as ``solve_block_full``) below a
+// crossover; above it Krylov-Schur for several levels, and for one level the
+// kernel Lanczos with no stored basis, a real iteration budget and a
+// k-lowest Ritz residual gate. A small budget (e.g. 2k+40) or no residual
+// guard lets partially-converged and ghost Ritz values through as
+// eigenvalues on near-degenerate blocks.
 [[nodiscard]] std::vector<double>
 solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
                    int dense_max_dim, bool* converged_out, int block_size) {
@@ -237,20 +208,14 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     if (nb == 0) return {};
     const std::size_t k = static_cast<std::size_t>(std::max<std::uint64_t>(
         1u, std::min<std::uint64_t>(static_cast<std::uint64_t>(want), nb)));
-    // Dense crossover (Jul 2026 fix; resized 2026-07-30): originally 32x
-    // the Lanczos cap because the OLD convergence gate could return a
-    // spurious extreme (the 4x4 n_up=8 ~800-dim block returned an
-    // interior level -7.75 instead of the true GS -8.57). That failure
-    // class is closed by the contiguous k-lowest Paige gate below (an
-    // unconverged low value now truncates and flags -- it can never be
-    // replaced by a higher one), so the floor is back to a PERF+S1
-    // decision: dense resolves true within-block multiplicities and is
-    // cheapest below ~4x the iteration cap; above it the honest Lanczos
-    // wins (the serial star walk was paying 8-15 s of latency-bound
-    // threaded zheevd per mid-band block). See lowest_dense_floor for
-    // the sizing rationale and the ED_SYM_LG_DENSE_FLOOR override
-    // (raise it for exact multiplicities on a suspect block; set it to
-    // 1 in tests to force the Lanczos path at toy dims).
+    // Dense crossover: a performance + within-block-multiplicity decision
+    // (the contiguous k-lowest Paige gate below makes Lanczos correct at
+    // any dim: an unconverged low value truncates and flags, it is never
+    // replaced by a higher one). Dense resolves true multiplicities and is
+    // cheapest below ~4x the iteration cap. See lowest_dense_floor for the
+    // sizing and the ED_SYM_LG_DENSE_FLOOR override (raise it for exact
+    // multiplicities on a suspect block; set it to 1 in tests to force the
+    // Lanczos path at toy dims).
     const std::uint64_t dense_floor = lowest_dense_floor(k, dense_max_dim);
     if (nb <= dense_floor || nb <= 2) {
         const std::vector<double> w = dense_block_eigenvalues(mv);  // ascending
@@ -264,7 +229,7 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     if (k > 1 || block_size > 1)
         return solve_block_lowest_krylov_schur(mv, k, block_size, converged_out);
 
-    // S1 (WITHIN-BLOCK genuine degeneracy): a single-vector Lanczos returns
+    // WITHIN-BLOCK genuine degeneracy: a single-vector Lanczos returns
     // exactly ONE Ritz value per eigenvalue no matter its true multiplicity
     // (a random start has one component in a degenerate eigenspace), so an
     // accidental degeneracy inside THIS (k, irrep, parity, Sz) block is
@@ -279,17 +244,9 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     // multiplicities up to the block size. This scan is the k = 1 lane only.
     ed::matvec::CpuBackend be;
     std::vector<Complex> v0(nb);
-    // ED_SYM_LG_SEED offsets the start vector (default 0): the multi-seed
-    // verification protocol for within-block degeneracy suspicion -- two
-    // runs with different seeds must agree on every distinct level (a level
-    // with accidentally tiny overlap against one seed shows up with the
-    // other). NOTE: single-vector Lanczos still returns ONE copy of a
-    // genuinely degenerate pair regardless of seed; multiplicity needs
-    // block Lanczos (ledger #2).
-    std::uint64_t seed = 0x51ED0B70ULL;
-    seed ^= static_cast<std::uint64_t>(ed::env::integer("ED_SYM_LG_SEED", 0))
-            * 0x9E3779B97F4A7C15ULL;
-    std::mt19937_64 gen(seed);
+    // Fixed start-vector seed. Single-vector Lanczos returns ONE copy of a
+    // genuinely degenerate pair; multiplicity needs block Lanczos.
+    std::mt19937_64 gen(0x51ED0B70ULL);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& v : v0) v = Complex(nd(gen), nd(gen));
 
@@ -297,14 +254,14 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
         nb, lg_lowest_max_iter(k)));
     // Ring reorth is a MEMORY term at frontier dims: 8 ring vectors x 16 B
-    // x nb is ~48 GB per 3.8e8-dim block (measured 81 G RSS against a 96 G
-    // budget on the 4x3 kagome campaign, 2026-07-19). This scan is
+    // x nb is ~48 GB per 3.8e8-dim block (81 G RSS measured against a 96 G
+    // budget on a 4x3 kagome block). This scan is
     // eigenvalues-only and the k-DISTINCT Paige-bound gate below is
     // ghost-aware by design, so above the two-pass dim floor we drop to
     // the pure three-term recurrence: ghosts cost duplicate converged
     // copies (deduped), not wrong eigenvalues. Small blocks keep the ring
     // -- it sharpens the excited window at negligible cost there.
-    if (static_cast<std::size_t>(nb) > lg_two_pass_min_dim()) {
+    if (static_cast<std::size_t>(nb) > kLgTwoPassMinDim) {
         kopts.reorth          = ed::krylov::ReorthPolicy::None;
     } else {
         kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
@@ -312,26 +269,22 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     }
     kopts.keep_basis      = false;
     kopts.dim_cap         = nb;
-    // k-LOWEST converged Ritz early exit (Jul 2026; CONTIGUITY fix
-    // 2026-07-30): at 1e8 dims the window fills with ghost COPIES of
-    // converged extremes, and a ghost is exactly as stationary as an
-    // eigenvalue -- the first production block burned its full budget and
-    // returned 8x E0. The tridiagonal residual bound |beta_m * z_{m,j}| is
-    // free, rigorous (Paige), and ghost-aware in combination with dedup.
+    // k-LOWEST converged Ritz early exit: at 1e8 dims the window fills with
+    // ghost COPIES of converged extremes, and a ghost is exactly as
+    // stationary as an eigenvalue (a stationarity test burns the full
+    // budget and returns 8x E0). The tridiagonal residual bound
+    // |beta_m * z_{m,j}| is free, rigorous (Paige), and ghost-aware in
+    // combination with dedup.
     //
-    // CONTIGUITY (the 2026-07-30 ghost-eigenvalue fix): the previous gate
-    // stopped once ANY k distinct Ritz values carried converged bounds.
-    // Lanczos converges the TOP extreme first, so on large blocks the gate
-    // collected k converged top-of-spectrum values within ~40 iterations
-    // and stopped before the bottom had converged at all; the keep loop
-    // below then returned those top values AS the "lowest k", flagged
-    // converged (measured: 4x2 kagome BFG, 338019-dim blocks, block min
-    // reported +11.58 while the true sector minimum is -6.57 -- and the
-    // fabricated value was near-identical across all momentum stars
-    // because the Ising-dominated spectrum top barely feels k). The gate
-    // must demand that the k LOWEST distinct Ritz values, walked
-    // contiguously from the bottom, EACH carry a converged bound -- the
-    // first unconverged distinct value vetoes the exit.
+    // CONTIGUITY: stopping once ANY k distinct Ritz values carry converged
+    // bounds is wrong. Lanczos converges the TOP extreme first, so on large
+    // blocks such a gate collects k converged top-of-spectrum values within
+    // ~40 iterations and stops before the bottom has converged at all
+    // (4x2 kagome BFG, 338019-dim blocks: block min +11.58 against a true
+    // sector minimum of -6.57). The gate demands that the k LOWEST distinct
+    // Ritz values, walked contiguously from the bottom, EACH carry a
+    // converged bound -- the first unconverged distinct value vetoes the
+    // exit.
     {
         const std::size_t kk = k;
         kopts.convergence_check =
@@ -391,8 +344,7 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     if (info != 0)
         throw std::runtime_error("little_group: lowest-k tridiag eigensolve "
                                  "failed (dstevd info != 0)");
-    // Ghost handling (Jul 2026; the first 126M-dim production block returned
-    // EIGHT copies of E0): with a local reorth ring at dim ~1e8 the Ritz
+    // Ghost handling: with a local reorth ring at dim ~1e8 the Ritz
     // window fills with ghost COPIES of converged extremes faster than
     // genuine upper levels converge. On this path a single-vector recurrence
     // cannot represent a true within-block degeneracy anyway (exact
@@ -405,15 +357,13 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
     const double beta_m = (kres.beta.size() > m) ? std::abs(kres.beta[m]) : 0.0;
     const double scale  = std::max(
         {std::abs(diag.front()), std::abs(diag[m - 1]), 1e-300});
-    // CONTIGUITY fix (2026-07-30, pairs with the gate above): walk the
-    // Ritz values ASCENDING, dedup ghost copies, and take the k lowest
-    // distinct values -- STOPPING at the first unconverged one. The old
-    // loop `continue`d past unconverged low values and backfilled with
-    // converged UPPER-spectrum values, which is precisely how the tower
-    // scan fabricated "lowest" eigenvalues near the spectrum TOP with
-    // converged=true (Lanczos converges the top extreme first). An
-    // unconverged low value now truncates the list and flags the block
-    // unconverged; it is never silently replaced by a higher value.
+    // CONTIGUITY (pairs with the gate above): walk the Ritz values
+    // ASCENDING, dedup ghost copies, and take the k lowest distinct values
+    // -- STOPPING at the first unconverged one. Skipping past it would
+    // backfill with converged UPPER-spectrum values (Lanczos converges the
+    // top extreme first) and report them as the "lowest" with
+    // converged=true. An unconverged low value truncates the list and flags
+    // the block unconverged; it is never silently replaced by a higher value.
     std::vector<double> keep;
     bool all_converged = true;
     for (std::size_t j = 0; j < m && keep.size() < k; ++j) {
@@ -427,7 +377,7 @@ solve_block_lowest(const ed::matvec::MatVecOperator& mv, int want,
         }
         keep.push_back(diag[j]);
     }
-    // 1b: a budget-capped block that could not deliver k distinct converged
+    // A budget-capped block that could not deliver k distinct converged
     // values must be DISTINGUISHABLE from a converged one downstream.
     if (converged_out) *converged_out = all_converged && keep.size() >= k;
     return keep;

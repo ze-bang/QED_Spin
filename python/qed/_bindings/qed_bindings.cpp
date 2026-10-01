@@ -84,7 +84,7 @@ void op_add_one_body(Operator& op,
     op.transform_data_.push_back(t);
     // Mark the SoA + isReal() + matvec backend caches stale so a subsequent
     // apply()/isReal() rebuilds. The size-aware commitPendingTransforms()
-    // (S0 #2) would also catch this, but invalidating eagerly here also
+    // would also catch this, but invalidating eagerly here also
     // resets the isReal() cache --- without this, a real-coeff operator that
     // had isReal() probed once will keep claiming real even after a complex
     // coefficient is added, routing later lanczos() through the lanczos_real
@@ -159,8 +159,7 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
 // =============================================================================
 
 // Returns true iff every (one-, two-, three-body) term commutes with total
-// Sz. The rule is the same as the on-disk `hamiltonian_conserves_sz` in
-// ed/core/ed_wrapper.h: a term preserves Sz iff its operator slots have a
+// Sz: a term preserves Sz iff its operator slots have a
 // net Sz-shift of zero (S+ = +1, S- = -1, Sz = 0).
 bool op_conserves_sz(const Operator& op) {
     auto sz_shift = [](int op_type) {
@@ -279,16 +278,10 @@ PYBIND11_MODULE(_core, m) {
              "Append a two-body term `coeff * Op1[site_1] Op2[site_2]`.")
         .def("transform_tuples",
              [](const Operator& op) {
-                 // SOTA cross-irrep spectral path: the Python wrapper
-                 // `qed.spectral(symmetry={"observable": Op, ...})`
-                 // calls this to extract the one-/two-body terms in
-                 // the canonical (op_type, site, coeff, is_two_body,
-                 // op_type_2, site_2) layout that
-                 // ``workflows_spectral_streaming_symmetry_cross_irrep``
-                 // ingests. We return a list of 6-tuples mirroring
-                 // ``Operator::TransformData``; three-body terms are
-                 // not yet plumbed through the cross-sector observable
-                 // (would need a separate scatter path).
+                 // The one-/two-body terms in the canonical (op_type,
+                 // site, coeff, is_two_body, op_type_2, site_2) layout,
+                 // a list of 6-tuples mirroring ``Operator::TransformData``
+                 // (three-body terms are not included).
                  py::list out;
                  for (const auto& t : op.transform_data_) {
                      out.append(py::make_tuple(
@@ -304,11 +297,9 @@ PYBIND11_MODULE(_core, m) {
              R"pbdoc(
              Return the operator's one-/two-body terms as a list of
              6-tuples ``(op_type, site, coeff, is_two_body, op_type_2,
-             site_2)``. Used by the cross-irrep streaming-symmetry
-             spectral path (qed.spectral with
-             ``symmetry={"observable": Op, ...}``) to extract the
-             probe O_Q's TransformData without exposing the SoA
-             internals directly.
+             site_2)``. Used by symmetry discovery (qed.discovery) to
+             read the operator's TransformData without exposing the SoA
+             internals directly. Three-body terms are not included.
              )pbdoc")
         .def("add_three_body", &op_add_three_body,
              py::arg("op_type_1"), py::arg("site_1"),
@@ -319,12 +310,10 @@ PYBIND11_MODULE(_core, m) {
         .def("apply", &op_apply,
              py::arg("vec"),
              "Compute H * v on a 1-D complex128 array.")
-        // Phase 9: in-process introspection used by the unified workflow API
-        // (``qed.workflow.find_symmetries`` / ``.diag``).
+        // In-process introspection used by symmetry discovery (qed.discovery).
         .def("conserves_sz", &op_conserves_sz,
-             "True iff every term commutes with total Sz (U(1) symmetry). "
-             "Mirrors the on-disk ``hamiltonian_conserves_sz`` check used by "
-             "the C++ CLI but works on the in-memory operator directly.")
+             "True iff every term commutes with total Sz (U(1) symmetry), "
+             "checked on the in-memory operator.")
         .def("iter_one_body_terms", &op_iter_one_body,
              "List of ``(op_type, site, coeff)`` tuples for every one-body "
              "term currently in the operator. ``op_type`` is one of "
@@ -385,7 +374,7 @@ PYBIND11_MODULE(_core, m) {
 
     bind_sectors(m);
 
-    // ed::dssf -- structure-factor observable assembly (P2.8 / DSSF PR-G).
+    // ed::dssf -- structure-factor observable assembly.
     auto m_dssf = m.def_submodule("dssf",
         "Bindings for the ed::dssf C++ library: assemble DSSF/SSSF "
         "observable pairs from a parameter dict instead of hand-rolling "
@@ -429,8 +418,8 @@ PYBIND11_MODULE(_core, m) {
         - ``obs_1`` (list[Operator]):  left  factor of each pair ⟨ψ|O₁†...|ψ⟩.
         - ``obs_2`` (list[Operator]):  right factor of each pair ⟨...O₂|ψ⟩
                                        (empty when ``OperatorSpec.single_obs_only``).
-        - ``names``  (list[str]):      legacy, byte-stable observable name
-                                       used as the HDF5 group key.
+        - ``names``  (list[str]):      byte-stable observable name of each
+                                       pair.
     )pbdoc")
         .def_readonly("obs_1", &ed::dssf::ObservablePairs::obs_1)
         .def_readonly("obs_2", &ed::dssf::ObservablePairs::obs_2)
@@ -485,7 +474,7 @@ PYBIND11_MODULE(_core, m) {
             Two unit 3-vectors.
         )pbdoc");
 
-    // ed::sym -- programmatic site-permutation symmetry DSL (P2.11).
+    // ed::sym -- programmatic site-permutation symmetry DSL.
     auto m_sym = m.def_submodule("symmetry",
         "Site permutations: identity, composition, powers, order, translations, "
         "reflections, swaps, and the closure of a generating set.");

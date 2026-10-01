@@ -9,11 +9,9 @@
 #                                 BENCHMARK_*() macros (use this for
 #                                 ed_add_benchmark).
 #
-# Pinned to v1.8.5 (released 2024-08, last release tested on this codebase).
+# Pinned to v1.8.5.
 # Disable Google Benchmark's own self-tests + Google Test dep by default --
 # we only want the library, not its CI infrastructure.
-#
-# Audit ref: P2.13.
 # =============================================================================
 
 option(ED_FETCH_BENCHMARK

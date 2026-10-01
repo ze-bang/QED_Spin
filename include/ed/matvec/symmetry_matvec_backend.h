@@ -5,8 +5,7 @@
 // CPU symmetry backend factory (on-the-fly representative SpMV).
 //
 // ``matvec_backend.h`` ships ``make_cpu_full_basis_backend`` (FullBasisPolicy)
-// and ``make_cpu_fixed_sz_backend`` (FixedSzBasisPolicy) but deliberately
-// stays free of any symmetry dependency so it remains a light, host-only
+// but deliberately stays free of any symmetry dependency so it remains a light, host-only
 // leaf header. This header ties the representative symmetry policy to the
 // backend: ``CpuMatVecBackend`` compiles out the assembled-CSR and real-input
 // fast paths for the rep policy (see the ``if constexpr`` guards in
@@ -31,22 +30,22 @@ namespace ed::matvec {
 
 // ---------------------------------------------------------------------------
 // make_cpu_rep_symmetry_backend: the CPU on-the-fly representative SpMV
-// backend ("Optimized symmetry ED + NLCE" plan, Jun 2026). Builds a
+// backend. Builds a
 // ``CpuMatVecBackend<RepSymmetryBasisPolicy, ...>`` over a non-owning view
 // into a ``RepSectorData`` (reps + 1/norm + group perms + per-sector
 // characters). NO orbit CSR is materialised; the group action + projection
 // phase are regenerated arithmetically in the matvec.
 //
-// Lifetime: the ``RepSectorData`` (typically ``SectorOperator::rep_data_``)
-// MUST outlive the returned backend (the policy holds raw pointers into its
+// Lifetime: the ``RepSectorData`` (typically held by the little-group
+// engine's ``RepSectorMatVec``) MUST outlive the returned backend (the policy holds raw pointers into its
 // vectors).
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline basis::RepSymmetryBasisPolicy
 rep_policy_from(const ed::symmetry::RepSectorData& rd) noexcept
 {
-    // Single source of the mapping now lives on RepSectorData (so the dense
-    // assembly lane and the matvec factory can never drift). Kept as a thin
-    // forwarder for the existing call sites.
+    // Forwards to RepSectorData::make_policy, the single source of the
+    // mapping (so the dense assembly lane and the matvec factory can never
+    // drift).
     return rd.make_policy();
 }
 
@@ -68,7 +67,7 @@ make_cpu_rep_symmetry_backend(const ed::symmetry::RepSectorData& rd)
         "CpuRepSymmetry(dim=" + std::to_string(dim) + ")");
 }
 
-// On-the-fly representative host cell (Jun 2026). Definition in
+// On-the-fly representative host cell. Definition in
 // src/matvec/cpu_backend_instantiations.cpp.
 extern template class CpuMatVecBackend<basis::RepSymmetryBasisPolicy,
                                        DiagOneBody, OffDiagOneBody, DiagTwoBody,

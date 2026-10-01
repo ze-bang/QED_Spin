@@ -1,7 +1,7 @@
 #pragma once
 
 // =============================================================================
-// Auto thread-count budget for memory-bound BLAS-1 / SpMV kernels  (Phase 6 #2)
+// Auto thread-count budget for memory-bound BLAS-1 / SpMV kernels
 // =============================================================================
 //
 // On many-core machines (16-128 cores) the default behaviour of OpenMP and
@@ -28,18 +28,15 @@
 // pthread runtime (``openblas_set_num_threads`` via a weak symbol so the
 // build does not hard-require OpenBLAS).
 //
-// The heuristic is deliberately simple: aim for roughly 16 KiB of complex
-// doubles per thread, i.e. ``threads = clamp(dim / 8192, 1, max_threads)``.
-// At dim = 16k that gives 2 threads; at dim = 65k it gives 8 threads (close
-// to our measured optimum of 4-8); at dim >= 1M it gives ``max_threads``.
-// The exact threshold can be tuned via the ``ED_AUTO_THREADS_PER_K`` env
-// knob (default: 8 -- one thread per ~8K basis states); pass ``ED_AUTO_THREADS=0``
-// to opt out entirely (useful when the caller is itself OMP-parallel and
-// nesting would oversubscribe).
+// The heuristic is deliberately simple: one thread per ~8K basis states
+// (roughly 128 KiB of complex doubles per thread), soft-capped at 8, i.e.
+// ``threads = clamp(dim / 8192, 1, min(8, max_threads))``. At dim = 16k
+// that gives 2 threads; from dim = 65k on it gives 8 threads (our measured
+// optimum is 4-8). Pass ``ED_AUTO_THREADS=0`` to opt out entirely (useful
+// when the caller is itself OMP-parallel and nesting would oversubscribe).
 //
 // Numerically a no-op: changing the BLAS / OMP thread count never changes
-// Lanczos eigenvalues. The lockdown tests confirm bit-identity with the
-// scope on vs. off.
+// Lanczos eigenvalues.
 // =============================================================================
 
 #include <cstddef>
@@ -48,10 +45,10 @@
 namespace ed::parallel {
 
 /// Compute the recommended thread count for a Krylov-style memory-bound
-/// kernel operating on a vector of `dim` complex doubles. Honours
-/// ``ED_AUTO_THREADS=0`` (returns ``omp_get_max_threads()`` unchanged) and
-/// ``ED_AUTO_THREADS_PER_K`` (default 8 -- one thread per 8K basis states).
-/// Always returns at least 1 and at most ``omp_get_max_threads()``.
+/// kernel operating on a vector of `dim` complex doubles: one thread per 8K
+/// basis states, soft-capped at 8. Honours ``ED_AUTO_THREADS=0`` (returns
+/// ``omp_get_max_threads()`` unchanged). Always returns at least 1 and at
+/// most ``omp_get_max_threads()``.
 int auto_threads_for_dim(std::uint64_t dim);
 
 /// RAII scope that pins both the OpenMP runtime and (when available) the
@@ -63,9 +60,9 @@ int auto_threads_for_dim(std::uint64_t dim);
 class ThreadBudgetScope {
 public:
     /// ``threads``: OpenMP team size. ``blas_threads``: OpenBLAS pool size,
-    /// default 1 (audit 2026-09: QED's BLAS-1 work runs on OpenMP; a
-    /// threaded OpenBLAS pool spinning between calls oversubscribes the
-    /// cores and was measured to slow BLAS-2/3-light lanes by 10-100x).
+    /// default 1 (QED's BLAS-1 work runs on OpenMP; a threaded OpenBLAS
+    /// pool spinning between calls oversubscribes the cores and was
+    /// measured to slow BLAS-2/3-light lanes by 10-100x).
     /// Pass a larger value only around dense LAPACK solves.
     explicit ThreadBudgetScope(int threads, int blas_threads = 1);
     ~ThreadBudgetScope();

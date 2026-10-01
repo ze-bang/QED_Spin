@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_time_reversal.cpp
 //
-// Stage-6 guard (SymmetryEngine v2): the real-Hamiltonian gate behind the
+// The real-Hamiltonian gate behind the
 // time-reversal sector pairing.
 //
 //   * hamiltonian_is_real: real Heisenberg passes; any imaginary

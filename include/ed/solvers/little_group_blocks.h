@@ -24,7 +24,7 @@
 //
 // The concrete types behind the handle (RepSectorMatVec, SparseColumns,
 // ProjectedBlockOp, Monomial) stay PRIVATE to the engine (src/solvers/little_group/lg_internal.h) -- this
-// header is deliberately pimpl so the basis layer keeps zero new surface.
+// header is deliberately pimpl so the basis layer exposes none of them.
 // =============================================================================
 
 #include <complex>
@@ -84,7 +84,7 @@ public:
     LittleGroupBlock(LittleGroupBlock&&) noexcept;
     LittleGroupBlock& operator=(LittleGroupBlock&&) noexcept;
 
-    /// U2a: lift a block-coordinate vector to the momentum sector's rep
+    /// Lift a block-coordinate vector to the momentum sector's rep
     /// basis, u = W_sigma v (identity copy for plain blocks). `v` must
     /// have the block dimension; the result has one entry per momentum-sector rep.
     /// W's columns are orthonormal (SVD), so norms are preserved.

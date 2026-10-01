@@ -111,9 +111,8 @@ def _outcome(r):
 def dense_inconsistencies(records, tol=1e-8):
     """Full spectra that disagree with their model's dense reference.
 
-    A reference only records what the code returned, so a lane that was wrong when the
-    reference was taken stays "green" forever (the chiral 3x3 symmetric lanes were
-    0.43 off their dense spectrum from the tag until 785ca0e). Every record of a model
+    A reference only records what the code returned, so a lane that is wrong when the
+    reference is taken would stay "green" forever. Every record of a model
     that carries the complete spectrum (same count as <model>/dense_reference) must
     equal it as a multiset, whatever the reference says."""
     out = []

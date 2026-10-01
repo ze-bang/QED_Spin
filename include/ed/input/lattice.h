@@ -1,9 +1,8 @@
 // =============================================================================
 // include/ed/input/lattice.h
 //
-// Standalone lattice geometry generators that **replace** the per-helper
-// Python files in `python/edlib/helper_*.py`. Every lattice the legacy
-// `edlib` package shipped is reachable from one factory:
+// Standalone lattice geometry generators, all reachable from one factory
+// namespace:
 //
 //   * chain     -- 1D chain (PBC / OBC)
 //   * square    -- 2D square lattice
@@ -12,7 +11,7 @@
 //   * kagome    -- 2D kagome (3-site basis)
 //   * pyrochlore-- 3D pyrochlore (4-site basis, FCC)
 //   * from_neighbor_lists -- build from an arbitrary user-supplied
-//                            adjacency list (covers `helper_cluster.py`).
+//                            adjacency list.
 //
 // The output `Lattice` struct is purely geometric: sites, 3D Cartesian
 // positions, sublattice indices, NN/NNN/NNNN bond lists, and the lattice
@@ -45,8 +44,8 @@ struct Lattice {
     // Nearest-neighbour bonds, canonicalised (i < j).
     std::vector<Bond> nn_bonds;
 
-    // Optional next-nearest and third-nearest bond lists. Some helpers
-    // (Kitaev honeycomb, kagome BFG) need them.
+    // Optional next-nearest and third-nearest bond lists (e.g. for
+    // Kitaev honeycomb or kagome BFG models).
     std::vector<Bond> nnn_bonds;
     std::vector<Bond> nnnn_bonds;
 
@@ -93,15 +92,15 @@ Lattice triangular(std::size_t Lx, std::size_t Ly, bool pbc);
 Lattice honeycomb(std::size_t Lx, std::size_t Ly, bool pbc);
 
 // 2D kagome lattice; 3-site basis. NN within the triangle, NNN across
-// hexagons. Used by helper_kagome_bfg.
+// hexagons.
 Lattice kagome(std::size_t Lx, std::size_t Ly, bool pbc);
 
 // 3D pyrochlore lattice (FCC of corner-sharing tetrahedra); 4-site basis.
 // Each unit cell hosts 4 sites; total = 4 * Lx * Ly * Lz.
 Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc);
 
-// Build a Lattice from a user-supplied adjacency description. This is the
-// generic escape hatch that `helper_cluster.py` historically filled.
+// Build a Lattice from a user-supplied adjacency description (the generic
+// escape hatch for clusters no factory above covers).
 //
 //   * `positions` -- one entry per site (length = `num_sites`)
 //   * `nn_pairs`  -- nearest-neighbour edges (each `(i, j)` with i != j)
@@ -111,9 +110,9 @@ Lattice from_neighbor_lists(
     const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
     const std::vector<int>& sublattice = {});
 
-// Read a legacy `cluster.txt`-style file (positions + edges block) into
-// a Lattice. Recognises the format used by `helper_cluster.py` and
-// `helper_cluster_triangular.py`.
+// Read a `cluster.txt`-style file into a Lattice: a "positions" block
+// ("x y z", "x y" or "id x y [z]" per line) followed by an "edges" /
+// "bonds" block ("i j" per line); '#' starts a comment line.
 Lattice from_cluster_file(const std::string& path);
 
 }  // namespace lattice

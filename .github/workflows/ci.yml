@@ -3,15 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    # Run on PRs targeting any branch (not just main) so feature -> feature
-    # PRs also get CI. Was ``branches: [main]`` -- harmless restriction in
-    # the days when ``main`` was the only long-lived branch, but it blocked
-    # CI on the multi-branch workflow we've moved to in 2026.
-  workflow_dispatch:
-    # Manual re-run knob from the Actions tab. Useful for re-running a
-    # failed lane against an unchanged tree, or for triggering CI on a
-    # branch that was created without an upstream PR.
+  pull_request:          # PRs into any branch
+  workflow_dispatch:     # manual re-runs from the Actions tab
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -23,9 +16,7 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Phase-0 lane: single Linux/GCC/OpenBLAS Release build, ctest must be 100%.
-  # Phase-1 expands this into a matrix (gcc-13/clang-18 x Release/Debug x
-  # OpenBLAS/generic + sanitizer + cuda-build-only).
+  # Linux / GCC / OpenBLAS Release build; every ctest must pass.
   # ---------------------------------------------------------------------------
   linux-gcc-openblas:
     name: Linux / GCC / OpenBLAS / Release
@@ -110,7 +101,7 @@ jobs:
       - name: Upgrade pip + install build tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy h5py networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy networkx pynauty
 
       - name: Build + install qed wheel (editable not yet supported by scikit-build-core fully)
         env:
@@ -120,18 +111,15 @@ jobs:
         run: |
           python -m pip install -v .
 
-      - name: Run pytest (unit + integration; slow guards deselected)
+      - name: Run pytest (slow guards and the grid deselected)
         run: |
-          python -m pytest python/tests tests/integration -v
+          python -m pytest python/tests -v
 
   # ---------------------------------------------------------------------------
-  # Tour lane: build the wheel and run every examples/tour/ script
-  # end-to-end. The tour is the canonical usage documentation (one
-  # knob-complete script per verb + the TPQ-state DSSF pipeline); this
-  # lane guards it against API drift.
+  # Examples lane: build the wheel and run every script in examples/.
   # ---------------------------------------------------------------------------
-  linux-tour:
-    name: Linux / Examples tour (CPU)
+  linux-examples:
+    name: Linux / Examples (CPU)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -161,25 +149,22 @@ jobs:
           CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy h5py networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy networkx pynauty
           python -m pip install -v .
 
-      - name: Run the tour
+      - name: Run the examples
         run: |
-          for f in examples/tour/*.py; do
+          for f in examples/[0-9]*.py; do
             echo "== $f =="
             python "$f"
           done
 
   # ---------------------------------------------------------------------------
-  # Correctness lane: benchmarks/audit_correctness.py runs every verb (solve /
-  # thermal / spectral / full_spectrum, the CLI, save/load) over the small
-  # models against an independent dense reference plus the invalid-input
-  # battery. Full runs (14 models, 12-site references) take an hour on a
-  # workstation; the hosted runner gets the <= 10-site models (720 cases, about a minute of solver time).
+  # Correctness lane: the CPU half of the coverage grid (python/tests/grid), every
+  # task x symmetry cell against an independent dense reference.
   # ---------------------------------------------------------------------------
   linux-correctness:
-    name: Linux / correctness harness (CPU, <= 10 sites)
+    name: Linux / coverage grid (CPU)
     runs-on: ubuntu-22.04
     timeout-minutes: 60
 
@@ -209,23 +194,21 @@ jobs:
           CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy h5py networkx pynauty
+          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy networkx pynauty
           python -m pip install -v .
 
-      - name: Run the correctness harness
+      - name: Run the CPU coverage grid
         env:
           OMP_NUM_THREADS: "4"
-        run: |
-          set -o pipefail
-          python benchmarks/audit_correctness.py --max-sites 10 --fail-on-mismatch \
-            --json correctness-cpu.json | grep -vE "^(\[|Lanczos|Iteration|Fixed Sz|Progress|Full diag|Constructing|Dense matrix|Using dense|Eigenvalue decomp|Matrix )"
+          QED_GRID_REPORT: grid-cpu.json
+        run: python -m pytest python/tests/grid -m grid -k cpu -q -rf -p no:cacheprovider
 
-      - name: Upload the case table
+      - name: Upload the cell table
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: correctness-cpu
-          path: correctness-cpu.json
+          name: grid-cpu
+          path: grid-cpu.json
 
   # ---------------------------------------------------------------------------
   # Clang Debug lane: catch UB / signed-overflow / strict-aliasing issues that
@@ -296,7 +279,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # clang-tidy lane: pure analysis, warnings only (||true). Runs against the
-  # ed_core / ed_dssf / ed_io / ed_solvers_cpu translation units using the
+  # ed_core / ed_dssf / ed_solvers_cpu translation units using the
   # checks defined in .clang-tidy at repo root. We deliberately do NOT fail
   # the build on warnings yet -- that flip will happen once the existing
   # technical debt is triaged. The lane exists today so newly-added code is
@@ -342,13 +325,11 @@ jobs:
             -DBLAS_PROFILE=OPENBLAS
 
       - name: Build (needed so generated headers exist)
-        run: cmake --build build-tidy --target ed_core ed_io ed_dssf ed_solvers_cpu -- -j$(nproc)
+        run: cmake --build build-tidy --target ed_core ed_dssf ed_solvers_cpu -- -j$(nproc)
 
       - name: Run clang-tidy on src/dssf and src/core (warnings only)
         run: |
-          # Keep the lane bounded on hosted runners: lint only the new
-          # ed::dssf code + src/core. Other directories will be added as
-          # the modernization rolls forward.
+          # Bounded for hosted runners: src/dssf and src/core only.
           shopt -s globstar nullglob
           files=(src/dssf/**/*.cpp src/core/**/*.cpp)
           if [ ${#files[@]} -eq 0 ]; then

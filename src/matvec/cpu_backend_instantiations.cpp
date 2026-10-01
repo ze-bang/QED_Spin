@@ -1,25 +1,19 @@
 // =============================================================================
 // src/matvec/cpu_backend_instantiations.cpp
 //
-// P6 of the operator-collapse refactor (Jun 2026): EXPLICIT INSTANTIATION
-// translation unit for the host (MemSpace=Host) leg of the
-// Operator<BasisPolicy, MemSpace> grid.
+// EXPLICIT INSTANTIATION translation unit for the host (MemSpace=Host) leg
+// of the Operator<BasisPolicy, MemSpace> grid.
 //
 // ``CpuMatVecBackend<BasisPolicy, ...6 term-view bins>`` is a heavy template:
 // it carries the matrix-free kernel (apply_terms<Policy,Scalar> for Complex
 // AND double), the Eigen CSR assemble/cache machinery, and the real-input
-// fast path. Before this TU every header that instantiated a backend
-// (operator.h Full lane, the former FixedSz lane, sector_operator.h
-// + the streaming-symmetry unified .cpp Symmetry lane) re-instantiated the
-// whole tree, multiplying compile time across the codebase.
+// fast path.
 //
 // This TU instantiates each of the two host cells of the grid exactly once,
 // over the single canonical term-view shape that every Operator uses (the six
-// SoA record types from term_storage.h). Pairing these explicit definitions
-// with ``extern template`` declarations in a later increment lets the rest of
-// the build consume the prebuilt symbols instead of recompiling them; on its
-// own this TU is a compile-coverage proof that both host cells are
-// coherent and instantiable as a standalone library object.
+// SoA record types from term_storage.h). It is a compile-coverage proof that
+// both host cells are coherent and instantiable as a standalone library
+// object.
 //
 // The host cells:
 //   * cell 1H (Full)        -- FullBasisPolicy
@@ -41,7 +35,7 @@ template class CpuMatVecBackend<basis::FullBasisPolicy,
                                 DiagOneBody, OffDiagOneBody, DiagTwoBody,
                                 MixedTwoBody, OffDiagTwoBody, ThreeBodyTerm>;
 
-// cell 5H (RepSymmetry) -- on-the-fly representative SpMV (Jun 2026). The
+// cell 5H (RepSymmetry) -- on-the-fly representative SpMV. The
 // rep policy forces the complex matrix-free path (is_rep_symmetry==true
 // compiles out the CSR + real-input fast-path branches) and dispatches the
 // dedicated ``apply_terms_rep_symmetry`` kernel.

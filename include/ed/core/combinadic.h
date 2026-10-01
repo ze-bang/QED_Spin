@@ -9,8 +9,8 @@
 // bit-identical to the device one. The on-the-fly representative SpMV
 // (``ed::matvec::basis::RepSymmetryBasisPolicy``) uses binary search on the
 // sorted representative array as its PRIMARY reverse lookup; this header
-// provides the OPTIONAL O(1) rank-table fast path (and the round-trip is
-// useful for tests + the HDF5 basis cache).
+// provides the OPTIONAL O(1) rank-table fast path (the round-trip is also
+// useful for tests).
 //
 // The Pascal/binomial table here is a small ``std::vector`` built on demand
 // (max 65x65 ``uint64_t`` ~= 33 KiB) rather than a CUDA ``__constant__``

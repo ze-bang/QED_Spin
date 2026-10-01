@@ -2,8 +2,7 @@
 // src/solvers/gpu/little_group_gpu.cu
 //
 // Batched GPU eigensolver for the little-group engine's dense blocks. See the
-// header for history (recovered from the Family-6-removed SAB GPU twin) and
-// the two-transfer design.
+// header for the two-transfer design.
 // =============================================================================
 
 #include <ed/solvers/little_group_gpu.h>

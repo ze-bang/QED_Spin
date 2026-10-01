@@ -12,12 +12,9 @@
 //
 //     |smallest_now - smallest_prev| / max(|smallest_now|, 1e-300) < tol
 //
-// This is the shared convention of every legacy ED Lanczos in the repo
-// (`src/solvers/cpu/lanczos.cpp`,
-// `src/distributed/distributed_lanczos.cpp` /
-// `include/ed/distributed/distributed_lanczos_kernel.h`,
-// `src/solvers/gpu/gpu_lanczos.cu`), and the well-trodden ARPACK / SLEPc
-// / Anasazi default for one-eigenvalue convergence.
+// This is the convention of `src/solvers/cpu/lanczos.cpp` and the
+// well-trodden ARPACK / SLEPc / Anasazi default for one-eigenvalue
+// convergence.
 // =============================================================================
 
 #include <algorithm>
@@ -38,7 +35,7 @@ namespace ed::krylov {
 ///
 /// The returned `std::function` is invoked by the kernel every
 /// `convergence_check_interval` iterations with the running `alpha`
-/// and the running `beta` (beta layout follows the kernel's legacy
+/// and the running `beta` (beta layout follows the kernel's
 /// convention: `beta[0] == 0.0` is the sentinel, `beta[j+1]` is the
 /// sub-diagonal entry `T(j+1, j)`). On every call the predicate solves
 /// the `m x m` real-symmetric tridiagonal `T(alpha, beta)`, takes its
@@ -62,12 +59,11 @@ make_smallest_ritz_convergence(std::size_t exct = 1,
                                std::size_t min_iters = 0,
                                bool require_residual_bound = false)
 {
-    // ``require_residual_bound`` (2026-09-11): callers that reconstruct
-    // eigenvectors from the kept basis need the Ritz RESIDUAL bound
+    // ``require_residual_bound``: callers that reconstruct eigenvectors
+    // from the kept basis need the Ritz RESIDUAL bound
     // |beta_m z_{m,i}| <= tol max(1, |E_i|) for every requested pair, not
-    // only the value stall: the CudaBackend vector lane returned residuals
-    // of 1e-6 at tol 1e-10 while the CPU two-pass lane (which gates on the
-    // same bound) returned 7e-10.
+    // only the value stall; a value stall alone can leave vector residuals
+    // orders of magnitude above tol.
     struct State {
         double prev = std::numeric_limits<double>::infinity();
     };
@@ -89,19 +85,13 @@ make_smallest_ritz_convergence(std::size_t exct = 1,
             T(i, i - 1) = b;
             T(i - 1, i) = b;
         }
-        // GAP-10 v3 (2026-07-17, the ROOT fix): despite taking `exct`,
-        // this predicate historically certified only THE SMALLEST Ritz
-        // value's stall -- values 2..exct of a requested window were
-        // whatever they happened to be when E0 plateaued, which is
-        // exactly how stalled interior garbage reached merged spectra
-        // (GAP 10) and why window contents differed across BLAS
-        // backends. Now: the stall check stays on E0 (cheap early
-        // exit), and when exct > 1 the WINDOW must also certify via
-        // the textbook per-Ritz residual bound |beta_m| * |z_{m-1,i}|
-        // for the exct lowest values. Converged values agree on every
-        // backend, so window counts are environment-stable by
-        // construction; the downstream merge filter becomes a
-        // tripwire instead of a load-bearing patch.
+        // The stall check is on E0 only (cheap early exit). When
+        // exct > 1 the WINDOW must also certify via the per-Ritz
+        // residual bound |beta_m| * |z_{m-1,i}| for the exct lowest
+        // values; an E0 stall alone leaves values 2..exct unconverged
+        // (stalled interior values that differ across BLAS backends).
+        // Converged values agree on every backend, so window counts
+        // are environment-stable by construction.
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es;
         es.compute(T, (exct > 1 || require_residual_bound)
                            ? Eigen::ComputeEigenvectors

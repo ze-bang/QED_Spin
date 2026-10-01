@@ -15,7 +15,7 @@
 //   * CAPPED : by `max_vectors` (the memory budget) AND by `global_dim`.
 //
 // The memory cap is what makes the footprint PREDICTABLE: m·N·16 never exceeds
-// the budget the caller passed, so a large `requested`/`max_iter` can no longer
+// the budget the caller passed, so a large `requested`/`max_iter` cannot
 // silently blow past available memory. `max_vectors == 0` means "no memory cap"
 // (callers that genuinely want the unbounded behaviour, e.g. tiny problems).
 // =============================================================================

@@ -3,114 +3,73 @@ Python API reference (``qed``)
 
 .. default-domain:: py
 
-The Python side lives under :py:mod:`qed`. It is a thin ``pybind11``
-layer over the C++ ``ed_solvers_*`` static libraries, wired up via
-``scikit-build-core``. The canonical user-facing surface is three
-verbs that mirror the C++ orchestrator: :func:`qed.solve`,
-:func:`qed.thermal`, :func:`qed.spectral`. All three take plain
-keyword arguments — no ``SolveOptions`` / ``ThermalOptions`` /
-``SpectralOptions`` objects in user code (those are constructed
-internally from your kwargs).
+``import qed`` gives five verbs over one symmetry description, plus the Hamiltonian
+builders and symmetry discovery. Every verb takes ``sym=`` (a :class:`qed.Symmetry`,
+default :meth:`qed.Symmetry.auto`) and ``device="cpu" | "gpu" | "auto"``.
 
 .. contents::
    :local:
-   :depth: 2
+   :depth: 1
 
-Top-level facade (``qed``)
+Symmetry
+--------
+
+.. autoclass:: qed.Symmetry
+   :members: auto, none, select, groups, resolve
+
+.. autofunction:: qed.api.symmetry.momentum_of
+.. autofunction:: qed.api.symmetry.irrep_characters_of
+
+Levels and vectors
+------------------
+
+.. autofunction:: qed.eigs
+.. autoclass:: qed.EigResult
+   :members: vectors, expect, matrix_element, save, momentum, irrep_characters
+.. autofunction:: qed.load_eigs
+
+.. autofunction:: qed.spectrum
+.. autoclass:: qed.SpectrumResult
+   :members: momentum, irrep_characters
+
+.. autofunction:: qed.expect
+.. autoclass:: qed.ExpectResult
+
+Thermodynamics
+--------------
+
+.. autofunction:: qed.thermal
+.. autoclass:: qed.ThermalResult
+
+Dynamics
+--------
+
+.. autofunction:: qed.dynamics
+.. autoclass:: qed.DynamicsResult
+
+Hamiltonians and operators
 --------------------------
 
-``import qed`` exposes everything you need to drive a workflow
-end-to-end. The most common entry points are:
-
-* :func:`qed.solve` — ground state, eigenvalues, low-lying spectrum.
-* :func:`qed.thermal` — finite-temperature thermodynamics.
-* :func:`qed.spectral` — static and dynamical structure factors.
-* :func:`qed.full_diagonalization`, :func:`qed.lanczos` — explicit
-  low-level access to the dense LAPACK and Lanczos drivers.
-* :func:`qed.find_symmetries` — symmetry discovery returning
-  :class:`qed.SymmetryReport` + :class:`qed.GeneratorSet` candidates.
-* :func:`qed.has_cuda_build`, :func:`qed.has_mpi_build`,
-  :func:`qed.has_nccl_build`, :func:`qed.has_scalapack_build` — build
-  introspection.
-
-The helper classes (:class:`qed.Operator`, :class:`qed.FixedSzOperator`,
-:class:`qed.GeneratorSet`,
-:class:`qed.SymmetryReport`, …) are re-exported from their canonical
-sub-modules; see the per-submodule sections below for full member
-listings.
-
-.. automodule:: qed
-   :no-members:
-
-Ground-state entry point (``qed.workflow``)
--------------------------------------------
-
-:func:`qed.solve` and its plumbing live in :mod:`qed.workflow`.
-
-.. automodule:: qed.workflow
-   :members:
-   :undoc-members:
-   :show-inheritance:
-   :exclude-members: GeneratorSet, SymmetryReport
-
-Thermal entry point (``qed.thermal``)
--------------------------------------
-
-.. automodule:: qed.thermal
-   :members:
-   :undoc-members:
-   :show-inheritance:
-   :exclude-members: thermal
-
-.. autofunction:: qed.thermal.thermal
-   :no-index:
-
-Spectral / structure-factor entry point (``qed.spectral``)
-----------------------------------------------------------
-
-.. automodule:: qed.spectral
-   :members:
-   :undoc-members:
-   :show-inheritance:
-   :exclude-members: spectral
-
-.. autofunction:: qed.spectral.spectral
-   :no-index:
-
-DSSF helpers (``qed.dssf``)
----------------------------
-
-Lower-level helpers consumed by :func:`qed.spectral` (operator-spec
-builders, broadening utilities). New code should call
-:func:`qed.spectral` directly.
-
-.. automodule:: qed.dssf
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-Hamiltonian builder DSL (``qed.input``)
----------------------------------------
-
-The Python mirror of the ``ed::input`` C++ library. Builds lattices
-and Hamiltonians fluently and emits either an in-memory ``Operator``
-or the ``InterAll.dat`` / ``Trans.dat`` / ``positions.dat`` directory
-that ``./ED`` consumes.
+``qed.Operator`` holds the terms (one-, two- and three-body products of S+, S-, Sz);
+``qed.input.HamiltonianBuilder`` builds it from bonds, and ``qed.dssf`` builds the
+momentum-resolved probe operators used with :func:`qed.dynamics`.
 
 .. automodule:: qed.input
    :members:
-   :undoc-members:
-   :show-inheritance:
 
-Programmatic symmetries (``qed.symmetry``)
-------------------------------------------
-
-Generator-set construction (translations, reflections, custom
-permutations) consumed via the ``symmetry=`` kwarg of
-:func:`qed.solve` / :func:`qed.thermal` / :func:`qed.spectral`.
-
-.. automodule:: qed.symmetry
+.. automodule:: qed.dssf
    :members:
-   :undoc-members:
-   :show-inheritance:
 
+Symmetry discovery
+------------------
+
+.. autofunction:: qed.find_symmetries
+.. autoclass:: qed.GeneratorSet
+.. autoclass:: qed.SymmetryReport
+
+Build introspection
+-------------------
+
+* :func:`qed.has_cuda_build` -- whether the extension was built with CUDA.
+* :func:`qed.env_snapshot`, :func:`qed.debug_env` -- the registered environment
+  variables and their current values.

@@ -17,8 +17,8 @@
 #include <ed/dssf/cross_sector_orbit_observable.h>
 
 #include <ed/config/env_registry.h>
-#include <ed/core/basis_utils.h>          // popcount (defensive, mirrors CrossSectorObservable)
-#include <ed/matvec/symmetry_matvec_backend.h>  // rep_policy_from (Stage 8d)
+#include <ed/core/basis_utils.h>          // popcount
+#include <ed/matvec/symmetry_matvec_backend.h>  // rep_policy_from
 
 #include <algorithm>
 #include <cstdint>
@@ -72,22 +72,21 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
     n_bits_     = src_.num_bits();
     dim_src_    = src_.dim();
     dim_dst_    = dst_.dim();
-    // group_norm = 1 / |G|, matches the same-sector matvec at
-    // streaming_symmetry.h:453.
+    // group_norm = 1 / |G| when src and dst share a group, matching the
+    // same-sector rep matvec.
     const std::uint64_t G = src_.group_size();
     if (G == 0) {
         throw std::runtime_error(
             "CrossSectorOrbitObservable: src group_size is zero "
             "(streaming-symmetry operator missing automorphism metadata?).");
     }
-    // U2b-r1: src and dst may come from DIFFERENT group extensions -- a
+    // src and dst may come from DIFFERENT group extensions -- a
     // flip-extended (k, +/-) source (|G'| = 2|A|) scattering into raw
     // destination sectors (|A|). The normalization convention stores
-    // per-rep norms of sqrt(|Stab|) (rep_projection.h closed form), i.e.
+    // per-rep norms of sqrt(|Stab|) (the rep-sector closed form), i.e.
     // each side's basis vector is short a sqrt(|G_side|); the bra-ket
-    // therefore carries 1/sqrt(G_src * G_dst), which reduces to the
-    // historical 1/G when the groups match (every existing pin
-    // unchanged). The destination group must still divide or extend the
+    // therefore carries 1/sqrt(G_src * G_dst), which reduces to 1/G when
+    // the groups match. The destination group must still divide or extend the
     // same automorphism content -- that is the caller's contract (both
     // handles built from one engine context).
     const std::uint64_t Gd = dst_.group_size();
@@ -115,9 +114,8 @@ namespace {
 // state ``s_prime`` (potentially with one or two bits flipped), and
 // the accumulated matrix-element factor ``amp`` (includes the
 // transform coefficient and the spin-S diagonal/off-diagonal
-// prefactors). Mirrors the term-walking switch in
-// streaming_symmetry.h:1290-1352 and the equivalent block in
-// cross_sector_observable.cpp.
+// prefactors). Mirrors the term-walking switch of the matvec term kernels
+// (ed/matvec/term_kernels*.h).
 struct TermResult {
     bool                          valid     = true;
     std::uint64_t                 s_prime   = 0;

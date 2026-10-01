@@ -110,7 +110,7 @@ struct ReducedSymmetryCsr {
 //
 // (all six term bins enumerated, so the diagonal lands in the CSR
 // naturally). CSR * v therefore equals the rep-walk gather to machine
-// precision -- pinned by tests/unit/test_reduced_symmetry_csr.cpp.
+// precision -- pinned by tests/unit/test_rep_symmetry_backend.cpp.
 // ---------------------------------------------------------------------------
 namespace detail {
 
@@ -193,11 +193,10 @@ template <class RepPolicy, class Scalar,
     csr.row_ptr.assign(dim + 1, 0);
 
     // Two passes over the rows, both parallel: (1) count the nonzeros of every row, (2) after one allocation of the
-    // final arrays, recompute each row and write it straight into its slot. A row's accumulation, zero filter and
-    // column sort are exactly those of the old single-pass build, so the matrix is bit-identical. The old build kept
-    // one heap vector per row until a SERIAL flatten had copied them all: at N=36 (3.8e8 rows, 1.5e10 nonzeros) that
-    // peaked above 700 GB with the flatten running single-threaded for more than an hour; now the peak is the final
-    // CSR itself (~290 GB) and nothing runs serially except the prefix sum.
+    // final arrays, recompute each row and write it straight into its slot. Both passes run the same deterministic
+    // row builder, so the counts match the writes exactly. Peak memory is the final CSR itself (~290 GB at N=36:
+    // 3.8e8 rows, 1.5e10 nonzeros) rather than one heap vector per row plus a flatten, and nothing runs serially
+    // except the prefix sum.
 #ifdef _OPENMP
     const std::uint64_t par = static_cast<std::uint64_t>(omp_get_max_threads()) * 256ULL;
 #else

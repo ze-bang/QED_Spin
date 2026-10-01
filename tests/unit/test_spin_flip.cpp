@@ -1,8 +1,7 @@
 // =============================================================================
 // tests/unit/test_spin_flip.cpp
 //
-// Stage-5 guards of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): the term-level spin-flip
+// The term-level spin-flip
 // commutation check ``hamiltonian_is_spin_flip_symmetric``.
 //
 // Under X = prod_i sigma^x_i:  Sz -> -Sz,  S+ <-> S-.

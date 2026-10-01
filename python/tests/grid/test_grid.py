@@ -3,7 +3,7 @@ reference built independently of the library (grid/models.py).
 
 A cell ends in one of: pass | wrong (numbers disagree) | refused (the API
 raised on purpose) | missing (no route) | crash (anything else). The run never
-fails on a cell's status unless a baseline file says that cell used to pass;
+fails on a cell's status unless the baseline file records that cell as passing;
 set QED_GRID_REPORT=<path> to write the measured table as JSON.
 """
 from __future__ import annotations

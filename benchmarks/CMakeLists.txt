@@ -16,8 +16,6 @@
 #
 # CI nightly job (.github/workflows/benchmarks.yml) builds them and posts
 # JSON results as an artifact so trends can be tracked across commits.
-#
-# Audit ref: P2.13.
 # =============================================================================
 
 if(NOT ED_BUILD_BENCHMARKS)
@@ -50,10 +48,9 @@ ed_add_benchmark(bench_operator_apply       bench_operator_apply.cpp)
 ed_add_benchmark(bench_lanczos_ground_state bench_lanczos_ground_state.cpp)
 ed_add_benchmark(bench_full_diagonalization bench_full_diagonalization.cpp)
 
-# Pillar 2 of the "Save and DSSF Upgrades" plan (May 2026): track the
-# speed-up of the omega-parallel Lehmann inner loop used by the
-# FtlmDynamical single-T lane. Reports a (serial, parallel) pair per
-# omega-grid size so the speed-up is visible at a glance.
+# Speed-up of an omega-parallel Lorentzian Lehmann sum (the spectral
+# reconstruction loop of the FTLM dynamics kernels). Reports a
+# (serial, parallel) pair per omega-grid size.
 ed_add_benchmark(bench_dssf_omega_parallel  bench_dssf_omega_parallel.cpp)
 
 set(_ed_bench_targets

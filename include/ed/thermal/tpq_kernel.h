@@ -11,8 +11,6 @@
 // the temperature bookkeeping live in the calling driver. Consumers:
 //
 //   * the `ed::workflows::thermal` orchestrator via `mtpq_kernel.h`
-//
-// Phase 2.4 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
 #include <algorithm>
@@ -58,7 +56,7 @@ struct TpqStepInfo {
     std::size_t    step;       ///< 0-based step counter
     double         beta;       ///< always 0 (the driver derives beta_k)
     double         norm_before_normalize;
-    /// Audit H4 (2026-09): the kernel computes H psi_k once per step and
+    /// The kernel computes H psi_k once per step and
     /// hands the moments to the callback, so drivers need no second matvec.
     bool           moments_valid = false;
     double         energy        = 0.0;   ///< Re <psi|H|psi>   (psi normalised)
@@ -104,7 +102,7 @@ TpqKernelResult tpq_kernel(Backend&                        be,
 
     std::size_t steps = 0;
     if (opts.method == TpqMethod::Microcanonical) {
-        // Audit H4: one matvec per step. The product H psi_k that forms
+        // One matvec per step. The product H psi_k that forms
         // psi_{k+1} = (L - H) psi_k also yields the moments E_k = Re<psi_k|H psi_k>
         // and <H^2>_k = ||H psi_k||^2 handed to the callback; the state
         // update is one axpby plus a pointer swap (no copy).

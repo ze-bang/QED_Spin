@@ -20,10 +20,10 @@ namespace lg_detail {
 
 namespace {
 
-// ED_SYM_LG_GROUP_SECTOR (default on): one-dimensional irreps of a star are solved in the rep basis of the FULL little
+// At fixed n_up, one-dimensional irreps of a star are solved in the rep basis of the FULL little
 // group G_k0 = A . P_k0 (x flip) -- C(N, n_up)/|G_k0| states -- instead of W-projecting the whole k-sector.
 [[nodiscard]] bool group_sector_enabled(const LittleGroupOptions& opt) {
-    return opt.n_up >= 0 && ed::env::flag("ED_SYM_LG_GROUP_SECTOR", true);
+    return opt.n_up >= 0;
 }
 
 // Dimension of the momentum sector k0 (extended index) at fixed n_up, without building it: the multiplicity of the
@@ -317,12 +317,12 @@ build_star_blocks(const ::Operator&         op,
             "dim=%llu\n",
             k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
             static_cast<unsigned long long>(rd.reps.size()));
-        // NOTE: no early return. Plan mode used to bail out here, which meant
-        // it reported dims and star sizes but never built the little co-group
-        // -- so the one thing a caller needs in order to NAME an irrep (its
-        // character table) was missing from the only pass cheap enough to ask
-        // for it. Plan runs the monomial + isotypic decomposition and skips
-        // just the eigensolves, which is where the cost actually is.
+        // NOTE: no early return. Plan mode must build the little co-group:
+        // the one thing a caller needs in order to NAME an irrep (its
+        // character table) comes from it, and plan is the only pass cheap
+        // enough to ask for it. Plan runs the monomial + isotypic
+        // decomposition and skips just the eigensolves, which is where the
+        // cost actually is.
     }
     if (group_sector_enabled(opt) && rd.reps.size() != dim_k)       // the count the path relied on
         throw std::logic_error("little group: Burnside dimension " + std::to_string(dim_k)
@@ -382,10 +382,9 @@ build_star_blocks(const ::Operator&         op,
     // Every decline below is CORRECTNESS-SAFE (we fall back to the plain
     // k-sector block) but silently forfeits the |little co-group| block
     // reduction -- and it forfeits the MOST at the high-symmetry momenta,
-    // where the co-group is largest. That made "why is my Gamma block
-    // |P| times too big?" undiagnosable without a debugger: the only
-    // signal was `projected=0` in the ED_SYM_PROFILE line. Each path now
-    // says WHY under ED_SYM_PROFILE=1 / verbose.
+    // where the co-group is largest. Each path says WHY under
+    // ED_SYM_PROFILE=1 / verbose, so "why is my Gamma block |P| times too
+    // big?" is answerable from the log.
     const bool lg_diag = [&] {
         return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose;
     }();
@@ -422,7 +421,7 @@ build_star_blocks(const ::Operator&         op,
                              * static_cast<std::uint64_t>(
                                    giP.irreps[static_cast<std::size_t>(ii)].dim);
                 }
-                // Stage 9b: sigma <-> sigma* pairing. Valid only when
+                // sigma <-> sigma* pairing. Valid only when
                 // the k0 sector is REAL: chi_{k0} real => the monomial
                 // phases are real => H_{k0} and every M_p are real, so
                 // conj(W_sigma) spans the sigma* isotypic and

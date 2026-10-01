@@ -7,16 +7,15 @@
 //     ed::solve     -- ground-state eigenproblem (Lanczos / Krylov-Schur /
 //                       full diag) on the Backend lane select_backend
 //                       picks (CPU or CUDA).
-//     ed::thermal   -- finite-temperature workflows (FTLM / OFTLM /
-//                       mTPQ).
+//     ed::workflows::thermal -- finite-temperature workflows (FTLM /
+//                       OFTLM / mTPQ).
 //
 // Both:
 //
-//   * accept any `ed::LinearOperator` (no separate CPU / GPU / MPI / etc
-//     entry point);
+//   * accept any `ed::LinearOperator` (no separate CPU / GPU entry point);
 //   * dispatch under `std::visit(select_backend(...))` so the kernel
 //     family runs on the right Backend;
-//   * return `GroundStateResult` / `ThermalResult` (Phase 3.3) with
+//   * return `GroundStateResult` / `ThermalResult` with
 //     backend metadata + Krylov diagnostics carried uniformly across lanes.
 //
 // The ed::sectors verbs (include/ed/sectors/) run these on each symmetry
@@ -37,16 +36,15 @@
 #include <ed/core/results.h>
 #include <ed/core/select_backend.h>
 
-// `ed::thermal` and `ed::observables` already exist as namespaces (the
-// per-kernel headers from Phase 2). To avoid a function/namespace
-// collision, the orchestrator entry points live under
+// `ed::thermal` and `ed::observables` are kernel namespaces. To avoid a
+// function/namespace collision, the orchestrator entry points live under
 // `ed::workflows::`. The public-facing convention is:
 //
 //     auto gs = ed::workflows::solve(H, opts);
 //     auto th = ed::workflows::thermal(H, opts);
 //
-// `ed::solve` is also exported as a top-level alias (since `ed::solve`
-// does not clash with any existing namespace) for ergonomics.
+// `ed::solve` is also exported as a top-level alias (it does not clash
+// with any namespace) for ergonomics.
 namespace ed::workflows {
 
 enum class SolveMethod : std::uint8_t {
@@ -76,7 +74,7 @@ struct ThermalOptions {
     /// ThermalResult::observables. Each is bound to the backend the run selects.
     std::vector<std::shared_ptr<const LinearOperator>> observables;
 
-    /// Method discriminator (matches the legacy auto/thermal lane tags).
+    /// Method discriminator.
     enum class Method : std::uint8_t {
         FTLM = 0, mTPQ = 2, OFTLM = 5,
     } method = Method::FTLM;
@@ -93,9 +91,9 @@ struct ThermalOptions {
 
     /// Temperature grid used only when `betas` is empty: num_temp_bins
     /// points linear in T on [temp_min, temp_max].
-    double      temp_min       = 0.1;  ///< Python `T_min` default (was 0.01).
+    double      temp_min       = 0.1;
     double      temp_max       = 10.0;
-    std::size_t num_temp_bins  = 24;   ///< Python `num_T` default (was 100).
+    std::size_t num_temp_bins  = 24;
 
     // -----------------------------------------------------------------
     // Caller-supplied spectral bounds for the mTPQ auto-tune. When BOTH
@@ -108,10 +106,11 @@ struct ThermalOptions {
     double      e_max_override = std::numeric_limits<double>::quiet_NaN();
 
     // -----------------------------------------------------------------
-    // mTPQ expert override (June 2026). The microcanonical iteration
+    // mTPQ expert override. The microcanonical iteration
     // |psi_{k+1}> = (L*I - H)|psi_k> uses a "large value" L that the
     // orchestrator auto-tunes from a short Lanczos spectral-bound
-    // estimate (see the mTPQ branch in orchestrator.cpp). A finite,
+    // estimate (see the mTPQ branch in src/orchestrator/orch_thermal.cpp).
+    // A finite,
     // POSITIVE value here pins L directly and skips the auto-tune,
     // mirroring the HPhi ``LargeValue`` knob. ``0.0`` (default) means
     // "auto". Ignored by every non-mTPQ lane.
@@ -125,11 +124,11 @@ struct ThermalOptions {
 // `ed::solve`     -- ground-state eigenproblem. Picks Lanczos /
 //                    Krylov-Schur / full-diag based on
 //                    (num_eigs, geometry().global_dim, opts.method).
-// `ed::thermal`   -- finite-T workflow. Switches on `opts.method`.
+// `thermal`       -- finite-T workflow. Switches on `opts.method`.
 //
 // Both orchestrators construct the appropriate Backend internally
 // via `select_backend(H.geometry(), opts.backend)` and return a uniform
-// Result struct (Phase 3.3) carrying the BackendMetadata that fired.
+// Result struct carrying the BackendMetadata that fired.
 // ---------------------------------------------------------------------------
 
 GroundStateResult solve(const LinearOperator&  H,

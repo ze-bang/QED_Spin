@@ -155,7 +155,7 @@ def tri_chiral_3x3():
     return Model("tri_chiral_3x3", 9, terms, u1=True, real=False, su2=True, lattice=(3, 3))
 
 
-# Open clusters in the shape the NLCE engine feeds to qed.full_spectrum: no
+# Open clusters in the shape the NLCE engine feeds to qed.spectrum: no
 # translations, a small point group, all 2^N eigenvalues required.
 def _open(name, bonds, n, Jz=1.0):
     return Model(name, n, heisenberg_terms(bonds, 1.0, Jz), u1=True, real=True, su2=(Jz == 1.0))

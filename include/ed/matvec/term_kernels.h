@@ -5,17 +5,8 @@
 // The unified matrix-free term-evaluation kernel.
 //
 // This header is the single source of truth for "apply a list of one-/two-/
-// three-body spin operators to a state vector" in *every* basis the rest of
-// the codebase cares about (full Hilbert space, fixed-Sz, ...). It replaces
-// the seven copies of the same bit-flip / radix-sort scatter loop that
-// previously lived in:
-//
-//   * Operator::apply_optimized           (full, complex)
-//   * Operator::apply_real                (full, real)
-//   * FixedSzOperator::apply              (fixed-Sz, complex)
-//   * StreamingSymmetryOperator::...      (symmetry, complex)        [Phase 3]
-//   * ed_wrapper_chunked.h inline lambdas (chunked symmetry)         [Phase 3]
-//   * GPU kernels                         (full/fixed-Sz, complex)   [Phase 3]
+// three-body spin operators to a state vector" in every host basis (full
+// Hilbert space, representative symmetry sector).
 //
 // The kernel is templated on:
 //
@@ -24,8 +15,7 @@
 //                    off-diagonal terms can produce out-of-basis states.
 //
 //   Scalar       --- std::complex<double> or double. Selecting `double` gives
-//                    the "real Hamiltonian + real input" fast path that the
-//                    legacy Operator::apply_real provided: half the
+//                    the "real Hamiltonian + real input" fast path: half the
 //                    bandwidth, half the flops, vectorises better.
 //
 //   TermContainers --- DUCK TYPED. The kernel reads fields by name:
@@ -37,13 +27,13 @@
 //                          .op_type_2, .coefficient
 //      three_body[i].op_type_1/2/3, .site_index_1/2/3, .coefficient
 //
-//      This is exactly the schema Operator already uses for its SoA term
-//      vectors (diag_one_body_, offdiag_one_body_, ...). It also lets us
-//      pass any compatible struct (e.g. a future SoA storage tuned for
-//      AVX-512 gather/scatter) without touching the kernel.
+//      This is exactly the schema Operator uses for its SoA term vectors
+//      (diag_one_body_, offdiag_one_body_, ...). Any compatible struct can
+//      be passed without touching the kernel.
 //
-// Algorithm (CPU/host variant in this header, GPU equivalent in a future
-// term_kernels_cuda.cuh):
+// Algorithm of the SCATTER kernel ``apply_terms`` (host variant in this
+// header; device kernels in term_kernels_gpu.cuh, row-gather form in
+// term_kernels_gather.h):
 //
 //   1. parallel over output basis states (`for i in [0, dim)`)
 //   2. for each input state with non-negligible amplitude:
@@ -51,12 +41,7 @@
 //      accumulate contributions into a thread-local buffer
 //   3. flush thread-local buffer with O(n) radix sort + atomic scatter
 //
-// This is BYTE-FOR-BYTE identical to the existing Operator::apply_optimized
-// behavior, just with the basis-state <-> array-index mapping abstracted
-// behind BasisPolicy. The validation regression tests pinned in
-// `tests/test_*` continue to pass.
-//
-// Phase 1 of the matvec-unification revamp.
+// The basis-state <-> array-index mapping is abstracted behind BasisPolicy.
 // =============================================================================
 
 #include <algorithm>
@@ -78,7 +63,7 @@ namespace ed::matvec::kernel {
 
 // ---------------------------------------------------------------------------
 // Element-wise term operator types: 0=S+, 1=S-, 2=Sz. The encoding matches
-// what Operator already uses everywhere else in the codebase.
+// what Operator uses everywhere else in the codebase.
 // ---------------------------------------------------------------------------
 inline constexpr uint8_t kOpSPlus  = 0;
 inline constexpr uint8_t kOpSMinus = 1;
@@ -104,7 +89,7 @@ template <class Scalar>
 
 // ---------------------------------------------------------------------------
 // Internal: SoA-friendly thread-local scratch buffer used by the radix-sort
-// scatter flush. Identical layout to what Operator::apply_optimized used.
+// scatter flush.
 // ---------------------------------------------------------------------------
 template <class Scalar>
 struct LocalContribution {
@@ -113,13 +98,12 @@ struct LocalContribution {
 };
 
 // ---------------------------------------------------------------------------
-// Internal: O(n) radix sort by uint64 index. Identical algorithm to what
-// Operator::apply_optimized used; factored out so the complex and real
-// kernels share it.
+// Internal: O(n) radix sort by uint64 index, shared by the complex and real
+// kernels.
 //
 // `dim_for_bytes` is the max possible value of `index` (used to truncate
-// the byte loop early; for fixed-Sz that is the projected dim, for full
-// basis it is 1 << n_bits).
+// the byte loop early; for a projected basis that is the projected dim, for
+// the full basis it is 1 << n_bits).
 // ---------------------------------------------------------------------------
 template <class Scalar>
 inline void radix_sort_local(
@@ -161,8 +145,7 @@ inline void radix_sort_local(
 
 // ---------------------------------------------------------------------------
 // Internal: scatter sorted local buffer into `out` with one atomic per
-// (basis_state, run-of-equal-indices). Identical to what
-// Operator::apply_optimized used.
+// (basis_state, run-of-equal-indices).
 //
 // We specialise on Scalar so the real path emits a single `#pragma omp
 // atomic double` instead of the pair-of-doubles trick required for
@@ -244,14 +227,12 @@ inline void apply_terms(
     Scalar*       __restrict__ out)
 {
     static_assert(!BasisPolicy::needs_orbit_walk && !BasisPolicy::has_coeff_modifier,
-                  "apply_terms applies H to one state per row (Full / FixedSz policies)");
+                  "apply_terms applies H to one state per row");
     using Contrib = LocalContribution<Scalar>;
     const uint64_t dim      = basis.dim();
     const double   spin_sq  = spin_l * spin_l;
 
-    // Cache-blocking + parallelism mirrors Operator::apply_optimized.
-    // The radix-sort scatter is unchanged --- it was proven optimal in
-    // the audit of Phase 6.
+    // Cache-blocked rows, dynamic schedule, thread-local radix-sort scatter.
     constexpr size_t kCacheBlockSize = 4096;
     constexpr size_t kFlushThreshold = 4096;
     const uint64_t num_blocks =
@@ -285,18 +266,15 @@ inline void apply_terms(
 
             for (uint64_t i = block_start; i < block_end; ++i) {
                 const Scalar coeff_in = in[i];
-                // Skip negligible-amplitude states. Identical threshold
-                // to legacy Operator::apply_optimized; tweak with care
-                // (lowering breaks Lanczos invariants at quad-precision
-                // Krylov subspaces).
+                // Skip negligible-amplitude states. Tweak the threshold
+                // with care (lowering breaks Lanczos invariants at
+                // quad-precision Krylov subspaces).
                 if (std::abs(coeff_in) < 1e-15) continue;
 
                 // Prefetch the next input amplitude. The basis lookup
                 // is policy-dependent; the FullBasisPolicy resolves
                 // state_of() to a no-op so no separate prefetch is
-                // needed there, and the FixedSzBasisPolicy uses a
-                // direct array index into basis_states_ which the
-                // hardware prefetcher catches on linear iteration.
+                // needed there.
                 if (i + 8 < block_end) {
                     __builtin_prefetch(&in[i + 8], 0, 1);
                 }
@@ -412,12 +390,7 @@ inline void apply_terms(
 
 // ---------------------------------------------------------------------------
 // CSR triplet assembly lives in term_kernels_assemble.h
-// (``ed::matvec::kernel::emit_term_triplets``). A previous version of
-// this header also carried a serial ``emit_csr_triplets`` helper, but it
-// was a strict subset of ``emit_term_triplets`` (no parallelism, no
-// zero-coeff pruning, no thread-local pre-allocation) with no callers.
-// The unified ASSEMBLE kernel in term_kernels_assemble.h is the only
-// triplet emitter the codebase uses.
+// (``ed::matvec::kernel::emit_term_triplets``).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -528,7 +501,7 @@ inline void apply_term_to_state(
 // ---------------------------------------------------------------------------
 // apply_terms_rep_symmetry -- the HOST on-the-fly representative SpMV.
 //
-// "Optimized symmetry ED + NLCE" plan (Jun 2026). The CPU twin of the device
+// The CPU twin of the device
 // ``apply_terms_rep_symmetry_scatter`` (term_kernels_gpu.cuh): one row per
 // orbit representative ``i``. It does NOT walk an orbit CSR -- it applies the
 // Hamiltonian terms to the SINGLE representative ``reps[i]``
@@ -649,14 +622,14 @@ template <class Scalar>
 // ---------------------------------------------------------------------------
 // compute_rep_diagonal -- precompute the rep-symmetry Hamiltonian diagonal.
 //
-// "Optimized symmetry ED" plan, Phase B. The diagonal of H in the
+// The diagonal of H in the
 // representative basis is a per-row scalar independent of the input vector:
 // a diagonal term applied to ``rep_r`` emits ``(rep_r, h)`` which projects
 // back onto orbit ``r`` with phase ``proj_r``, so
 //   diag[r] = inv_norm[r] * sum_diag conj(h * proj_r).
 // Computed ONCE (the term list is fixed across solver iterations) and fused as
 // ``out[r] += diag[r]*in[r]`` by the gather driver, which then skips the
-// diagonal bins -- exactly the Full / Fixed-Sz precomputed-diagonal pattern.
+// diagonal bins -- the same precomputed-diagonal pattern as the full basis.
 // ---------------------------------------------------------------------------
 template <
     class BasisPolicy,
@@ -712,10 +685,10 @@ inline void compute_rep_diagonal(
 }
 
 // ---------------------------------------------------------------------------
-// apply_terms_rep_symmetry_gather -- the SOTA lock-free GATHER twin of
+// apply_terms_rep_symmetry_gather -- the lock-free GATHER twin of
 // ``apply_terms_rep_symmetry``.
 //
-// "Optimized symmetry ED" plan, Phase C. One thread OWNS each output orbit row
+// One thread OWNS each output orbit row
 // ``r``: it applies H to the single representative ``rep_r`` once, maps each
 // connected computational state ``s'`` back to its SOURCE orbit ``j`` +
 // projection ``proj`` via ``index_and_projection`` (reused verbatim from the

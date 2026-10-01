@@ -19,13 +19,11 @@ using namespace orch_detail;
 namespace {
 
 // Pick a sensible eigensolver when the caller leaves SolveMethod::Auto: full
-// diagonalization for tiny spaces, Lanczos otherwise. (Replaces the planner's
-// cost-model method choice.)
+// diagonalization for tiny spaces, Lanczos otherwise.
 [[nodiscard]] SolveMethod default_method_for(const LinearOperator& H,
                                              std::size_t num_eigs = 1) {
     if (H.global_dim() <= 1024) return SolveMethod::FullDiag;
-    // Correctness (2026-09-11): single-vector Lanczos reports every degenerate
-    // level ONCE (measured: k = 6 on the 14-site ring, dim 3432, returns the
+    // Single-vector Lanczos reports every degenerate level ONCE (measured: k = 6 on the 14-site ring, dim 3432, returns the
     // 5th level wrong), while Krylov-Schur resolves the multiplicities. A
     // window therefore defaults to Krylov-Schur; a single ground state keeps
     // the faster Lanczos lane.
@@ -45,17 +43,16 @@ GroundStateResult solve_on(Backend& be,
                            const SolveOptions& opts) {
     using Complex = std::complex<double>;
     const auto geom = H.geometry();
-    // Audit F4: the assembled CSR is now built directly (two-pass gather
-    // form, parallel) at a cost of a few matvecs, so it pays off for every
-    // Krylov solve inside the memory cutoff (ED_CSR_DIM_MAX, default 2^22);
-    // the planner's dim-based decision stands.
+    // The assembled CSR is built directly (two-pass gather form, parallel)
+    // at a cost of a few matvecs, so it pays off for every Krylov solve
+    // inside the memory cutoff (ED_CSR_DIM_MAX, default 2^22).
     auto matvec = H.template bind<Backend>();
 
     GroundStateResult R;
 
     // -----------------------------------------------------------------------
-    // Sensible defaults (planner removed). The caller's explicit method /
-    // max_iter win; otherwise a simple dim-based default. No memory-budget
+    // Defaults. The caller's explicit method / max_iter win; otherwise a
+    // simple dim-based default. No memory-budget
     // pre-flight refusal, and no CSR / symmetry-matvec override -- the leaf
     // policy hooks (sym_matvec_policy_hook, ED_CSR_* env)
     // keep their default + env-override behaviour, consumed lazily at first
@@ -73,21 +70,18 @@ GroundStateResult solve_on(Backend& be,
                       + " or num_eigs >= dim/2 (Krylov lanes cannot resolve such windows)");
         method = SolveMethod::FullDiag;
     }
-    // Audit 2026-09 (correctness): the previous default of 2*num_eigs+30
-    // (= 32 for the ground state) silently returned UNCONVERGED results
-    // for every problem that needs more than 32 Krylov iterations (i.e.
-    // any dim above ~1e4): energies wrong at 1e-7 and "eigenvectors" with
-    // residuals of 1e-3..1e-2 at tolerance 1e-10. The Krylov lanes all
-    // have Ritz-value early exit, so the cap only has to be generous (the
-    // FullDiag lane ignores it).
-    // Default iteration budget when the caller left it at 0. For the
-    // restarted lanes ``max_iter`` is the PER-CYCLE Krylov dimension (each
-    // cycle costs O(m^2 n) with full reorthogonalisation and runs to m
-    // regardless of convergence), so it must not scale with the dimension:
-    // the CLI's unset cap became min(dim, 1000) and a 4096-state chiral
-    // model took 592 s for three eigenvalues (0.5 s at m = 200; the Python
-    // facade already defaults to max(200, 8k + 80)). Single-vector Lanczos
-    // stops on convergence, so its cap may stay at min(dim, 1000).
+    // Default iteration budget when the caller left it at 0. The Krylov
+    // lanes all have Ritz-value early exit, so the cap only has to be
+    // generous: a tight cap (e.g. 2*num_eigs+30) returns UNCONVERGED
+    // energies and eigenvectors for any dim above ~1e4 (the FullDiag lane
+    // ignores it). For the restarted lanes ``max_iter`` is the PER-CYCLE
+    // Krylov dimension (each cycle costs O(m^2 n) with full
+    // reorthogonalisation and runs to m regardless of convergence), so it
+    // must not scale with the dimension: a cap of min(dim, 1000) took 592 s
+    // for three eigenvalues of a 4096-state chiral model against 0.5 s at
+    // m = 200 (the Python facade defaults to max(200, 8k + 80) too).
+    // Single-vector Lanczos stops on convergence, so its cap is
+    // min(dim, 1000).
     const std::size_t max_iter =
         (opts.max_iter > 0) ? opts.max_iter
         : (method == SolveMethod::Lanczos)
@@ -96,15 +90,12 @@ GroundStateResult solve_on(Backend& be,
             ? std::min<std::size_t>(std::max<std::uint64_t>(H.global_dim(), 1),
                                     std::max<std::size_t>(200, 8 * opts.num_eigs + 80))
             : 2 * opts.num_eigs + 30;
-    // Two-pass Lanczos for eigenvectors (audit F3): no kept basis, no
+    // Two-pass Lanczos for eigenvectors: no kept basis, no
     // O(m^2 n) reorthogonalisation; the recurrence is rerun once and the
-    // Ritz vectors accumulated on the fly. ED_LANCZOS_EIGVEC_TWOPASS=0
-    // restores the kept-basis FullCGS2 lane.
-    const bool eigvec_two_pass = [&] {
-        if (!(opts.compute_vectors && method == SolveMethod::Lanczos)) return false;
-        return ed::env::flag("ED_LANCZOS_EIGVEC_TWOPASS", true);
-    }();
-    const std::uint64_t subspace_cap_vectors = 0;  // uncapped (no planner budget)
+    // Ritz vectors accumulated on the fly.
+    const bool eigvec_two_pass =
+        opts.compute_vectors && method == SolveMethod::Lanczos;
+    const std::uint64_t subspace_cap_vectors = 0;  // uncapped
 
     // Leaf memory guard: throw cleanly before the dominant allocation rather
     // than OOM-crash. H.global_dim() is the actual working dimension (full /
@@ -153,42 +144,21 @@ GroundStateResult solve_on(Backend& be,
 
     if (method == SolveMethod::Lanczos) {
         // -------------------------------------------------------------
-        // Wave 1.1 of the SOTA Performance rollout (May 2026): on the
-        // CPU backend, for the canonical eigenvalues-only ground-state
-        // request on a real-Hermitian operator, dispatch to the
-        // legacy `lanczos_real` lane. This was the engine the Apr 25
-        // baseline measured (`bench_vs_xdiag_*.json` Python rows) and
-        // remains 30-50% faster than the unified complex
-        // `lanczos_kernel<CpuBackend>` thanks to fused BLAS-1, K=1
-        // local-DGKS, zero-copy ring rotation, and a native-double
-        // recurrence (`src/solvers/cpu/lanczos.cpp:1110-1258`).
+        // Real-H fast path: on the CPU backend, a real-Hermitian operator
+        // runs on the native-double `lanczos_real` lane, 30-50% faster
+        // than the complex `lanczos_kernel<CpuBackend>` thanks to fused
+        // BLAS-1, K=1 local-DGKS, zero-copy ring rotation, and a
+        // native-double recurrence (src/solvers/cpu/lanczos.cpp).
         //
-        // Eligibility (all must hold):
-        //   * CpuBackend (no GPU lane affected),
-        //   * single eigenvalue (the smallest --- num_eigs == 1),
-        //   * eigenvalues only (caller did NOT request eigenvectors;
-        //     CF spectral / per-state observables go through the
-        //     complex kernel which keeps the basis),
-        //   * H reports ``is_real_hermitian() == true``.
-        //
-        // Env opt-out: ``ED_FORCE_COMPLEX_LANCZOS=1`` returns the
-        // pre-Wave-1.1 behaviour (unified complex kernel) for A/B
-        // performance comparison and bisection.
+        // It serves the ground state, eigenvalue WINDOWS (num_eigs > 1,
+        // with the Ritz residual bounds the window contract requires) and
+        // EIGENVECTORS via a real two-pass reconstruction, so the complex
+        // kernel is only used when the operator is genuinely complex or
+        // the real lane cannot certify its vector.
         // -------------------------------------------------------------
         if constexpr (std::is_same_v<Backend, ed::matvec::CpuBackend>) {
-            const bool force_complex = []() {
-                return ed::env::flag("ED_FORCE_COMPLEX_LANCZOS", false);
-            }();
-            // Audit F3/F5 (2026-09): the real-storage lane now also serves
-            // eigenvalue WINDOWS (num_eigs > 1, with the Ritz residual
-            // bounds the window contract requires) and EIGENVECTORS via a
-            // real two-pass reconstruction, so the complex kernel is only
-            // used when the operator is genuinely complex or the two-pass
-            // lane is disabled by env.
             bool real_done = false;
-            if (!force_complex
-                    && (!opts.compute_vectors || eigvec_two_pass)
-                    && H.is_real_hermitian()) {
+            if (H.is_real_hermitian()) {
                 auto Hv_real = H.bind_real_cpu();
                 auto H_fn = [Hv_real](const double* in, double* out, int n) {
                     Hv_real(in, out, static_cast<std::size_t>(n));
@@ -295,14 +265,10 @@ GroundStateResult solve_on(Backend& be,
                 R.backend.wall_seconds =
                     std::chrono::duration<double>(t1 - t0).count();
                 R.backend.notes.emplace_back(
-                    "dispatch", "lanczos_real (Wave 1.1 real-H fast path)");
-                // Phase D (May 2026): truthful lane reporting. The
-                // lanczos_real fast path is guarded by the
-                // CpuBackend ``constexpr`` branch above so the lane
-                // label is the template's lane unconditionally. Using
-                // ed::lane_label_for<Backend>() keeps the labels
-                // consistent with the variant-driven helper used at
-                // the bottom of solve() / thermal().
+                    "dispatch", "lanczos_real (real-H fast path)");
+                // The lanczos_real fast path is guarded by the
+                // CpuBackend ``constexpr`` branch above, so the lane
+                // label is the template's lane unconditionally.
                 R.backend.lane = ed::lane_label_for<Backend>();
                 return R;
             }
@@ -311,91 +277,46 @@ GroundStateResult solve_on(Backend& be,
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter      = max_iter;
         kopts.dim_cap       = static_cast<std::size_t>(geom.global_dim);
-        kopts.keep_basis    = opts.compute_vectors && !eigvec_two_pass;
-
-        // Wave 2.1 + correction: LocalDGKS3 K=1 only ortho-projects
-        // against the most recent two basis vectors. That is enough
-        // for the EIGENVALUES-only path (tridiag eigvals don't need
-        // mutually-orthogonal basis vectors), but if the orchestrator
-        // is asked to RECONSTRUCT eigenvectors via
-        //     psi_k = sum_i S(i, k) * V_i
-        // (which is the path taken by ``ground_state_cf`` spectral and
-        // any caller that sets ``compute_vectors = true``) the basis
-        // MUST stay numerically orthogonal across all iterations.
-        // FullCGS2 (against the kept basis) is the standard recipe.
-        //
-        // So: keep K=1 LocalDGKS3 (Wave 2.1) when basis is NOT kept,
-        // and use FullCGS2 when it IS. ``ED_LANCZOS_REORTH_K`` still
-        // overrides the local ring width when the user knows their
-        // spectrum has near-degeneracies that K=1 can miss.
-        if (kopts.keep_basis) {
-            kopts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
-        } else {
-            kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
-            kopts.local_ring_size = 1;
-            if (const char* k_env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
-                try {
-                    const long k_val = std::stol(k_env);
-                    if (k_val >= 1 && k_val <= 64) {
-                        kopts.local_ring_size =
-                            static_cast<std::size_t>(k_val);
-                    }
-                } catch (...) {
-                    // malformed env: silently keep the default.
-                }
-            }
-        }
-        // Wire in Ritz-value early exit so the orchestrator matches the
-        // legacy CPU `lanczos()` convergence behaviour (otherwise the
-        // kernel always runs to `max_iter` -- 5-10x slower on small
-        // problems and a noticeable hit even on large ones).
+        // No kept basis: eigenvectors come from the two-pass
+        // reconstruction below, so K=1 LocalDGKS3 suffices.
+        // The kept-basis FullCGS2 lane is the certification fallback.
+        kopts.keep_basis      = false;
+        kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
+        kopts.local_ring_size = 1;
+        // Ritz-value early exit (otherwise the kernel always runs to
+        // `max_iter` -- 5-10x slower on small problems and a noticeable
+        // hit even on large ones).
         kopts.convergence_check =
             ed::krylov::make_smallest_ritz_convergence(opts.num_eigs,
                                                        opts.tolerance,
                                                        /*min_iters=*/0,
                                                        /*require_residual_bound=*/opts.compute_vectors);
-        // Wave 2.6: check every-5 iterations to amortise the O(m^2)
-        // LAPACK tridiag eigensolve. A few extra Lanczos iterations
-        // (~ check_interval / 2) are cheaper than one extra dstevd
-        // every iter past convergence. Matches the distributed lane
-        // and the post-Wave-2.6 `lanczos()` default. Override via
-        // env ``ED_LANCZOS_CHECK_EVERY``.
+        // Check every 5 iterations to amortise the O(m^2) LAPACK tridiag
+        // eigensolve. A few extra Lanczos iterations (~ check_interval / 2)
+        // are cheaper than one extra dstevd every iter past convergence.
+        // Same interval as the `lanczos()` default.
         kopts.convergence_check_interval = 5;
-        if (const char* ce = ed::env::raw("ED_LANCZOS_CHECK_EVERY")) {
-            try {
-                const long ci = std::stol(ce);
-                if (ci >= 1 && ci <= 1000) {
-                    kopts.convergence_check_interval =
-                        static_cast<std::size_t>(ci);
-                }
-            } catch (...) {
-                // malformed env: keep the default.
-            }
-        }
         auto kres = ed::krylov::lanczos_kernel(be, matvec, geom.local_dim,
                                                seed, kopts);
-        // Convergence bookkeeping (audit): the lane used to leave
-        // `krylov.converged` false even when the Ritz check fired, and
-        // said nothing when the cap was hit.
+        // Converged = the Ritz check fired before the cap, or the Krylov
+        // space exhausted the full dimension.
         const std::size_t cap_hit_m = std::min<std::size_t>(
             max_iter, static_cast<std::size_t>(geom.global_dim));
         R.krylov.converged = (kres.alpha.size() < cap_hit_m) ||
                              (kres.alpha.size() == static_cast<std::size_t>(geom.global_dim));
         // Solve the small (m x m) real-symmetric tridiagonal for the
         // lowest `num_eigs` eigenvalues. When the caller didn't request
-        // eigenvectors, use the eigenvalues-only Eigen path -- the
-        // legacy `solve_tridiag_with_eigenvectors` did the full eigen
-        // problem unconditionally, which is ~2-3x slower for the
-        // common num_eigs=1 + compute_vectors=false workflow.
+        // eigenvectors, use the eigenvalues-only path -- the full eigen
+        // problem (`solve_tridiag_with_eigenvectors`) is ~2-3x slower for
+        // the common num_eigs=1 + compute_vectors=false workflow.
         std::vector<double> evals;
         std::vector<double> evec_coeffs;  // column-major m x m
-        // GAP 10 fix (2026-07-16): a requested WINDOW (num_eigs > 1) needs
-        // the tridiag eigenvectors even on the eigenvalues-only path --
-        // the per-Ritz residual bound |beta_m| * |z_{m,i}| is free once z
-        // exists, and without it stalled interior Ritz values escaped
-        // into the merged spectrum as plausible-looking garbage (measured:
-        // -2.686 reported where dense says -2.459; NOT a reorth ghost --
-        // K = 1..32 identical). num_eigs == 1 keeps the fast
+        // A requested WINDOW (num_eigs > 1) needs the tridiag eigenvectors
+        // even on the eigenvalues-only path: the per-Ritz residual bound
+        // |beta_m| * |z_{m,i}| is free once z exists, and without it
+        // stalled interior Ritz values escape into a merged spectrum as
+        // plausible-looking garbage (e.g. -2.686 where dense says -2.459;
+        // not a reorth ghost -- K = 1..32 identical). num_eigs == 1 keeps the fast
         // eigenvalues-only path: the extreme pair is what Lanczos
         // converges first and the stall detector guards it adequately.
         const bool need_z = opts.compute_vectors || opts.num_eigs > 1;
@@ -408,7 +329,7 @@ GroundStateResult solve_on(Backend& be,
                 kres.alpha, kres.beta, kres.alpha.size());
         }
         if (opts.num_eigs > 1 && !evec_coeffs.empty()) {
-            // Audit 2026-09: drop Lanczos ghosts (Cullum-Willoughby) so a
+            // Drop Lanczos ghosts (Cullum-Willoughby) so a
             // window never reports a converged level twice; the tridiag
             // eigenvector columns are repacked to match.
             const std::size_t m = kres.alpha.size();
@@ -429,15 +350,12 @@ GroundStateResult solve_on(Backend& be,
         }
         const std::size_t n_keep =
             std::min<std::size_t>(opts.num_eigs, evals.size());
-        // GAP-10 v2 (2026-07-17): the first fix TRUNCATED to the certified
-        // prefix, which broke the num_eigs COUNT contract in
-        // environment-dependent ways (an OpenBLAS runner trimmed a value
-        // the local run kept; [unified-e2e] 83 asserted the count). The
-        // window is now returned IN FULL and every value carries its
+        // The window is returned IN FULL (truncating to the certified
+        // prefix would break the num_eigs COUNT contract in
+        // environment-dependent ways) and every value carries its
         // residual bound |beta_m| * |z_{m,i}| in krylov.ritz_residuals --
-        // consumers that MERGE windows (the streaming sector pools, where
-        // the original garbage did its damage) filter on the bound; a
-        // direct caller keeps num_eigs values plus the diagnostics.
+        // consumers that MERGE windows (sector pools) filter on the bound;
+        // a direct caller keeps num_eigs values plus the diagnostics.
         std::vector<double> ritz_bounds;
         // |beta_m| of pass 1: the last (unused) recurrence coefficient that
         // turns the tridiag eigenvector bottom component into the residual
@@ -459,12 +377,10 @@ GroundStateResult solve_on(Backend& be,
         }
         R.eigenvalues.assign(evals.begin(), evals.begin() + n_keep);
 
-        // Reconstruct host-side eigenvectors from the kept Lanczos basis
-        // when the caller requested them. evec_coeffs is the (m x m)
-        // eigenvector matrix of the tridiag in column-major order; the
-        // k-th eigenvector in the original Hilbert space is the linear
-        // combination psi_k = sum_i evec_coeffs(i, k) * basis[i].
-        if (opts.compute_vectors && eigvec_two_pass && !evec_coeffs.empty()) {
+        // Reconstruct host-side eigenvectors when the caller requested
+        // them. evec_coeffs is the (m x m) eigenvector matrix of the tridiag
+        // in column-major order; psi_k = sum_i evec_coeffs(i, k) * V_i.
+        if (opts.compute_vectors && !evec_coeffs.empty()) {
             // ---- Pass 2: rerun the identical recurrence and accumulate
             //      psi_k = sum_j y_{j,k} V_j as the basis vectors stream by.
             const std::size_t m = kres.alpha.size();
@@ -501,8 +417,8 @@ GroundStateResult solve_on(Backend& be,
                 R.krylov.residual_norm = resid;
                 // Certification. The Ritz-value stop at `tolerance` gives a
                 // vector whose residual scales like sqrt(tolerance) * |E|,
-                // so an absolute gate (the first cut used 1e-6) is never met
-                // at tol = 1e-10 and sent every N >= 20 run through the slow
+                // so an absolute gate (e.g. 1e-6) is never met at tol = 1e-10
+                // and would send every N >= 20 run through the slow
                 // kept-basis fallback. The right yardstick is the free
                 // Lanczos bound |beta_m| |z_{m,0}| from pass 1: a faithful
                 // reconstruction reproduces it to O(1); loss of orthogonality
@@ -549,24 +465,6 @@ GroundStateResult solve_on(Backend& be,
                 }
                 R.eigenvectors = std::move(evref);
             }
-        } else if (opts.compute_vectors && !kres.basis.empty()) {
-            const std::size_t m = kres.alpha.size();
-            EigenvectorRef evref;
-            evref.host.resize(n_keep,
-                              std::vector<Complex>(geom.local_dim, Complex{0.0, 0.0}));
-            std::vector<Complex> basis_host(geom.local_dim);
-            for (std::size_t i = 0; i < m && i < kres.basis.size(); ++i) {
-                be.copy_to_host(kres.basis[i].get(),
-                                basis_host.data(), geom.local_dim);
-                for (std::size_t k = 0; k < n_keep; ++k) {
-                    const double c = evec_coeffs[i + k * m];
-                    auto& out = evref.host[k];
-                    for (std::size_t r = 0; r < geom.local_dim; ++r) {
-                        out[r] += c * basis_host[r];
-                    }
-                }
-            }
-            R.eigenvectors = std::move(evref);
         }
 
         R.krylov.alpha = std::move(kres.alpha);
@@ -598,17 +496,16 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.iters_done = kres.iters_done;
         R.krylov.converged  = kres.converged;
     } else {
-        // FullDiag lane: build the dense matrix-vector applied to every
-        // basis vector and run LAPACK zheevd via the legacy
-        // `full_diagonalization` helper. The orchestrator only takes this
-        // path for small dimensions (<= 2^12 by default) so the O(N^3)
-        // dense step is affordable.
+        // FullDiag lane: build the dense matrix and run LAPACK zheevd via
+        // `full_diagonalization`. The default method picks this lane only
+        // for small dimensions (<= 1024), so the O(N^3) dense step is
+        // affordable.
         //
         // The FullDiag column-extraction loop in
         // ``::full_diagonalization`` (lanczos.cpp) calls
         // ``H(unit_vec.data(), col_j.data(), N)`` with host
         // ``std::vector<Complex>`` storage. If we hand it a matvec
-        // bound to a non-CPU backend (e.g. the streaming-symmetry
+        // bound to a non-CPU backend (e.g. the representative-sector
         // GPU mirror, advertised via
         // ``Geometry::supports_device_matvec=true``), the lambda
         // dereferences the host pointers as device pointers and
@@ -620,9 +517,8 @@ GroundStateResult solve_on(Backend& be,
         // binding (``LinearOperator::bind_cpu()`` is supported by
         // every Operator subclass and is the fallback path
         // ``LinearOperator::bind<CpuBackend>()`` selects). The Lanczos /
-        // KrylovSchur lanes above keep the original
-        // device-bound matvec since they operate entirely in the
-        // backend's memory space.
+        // KrylovSchur lanes above keep the device-bound matvec since they
+        // operate entirely in the backend's memory space.
         ed::LinearOperator::MatvecFn cpu_matvec = H.bind_cpu();
         std::function<void(const Complex*, Complex*, int)> Hv =
             [&](const Complex* in, Complex* out, int n) {
@@ -640,7 +536,7 @@ GroundStateResult solve_on(Backend& be,
                              /*op_for_dense=*/&H,
                              opts.compute_vectors ? &fd_vecs : nullptr);
         if (opts.compute_vectors && !fd_vecs.empty()) {
-            // Audit 2026-09: the dense lane hands its vectors back in memory.
+            // The dense lane hands its vectors back in memory.
             EigenvectorRef evref;
             evref.host = std::move(fd_vecs);
             R.eigenvectors = std::move(evref);
@@ -652,19 +548,11 @@ GroundStateResult solve_on(Backend& be,
         R.krylov.converged  = true;
     }
 
-    // Phase D (May 2026): truthful lane reporting. The legacy line
-    //
-    //     R.backend.lane = geom.is_device() ? "gpu" : "cpu";
-    //
-    // pulled the label from the operator's memory_space, which is
-    // wrong for every SectorView (streaming-symmetry /
-    // FixedSzStreamingSymmetry): those views report ``Host``
-    // memory_space yet advertise ``supports_device_matvec=true``, so
-    // ``select_backend`` actually picks ``CudaBackend`` and
-    // ``bind_cuda()`` wires a lazy GPU mirror -- the label simply
-    // misreported the lane. ``ed::lane_label_for<Backend>()`` reads
-    // the template parameter directly so the label always matches
-    // the lane ``std::visit`` dispatched to.
+    // The lane label comes from the Backend template parameter, not the
+    // operator's memory_space: a host-resident operator that advertises
+    // ``supports_device_matvec=true`` runs on ``CudaBackend``, so only
+    // ``ed::lane_label_for<Backend>()`` always matches the lane
+    // ``std::visit`` dispatched to.
     R.backend.lane = ed::lane_label_for<Backend>();
     const auto t1 = std::chrono::steady_clock::now();
     R.backend.wall_seconds =

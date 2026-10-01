@@ -1,14 +1,12 @@
 // =============================================================================
-// Minimal, header-only test harness for the ED package.
+// Minimal, header-only test fixtures for the ED package.
 //
 // Design goals:
-//   * Zero external dependencies (no gtest/catch): tests must build in the
-//     same environment as the main ED target.
+//   * No test-framework dependency: catch2_harness.h wraps these helpers
+//     for the Catch2 suites.
 //   * Deterministic: every random fixture takes a seed.
-//   * Small: we test against tiny systems (N <= 6 spin-1/2) whose spectra
-//     can be cross-checked against a dense Eigen reference in milliseconds.
-//   * Compose-friendly: each test file registers individual checks and
-//     returns a single int exit code; CTest consumes that directly.
+//   * Small: fixtures are tiny spin-1/2 systems whose spectra can be
+//     cross-checked against a dense Eigen reference in milliseconds.
 // =============================================================================
 #pragma once
 
@@ -17,7 +15,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>  // P0.12
+#include <filesystem>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -25,7 +23,7 @@
 #include <random>
 #include <sstream>
 #include <string>
-#include <system_error>  // P0.12
+#include <system_error>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -158,9 +156,7 @@ inline bool check_eigs_close(TestContext& ctx, std::vector<double> got,
 // We go through the optimized SoA path by pushing TransformData entries
 // directly into ``op->transform_data_``; ``Operator::commitPendingTransforms``
 // (invoked automatically by every matvec entry point) tracks the vector size
-// and rebuilds the SoA ``terms_`` cache on the next apply(). The legacy
-// ``separateTransformsByType()`` lazy fan-out was retired with the term-
-// storage refactor in May 2026.
+// and rebuilds the SoA ``terms_`` cache on the next apply().
 inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
                                                        bool periodic = false) {
     auto op = std::make_unique<Operator>(N, 0.5f);
@@ -322,16 +318,15 @@ inline double l2_diff(const ComplexVector& a, const ComplexVector& b) {
     return std::sqrt(s);
 }
 
-// Create (and return) a unique per-test temporary directory. The path lives
-// under `build/tests/tmp/<suite>_<suffix>/` so concurrent CTest jobs do not
-// collide and so artifacts are easy to wipe.
+// Create (and return) a unique per-test temporary directory under
+// `$ED_TEST_TMP_DIR` (default `test_scratch`) as `<suite>_<suffix>/`, so
+// concurrent CTest jobs do not collide and artifacts are easy to wipe.
 inline std::string make_scratch_dir(const std::string& suite,
                                     const std::string& suffix = "") {
     const char* base_env = std::getenv("ED_TEST_TMP_DIR");
     std::string base = base_env && *base_env ? base_env : "test_scratch";
     std::string dir = base + "/" + suite;
     if (!suffix.empty()) dir += "_" + suffix;
-    // P0.12: was system("mkdir -p '...'") (shell-quoted).
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     return dir;

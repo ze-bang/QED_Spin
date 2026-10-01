@@ -2,17 +2,14 @@
 // =============================================================================
 // include/ed/symmetry/symmetry_cache.h
 //
-// Stage 3 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): content-addressed persistence
-// + in-process sharing for the OrbitTable, finally implementing the
-// long-plumbed-but-never-consumed ``basis_cache_dir`` contract.
+// Content-addressed persistence + in-process sharing for the OrbitTable.
 //
 // Two layers, both keyed by ``OrbitTable::content_hash`` (CompiledGroup
 // element hash x subspace signature x engine version -- Hamiltonian
 // couplings deliberately excluded, which is why parameter sweeps hit):
 //
 //   1. In-process registry: a small FIFO of shared_ptr<const OrbitTable>.
-//      Repeated qed.solve/thermal/spectral calls in one process (and the
+//      Repeated qed.eigs/thermal/spectrum calls in one process (and the
 //      GeneratorSet temp-dir round-trip, whose PATH changes but whose
 //      CONTENT does not) reuse the table without any rebuild. Always on;
 //      correctness-neutral (tables are immutable once built).
@@ -89,7 +86,7 @@ otab_path(const std::string& cache_dir, std::uint64_t key) {
 }  // namespace detail
 
 // ---------------------------------------------------------------------------
-// save / load (public for tests + the precompute_basis_only CLI mode).
+// save / load (public for tests).
 // Failures are soft everywhere: the cache is derived data, so any I/O or
 // validation problem falls back to "no cache" and the caller rebuilds.
 // ---------------------------------------------------------------------------
@@ -237,9 +234,8 @@ private:
 };
 
 // Physical verification of a cache hit: registry/disk entries are keyed by a
-// salted content hash, and correctness must NOT ride on hash quality (the
-// GPU-mirror memo's word-XOR FNV collided on structured inputs -- Stage-9f
-// precedent). Spot-verify sampled reps against the CALLER's group + subspace:
+// salted content hash, and correctness must NOT ride on hash quality
+// (structured inputs can collide). Spot-verify sampled reps against the CALLER's group + subspace:
 // membership (bit range, popcount / parity) and canonical-minimum under the
 // group action. A wrong-table hit fails with near-certainty; cost is
 // <= 64 x |G| LUT applies, negligible next to any solve.
@@ -286,11 +282,9 @@ acquire_impl(std::uint64_t key, const std::string& cache_dir, BuildFn&& build,
                      "verification (key collision or stale entry) -- rebuilding\n");
         reg.erase(key);
     }
-    // Jul 2026: honor ED_SYM_CACHE_DIR HERE, at the single choke point --
-    // the little-group lane's acquire calls pass no caller dir, so despite
-    // the env being exported every 36-site job silently rebuilt its 126M-rep
-    // orbit table (83 s x hundreds of planned star jobs). Env override wins,
-    // caller dir second, empty disables the disk layer.
+    // ED_SYM_CACHE_DIR is honored HERE, at the single choke point, because
+    // some callers (the little-group lane) pass no caller dir. Env override
+    // wins, caller dir second, empty disables the disk layer.
     std::string dir;
     if (disk_cache_enabled()) {
         const std::string ovr = cache_dir_override();
@@ -377,7 +371,7 @@ acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
 }
 
 /// Resolve the effective disk-cache directory for a lattice fixture
-/// directory (the documented ``basis_cache_dir`` contract):
+/// directory:
 ///   explicit option > ED_SYM_CACHE_DIR > <lattice_dir>/basis_cache;
 ///   ED_SYM_CACHE=0 disables regardless. ``lattice_dir`` may be empty
 ///   (in-memory operators): registry-only unless an override names a dir.

@@ -1,7 +1,7 @@
 // =============================================================================
 // src/parallel/thread_budget.cpp
 //
-// Implementation of the auto thread-count budget (Phase 6 #2). See
+// Implementation of the auto thread-count budget. See
 // include/ed/parallel/thread_budget.h for the design rationale.
 //
 // OpenBLAS integration uses a *weak symbol*: when the binary is linked
@@ -62,16 +62,11 @@ int auto_threads_for_dim(std::uint64_t dim) {
     const int max_t = omp_max_threads();
     if (auto_threads_disabled() || max_t <= 1) return max_t;
 
-    // Two knobs:
-    //   * ED_AUTO_THREADS_PER_K (default 8) -- aim for one OMP/BLAS worker per
-    //     K*1024 basis states (i.e. K * 16 KiB of complex double per thread).
-    //     This grows the team linearly with dim until we cross the hardware
-    //     ceiling.
-    //   * ED_AUTO_THREADS_CEIL (default 8) -- soft cap on the number of
-    //     threads regardless of dim, because the dominant Lanczos kernels
-    //     (SpMV, zaxpy, dznrm2) are memory-bandwidth bound and saturate
-    //     well below ``max_threads`` on every machine we have measured.
-    //     Set to 0 to disable the soft cap (use ``min(dim/per_k, max_t)``).
+    // Aim for one OMP/BLAS worker per kPerK*1024 basis states (kPerK * 16 KiB
+    // of complex double per thread), growing the team linearly with dim, and
+    // soft-cap it at kCeil threads: the dominant Lanczos kernels (SpMV,
+    // zaxpy, dznrm2) are memory-bandwidth bound and saturate well below
+    // ``max_threads`` on every machine we have measured.
     //
     // On a 32-core x86_64 box (Ryzen 7950X-class, OpenBLAS-pthread, gcc-13)
     // we measured the following Lanczos(N) total runtime in ms vs OMP+BLAS
@@ -84,31 +79,18 @@ int auto_threads_for_dim(std::uint64_t dim) {
     //     18           320  244  219  198   248
     //     20          1647 1486 1094 1374  1310
     //
-    // The optimum sits at 4-8 threads for every N >= 16; the default
-    // ``ED_AUTO_THREADS_CEIL=8`` captures that without needing per-machine
-    // tuning. HPC users on systems with significantly more memory
-    // bandwidth (multi-socket, MI300A, GH200) can raise the ceiling.
-    std::uint64_t per_k = 8;
-    if (const char* env = ed::env::raw("ED_AUTO_THREADS_PER_K")) {
-        const long long parsed = std::strtoll(env, nullptr, 10);
-        if (parsed > 0) per_k = static_cast<std::uint64_t>(parsed);
-    }
+    // The optimum sits at 4-8 threads for every N >= 16; a ceiling of 8
+    // captures that without needing per-machine tuning.
+    constexpr std::uint64_t kPerK = 8;
+    constexpr int kCeil = 8;
+    const int ceil = std::min(kCeil, max_t);
 
-    int ceil = 8;
-    if (const char* env = ed::env::raw("ED_AUTO_THREADS_CEIL")) {
-        const long long parsed = std::strtoll(env, nullptr, 10);
-        if (parsed >= 0) ceil = static_cast<int>(parsed);
-    }
-    // ``ceil <= 0`` disables the soft cap entirely.
-    if (ceil <= 0 || ceil > max_t) ceil = max_t;
-
-    const std::uint64_t denom = per_k * 1024ULL;
-    if (denom == 0) return std::min(ceil, max_t);
+    const std::uint64_t denom = kPerK * 1024ULL;
 
     const std::uint64_t want64 = std::max<std::uint64_t>(1, dim / denom);
     const int want = static_cast<int>(std::min<std::uint64_t>(
         want64, static_cast<std::uint64_t>(max_t)));
-    return std::clamp(want, 1, std::min(ceil, max_t));
+    return std::clamp(want, 1, ceil);
 }
 
 ThreadBudgetScope::ThreadBudgetScope(int threads, int blas_threads) {

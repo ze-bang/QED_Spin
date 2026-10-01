@@ -16,8 +16,6 @@
 // We deliberately do NOT include allocation in the timed section --
 // `state.PauseTiming()` is used around `ComplexVector(dim)` so the
 // reported time is purely the apply() cost.
-//
-// Audit ref: P2.13.
 // =============================================================================
 
 #include <benchmark/benchmark.h>
@@ -91,7 +89,7 @@ void run_apply(benchmark::State& state, bool periodic, bool real_input) {
     auto op = make_heisenberg_chain(N, periodic);
     ComplexVec vin  = random_unit_vector(dim, /*seed=*/42);
     if (real_input) {
-        // Strip imag so apply()'s isReal-fast-path takes over (audit §2.1).
+        // Strip imag so apply()'s real-input fast path takes over.
         for (auto& z : vin) z = Complex(z.real(), 0.0);
     }
     ComplexVec vout(dim);
@@ -145,11 +143,11 @@ void BM_OperatorApplyReal_PBC(benchmark::State& state) {
 }
 
 // ---------------------------------------------------------------------------
-// SOTA matrix-apply plan (Phase 1 gate): matrix-free GATHER vs SCATTER.
+// Matrix-free GATHER vs SCATTER.
 //
 // Forces the matrix-free path (ED_CSR_FORCE=0) and toggles the shared-memory
-// kernel via ED_MATVEC_SCATTER so the new lock-free row-GATHER default can be
-// compared head-to-head against the legacy SCATTER baseline (atomic + radix
+// kernel via ED_MATVEC_SCATTER so the lock-free row-GATHER default can be
+// compared head-to-head against the SCATTER kernel (atomic + radix
 // sort) on the identical Heisenberg workload. Both env vars are read once when
 // the lazy backend is built (inside the warm-up apply below), so we set them
 // before constructing/warming the operator and clear them afterwards.
@@ -190,7 +188,7 @@ void BM_MatFree_Scatter_PBC(benchmark::State& state) { run_matfree(state, /*scat
 // Dims swept: 2^8=256, ..., 2^20=1.05M. The largest two stress true
 // memory-bound SpMV; the smaller ones probe per-iter overhead.
 // PBC_Real is the natural Lanczos workload (real seed); reports the
-// effective speedup of the audit §2.1 Phase 1 fast path over the pure
+// effective speedup of the real-input fast path over the pure
 // complex path of PBC.
 BENCHMARK(BM_OperatorApply_OBC)
     ->Arg(8)->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
@@ -205,7 +203,7 @@ BENCHMARK(BM_OperatorApplyReal_PBC)
     ->Arg(10)->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
     ->Unit(benchmark::kMicrosecond);
 
-// Head-to-head: new lock-free row GATHER (default) vs legacy SCATTER baseline.
+// Head-to-head: lock-free row GATHER (default) vs SCATTER.
 BENCHMARK(BM_MatFree_Gather_PBC)
     ->Arg(12)->Arg(14)->Arg(16)->Arg(18)->Arg(20)
     ->Unit(benchmark::kMicrosecond);

@@ -5,17 +5,14 @@
 // The SU(2) Casimir S^2_tot = (S_tot)^2 as an `::Operator` carrier, the
 // operator the total-spin (Lowdin) projections and block restrictions use.
 //
-// Stage 12a of the SU(2) rollout (docs/architecture/SYMMETRY_V2_DESIGN.md).
-//
 // Operator identity (spin-1/2, N sites):
 //
 //   S^2 = sum_i S_i^2 + 2 sum_{i<j} S_i . S_j
 //       = (3N/4) Id + sum_{i<j} [ 2 Sz_i Sz_j + S+_i S-_j + S-_i S+_j ]
 //
-// Every piece is expressible in the EXISTING term ABI -- that is the whole
-// point of Route A (Casimir/projection): the same CPU/GPU/MPI term kernels
-// that apply H in any symmetry-adapted basis (fixed-Sz combinadic, rep/orbit
-// per momentum x irrep, flip-projected, little-group isotypic via lift) apply
+// Every piece is expressible in the standard term ABI, so the same CPU/GPU
+// term kernels that apply H in any symmetry-adapted basis (rep/orbit per
+// momentum x irrep, flip-projected, little-group isotypic via lift) apply
 // S^2 there too, because [S^2, g] = 0 for every site permutation g, every
 // flip mask, and Sz (S^2 conserves popcount term-by-term).
 //

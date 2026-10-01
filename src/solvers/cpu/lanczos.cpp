@@ -1,4 +1,3 @@
-#include <ed/config/env_registry.h>
 #include <ed/solvers/lanczos.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backends/cpu_backend.h>
@@ -8,7 +7,6 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <iomanip>
@@ -152,7 +150,7 @@ void estimate_spectral_bounds(
 // =============================================================================
 // lanczos_real -- real-storage / real-arithmetic Lanczos for eigenvalues only.
 //
-// Phase 6 #7: when the Hamiltonian is real and the seed is real, the entire
+// When the Hamiltonian is real and the seed is real, the entire
 // Krylov basis stays real. The complex ``lanczos_kernel`` stores complex
 // vectors, paying 2x memory traffic and 2x BLAS-1 FLOPs over the
 // strictly-needed amount. At N = 18-22 (Krylov dim < 1M) the iter is BLAS-1
@@ -218,13 +216,12 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     // Local-reorth ring buffer: max_recent slabs of N doubles each, held
     // as a single contiguous allocation. Each iter we write the just-
     // computed v_{j+1} *directly* into slab[ring_head] via the fused
-    // norm+scale kernel (Phase 6 #9 + #10) instead of writing into v_next
+    // norm+scale kernel instead of writing into v_next
     // and then memcpy'ing into the slab. v_current and v_prev are POINTER
     // views into earlier slabs; the rotating ring head IS the new
-    // v_current. This kills the per-iter dim-N memcpy that the previous
-    // ring-update did.
+    // v_current, so no iteration pays a dim-N memcpy.
     constexpr int max_recent = 5;
-    // Phase 6 #12: project against the K most-recent ring vectors.
+    // Project against the K most-recent ring vectors.
     // Default K=1: a single DGKS pass against v_{j-1}. This is the
     // canonical Lanczos-with-one-step-reorthogonalisation used by xdiag,
     // ARPACK (`dsaupd` mode 1), and SLEPc -- one DGKS pass restores
@@ -245,13 +242,8 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     // The lone extra pass at K=1 saves one full dim-N dot+axpy per iter
     // (which is memory-bandwidth bound on every modern x86 CPU), and the
     // resulting eigenvalues match the K=3 reference to 1e-9 -- well below
-    // the user-facing tolerance of 1e-10. Override with
-    // ED_LANCZOS_REORTH_K=N (0..max_recent-1) for ill-conditioned spectra.
-    int reorth_K = 1;
-    if (const char* env = ed::env::raw("ED_LANCZOS_REORTH_K")) {
-        const int k = std::atoi(env);
-        if (k >= 0 && k < max_recent) reorth_K = k;
-    }
+    // the user-facing tolerance of 1e-10.
+    constexpr int reorth_K = 1;
     std::vector<double> recent_buf(static_cast<size_t>(N) * max_recent, 0.0);
     auto slab = [&](int slot) -> double* {
         return recent_buf.data() + static_cast<size_t>(slot) * N;
@@ -294,17 +286,16 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     std::vector<double> beta;   // tridiagonal off-diagonal (beta[0] unused)
     beta.push_back(0.0);
 
-    // Eigenvalue-convergence bookkeeping. Phase 6 #11: switch from
-    // absolute-change-every-10-iters to xdiag-style RELATIVE-change-
-    // every-iter. This:
-    //   * matches the criterion every other ED library (xdiag, KrylovKit,
-    //     ARPACK with the default ``tol``) reports their iter counts
-    //     against, so the bench_vs_xdiag iter counts become comparable;
+    // Eigenvalue-convergence bookkeeping: xdiag-style RELATIVE change,
+    // tested every iteration. This:
+    //   * matches the criterion other ED libraries (xdiag, KrylovKit,
+    //     ARPACK with the default ``tol``) report their iter counts
+    //     against, so iteration counts are comparable;
     //   * lets the user pass the same ``tolerance=1e-12`` they would to
     //     ``scipy.sparse.linalg.eigsh`` and get the same behaviour;
-    //   * converges much earlier on well-conditioned problems (e.g. the
-    //     1D Heisenberg fixed-Sz benchmark drops from 60 -> ~25 iters at
-    //     N=20 to reach the same numerical precision).
+    //   * converges much earlier on well-conditioned problems than an
+    //     absolute change tested every 10 iters (1D Heisenberg fixed-Sz,
+    //     N=20: ~25 iters instead of 60 for the same precision).
     //
     // We still re-solve the small Lanczos tridiagonal at every iter to
     // get the new Ritz value -- LAPACKE_dstevd on a 60x60 matrix is
@@ -318,36 +309,22 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
     std::cout << "Lanczos[real]: max_iter=" << max_iter << ", n_eig=" << exct
               << ", tol=" << tol << " (real-storage fast path)" << std::endl;
 
-    // Optional per-iter timing breakdown (set ED_LANCZOS_PROFILE=1 to enable).
-    // Sums of microseconds spent in each kernel across the whole run.
-    const bool profile = []() {
-        return ed::env::flag("ED_LANCZOS_PROFILE", false);
-    }();
-    double t_apply = 0, t_recur = 0, t_reorth = 0, t_normsc = 0, t_tridiag = 0;
-    auto now_us = []() {
-        auto t = std::chrono::steady_clock::now().time_since_epoch();
-        return std::chrono::duration<double, std::micro>(t).count();
-    };
-
     for (uint64_t j = 0; j < max_iter; ++j) {
         if (extras && extras->on_basis_vector) extras->on_basis_vector(j, v_current);
         // w = H * v_j  (real SpMV; uses our OMP team)
-        double t0 = profile ? now_us() : 0.0;
         H_real(v_current, w.data(), static_cast<int>(N));
-        if (profile) { t_apply += now_us() - t0; t0 = now_us(); }
 
         // (1) w -= beta_j * v_{j-1}
         // (2) alpha_j = <v_j, w_after>
         // (3) w -= alpha_j * v_j
         // -- all three steps fused into one OMP parallel region
-        //    (Phase 6 #9). The barrier between the dot reduction and
+        //    The barrier between the dot reduction and
         //    the second axpy keeps the math identical to the cblas
         //    version while paying only one fork/join instead of three.
         const double alpha_j = ed::parallel::fused_axpy_dot_axpy_real(
             N, beta[j], v_prev, v_current, w.data(),
             /*apply_beta_term=*/(j > 0));
         alpha.push_back(alpha_j);
-        if (profile) { t_recur += now_us() - t0; t0 = now_us(); }
 
         // Local reorthogonalization against the K most-recent ring vectors,
         // walking the ring backward. Each pass is one fused OMP region
@@ -364,17 +341,14 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                     N, slab(slot), w.data(), ortho_threshold);
             }
         }
-        if (profile) { t_reorth += now_us() - t0; t0 = now_us(); }
 
         // (4) norm = ||w||
         // (5) v_{j+1} = w / norm  (written DIRECTLY into the next ring slot)
-        // -- fused into one OMP region (Phase 6 #9 + #10). Avoids the
-        //    separate ``recent_buf[slot] = v_current`` memcpy that the
-        //    previous version paid every iter.
+        // -- fused into one OMP region, with no separate copy into the
+        //    ring.
         double* v_next_slab = slab(ring_head);
         norm = ed::parallel::fused_norm2_scale_real(
             N, w.data(), v_next_slab);
-        if (profile) { t_normsc += now_us() - t0; }
 
         // Print sparingly to match the complex path's verbosity profile.
         if (j == 0 || (j + 1) % 100 == 0 || j + 1 == max_iter) {
@@ -401,7 +375,6 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
         // Eigenvalue convergence check (every iter, xdiag-style relative).
         // Skip the first ``exct`` iters: the tridiagonal isn't large
         // enough yet to host ``exct`` Ritz values.
-        const double t_tri0 = profile ? now_us() : 0.0;
         if (!fixed_iters && j >= exct) {
             const uint64_t m_cur = alpha.size();
             std::vector<double> diag = alpha;
@@ -411,11 +384,11 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                                             diag.data(), offd.data(), nullptr,
                                             m_cur);
             if (info == 0) {
-                // Audit 2026-09: ghost filter for eigenvalue WINDOWS. With
-                // local reorthogonalisation a converged eigenvalue re-emerges
-                // as extra copies ("ghosts"), and the eigenvalue-change test
-                // happily converges on them: the CLI returned E[0] == E[1] on
-                // a non-degenerate chiral model. Apply the Cullum-Willoughby
+                // Ghost filter for eigenvalue WINDOWS. With local
+                // reorthogonalisation a converged eigenvalue re-emerges as
+                // extra copies ("ghosts"), and the eigenvalue-change test
+                // happily converges on them (E[0] == E[1] on a
+                // non-degenerate model). Apply the Cullum-Willoughby
                 // test (Lanczos Algorithms for Large Symmetric Eigenvalue
                 // Computations, ch. 4): a SIMPLE Ritz value of T that is also
                 // an eigenvalue of T with its first row/column deleted is
@@ -437,8 +410,7 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                             current[ii] - prev_eigenvalues[ii]) / denom;
                         max_rel_change = std::max(max_rel_change, rel_change);
                     }
-                    // GPU-parity fix (2026-09-11): when eigenvectors are
-                    // requested, the Ritz-value stop alone leaves the
+                    // When eigenvectors are requested, the Ritz-value stop alone leaves the
                     // higher members of the window with residuals ~sqrt(tol)
                     // (measured 5e-8 / 6e-6 for levels 2-3 at tol = 1e-10),
                     // which fails the SU(2) label certification (needs
@@ -490,7 +462,6 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
                 prev_eigenvalues = std::move(current);
             }
         }
-        if (profile) t_tridiag += now_us() - t_tri0;
 
         // v_{j+1} already lives in slab[ring_head] (written directly by
         // the fused norm+scale kernel above). Rotate the pointers so
@@ -499,25 +470,6 @@ void lanczos_real(std::function<void(const double*, double*, int)> H_real,
         v_current = v_next_slab;
         if (ring_count < max_recent) ++ring_count;
         ring_head = (ring_head + 1) % max_recent;
-    }
-
-    if (profile) {
-        const double iters = static_cast<double>(alpha.size());
-        std::cout << "Lanczos[real] PROFILE (per-iter avg, " << iters
-                  << " iters):\n"
-                  << "  apply (SpMV)              = "
-                  << t_apply / iters / 1000.0 << " ms\n"
-                  << "  fused 3-op recurrence     = "
-                  << t_recur / iters / 1000.0 << " ms\n"
-                  << "  fused dot+axpy reorth     = "
-                  << t_reorth / iters / 1000.0 << " ms\n"
-                  << "  fused norm+scale          = "
-                  << t_normsc / iters / 1000.0 << " ms\n"
-                  << "  tridiag+rel-tol check     = "
-                  << t_tridiag / iters / 1000.0 << " ms\n"
-                  << "  TOTAL inner loop          = "
-                  << (t_apply + t_recur + t_reorth + t_normsc + t_tridiag)
-                     / iters / 1000.0 << " ms\n";
     }
 
     // Solve the final Lanczos tridiagonal for the requested eigenvalues.
@@ -588,7 +540,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
     if (eigenvectors_out) eigenvectors_out->clear();
 
-    // Phase 6.1: dim-aware OMP+BLAS thread cap for the column build; the
+    // Dim-aware OMP+BLAS thread cap for the column build; the
     // dense eigensolve below lifts it (see dense_solve_budget).
     const ed::parallel::ThreadBudgetScope budget(
         ed::parallel::auto_threads_for_dim(N));
@@ -600,14 +552,9 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     // complex / ~115 GB real (transient peak ~1.5x during the real-path
     // conversion) -- fat-node territory, and undersized machines fail as
     // a clean bad_alloc up front, before any solve work. Above the
-    // window the call is a hard error. ED_FULLDIAG_DENSE_MAX overrides in
-    // either direction.
-    uint64_t DENSE_THRESHOLD = 120000;
-    if (const char* env_max = ed::env::raw("ED_FULLDIAG_DENSE_MAX")) {
-        const unsigned long long v = std::strtoull(env_max, nullptr, 10);
-        if (v > 0) DENSE_THRESHOLD = static_cast<uint64_t>(v);
-    }
-    
+    // window the call is a hard error.
+    constexpr uint64_t DENSE_THRESHOLD = 120000;
+
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
         std::cout << "Using dense diagonalization with MKL/LAPACK" << std::endl;
@@ -651,7 +598,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // FAST PATH: assemble the matrix directly from the operator's sparse term
         // structure -- O(nnz), reentrant, parallel over columns -- instead of N
         // full matvecs (O(dim*nnz)). Supported by the full-space / fixed-Sz lanes;
-        // symmetry lanes (and distributed/GPU callers with no operator handle)
+        // symmetry lanes (and callers with no operator handle)
         // return false and fall through to the matvec column build below.
         bool built_direct =
             (op_for_dense != nullptr) &&
@@ -694,23 +641,17 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // backend can (measured: 9 s vs 2.6 s at dim 3432). ThreadBudgetScope
         // clamps the request to the hardware maximum and restores on scope exit.
         //
-        // Nesting-aware: when this runs INSIDE a sector-parallel region (the
-        // streaming-symmetry FULL loop spreads independent sectors across cores
-        // via an outer `omp parallel for`), keep the eigensolve
-        // single-threaded -- otherwise N_sectors x P_cores oversubscribes. A
-        // standalone FULL solve takes all cores.
-        // Audit 2026-09: "all cores" is wrong for small blocks. OpenBLAS's
+        // Nesting-aware: when this runs INSIDE a sector-parallel region (an
+        // outer `omp parallel for` over independent sectors), keep the
+        // eigensolve single-threaded -- otherwise N_sectors x P_cores
+        // oversubscribes.
+        // Small blocks must not take all cores either: OpenBLAS's
         // dsytrd/zhetrd is a chain of O(N) BLAS-2 calls, and every one of them
         // fans out to the whole (spinning) thread pool: measured 0.13 s .. 10 s
         // for the SAME dim-924 block depending on what else was running, vs
         // ~40 ms single-threaded. Scale the team with the block: one thread
-        // per ~1024 rows, all cores from ~32k rows on. ED_FULLDIAG_THREADS
-        // overrides.
+        // per ~1024 rows, all cores from ~32k rows on.
         int dense_threads = static_cast<int>(std::max<uint64_t>(1, N / 1024));
-        if (const char* e = ed::env::raw("ED_FULLDIAG_THREADS")) {
-            const int v = std::atoi(e);
-            if (v > 0) dense_threads = v;
-        }
 #ifdef _OPENMP
         if (omp_in_parallel()) dense_threads = 1;
 #endif
@@ -726,9 +667,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // / k=pi momentum sectors. Real LAPACK (dsyevd / dsyevr) is ~2x faster and
         // uses half the working memory of the complex driver, with identical
         // eigenvalues. Detect once (O(N^2), trivial next to the O(N^3) solve).
-        // ED_FULLDIAG_FORCE_COMPLEX forces the complex driver (A/B timing +
-        // real-vs-complex equivalence checks).
-        bool matrix_is_real = !ed::env::flag("ED_FULLDIAG_FORCE_COMPLEX", false);
+        bool matrix_is_real = true;
         for (size_t i = 0; i < matrix_size && matrix_is_real; ++i)
             if (std::abs(dense_matrix[i].imag()) > 1e-12) matrix_is_real = false;
 
@@ -882,17 +821,11 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     } else {
         // Above the dense window: HARD ERROR. The callers (the solve lane's
         // FullDiag method and the small-block thermal fallback) only route
-        // small blocks here; Krylov lanes serve everything larger. The old
-        // Eigen-sparse "full diagonalization" fallback densified internally
-        // on one thread, heap-corrupted at N=32768 on symmetry-free clusters,
-        // and could not honestly deliver all N eigenvalues (retired
-        // 2026-07-20).
+        // small blocks here; Krylov lanes serve everything larger.
         throw std::runtime_error(
             "full_diagonalization: dimension " + std::to_string(N) +
             " exceeds the dense limit (" + std::to_string(DENSE_THRESHOLD) +
-            "). Reduce the block with symmetry, use a Krylov method, or set "
-            "ED_FULLDIAG_DENSE_MAX above " + std::to_string(N) +
-            " if the dense matrix genuinely fits in RAM.");
+            "). Reduce the block with symmetry or use a Krylov method.");
     }
     
     std::cout << "Full diagonalization completed successfully" << std::endl;

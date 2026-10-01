@@ -1,23 +1,14 @@
 // =============================================================================
 // include/ed/input/hamiltonian_builder.h
 //
-// `HamiltonianBuilder`: composable, fluent C++ API that **replaces** the
-// monolithic `prepare_hamiltonian_parameters` calls in
-// `python/edlib/helper_*.py`. It accumulates one-/two-/three-body spin
-// terms and can emit them either:
+// `HamiltonianBuilder`: composable, fluent C++ API that accumulates
+// one-/two-/three-body spin terms and emits them in-process as an
+// `ed::Operator` (no file I/O).
 //
-//   1. **In-process** as an `ed::Operator` (no file I/O at all -- the
-//      preferred path for `qed` users), or
-//   2. As legacy directory output (`InterAll.dat`, `Trans.dat`,
-//      `ThreeBodyG.dat`, `positions.dat`) consumed by `./ED <directory>`,
-//      preserving every input contract that the production CLI workflow
-//      relies on.
-//
-// Available term shortcuts cover the entire physics surface used by the
-// `edlib` helpers (Heisenberg / XXZ / XYZ / Kitaev / Ising-with-transverse-
-// field / Zeeman / DM / single-site / ring exchange / arbitrary low-level
-// add_one/two/three_body), so users no longer need to drop down to raw
-// per-bond loops to wire a textbook Hamiltonian.
+// Term shortcuts cover Heisenberg / XXZ / XYZ / Kitaev / Ising-with-
+// transverse-field / Zeeman / DM / single-site / ring exchange, plus
+// arbitrary low-level add_one/two/three_body, so a textbook Hamiltonian
+// does not need raw per-bond loops.
 // =============================================================================
 
 #pragma once
@@ -131,7 +122,7 @@ public:
     // Single-ion uniaxial-z field on every site:
     //   H += sum_i h * Sz_i
     // (Equivalent to `zeeman({0,0,-h})` up to sign convention; provided
-    // because every Python helper writes it directly.)
+    // as a common shortcut.)
     HamiltonianBuilder& on_site_field(double h_z);
 
     // 4-site ring exchange:
@@ -141,16 +132,15 @@ public:
     // P + P^{-1} = 4 (S_1.S_2)(S_3.S_4) + 4 (S_1.S_4)(S_2.S_3) - 4 (S_1.S_3)(S_2.S_4) + 1/4
     // emitted as four-body terms; the constant is absorbed into the
     // diagonal Sz_i Sz_i counter (skipped here -- it is a global energy
-    // shift). This shortcut is included for compatibility with the
-    // pyrochlore / kagome ring-exchange Hamiltonians but should be used
-    // with care because four-body terms blow up the operator size.
+    // shift). Intended for pyrochlore / kagome ring-exchange Hamiltonians;
+    // use with care because four-body terms blow up the operator size.
     HamiltonianBuilder& ring_exchange(
         const std::vector<std::array<std::size_t, 4>>& plaquettes,
         double K);
 
-    // Pyrochlore non-Kramers Jpmpm phase (matches helper_pyrochlore.py
-    // `non_kramer_factor`). Adds the standard XXZ Heisenberg (via xxz
-    // above) plus the J_pmpm phase-twisted S+S+ / S-S- terms.
+    // Pyrochlore non-Kramers Jpmpm phase. Adds the standard XXZ
+    // Heisenberg (via xxz above) plus the J_pmpm phase-twisted
+    // S+S+ / S-S- terms.
     //
     //   J_pm   = -(Jxx + Jyy)/4
     //   J_pmpm = (Jxx - Jyy)/4

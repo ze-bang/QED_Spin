@@ -46,11 +46,9 @@
 // -----------------
 // N=6 (dim=64) sits under the orchestrator's SMALL_THERMAL_DIM=512 exact
 // fallback, which answers every sampling method exactly and would leave the
-// estimators this file exists to gate completely untested (before Jul 2026
-// that fallback was mTPQ-only, so the mTPQ cells here were already measuring
-// it rather than the TPQ kernel).  This file sets ED_THERMAL_EXACT_SMALL=0
-// at static-init so the real kernels run.  test_thermal_exact_small_fallback
-// pins the fallback itself.
+// estimators this file exists to gate completely untested.  This file sets
+// ED_THERMAL_EXACT_SMALL=0 at static-init so the real kernels run.
+// test_thermal_exact_small_fallback pins the fallback itself.
 //
 // Both grids are precomputed and passed via ``opts.betas`` so they exactly
 // match the log-spaced T grid of the dense reference (dense_reference below).
@@ -58,8 +56,8 @@
 // ``temp_min/temp_max/num_temp_bins``, which would cause element-wise
 // temperature mismatches.
 //
-// Relationship to existing tests
-// -------------------------------
+// Relationship to other tests
+// ---------------------------
 //   (sector recombination: combine_sectors, in this file)
 //   test_auto_thermal      : smoke-tests orchestrator wiring
 //   test_kernel_facades    : pin individual kernel signatures

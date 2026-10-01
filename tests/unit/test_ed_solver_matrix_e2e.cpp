@@ -17,11 +17,8 @@
 // intentionally about the DISPATCH WIRING: every ground-state method
 // must be reachable from `workflows::solve` and return the same answer.
 //
-// Migrated from the legacy `ed::auto_pilot::solve(...)` API during the
-// ED Cleanup Sweep Phase 2 (May 2026). Auto-Sz projection has moved
-// from auto_pilot into the caller: tests that previously relied on
-// implicit projection now build a fixed-Sz sector operator themselves before
-// calling `workflows::solve`.
+// `workflows::solve` does no implicit Sz projection: sector tests build a
+// fixed-Sz sector operator themselves before calling it.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -83,8 +80,8 @@ TEST_CASE("workflows::solve e2e: Auto on the 8-site chain lands FullDiag and "
 // ---------------------------------------------------------------------------
 // 1b. Direct dense assembly (try_build_dense_columns, O(nnz) from the term
 //     structure) must produce EXACTLY the same matrix as the O(dim)-matvec
-//     column build for the full Hilbert space. This is what the
-//     FullDiag path now uses to skip the slow N-matvec construction.
+//     column build for the full Hilbert space. The FullDiag path uses
+//     it to skip the slow N-matvec construction.
 // ---------------------------------------------------------------------------
 TEST_CASE("dense assembly: try_build_dense_columns == matvec column build",
           "[workflows][dense][assembly]") {

@@ -1,6 +1,6 @@
 """Clique budget + trivial-group blocked sweep + dense-assembly regressions.
 
-Three seams pinned here (all landed together, Jul 2026):
+Three seams pinned here:
 
 * ``find_symmetries(clique_budget=...)``: above the budget the NP-hard
   maximum-clique search (``nx.find_cliques`` over the O(|Aut|^2)
@@ -13,14 +13,13 @@ Three seams pinned here (all landed together, Jul 2026):
   symmetry the sweep still blocks by Sz (or native Sz-parity) with
   flip-transport folds, instead of one plain 2^N dense solve.
 
-* F6 regression: ``Operator::try_build_dense_columns`` raced the FIRST
-  ``commitPendingTransforms()`` across its OMP team on a cold operator and
-  DROPPED TERMS from the assembled dense matrix -- a 14-site XXZ tree's
-  full 16384-dim spectrum shipped wrong (E0 -6.6397 vs true -4.3855) with
-  no error. The commit is now mutex-serialized behind an atomic freshness
-  flag and hoisted before the parallel loop; the regression here pins a
-  COLD operator's plain-dense full sweep against an independent numpy
-  Sz-block oracle.
+* cold-operator dense assembly: ``Operator::try_build_dense_columns`` must
+  not race the FIRST ``commitPendingTransforms()`` across its OMP team (a
+  race DROPS TERMS from the assembled dense matrix -- e.g. a 14-site XXZ
+  tree's 16384-dim spectrum with E0 -6.6397 vs true -4.3855, and no error).
+  The commit is mutex-serialized behind an atomic freshness flag and
+  hoisted before the parallel loop; the test pins a COLD operator's
+  plain-dense full sweep against an independent numpy Sz-block oracle.
 """
 from __future__ import annotations
 
@@ -224,8 +223,8 @@ def test_trivial_group_sz_blocked_sweep_matches_oracle():
 
 
 def test_trivial_group_named_sz_returns_that_block():
-    """Naming sz= with no spatial group must return that block's spectrum
-    (the old plain-dense branch silently returned all 2^N)."""
+    """Naming sz= with no spatial group must return that block's spectrum,
+    not all 2^N levels."""
     n = 8
     H = _bent_tree_xxz(n)
     from math import comb
@@ -238,16 +237,16 @@ def test_trivial_group_named_sz_returns_that_block():
 
 
 # ---------------------------------------------------------------------------
-# 3. F6 regression: cold-operator plain-dense assembly
+# 3. Cold-operator plain-dense assembly
 # ---------------------------------------------------------------------------
 
 def test_cold_plain_dense_assembly_no_term_loss():
     """COLD operator (no prior matvec/commit) through the plain-dense FULL
     lane: force the no-blocking path with a parity-breaking term so the
     dense assembler itself is what is pinned. n=10 keeps it fast; the
-    original corruption was timing-dependent (first-commit race), so the
-    mutex fix is what makes this deterministic, and the n=14 case that
-    shipped wrong is covered by the (slow) NLCE-side parity suite."""
+    failure mode is timing-dependent (a first-commit race) and the mutex
+    makes the result deterministic; the n=14 case is covered by the (slow)
+    NLCE-side parity suite."""
     n = 10
     b = qed.input.HamiltonianBuilder(n)
     bonds = [(i, i + 1) for i in range(n - 2)] + [(n // 2, n - 1)]

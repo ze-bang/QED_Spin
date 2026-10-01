@@ -3,17 +3,11 @@
 // include/ed/thermal/mtpq_kernel.h
 //
 // Microcanonical TPQ facade --- thin wrapper around the unified
-// `ed::thermal::tpq_kernel<Backend>` (see `tpq_kernel.h`). Generates a
-// rank-deterministic random seed using the historical
-// `tpq_per_sample_seed` recipe, runs the iteration loop on the supplied
-// Backend, and accumulates the per-iterate energy expectation.
-//
-// Phase 2.4 of the Minimalist ED Collapse (May 2026): replaces the
-// CPU-only `::microcanonical_tpq` forward with a backend-templated
-// kernel call. The legacy monolith (`src/solvers/cpu/TPQ.cpp`) is gone:
-// its drivers were deleted in the Jul-2026 debt cleanup and its last
-// survivor, the trajectory aggregator, now lives in
-// `include/ed/thermal/tpq_thermo.h` (Stage 11b).
+// `ed::thermal::tpq_kernel<Backend>` (see `tpq_kernel.h`). Draws a
+// random seed vector per sample (`tpq_per_sample_seed`, or
+// `random_seed + s` when a seed is given), runs the iteration loop on the
+// supplied Backend, and accumulates the per-iterate energy expectation.
+// The trajectory aggregator lives in `include/ed/thermal/tpq_thermo.h`.
 // =============================================================================
 
 #include <cmath>
@@ -45,7 +39,7 @@ struct MtpqOptions {
     double      target_beta    = 1000.0;
     std::uint64_t random_seed  = 0;
 
-    /// Stage 12f (SU(2) rollout): host-side transform applied to every
+    /// Host-side transform applied to every
     /// TPQ sample seed before staging (e.g. the Lowdin total-spin
     /// projection). Must leave a normalisable vector; a zero result
     /// throws (the targeted subspace has no weight in this block).
@@ -58,8 +52,8 @@ struct MtpqOptions {
 };
 
 struct MtpqResult {
-    /// Final-iterate energy per sample (legacy field; kept for callers
-    /// that only need the long-imaginary-time E proxy).
+    /// Final-iterate energy per sample (for callers that only need the
+    /// long-imaginary-time E proxy).
     std::vector<double> energies;
 
     /// Per-sample (beta_k, E_k, var_k) trajectories for the
@@ -81,8 +75,8 @@ struct MtpqResult {
 
 namespace detail {
 
-// Generate a length-N rank-deterministic random unit vector on host
-// using the historical TPQ seeding policy (Gaussian + L2 normalise).
+// Generate a length-N random unit vector on host, deterministic in
+// `seed` (Gaussian + L2 normalise).
 inline std::vector<Complex> mtpq_make_seed(std::size_t N, std::uint64_t seed) {
     std::vector<Complex> v(N);
     std::mt19937_64 gen(seed);
@@ -121,7 +115,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
                                     ? (opts.random_seed + s)
                                     : ed::tpq_per_sample_seed(s);
         auto host_seed = detail::mtpq_make_seed(local_n, seed);
-        // Stage 12f: subspace projection of the TPQ seed (e.g. Lowdin
+        // Subspace projection of the TPQ seed (e.g. Lowdin
         // total-spin), renormalised so the microcanonical estimator's
         // unit-norm contract holds.
         if (opts.seed_transform) {
@@ -147,7 +141,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
         kopts.large_value = opts.large_value;
         kopts.normalize_each_step = true;
 
-        // Capture both the final-iterate energy (legacy) AND the
+        // Capture both the final-iterate energy AND the
         // per-step (beta_k, E_k, var_k) trajectory for ThermodynamicData
         // recombination by the orchestrator. The variance comes free
         // from the existing scratch vector via <H^2> = ||H psi||^2 -- no
@@ -164,7 +158,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
         auto on_step = [&](const TpqStepInfo<Backend>& info) -> bool {
             double E_k, H2_k;
             if (info.moments_valid) {
-                // Audit H4: moments come from the step's own matvec.
+                // Moments come from the step's own matvec.
                 E_k = info.energy; H2_k = info.h2;
             } else {
                 apply_H(info.psi, scratch.get(), info.local_n);

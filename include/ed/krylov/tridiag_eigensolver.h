@@ -45,7 +45,7 @@ inline std::vector<double> solve_tridiag(const std::vector<double>& alpha,
     return evals;
 }
 
-/// Cullum-Willoughby ghost test (audit 2026-09). ``evals`` are the sorted
+/// Cullum-Willoughby ghost test. ``evals`` are the sorted
 /// Ritz values of the m x m tridiagonal (alpha, beta[1..m-1]). Returns the
 /// indices (into ``evals``) of the Ritz values to KEEP: multiple copies of a
 /// converged level collapse to their first index, and a SIMPLE Ritz value

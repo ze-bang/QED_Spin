@@ -7,11 +7,9 @@
 // (``apply_terms_rep_symmetry_scatter`` /
 // ``ed::symmetry::make_sector_matvec_gpu_rep``).
 //
-// "On-the-fly representative SpMV for streaming symmetry" plan (Jun 2026).
-//
-// Where a ``SymmetrySector`` stores, per representative, ALL |G| orbit images
-// and their character coefficients (an O(full-Sz-dim) structure), a
-// RepSectorData stores only:
+// Instead of storing, per representative, ALL |G| orbit images and their
+// character coefficients (an O(full-Sz-dim) structure), a RepSectorData
+// stores only:
 //
 //   * ``reps``       -- the representative computational state per orbit
 //                       (the sector basis index IS the array index).
@@ -46,25 +44,18 @@
 namespace ed::symmetry {
 
 // ---------------------------------------------------------------------------
-// O(1) rep reverse-lookup gate ("Optimized symmetry ED" plan, Phase A).
+// O(1) rep reverse-lookup gate.
 //
 // The CSR-free rep matvec can resolve ``state -> orbit index`` either by a
 // binary search over the sorted ``reps`` array (O(log dim), zero extra memory)
 // or by a dense combinadic rank table (O(1), C(n_sites,n_up) int32). For an
 // iterative solver doing thousands of matvecs the table is reused every
 // iteration, so it pays for itself -- but it costs ~2.4 GiB at N=32, so it is
-// gated by a memory budget.
-//
-//   ED_SYM_REP_RANKTABLE = "0"  -> force OFF (always binary search)
-//                          "1"  -> force ON  (build regardless of budget)
-//                          unset -> build when table bytes <= budget
-//   ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 8) sets the budget.
+// gated by a memory budget: the table is built when its bytes fit in
+// ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 8).
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
     if (table_entries == 0) return false;
-    const char* force = ed::env::raw("ED_SYM_REP_RANKTABLE");
-    if (force != nullptr && force[0] == '0' && force[1] == '\0') return false;
-    if (force != nullptr && force[0] == '1' && force[1] == '\0') return true;
     double budget_gib = 8.0;
     if (const char* b = ed::env::raw("ED_SYM_REP_RANKTABLE_BUDGET_GIB")) {
         const double parsed = std::atof(b);
@@ -78,12 +69,10 @@ namespace ed::symmetry {
 }
 
 // ---------------------------------------------------------------------------
-// SharedRankLookup -- Stage 4 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): ONE dense
-// ``combinadic rank -> shared-rep-index`` table per (n_sites, n_up),
-// shared across every irrep sector of that subspace, replacing the
-// per-sector C(N,n_up) x int32 tables (2.4 GiB EACH at N=32
-// half-filling). Each sector then carries only the small
+// SharedRankLookup -- ONE dense ``combinadic rank -> shared-rep-index``
+// table per (n_sites, n_up), shared across every irrep sector of that
+// subspace, instead of a per-sector C(N,n_up) x int32 table (2.4 GiB EACH
+// at N=32 half-filling). Each sector then carries only the small
 // ``local_of_shared`` remap (int32 x #reps, ~76 MB at N=32).
 // ---------------------------------------------------------------------------
 struct SharedRankLookup {
@@ -132,7 +121,7 @@ struct RepSectorData {
     std::vector<int>                  perms_flat;  // group_size * n_sites, row-major
     int group_size = 0;
     int n_sites    = 0;
-    int n_up       = -1;  // -1 => not a fixed-Sz sector (rep path needs n_up >= 0)
+    int n_up       = -1;  // -1 => not a fixed-Sz sector (full-space sentinel)
 
     // Optional O(1) reverse lookup (host twin of the GPU dense rank table,
     // symmetry_spmv_optimizations.pdf Section 3.3). ``rep_index_of_rank`` maps
@@ -144,13 +133,12 @@ struct RepSectorData {
     std::vector<std::int32_t>          rep_index_of_rank;
     ed::core::combinadic::BinomialTable binom;
 
-    // Stage 5b (SymmetryEngine v2): per-element XOR masks for flip-extended
-    // groups (element action = permute_bits(s, perm) ^ flip_masks[g]).
-    // Empty = pure permutations (every pre-5b group). When non-empty the
-    // length must equal ``group_size`` and ``perms_flat`` carries the
-    // permutation part of every element (the flip half repeats the spatial
-    // permutations). Stage 8b: the device mirror carries the same
-    // masks, so flip-extended sectors run on both CPU and GPU.
+    // Per-element XOR masks for flip-extended groups (element action =
+    // permute_bits(s, perm) ^ flip_masks[g]). Empty = pure permutations.
+    // When non-empty the length must equal ``group_size`` and ``perms_flat``
+    // carries the permutation part of every element (the flip half repeats
+    // the spatial permutations). The device mirror carries the same masks,
+    // so flip-extended sectors run on both CPU and GPU.
     std::vector<std::uint64_t> flip_masks;
 
     [[nodiscard]] bool has_flips() const noexcept {
@@ -159,14 +147,13 @@ struct RepSectorData {
         return false;
     }
 
-    // Byte-decomposition lookup table for fast apply_perm on N≤32 systems.
-    // Replaces the N-iteration scalar bit-scatter loop with 4 table lookups,
-    // saving ~60% of instruction count at N=32 (4 L2 hits vs 32 scalar ops).
+    // Byte-decomposition lookup table for fast apply_perm on N≤64 systems.
+    // Replaces the N-iteration scalar bit-scatter loop with ceil(N/8) table
+    // lookups (~60% fewer instructions at N=32: 4 L2 hits vs 32 scalar ops).
     //
     // Layout: perm_lut_data[(g * perm_lut_bpw + byte_idx) * 256 + byte_val]
     // -- 64-bit output words so every N <= 64 gets the byte-decomposition
-    // fast path (the uint32 version stranded N > 32, i.e. exactly the
-    // 36-site production regime, on the serial n_sites-iteration walk).
+    // fast path.
     // perm_lut_bpw = ceil(n_sites / 8); 5 for N=36.
     // Size: group_size * perm_lut_bpw * 256 * 8 bytes (~740 KB at N=36,
     // |G|=72 -- L2-resident on host and device).
@@ -182,10 +169,10 @@ struct RepSectorData {
         return !rep_index_of_rank.empty();
     }
 
-    // Stage 4 two-level reverse lookup: the SHARED per-(N,n_up) rank table
+    // Two-level reverse lookup: the SHARED per-(N,n_up) rank table
     // (co-owned across all irrep sectors) + this sector's small
     // shared-idx -> local-idx remap. Preferred over the dense per-sector
-    // table when present (rep_policy_from / ensureRepData honor it).
+    // table when present (``make_policy`` honors it).
     std::shared_ptr<const SharedRankLookup> shared_rank;
     std::vector<std::int32_t>               local_of_shared;  // -1 = cancelled here
 
@@ -208,7 +195,7 @@ struct RepSectorData {
     // Build the dense rank -> orbit-index table from ``reps`` only (no orbit
     // images materialised; bit-identical to the GPU build in
     // streaming_symmetry_gpu_mirror.cu). Idempotent / no-op when already built
-    // or when the sector is not a usable fixed-Sz sector.
+    // or when the sector has no reps.
     void build_rank_table() {
         if (has_rank_table()) return;
         if (n_sites <= 0 || reps.empty()) return;
@@ -244,18 +231,11 @@ struct RepSectorData {
         }
     }
 
-    // Build the byte-decomposition LUT for N≤32. Idempotent / no-op when
+    // Build the byte-decomposition LUT for N≤64. Idempotent / no-op when
     // already built or when n_sites > 64. See ``perm_lut_data`` for layout.
     void build_perm_lut() {
         if (!perm_lut_data.empty()) return;
         if (n_sites <= 0 || n_sites > 64 || perms_flat.empty()) return;
-        // ED_SYM_PERM_LUT=0 (test gate): keep the scalar bit walk so the
-        // pathway matrix can pin LUT == scalar at any size (the LUT is
-        // otherwise unconditional and the fallback would only ever run at
-        // N > 64, i.e. never in tests).
-        if (const char* v = ed::env::raw("ED_SYM_PERM_LUT")) {
-            if (v[0] == '0' && v[1] == '\0') return;
-        }
         const int G   = group_size;
         const int N   = n_sites;
         const int BPW = (N + 7) / 8;   // 5 for N=36
@@ -286,10 +266,9 @@ struct RepSectorData {
 
     // Non-owning host policy view over this data. THE single source of the
     // RepSectorData -> RepSymmetryBasisPolicy mapping: the matvec factory
-    // (``rep_policy_from``) and the dense-assembly lane
-    // (``SubspaceOperator::try_build_dense_columns``, rep-only sectors) both
-    // route through here so the two-level rank table / flip masks / perm LUT
-    // wiring can never drift between them. The returned view holds raw
+    // (``rep_policy_from``) and the little-group engine both route through
+    // here so the two-level rank table / flip masks / perm LUT wiring can
+    // never drift between consumers. The returned view holds raw
     // pointers into this object's vectors -- keep it alive for the policy's
     // lifetime.
     [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy
@@ -303,10 +282,10 @@ struct RepSectorData {
         p.group_size = group_size;
         p.n_sites    = n_sites;
         p.n_up       = n_up;
-        // Stage 4 two-level lookup takes precedence: shared rank table (one
-        // per (N, n_up)) + per-sector local remap. Then the legacy dense
-        // per-sector table; index_of_rep falls back to binary search when
-        // neither is set.
+        // Two-level lookup takes precedence: shared rank table (one per
+        // (N, n_up)) + per-sector local remap. Then the dense per-sector
+        // table; index_of_rep falls back to binary search when neither is
+        // set.
         if (has_two_level()) {
             p.shared_rank_of  = shared_rank->shared_of_rank.data();
             p.local_of_shared = local_of_shared.data();
@@ -315,12 +294,12 @@ struct RepSectorData {
             p.rep_index_of_rank = rep_index_of_rank.data();
             p.binom             = &binom;
         }
-        // N<=32 fast apply_perm: byte-decomposition LUT (4 lookups vs N iters).
+        // Fast apply_perm: byte-decomposition LUT (ceil(N/8) lookups vs N iters).
         if (!perm_lut_data.empty()) {
             p.perm_lut     = perm_lut_data.data();
             p.perm_lut_bpw = perm_lut_bpw;
         }
-        // Stage 5b: flip-extended elements (perm THEN xor).
+        // Flip-extended elements (perm THEN xor).
         if (!flip_masks.empty()) {
             p.flips = flip_masks.data();
         }
@@ -328,12 +307,11 @@ struct RepSectorData {
     }
 
     // A RepSectorData is usable by the rep matvec only when it carries a
-    // fixed-Sz magnetisation (the device reverse lookup is a combinadic rank
-    // table over C(n_sites, n_up)) and a non-empty group action.
+    // non-empty group action with matching characters / permutations, and
+    // either a fixed-Sz magnetisation or the full-space sentinel.
     [[nodiscard]] bool usable() const noexcept {
-        // n_up == -1 is the documented full-space sentinel (the rep
-        // policy skips the popcount filter); rejecting it silently
-        // degraded the full-space lazy lane to orbit-CSR.
+        // n_up == -1 is the full-space sentinel (the rep policy skips the
+        // popcount filter) and must be accepted.
         return n_up >= -1 && group_size > 0 && n_sites > 0
             && !reps.empty()
             && characters.size() == static_cast<std::size_t>(group_size)

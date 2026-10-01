@@ -1,16 +1,15 @@
 // term_gate_math.h - the single source of truth for spin-operator term
-// application math (Consolidation Family 4).
+// application math.
 //
 // The per-term "gate" arithmetic -- which bit to test, whether a ladder
 // operator annihilates the state, which bit(s) to flip, and the real
-// geometric factor from Sz signs -- was reimplemented identically in the CPU
-// path (`apply_term_to_state`, term_kernels.h) and the GPU device path
-// (`process_source_terms`, term_kernels_gpu.cuh). A physics fix (e.g. a sign
-// or gating convention) had to be applied in both, and the regime no test hit
-// was where they could silently diverge. These `__host__ __device__` helpers
-// are that math, once, so both callers share it. Each helper is pure integer /
-// double arithmetic (no complex, no scalar traits, no I/O): the caller still
-// owns coefficient multiplication and output emission.
+// geometric factor from Sz signs -- is shared by the CPU path
+// (`apply_term_to_state`, term_kernels.h) and the GPU device path
+// (`process_source_terms`, term_kernels_gpu.cuh) through these
+// `__host__ __device__` helpers, so a sign or gating convention cannot
+// diverge between them. Each helper is pure integer / double arithmetic (no
+// complex, no scalar traits, no I/O): the caller owns coefficient
+// multiplication and output emission.
 #pragma once
 
 #include <cstdint>

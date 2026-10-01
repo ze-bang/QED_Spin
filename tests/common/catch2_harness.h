@@ -1,14 +1,12 @@
 // =============================================================================
 // tests/common/catch2_harness.h
 //
-// Catch2 v3 wrapper around the existing fixture builders in test_harness.h.
+// Catch2 v3 wrapper around the fixture builders in test_harness.h.
 //
-// We deliberately keep the construct_*, reference_from_*, random_unit_vector,
+// We deliberately keep the build_*, reference_from_*, random_unit_vector,
 // and make_scratch_dir helpers in test_harness.h (they are pure functions
 // and have no Catch2 dependency). This header just pulls them in plus the
-// Catch2 macros and provides ED-specific MATCHER helpers.
-//
-// P1.8 / audit Q12.
+// Catch2 macros and provides ED-specific assertion helpers.
 // =============================================================================
 #pragma once
 

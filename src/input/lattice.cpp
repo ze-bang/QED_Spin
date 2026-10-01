@@ -404,8 +404,7 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc) {
     }
     // Down tetrahedron: each sublattice site connects to its mirrored
     // neighbours one cell over along the corresponding FCC vector. The
-    // canonical pyrochlore connectivity (matching helper_pyrochlore.py
-    // get_neighbors):
+    // canonical pyrochlore connectivity:
     //   sub 0 connects to sub {1,2,3} in cell (i-1, j, k), (i, j-1, k),
     //                                          (i, j, k-1) respectively.
     //   sub 1 connects to sub 0 in cell (i+1, j, k), and sub {2,3} in

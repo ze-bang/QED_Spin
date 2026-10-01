@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/matvec/backend.h
 //
-// Backend: the second half of the matvec-unification pair. While
+// Backend: the vector-primitives half of the matvec layer. While
 // MatVecOperator says "how to apply H to a vector", Backend says "how to do
 // every *other* linear-algebra primitive that the surrounding Krylov /
 // thermal solver needs on that vector": axpy, dot, norm, scale, copy,
@@ -23,16 +23,13 @@
 //
 // All operations are synchronous from the caller's point of view: when
 // they return, the result is visible. Internally Backends may chain CUDA
-// streams, but the API is sync. This matches
-// what every existing solver in the codebase already assumes.
-//
-// Phase 1 of the matvec-unification revamp.
+// streams, but the API is sync, which is what the solvers assume.
 //
 // NOTE: the matvec dispatch strategy (matrix-free vs assembled-CSR, real
 // vs complex specialisation) lives in a SEPARATE header
 // ``ed/matvec/matvec_backend.h``. The two are orthogonal: Backend is the
-// vector-primitives backend the solver talks to; MatVecBackend is the
-// SpMV-kernel strategy the Operator talks to.
+// vector-primitives backend the solver talks to; MatVecBackendBase
+// (CpuMatVecBackend) is the SpMV-kernel strategy the Operator talks to.
 // =============================================================================
 
 #include <complex>
@@ -89,7 +86,6 @@ public:
     //   scale: x <- alpha * x
     //   dot:   returns x^H * y   (conj on left)
     //   nrm2:  returns ||x||_2
-    //   set_value: x[i] <- v for i < n  (used for unit vector seeding)
     // ------------------------------------------------------------------
     virtual void   axpy(Complex alpha, const Complex* x, Complex* y, std::size_t n) const = 0;
     virtual void   scale(Complex alpha, Complex* x, std::size_t n) const = 0;
@@ -102,13 +98,13 @@ public:
                        Complex beta,  Complex* y, std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
-    // Fused Lanczos-recurrence primitives (performance audit 2026-09, F5).
+    // Fused Lanczos-recurrence primitives.
     // One streaming pass each instead of two:
     //   axpy_dot : y <- y + alpha*x ; returns z^H * y      (reduced)
     //   axpy_nrm2: y <- y + alpha*x ; returns ||y||_2      (reduced)
     // The defaults compose the primitives above so every backend stays
     // correct; CpuBackend overrides them with single-pass
-    // kernels (the unified `lanczos_kernel` issues three fused calls per
+    // kernels (`lanczos_kernel` issues three fused calls per
     // iteration instead of seven separate BLAS-1 calls).
     // ------------------------------------------------------------------
     [[nodiscard]] virtual Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
@@ -128,12 +124,10 @@ public:
     // of `v` (one streaming pass over `v` feeds k inner dots, instead of
     // k streaming passes for k single-pair calls).
     //
-    // Default implementations are provided so that pre-existing
-    // concrete Backends compile unchanged; they trade reduction
-    // amortisation for code simplicity. Concrete backends override
-    // them when they want the batched fast path (CpuBackend uses a
-    // single OpenMP region; future GpuBackend will route through cuBLAS
-    // gemv).
+    // The default implementations loop over the single-pair calls,
+    // trading reduction amortisation for simplicity. Concrete backends
+    // override them for the batched fast path (CpuBackend uses a
+    // single OpenMP region; CudaBackend routes through cuBLAS gemv).
     // ------------------------------------------------------------------
 
     /// Compute `coeffs_out[k] = <basis[k], v>` for k in [0, num_basis).
@@ -165,8 +159,7 @@ public:
     // ------------------------------------------------------------------
     // Level-3 BLAS primitives. All matrix arguments are column-major.
     //
-    // Defaults throw; backends that need to expose BLAS-3 (currently
-    // every concrete backend: CpuBackend, CudaBackend) override.
+    // Defaults throw; CpuBackend and CudaBackend override.
     // ------------------------------------------------------------------
 
     /// Standard ZGEMM: C = alpha * op(A) * op(B) + beta * C, where

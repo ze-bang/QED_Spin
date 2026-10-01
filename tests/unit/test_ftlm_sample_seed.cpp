@@ -1,12 +1,10 @@
 // =============================================================================
 // tests/unit/test_ftlm_sample_seed.cpp
 //
-// WP10 C3/C6: the FTLM body (``ed::thermal::detail::ftlm_kernel_via_backend``)
+// The FTLM body (``ed::thermal::detail::ftlm_kernel_via_backend``)
 // draws sample ``s`` as
 //     generateGaussianRandomVector(N, sample_engine(resolve_base_seed(seed), s))
-// (the recipe the retired Gen-1 CPU driver used, shared with OFTLM through
-// ``sample_seed.h``). Until C6 this was checked by comparing against that
-// driver; with the driver deleted the same protection is kept by
+// (the recipe shared with OFTLM through ``sample_seed.h``). Pinned by
 //   * recording every draw through a pass-through ``seed_transform`` and
 //     requiring it to equal the recipe bit for bit;
 //   * requiring two runs with the same options to be bit-identical;

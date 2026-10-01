@@ -7,21 +7,21 @@
 // A POD struct (raw device pointers + scalar fields) that mirrors the host
 // policy's ABI via ``__device__``-callable methods.
 //
-// Contract for adding a new policy (see ``docs/architecture/
-// ADD_NEW_GPU_CELL.md``):
+// Contract for adding a new policy:
 //   1. Declare a ``DeviceXxxBasisPolicy`` POD with ``__device__`` methods
 //      matching the host ABI (``dim``, ``state_of``, ``index_of``, and
 //      optionally ``index_and_projection``).
 //   2. Add the same compile-time traits (``may_leave_basis``,
 //      ``needs_orbit_walk``, ``has_coeff_modifier``).
-//   3. Provide a host-side ``to_device(HostPolicy)`` helper that
-//      uploads any backing arrays (basis states, orbit CSR, ...) to
-//      device memory and returns the POD view.
+//   3. Provide host-side code that uploads any backing arrays (basis
+//      states, lookup tables, ...) to device memory and returns the POD
+//      view (cf. ``GpuRepSectorMirror::basis_view`` in
+//      ``src/symmetry/streaming_symmetry_gpu_mirror.cu``).
 //
-// Memory ownership: each ``DeviceXxxBasisPolicyHolder`` (in this header
-// or in the owning operator class) RAII-manages the device allocations.
-// The bare POD view is non-owning and trivially copyable -- safe to pass
-// by value to a ``__global__`` kernel.
+// Memory ownership: the owning host object (``GpuRepSectorMirror`` for
+// this policy) RAII-manages the device allocations. The bare POD view is
+// non-owning and trivially copyable -- safe to pass by value to a
+// ``__global__`` kernel.
 // =============================================================================
 
 #ifdef WITH_CUDA
@@ -76,7 +76,7 @@ inline constexpr std::uint64_t kDeviceNotFound = static_cast<std::uint64_t>(-1);
 // of each row (``needs_orbit_walk == false``) and the rep-symmetry kernel
 // in ``term_kernels_gpu.cuh`` supplies ``pre_phase = inv_norms[i]``.
 //
-// Math (matches the orbit-CSR reference bit-for-bit; derivation in the plan):
+// Math (equivalent to the explicit orbit-sum formulation):
 //   For a connected state ``s'`` reached by a term from ``reps[i]`` we need
 //   the destination orbit index ``k`` and the projection
 //   ``conj(beta_{s'}) / norm_k`` where ``beta_{s'}`` is the coefficient of
@@ -86,8 +86,8 @@ inline constexpr std::uint64_t kDeviceNotFound = static_cast<std::uint64_t>(-1);
 //   (because the coefficient of g(r_b) in ``sum_g conj(chi(g)) |g r_b>`` is
 //   ``conj(chi(g))``, and {g: g(r_b)=s'} = {h^{-1}: h(s')=r_b} with
 //   ``chi(h^{-1}) = conj(chi(h))`` for unit-modulus characters). The
-//   group_norm (1/|G|) and the orbit walk of the reference collapse into the
-//   single representative term, so it does NOT appear here.
+//   group_norm (1/|G|) and the orbit walk of the orbit-sum form collapse into
+//   the single representative term, so it does NOT appear here.
 // ===========================================================================
 struct DeviceRepSymmetryBasisPolicy {
     const std::uint64_t*    reps              = nullptr;  // length dim_
@@ -95,26 +95,25 @@ struct DeviceRepSymmetryBasisPolicy {
     const int*              perms             = nullptr;  // group_size * n_sites
     const cuDoubleComplex*  characters        = nullptr;  // length group_size, chi_k(g)
     const std::int32_t*     rep_index_of_rank = nullptr;  // length C(n_sites,n_up)
-    // Stage 8b (SymmetryEngine v2): per-element XOR flip masks for
-    // flip-extended groups (element action = perm THEN xor). nullptr =
-    // pure permutations (every pre-8b sector). Mirrors the host
-    // RepSymmetryBasisPolicy::flips field.
+    // Per-element XOR flip masks for flip-extended groups (element
+    // action = perm THEN xor). nullptr = pure permutations. Mirrors the
+    // host RepSymmetryBasisPolicy::flips field.
     const std::uint64_t*    flips             = nullptr;  // length group_size
-    // Stage-4 two-level reverse lookup, DEVICE twin (Jul 2026): ONE dense
-    // rank -> shared-rep-index table per (N, n_up), shared across every
-    // irrep sector's mirror, plus this sector's small local remap. When
-    // both are set they take precedence over the per-sector
-    // ``rep_index_of_rank`` (which is then not even uploaded). Mirrors the
-    // host RepSymmetryBasisPolicy::{shared_rank_of, local_of_shared}.
+    // Two-level reverse lookup: ONE dense rank -> shared-rep-index table
+    // per (N, n_up), shared across every irrep sector's mirror, plus this
+    // sector's small local remap. When both are set they take precedence
+    // over the per-sector ``rep_index_of_rank`` (which is then not even
+    // uploaded). Mirrors the host
+    // RepSymmetryBasisPolicy::{shared_rank_of, local_of_shared}.
     const std::int32_t*     shared_rank_of    = nullptr;  // C(N,n_up), shared
     const std::int32_t*     local_of_shared   = nullptr;  // per sector
-    // Byte-decomposition permutation LUT (Jul 2026, device twin of the host
+    // Byte-decomposition permutation LUT (device twin of the host
     // RepSymmetryBasisPolicy fast path): out = OR_b lut[g][b][byte_b(s)].
-    // Replaces the serial n_sites-iteration bit walk (36 dependent global
-    // loads per image at N=36) with perm_lut_bpw = ceil(N/8) L2-resident
-    // gathers -- the canonicalization walk is THE production hot loop
-    // (dim x terms x |G| images per matvec; measured 26 s/matvec at the
-    // 126M-dim 36-site block before this).
+    // Uses perm_lut_bpw = ceil(N/8) L2-resident gathers per image instead
+    // of a serial n_sites-iteration bit walk (36 dependent global loads per
+    // image at N=36) -- the canonicalization walk is THE production hot
+    // loop (dim x terms x |G| images per matvec; the bit walk measured
+    // 26 s/matvec at the 126M-dim 36-site block).
     const std::uint64_t*    perm_lut          = nullptr;
     int                     perm_lut_bpw      = 0;
     std::uint64_t           dim_              = 0;
@@ -204,7 +203,7 @@ struct DeviceRepSymmetryBasisPolicy {
     //
     // One pass over the group with a running minimum (as the host policy): the character sum
     // restarts whenever a smaller image appears and grows on ties. No per-thread image
-    // buffer (it lived in local memory and cost occupancy), no bound on |G|.
+    // buffer (it would live in local memory and cost occupancy), no bound on |G|.
     __device__ inline std::uint64_t
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;

@@ -2,8 +2,7 @@
 // =============================================================================
 // include/ed/symmetry/su2_dims.h
 //
-// Stage 12c of the SU(2) rollout (docs/architecture/SYMMETRY_V2_DESIGN.md):
-// exact S-resolved dimension arithmetic from the highest-weight trick.
+// Exact S-resolved dimension arithmetic from the highest-weight trick.
 //
 // Facts (N spin-1/2 sites):
 //   * Number of spin-S multiplets:

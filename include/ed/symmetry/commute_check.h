@@ -7,7 +7,7 @@
 // The abelian rep lane trusts the generators it is handed: an automorphism
 // from ``find_symmetries`` commutes with H by construction (it is a symmetry
 // of H's own coloured interaction graph), but an EXPLICIT generator set --
-// e.g. a permutation list passed straight to ``qed.solve(symmetry=[...])``,
+// e.g. a hand-written permutation list passed to ``qed.eigs(..., sym=...)``,
 // or an NLCE bridge that maps a cluster onto a lattice embedding -- is
 // unchecked. A wrong permutation (site-ordering mismatch, an off-by-one in a
 // translation) then produces SILENTLY WRONG spectra with correct-looking

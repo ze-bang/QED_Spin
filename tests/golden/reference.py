@@ -1,9 +1,7 @@
 """Model vocabulary and the independent dense reference for the golden harness.
 
-Moved verbatim from benchmarks/audit_workflows.py (Model, term builders, Reference) and
-benchmarks/audit_correctness.py (make_models and its helpers) so that the gate does not
-depend on the benchmarks tree. A model is a list of terms (ops, sites, coeff) with ops in
-{"+", "-", "z"}; the same list feeds the QED builder and the numpy reference.
+A model is a list of terms (ops, sites, coeff) with ops in {"+", "-", "z"}; the same list
+feeds the QED builder and the numpy reference.
 """
 from __future__ import annotations
 
@@ -123,7 +121,7 @@ def lattice_pairs(L):
 
 
 def make_audit_models():
-    """The model set of the correctness audit (formerly audit_correctness.make_models)."""
+    """The small models every verb is checked on."""
     ms = []
     ms.append(Model("dimer", 2, heisenberg_terms([(0, 1)]), u1=True, real=True, su2=True))
     ms.append(Model("triangle3", 3, heisenberg_terms([(0, 1), (1, 2), (2, 0)]), u1=True, real=True, su2=True))

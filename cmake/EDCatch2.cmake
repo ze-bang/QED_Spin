@@ -11,8 +11,6 @@
 # Why FetchContent first? Most lab clusters and HPC images do not ship
 # Catch2 v3 (Debian bookworm, RHEL 8/9 ship v2). Pinning to v3.5.4 makes
 # the test build reproducible without imposing a system dependency.
-#
-# P1.8 / audit Q12.
 # =============================================================================
 
 option(ED_FETCH_CATCH2 "Always fetch Catch2 v3 via FetchContent (bypass find_package)" OFF)

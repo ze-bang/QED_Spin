@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_su2_dims.cpp
 //
-// Stage 12c of the SU(2) rollout: exact S-resolved dimensions from the
+// Exact S-resolved dimensions from the
 // highest-weight / Burnside-differencing trick
 // (include/ed/symmetry/su2_dims.h).
 //

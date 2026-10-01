@@ -5,8 +5,8 @@
 // MatVecBackend: the strategy object that knows HOW to apply a Hamiltonian's
 // term list to a vector. Encapsulates the choice between
 //
-//   * matrix-free SpMV   (term_kernels::apply_terms<Basis, Scalar>)
-//   * assembled-CSR SpMV (Eigen RowMajor SparseMatrix, OpenMP-parallel rows)
+//   * matrix-free SpMV   (row-gather kernels, term_kernels_gather.h)
+//   * assembled-CSR SpMV (self-owned gather-form CSR, OpenMP-parallel rows)
 //
 // and the real-vs-complex specialisation, behind ONE polymorphic interface.
 // Operator holds a unique_ptr to a backend
@@ -23,25 +23,7 @@
 // (whose ``apply`` happens to go through a MatVecBackend) with any Backend
 // (which it uses for the surrounding linear algebra).
 //
-// Why this exists (matvec-unification, Phase 4 — May 2026):
-// --------------------------------------------------------
-// Before this header, Operator::apply() and the fixed-Sz operator each
-// contained the same three-way dispatch tree
-//
-//     if (CSR built || sparse_dispatch_enabled(dim)) {
-//         if (op_real && input_real) { csr_real(...); return; }
-//         csr_complex(...); return;
-//     }
-//     if (op_real && input_real && dim >= 1024) { apply_real(...); return; }
-//     apply_optimized(...);
-//
-// and each spelled it out against its own private CSR caches
-// (sparseMatrixRow_/sparseMatrixRealRow_/fixed_sz_csr_/...). Two operators,
-// eight near-identical apply_* member functions, mutable caches stored on
-// the operator (hence `mutable` + `const_cast` in apply()), and the same
-// dispatch logic written twice.
-//
-// The post-refactor picture:
+// Operator side:
 //
 //   class Operator {
 //       std::unique_ptr<MatVecBackendBase> backend_;
@@ -86,7 +68,7 @@
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
 #include <ed/matvec/reduced_symmetry_csr.h>
-#include <ed/matvec/term_kernels_gather.h>  // SOTA lock-free row-gather SpMV
+#include <ed/matvec/term_kernels_gather.h>  // lock-free row-gather SpMV
 #include <ed/matvec/term_storage.h>   // canonical term-view record types
                                       // (named only by the extern template
                                       //  declarations at the foot of this file)
@@ -116,17 +98,15 @@ namespace detail {
 // Measured net win at 27-site sz+spatial: converged GS 238 s vs 452 s rep-walk;
 // FTLM rep-walk did not finish in 70 min vs ~31 min reduced-CSR.
 inline bool reduced_csr_enabled() noexcept {
-    // resolved_sym_matvec_repr() now DEFAULTS to RepReducedCsr (opt out with
+    // resolved_sym_matvec_repr() defaults to RepReducedCsr (opt out with
     // ED_SYM_REDUCED_CSR=0 / ED_SYM_REP), so this is the reduced-CSR sub-choice.
     return ed::planner::resolved_sym_matvec_repr()
            == static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr);
 }
 
-// Stage 9f: the reduced sector matrix is ~dim x terms_per_row entries, and it
-// used to be assembled UNCONDITIONALLY under the RepReducedCsr default -- an
-// automatic OOM at frontier sectors (N=36 half filling: hundreds of GB) that
-// the "opt out with ED_SYM_REDUCED_CSR=0" comment merely documented. Mirror
-// the little-group engine's up-front UPPER-BOUND estimate (each off-diagonal
+// The reduced sector matrix is ~dim x terms_per_row entries, which would OOM
+// at frontier sectors (N=36 half filling: hundreds of GB). Use the
+// little-group engine's up-front UPPER-BOUND estimate (each off-diagonal
 // term contributes at most one entry per source row) against the SAME budget
 // knob, ED_SYM_SECTOR_CSR_BUDGET_GIB (default 8): an oversized sector falls
 // back to the CSR-free rep walk on its own, no env var required.
@@ -154,9 +134,9 @@ inline constexpr bool policy_is_rep_v = policy_is_rep<P>::value;
 // a kernel: the spin length and whether all couplings are purely real.
 //
 // The struct types referenced here are duck-typed at template instantiation
-// time (the kernel reads only the field names, see term_kernels.h). We avoid
-// hard-coding ed::matvec types for them so the operator's existing nested
-// type aliases (Operator::DiagonalOneBody etc.) keep working with no change.
+// time (the kernel reads only the field names, see term_kernels.h), so the
+// operator's nested type aliases (Operator::DiagonalOneBody etc.) plug in
+// directly.
 // ---------------------------------------------------------------------------
 template <class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
           class OffDiagTwo, class ThreeBody>
@@ -218,11 +198,9 @@ struct MatVecTunables {
     // Below this projected-basis dim we prefer assembled-CSR; above it we
     // stick with matrix-free. Defaults:
     //   - full Hilbert space    : 1<<20  (~1M states, ~16 MB / Lanczos vec)
-    //   - fixed-Sz / symmetry   : 1<<22  (~4M states; CSR amortises well)
-    // Override at runtime with ED_CSR_DIM_MAX / ED_CSR_FORCE (the legacy
-    // ED_USE_SPARSE / ED_SPARSE_DIM_MAX / ED_FIXED_SZ_* aliases were retired
-    // in the Jul-2026 debt cleanup). Read ONCE at construction so the hot
-    // path doesn't pay a getenv() per matvec.
+    //   - symmetry sectors      : 1<<13  (see read_symmetry_tunables)
+    // Override at runtime with ED_CSR_DIM_MAX / ED_CSR_FORCE. Read ONCE at
+    // construction so the hot path doesn't pay a getenv() per matvec.
     std::uint64_t csr_cutoff_dim = 0;
     // false: never assemble CSR (matrix-free always). true: always assemble.
     // tri-state via the env vars: -1 means "use cutoff", 0 means "off",
@@ -232,11 +210,10 @@ struct MatVecTunables {
     // matrix-free branch even if both op and input are real. The OMP fork+join
     // + the input-real scan cost dominates the savings for tiny vectors.
     std::uint64_t real_matvec_min_dim = 1024;
-    // Matrix-free SpMV form for the trivial (Full / FixedSz) policies.
-    // Default false -> the SOTA lock-free row-GATHER kernel
-    // (apply_terms_gather). Set ED_MATVEC_SCATTER=1 to fall back to the
-    // legacy SCATTER kernel (apply_terms, atomic + radix-sort) for one
-    // release as a bisection escape hatch.
+    // Matrix-free SpMV form. Default false -> the lock-free row-GATHER
+    // kernel (apply_terms_gather). Set ED_MATVEC_SCATTER=1 to use the
+    // SCATTER kernel (apply_terms, atomic + radix-sort) instead, as a
+    // bisection escape hatch.
     bool matvec_scatter = false;
 };
 
@@ -269,35 +246,19 @@ inline MatVecTunables read_tunables(std::uint64_t default_cutoff) noexcept
 
     t.csr_force = read_force("ED_CSR_FORCE");
 
-    // Wave 7 (May 2026, "Unify all 16 matvec cells" plan): ``ED_SYM_CSR_DIM_MAX``
-    // is the symmetry-specific override. When a SymmetryBasisPolicy-backed
-    // operator constructs its backend it reads this in addition to
-    // ``ED_CSR_DIM_MAX`` so users can apply a smaller cap on symmetry
-    // sectors (where orbit-walk amortizes more across matvecs) than on
-    // the full-Hilbert lane. The follow-up patch wires SectorView
-    // through a backend instance that pays attention to it.
     t.csr_cutoff_dim = read_cutoff("ED_CSR_DIM_MAX", default_cutoff);
     t.matvec_scatter = read_matvec_scatter();
     return t;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 of the "Unified CPU/GPU symmetry architecture" plan (May 2026).
-//
 // ``read_symmetry_tunables(default_cutoff)`` returns a ``MatVecTunables``
 // configured for the symmetry lane: the cutoff is taken from
-// ``ED_SYM_CSR_DIM_MAX`` first, then ``ED_CSR_DIM_MAX``, then the
-// caller's default (typically ``1<<13 == 8192`` -- the "small N"
-// regime where symmetry-projected sectors benefit most from CSR
-// caching; large N is dominated by matrix-free SpMV time and the
-// CSR build would dwarf the savings).
-//
-// Why a separate env var: symmetry-projected sectors live in a
-// different size regime than the full Hilbert space. For an N=14 ring
-// with translation+reflection, the largest sector is ~5k states even
-// though the full Hilbert space is 16384. Users routinely want
-// ``ED_CSR_DIM_MAX=0`` (disable CSR for full) while still benefiting
-// from ``ED_SYM_CSR_DIM_MAX=8192`` (enable CSR for symmetry sectors).
+// ``ED_CSR_DIM_MAX`` when set to a non-zero value, else the caller's
+// default (typically ``1<<13 == 8192`` -- the "small N" regime where
+// symmetry-projected sectors benefit most from CSR caching; large N is
+// dominated by matrix-free SpMV time and the CSR build would dwarf the
+// savings).
 //
 // ``csr_force`` shares the unified ``ED_CSR_FORCE`` knob so a force-on
 // or force-off applies uniformly across lanes.
@@ -326,21 +287,15 @@ inline MatVecTunables read_symmetry_tunables(
     int force = read_force("ED_CSR_FORCE");
     t.csr_force = force;  // -1 if unset -> use cutoff
 
-    // Symmetry-specific cutoff: ED_SYM_CSR_DIM_MAX overrides
     // ED_CSR_DIM_MAX overrides the caller default.
-    std::uint64_t sym_cutoff = read_cutoff("ED_SYM_CSR_DIM_MAX", 0);
-    if (sym_cutoff != 0) {
-        t.csr_cutoff_dim = sym_cutoff;
-    } else {
-        std::uint64_t unified = read_cutoff("ED_CSR_DIM_MAX", 0);
-        if (unified != 0) t.csr_cutoff_dim = unified;
-    }
+    const std::uint64_t unified = read_cutoff("ED_CSR_DIM_MAX", 0);
+    if (unified != 0) t.csr_cutoff_dim = unified;
     t.matvec_scatter = read_matvec_scatter();
     return t;
 }
 
 // ---------------------------------------------------------------------------
-// Structural Hermiticity check (audit 2026-09, correctness R1).
+// Structural Hermiticity check.
 //
 // The symmetry gather kernel (`apply_terms_rep_symmetry_gather`) evaluates
 // <r| H |s'> through the adjoint of the emitted element and therefore
@@ -388,7 +343,7 @@ inline void require_hermitian_terms(const std::vector<OffDiagOneBody>& one,
                 "symmetry lane requires a Hermitian operator: an off-diagonal term "
                 "has no adjoint partner with the conjugate coefficient (the "
                 "representative-walk kernels compute H^dagger v). Route non-Hermitian "
-                "probes through the full/fixed-Sz operator, or symmetrise the term list.");
+                "probes through qed.dynamics / matrix_element (cross-sector observables), or symmetrise the term list.");
         }
     }
 }
@@ -406,15 +361,15 @@ inline bool csr_eligible(const MatVecTunables& t, std::uint64_t dim, bool alread
 // CpuMatVecBackend<BasisPolicy, ...>
 //
 // Concrete backend for host-memory matvecs. The basis policy (FullBasisPolicy
-// or FixedSzBasisPolicy) is a value-type member; it's cheap to copy and the
-// kernel reads it through inline accessors. CSR caches are owned by the
+// or RepSymmetryBasisPolicy) is a value-type member; it's cheap to copy and
+// the kernel reads it through inline accessors. CSR caches are owned by the
 // backend so the operator (which is the user-facing object) stays free of
 // mutable state and const_cast.
 //
 // Thread-safety: a single backend instance is NOT safe to call concurrently
 // across threads (the CSR-build phase races on the cache flag). This matches
-// the existing operator.h contract and is fine because Lanczos / FTLM / TPQ
-// drive a single matvec per iteration anyway.
+// the operator.h contract and is fine because Lanczos / FTLM / TPQ drive a
+// single matvec per iteration anyway.
 // ---------------------------------------------------------------------------
 template <class BasisPolicy,
           class DiagOne, class OffDiagOne, class DiagTwo, class MixedTwo,
@@ -446,10 +401,9 @@ public:
         // real-input fast path is invalid too: a real Hamiltonian projected
         // onto a complex momentum sector has complex off-diagonals (a real
         // projection would silently drop the imaginary part of the phase).
-        // This branch is compiled out for the Full / FixedSz policies.
+        // This branch is compiled out for the trivial policies.
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
-            // Audit 2026-09 (correctness R1): the symmetry gather kernels
-            // compute H^dagger v and rely on H being Hermitian; check the
+            // The symmetry gather kernels compute H^dagger v and rely on H being Hermitian; check the
             // term list structurally once per backend instance.
             if (!hermiticity_checked_) {
                 detail::require_hermitian_terms(*terms.offdiag_one, *terms.mixed_two,
@@ -485,7 +439,7 @@ public:
 
             // Matrix-free path. Take the real specialisation when the operator
             // and the input are both real AND the vector is big enough to amortise
-            // the input-scan and the buffer copies (legacy threshold: dim >= 1024).
+            // the input-scan and the buffer copies (real_matvec_min_dim).
             if (terms.is_real && n >= tunables_.real_matvec_min_dim
                 && input_is_real(in, n))
             {
@@ -520,7 +474,7 @@ public:
         // matrix-free kernel is valid here only because apply_real is reached
         // solely when the owning operator reports a real effective matrix
         // (real terms AND real momentum phases); the real projection is then
-        // exact. Compiled out for Full / FixedSz.
+        // exact. Compiled out for the trivial policies.
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
             // GATHER (default) overwrites every row; only the SCATTER fallback
             // needs a pre-zeroed accumulator.
@@ -563,7 +517,7 @@ private:
         if constexpr (detail::policy_is_rep_v<BasisPolicy>) {
             // On-the-fly representative (momentum) sector.
             if (tunables_.matvec_scatter) {
-                // Bisection fallback: legacy SCATTER kernel (caller pre-zeroed).
+                // Bisection fallback: SCATTER kernel (caller pre-zeroed).
                 ed::matvec::kernel::apply_terms_rep_symmetry<BasisPolicy, Complex>(
                     basis_, t.spin_l,
                     *t.diag_one, *t.offdiag_one,
@@ -575,7 +529,7 @@ private:
                               basis_.dim(),
                               1 + t.offdiag_one->size() + t.mixed_two->size()
                                 + t.offdiag_two->size() + t.three_body->size())) {
-                // Stage 2b: reduced sector matrix assembled straight from the
+                // Reduced sector matrix assembled straight from the
                 // rep policy (index_and_projection) -- no orbit CSR, then
                 // O(1)-per-nnz SpMV.
                 if (!rep_csr_cplx_.built())
@@ -585,7 +539,7 @@ private:
                         *t.mixed_two, *t.offdiag_two, *t.three_body);
                 rep_csr_cplx_.spmv(in, out);
             } else {
-                // RepStream: SOTA lock-free row GATHER + precomputed rep
+                // RepStream: lock-free row GATHER + precomputed rep
                 // diagonal. Overwrites ``out`` (no pre-zero needed).
                 ensure_diag_complex(t);
                 ed::matvec::kernel::apply_terms_rep_symmetry_gather<BasisPolicy, Complex>(
@@ -596,7 +550,7 @@ private:
                     in, out, diag_cplx_.data());
             }
         } else if (tunables_.matvec_scatter) {
-            // Trivial policy, bisection fallback: legacy SCATTER kernel
+            // Trivial policy, bisection fallback: SCATTER kernel
             // (caller pre-zeroed ``out``).
             ed::matvec::kernel::apply_terms<BasisPolicy, Complex>(
                 basis_, t.spin_l,
@@ -605,7 +559,7 @@ private:
                 *t.three_body,
                 in, out);
         } else {
-            // Trivial policy, DEFAULT: SOTA lock-free row GATHER + precomputed
+            // Trivial policy, DEFAULT: lock-free row GATHER + precomputed
             // diagonal. Overwrites ``out`` (no pre-zero needed).
             ensure_diag_complex(t);
             ed::matvec::kernel::apply_terms_gather<BasisPolicy, Complex>(
@@ -632,7 +586,7 @@ private:
                               basis_.dim(),
                               1 + t.offdiag_one->size() + t.mixed_two->size()
                                 + t.offdiag_two->size() + t.three_body->size())) {
-                // Stage 2b: rep-assembled reduced sector matrix (see the
+                // Rep-assembled reduced sector matrix (see the
                 // complex twin above).
                 if (!rep_csr_real_.built())
                     rep_csr_real_ = build_reduced_symmetry_csr_rep<BasisPolicy, double>(
@@ -668,8 +622,7 @@ private:
     }
 
     // ------------------------------------------------------------------
-    // Precomputed Hamiltonian diagonal (Phase 2 of the SOTA matrix-apply
-    // plan). For the trivial (Full / FixedSz) policies the diagonal is a
+    // Precomputed Hamiltonian diagonal. For the trivial policies the diagonal is a
     // pure per-row function of the bitstring (Sz and SzSz sign products),
     // so it can be computed ONCE and reused across every matvec instead of
     // re-walking the diag_one_body / diag_two_body bins per row per apply.
@@ -713,7 +666,7 @@ private:
         }
     }
 
-    // Rep-symmetry diagonal (Phase B): the diagonal in the representative basis
+    // Rep-symmetry diagonal: the diagonal in the representative basis
     // is NOT the bare Sz/SzSz sign product -- it carries the per-orbit
     // projection phase + 1/norm. Built via the dedicated kernel; reuses the
     // same diag_* buffers (a backend is either a trivial OR a rep policy, never
@@ -752,7 +705,7 @@ private:
     // Assembled-CSR build + parallel SpMV.
     // ------------------------------------------------------------------
     void check_csr_index_range_() const {
-        // Audit R2: column indices are 32-bit; refuse instead of overflowing.
+        // Column indices are 32-bit; refuse instead of overflowing.
         if (basis_.dim() > 0xFFFFFFFFull) {
             throw std::runtime_error(
                 "assembled CSR requested for dim > 2^32-1 (32-bit column indices); "
@@ -760,7 +713,7 @@ private:
         }
     }
 
-    // Audit F4 (2026-09): direct two-pass CSR assembly in GATHER form
+    // Direct two-pass CSR assembly in GATHER form
     // (count / prefix / fill, parallel over rows, sorted+merged columns) --
     // no Eigen triplet vector (24 B/nnz), no serial setFromTriplets sort.
     void ensure_csr_complex(const term_view_t& t) {
@@ -833,22 +786,6 @@ private:
     }
 
     // ------------------------------------------------------------------
-    // The templated triplet emitter previously inlined here was factored
-    // out into ed/matvec/term_kernels_assemble.h's
-    // ``ed::matvec::kernel::emit_term_triplets<BasisPolicy, Scalar>(...)``
-    // so the assembly logic is now the same single source of truth for:
-    //   * MatVecBackend's assembled-CSR path (ensure_csr_complex/real)
-    //   * Operator::buildSparseMatrix    (the legacy std::function path
-    //                                      is no longer the only one
-    //                                      supported)
-    //   * any future Eigen / Spectra / ARPACK consumer that needs a
-    //     materialised CSR matrix from the canonical AoS term list
-    // The dead private emit_triplets_ / emit_ / emit_if_in_basis_ /
-    // coerce_ block that used to live here was removed -- both
-    // ensure_csr_complex and ensure_csr_real now delegate to the free
-    // helper directly.
-    // ------------------------------------------------------------------
-    // ------------------------------------------------------------------
     // Cheap helpers.
     // ------------------------------------------------------------------
 
@@ -900,7 +837,7 @@ private:
     std::string            label_;
 
     // Assembled-CSR caches. Lazy-built on first apply that's CSR-eligible.
-    // Audit F4: self-owned CSR (int64 row_ptr, uint32 col) built directly
+    // Self-owned CSR (int64 row_ptr, uint32 col) built directly
     // in gather form; see term_kernels_assemble.h.
     ed::matvec::kernel::OwnedCsr<Complex> csr_complex_{};
     ed::matvec::kernel::OwnedCsr<double>  csr_real_{};
@@ -914,8 +851,8 @@ private:
     mutable bool diag_cplx_built_ = false;
     mutable bool diag_real_built_ = false;
 
-    // Reduced-CSR "skeleton" lane (rep symmetry only; ED_SYM_REDUCED_CSR=1). Built
-    // once on first apply from the same row walk as the rep gather, then reused
+    // Reduced-CSR "skeleton" lane (rep symmetry only; default, opt out with
+    // ED_SYM_REDUCED_CSR=0). Built once on first apply, then reused
     // as an O(1)-per-nnz SpMV across all solver iterations.
     mutable ReducedSymmetryCsr<Complex> rep_csr_cplx_{};
     mutable ReducedSymmetryCsr<double>  rep_csr_real_{};
@@ -924,7 +861,7 @@ private:
     std::vector<double> real_in_buf_;
     std::vector<double> real_out_buf_;
 
-    // Audit R1: set once the term list has been verified to be Hermitian
+    // Set once the term list has been verified to be Hermitian
     // (symmetry lanes only).
     mutable bool hermiticity_checked_ = false;
 };
@@ -954,7 +891,7 @@ make_cpu_full_basis_backend(std::uint64_t n_bits,
 }
 
 // ---------------------------------------------------------------------------
-// P6 (operator-collapse): extern-template declaration for the trivial-
+// Extern-template declaration for the trivial-
 // basis host cell of the Operator<BasisPolicy, MemSpace> grid, over the
 // single canonical term-view shape every Operator instantiates (the six SoA
 // record types from term_storage.h; see the Operator::DiagonalOneBody ...
@@ -966,8 +903,8 @@ make_cpu_full_basis_backend(std::uint64_t n_bits,
 // compile-time cost of the heavy CSR + matrix-free kernel tree to one TU.
 //
 // The Symmetry cell's extern declaration lives in symmetry_matvec_backend.h
-// (its policy type pulls in the heavyweight streaming-symmetry chain, which
-// this leaf header deliberately avoids).
+// (its policy type pulls in the heavyweight symmetry headers, which this
+// leaf header deliberately avoids).
 // ---------------------------------------------------------------------------
 extern template class CpuMatVecBackend<basis::FullBasisPolicy,
                                        DiagOneBody, OffDiagOneBody, DiagTwoBody,

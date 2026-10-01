@@ -25,7 +25,7 @@
 // random part to the (D - N_V)-dimensional complement, Z is the FULL (shifted)
 // trace -- there is no separate ln(D) term as in plain FTLM.
 //
-// CPU-only lane (matches LTLM). Consumes the host term-matvec + the shared host
+// CPU-only lane. Consumes the host term-matvec + the shared host
 // Lanczos helpers in ed/solvers/lanczos.h.
 // =============================================================================
 
@@ -48,7 +48,7 @@ struct OftlmOptions {
     std::uint64_t random_seed  = 0;
 };
 
-/// Orthogonalized FTLM on a single (CPU, single-rank) sector.
+/// Orthogonalized FTLM on a single (CPU) sector.
 /// @param apply_H  host term-matvec: out = H * in, length N.
 /// @param N        sector Hilbert dimension (local == global on CPU).
 FtlmResult oftlm_cpu(

@@ -15,8 +15,11 @@ H = b.to_operator()
 # Every symmetry H has (momenta, point group, Sz, spin flip, time reversal) is found and used.
 r = qed.eigs(H, 6)
 print("lowest energies (with multiplicity):", np.round(r.energies, 8))
-for L in r.levels:
-    print(f"  E = {L.energy:.8f}  x{L.multiplicity}  Sz sector n_up={L.n_up}  k0={L.k0}  irrep={L.irrep}")
+t = [(i + 1) % N for i in range(N)]       # translation by one site
+for i, L in enumerate(r.levels):
+    theta = r.momentum(i, [t])[0]          # t|psi> = exp(-2 pi i theta)|psi>
+    print(f"  E = {L.energy:.8f}  x{L.multiplicity}  Sz sector n_up={L.n_up}  momentum {theta}  "
+          f"little-group characters {np.round(list(r.irrep_characters(i).values()), 6)}")
 
 # Eigenvectors in the full 2^N basis (degenerate multiplets completed by symmetry).
 r = qed.eigs(H, 2, vectors=True)

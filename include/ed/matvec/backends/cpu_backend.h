@@ -3,14 +3,12 @@
 // include/ed/matvec/backends/cpu_backend.h
 //
 // CpuBackend: host-memory, OpenMP-parallel realisation of the Backend
-// interface. Drives every CPU solver in the codebase (Lanczos, FTLM,
-// LTLM, TPQ, CG, time evolution) once the matvec-unification revamp
-// is complete.
+// interface, used by the CPU solvers (Lanczos, FTLM, LTLM, TPQ, CG,
+// time evolution).
 //
-// Vector primitives delegate to BLAS via the existing
-// `ed/core/blas_lapack_wrapper.h` shim (the same code path the legacy
-// solvers already use), so wall-clock performance is identical or better
-// (one less indirection per call).
+// Level-1 vector primitives are OpenMP loops; level-3 primitives (gemm,
+// qr_thin) call cBLAS / LAPACKE through the `ed/core/blas_lapack_wrapper.h`
+// shim.
 //
 // Allocations use aligned new (64-byte alignment for AVX-512) so the
 // inner SpMV / level-1 BLAS loops can rely on aligned moves.
@@ -64,7 +62,7 @@ public:
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;
-        // Audit F8: parallel first touch so Krylov vectors are distributed
+        // Parallel first touch so Krylov vectors are distributed
         // across NUMA nodes with the same static chunking the BLAS-1 and
         // matvec kernels use (a serial memset places every page on the
         // calling thread's node).
@@ -87,13 +85,9 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Level-1 BLAS. We deliberately re-implement here with OpenMP
-    // instead of cblas_zaxpy / cblas_zdotc so the Backend has zero
-    // mandatory link-time dependencies (the BLAS shim continues to be
-    // used by the legacy code path during the migration). After Phase
-    // 4 we can swap these for BLAS calls if a profiler ever shows
-    // them to be the bottleneck --- they currently bind-and-stream at
-    // memory bandwidth, which BLAS would not improve.
+    // Level-1 BLAS as OpenMP loops rather than cblas_zaxpy / cblas_zdotc.
+    // These kernels stream at memory bandwidth, which BLAS would not
+    // improve, and their static chunking matches fill_zero's first touch.
     // -----------------------------------------------------------------
     void axpy(Complex alpha, const Complex* x, Complex* y,
               std::size_t n) const override {
@@ -143,7 +137,7 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // Fused Lanczos primitives (audit F5): single streaming pass.
+    // Fused Lanczos primitives: single streaming pass.
     // `axpy_dot_local` / `axpy_nrm2sq_local` are the local pieces.
     // ----------------------------------------------------------------
     [[nodiscard]] Complex axpy_dot_local(Complex alpha, const Complex* x, Complex* y,
@@ -192,8 +186,7 @@ public:
     //
     // dot_many: each thread sweeps a chunk of `i in [0, n)` and
     // accumulates partial sums of <basis[k], v> for every k. Final
-    // reduction across threads via a critical section (or partial
-    // arrays followed by sum). One streaming pass over `v` feeds all
+    // reduction sums the per-thread partial arrays. One streaming pass over `v` feeds all
     // k inner products --- bandwidth-bound, but only one read of v.
     //
     // axpy_many: each thread sweeps a chunk of `i` and accumulates
@@ -217,17 +210,13 @@ public:
         const int nthreads = 1;
 #endif
         // Per-thread partial-sum scratch: nthreads * num_basis doubles
-        // each for re / im. Phase 6.1 of the Krylov-unification gap-fill
-        // (May 2026): held in `mutable` member storage so a tight Lanczos
-        // loop doesn't re-alloc on every iteration. Per-instance and only
-        // touched serially from the calling thread (the OMP parallel
-        // region below operates on disjoint slices via `tid * num_basis`
-        // offset, so the buffer is safe to share across OMP child
-        // threads). The `CpuBackend` singleton is process-global; if a
-        // higher-level caller dispatches two `dot_many` calls in
-        // parallel on the same singleton, the calls must synchronize
-        // (the kernel and every legacy caller does so by construction:
-        // `dot_many` is always invoked from a serial section).
+        // each for re / im, held in `mutable` member storage so a tight
+        // Lanczos loop doesn't re-alloc on every iteration. The OMP
+        // parallel region below writes disjoint slices (`tid * num_basis`
+        // offset), so the buffer is safe to share across OMP child
+        // threads. Two concurrent `dot_many` calls on the same instance
+        // would race; `default_cpu_backend()` is thread_local for that
+        // reason.
         const std::size_t need = static_cast<std::size_t>(nthreads) * num_basis;
         if (scratch_partial_re_.size() < need) scratch_partial_re_.resize(need);
         if (scratch_partial_im_.size() < need) scratch_partial_im_.resize(need);
@@ -287,8 +276,7 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // Level-3 BLAS via cBLAS / LAPACKE (Phase 1 of the Minimalist ED
-    // Collapse). All matrix arguments column-major.
+    // Level-3 BLAS via cBLAS / LAPACKE. All matrix arguments column-major.
     // -----------------------------------------------------------------
     void gemm(char opA, char opB,
               std::size_t m, std::size_t n, std::size_t k,
@@ -357,9 +345,8 @@ private:
     }
 
 private:
-    // Phase 6.1 (Krylov-unification gap-fill, May 2026): persistent
-    // per-thread accumulation scratch for `dot_many`. Sized lazily on
-    // first call, grow-only across the lifetime of this backend. See
+    // Persistent per-thread accumulation scratch for `dot_many`. Sized
+    // lazily on first call, grow-only across the lifetime of this backend. See
     // the comment block in `dot_many` for the concurrency contract.
     mutable std::vector<double> scratch_partial_re_;
     mutable std::vector<double> scratch_partial_im_;

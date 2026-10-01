@@ -225,16 +225,6 @@ TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
     REQUIRE_FALSE(res.heat_capacity.empty());
 }
 
-// NOTE: there is no ltlm_kernel facade to pin. ed/thermal/ltlm_kernel.h and
-// low_temperature_lanczos were deleted in consolidation Family 1 (Jul 2026):
-// both reimplemented the same GS-local-DOS bug, and for a function of H the
-// symmetric LTLM estimator reduces exactly to the FTLM trace, so the
-// orchestrator's LTLM branch dispatches through ftlm_kernel. That equivalence
-// is pinned in test_thermal_dense_ref ("LTLM thermodynamics IS the FTLM
-// trace"); the genuinely LTLM-only estimator that survives
-// (compute_connected_qh_response_ltlm, dM/dT -- an observable that does NOT
-// commute with H) is pinned by test_ltlm_static_connected_qh.
-
 TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
           "[kernel-facade][mtpq][phase6]") {
     constexpr std::uint64_t N   = 4;

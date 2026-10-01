@@ -1,12 +1,8 @@
 # clang-tidy >= 17 expected.
 #
-# Conservative starter set: catches obvious bugs, leaves stylistic checks
-# off. As the codebase modernizes (Phase 1+), additional check groups will
-# be enabled and the noisy ones suppressed via NOLINT comments at the
-# call site, not via a global -* exclusion.
-#
-# Currently CI runs clang-tidy as warnings-only (does not fail the build).
-# In Phase 2 it becomes an error gate after the major refactors land.
+# A conservative set: catches likely bugs, leaves stylistic checks off. Silence a
+# justified warning with NOLINT at the call site, not with a global exclusion.
+# CI runs clang-tidy as warnings only.
 
 ---
 Checks: >

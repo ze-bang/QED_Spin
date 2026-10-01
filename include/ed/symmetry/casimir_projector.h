@@ -2,12 +2,10 @@
 // =============================================================================
 // include/ed/symmetry/casimir_projector.h
 //
-// Stage 12d of the SU(2) rollout (docs/architecture/SYMMETRY_V2_DESIGN.md):
-// the Lowdin total-spin projector and the Krylov-targeting operator wrapper.
-// This is the `CasimirProjector` seat reserved in projector.h -- realised at
-// the OPERATOR level (a polynomial in S^2 acting on vectors), NOT as a
-// Subspace: S-eigenspaces are not spanned by computational basis states, so
-// there is nothing for an `index_of` to filter. The matvec ABI is untouched.
+// The Lowdin total-spin projector and the Krylov-targeting operator wrapper,
+// realised at the OPERATOR level (a polynomial in S^2 acting on vectors),
+// NOT as a Subspace: S-eigenspaces are not spanned by computational basis
+// states, so there is nothing for an `index_of` to filter.
 //
 // Lowdin projector onto the spin-S eigenspace of S^2:
 //
@@ -18,7 +16,7 @@
 // every OTHER S' appears (X|S, m=0> = (-1)^{N/2-S}|S, m=0>), halving the
 // degree again. `allowed_two_S_in_block` is the single source of that set.
 //
-// Numerical policy (see the SU(2) plan):
+// Numerical policy:
 //   * factors are applied NUMERATOR-ONLY, farthest eigenvalue first (the
 //     dominant unwanted components are annihilated while intermediate
 //     norms stay O(1));
@@ -63,24 +61,18 @@
 
 namespace ed::symmetry {
 
-/// Reprojection cadence for the targeting wrapper. Default 1 (project
-/// every apply): eigenvalue-only Lanczos lanes run bounded (local)
+/// Default reprojection cadence for the targeting wrapper: project every
+/// apply. Eigenvalue-only Lanczos lanes run bounded (local)
 /// reorthogonalisation, where an off-tower roundoff component is
 /// AMPLIFIED toward the global extremal eigenvalue and converges as a
 /// ghost within ~30 iterations if left unscrubbed -- correctness first.
-/// Raise via ED_SYM_SU2_REPROJECT_FREQ (k = project every k-th apply;
-/// 0 = seed projection only) when the projection cost dominates and the
-/// spectrum is known to be drift-benign. Read per call so tests can
-/// toggle from Python.
-[[nodiscard]] inline int su2_reproject_freq() noexcept {
-    const char* v = ed::env::raw("ED_SYM_SU2_REPROJECT_FREQ");
-    if (v == nullptr || *v == '\0') return 1;
-    return std::atoi(v);
-}
+/// Callers pass an explicit cadence (k = project every k-th apply;
+/// 0 = seed projection only) to the constructor to override.
+inline constexpr int kSu2ReprojectFreq = 1;
 
 /// The set of total-spin labels (as two_S) present in a symmetry block,
 /// the single source consumed by the Lowdin excluded-set and by the dense
-/// S-resolution (Stage 12e).
+/// S-resolution.
 ///   * n_up >= 0     : fixed-Sz block, S >= |Sz|;
 ///   * sz_parity >= 0: Sz-parity half; only the S = 0 tower is parity-
 ///     selective (its lone member sits at n_up = N/2), every S >= 1
@@ -259,14 +251,12 @@ private:
 /// Spectrally H and the wrapper agree on the targeted tower ([H, P_S] = 0
 /// and P_S == Id there).
 ///
-/// GHOST SHIFT (audit fix, Jul 2026): the naive scrub `out = P(H v)`
-/// leaves the ENTIRE off-tower complement as an exact eigenvalue-0
-/// kernel of the effective operator (P H = P H P, and P H Q = 0). The
-/// Lanczos recurrence recycles off-tower roundoff through its -alpha*v
-/// terms, so a ghost Ritz value converges at 0 -- BELOW the tower
-/// whenever the tower minimum is positive (measured: total_spin=3 on the
-/// N=6 ring returned 0 instead of +1.5; any positively shifted H
-/// reproduces it for every tower). The scrubbed apply therefore computes
+/// GHOST SHIFT: a plain scrub `out = P(H v)` would leave the ENTIRE
+/// off-tower complement as an exact eigenvalue-0 kernel of the effective
+/// operator (P H = P H P, and P H Q = 0). The Lanczos recurrence recycles
+/// off-tower roundoff through its -alpha*v terms, so a ghost Ritz value
+/// would converge at 0 -- BELOW the tower whenever the tower minimum is
+/// positive. The scrubbed apply therefore computes
 ///
 ///     out = P((H - mu) v) + mu v
 ///
@@ -280,11 +270,11 @@ public:
     CasimirProjectedOperator(
         std::shared_ptr<const ed::matvec::MatVecOperator> h,
         std::shared_ptr<const LowdinS2Projector> projector,
-        int reproject_freq = -1)  // -1 = env default
+        int reproject_freq = -1)  // -1 = kSu2ReprojectFreq
         : h_(std::move(h)),
           projector_(std::move(projector)),
           freq_(reproject_freq >= 0 ? reproject_freq
-                                    : su2_reproject_freq()) {
+                                    : kSu2ReprojectFreq) {
         if (!h_ || !projector_) {
             throw std::invalid_argument(
                 "CasimirProjectedOperator: null operator/projector");

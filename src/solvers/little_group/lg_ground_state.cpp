@@ -12,7 +12,7 @@ using namespace lg_detail;
 
 namespace lg_detail {   // solve_gs_vector backs solve_block_eigenpairs (lg_block_solve.cpp)
 
-// TWO-PASS no-reorth ground-state Ritz vector (2026-07-19).
+// TWO-PASS no-reorth ground-state Ritz vector.
 //
 // Pass 1: pure three-term recurrence (no reorth, no stored basis), tridiag
 // only, with the same ghost-aware k=1 Paige-bound gate the star scan uses
@@ -28,8 +28,8 @@ namespace lg_detail {   // solve_gs_vector backs solve_block_eigenpairs (lg_bloc
 solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
                          std::size_t n)
 {
-    const std::size_t max_iter = std::min<std::size_t>(n, lg_gs_max_iter(600));
-    const int restarts = lg_gs_restarts();
+    const std::size_t max_iter = std::min<std::size_t>(n, kLgGsTwoPassMaxIter);
+    const int restarts = kLgGsRestarts;
 
     std::vector<Complex> v0(n);
     {
@@ -174,7 +174,7 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
             num += std::norm(w[ii] - ray * u[ii]);
         }
         E0 = ray;
-        if (std::sqrt(num) <= lg_gs_resid_tol() || attempt == restarts) break;
+        if (std::sqrt(num) <= kLgGsResidTol || attempt == restarts) break;
         seed = u;                       // restarted refinement
     }
     return {E0, std::move(u)};
@@ -182,8 +182,8 @@ solve_gs_vector_two_pass(const ed::matvec::MatVecOperator& hk,
 
 // GS eigenpair of the PLAIN k0 sector with an in-memory eigenvector:
 // dense for small blocks; above the dense crossover either the two-pass
-// no-reorth lane (large n -- see lg_two_pass_min_dim) or FullCGS2 Lanczos
-// + kept-basis Ritz vector (small n, the historical path). Residual-
+// no-reorth lane (large n -- see kLgTwoPassMinDim) or FullCGS2 Lanczos
+// + kept-basis Ritz vector (small n). Residual-
 // guarded -- a failed vector THROWS (the caller's point_group='full'
 // contract is loud, and there is no cheaper correct fallback for a
 // vector consumer).
@@ -199,7 +199,7 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         E0 = es.eigenvalues()(0);
         for (std::size_t i = 0; i < n; ++i)
             u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
-    } else if (n > lg_two_pass_min_dim()) {
+    } else if (n > kLgTwoPassMinDim) {
         auto pr = solve_gs_vector_two_pass(hk, n);
         E0 = pr.first;
         u  = std::move(pr.second);
@@ -210,7 +210,7 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         std::normal_distribution<double> nd(0.0, 1.0);
         for (auto& v : v0) v = Complex(nd(gen), nd(gen));
         ed::krylov::LanczosKernelOptions kopts;
-        kopts.max_iter   = std::min<std::size_t>(n, lg_gs_max_iter(200));
+        kopts.max_iter   = std::min<std::size_t>(n, kLgGsSmallMaxIter);
         kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
         kopts.keep_basis = true;
         kopts.dim_cap    = n;
@@ -251,17 +251,15 @@ solve_gs_vector(const ed::matvec::MatVecOperator& hk, int dense_max_dim)
         den += std::norm(u[i]);
     }
     // Residual acceptance -- shared with the two-pass inner loop via
-    // lg_gs_resid_tol() (see its comment for the calibration and the 4x3
-    // kagome post-mortem).
-    const double resid_tol = lg_gs_resid_tol();
+    // kLgGsResidTol.
+    const double resid_tol = kLgGsResidTol;
     if (std::sqrt(num / den) > resid_tol) {
         char buf[64];
         std::snprintf(buf, sizeof buf, "%.3e", std::sqrt(num / den));
         throw std::runtime_error(
             std::string("little_group: GS eigenvector residual ") + buf
             + " exceeds tolerance " + std::to_string(resid_tol)
-            + " -- declining the factorized DSSF "
-            "(ED_SYM_LG_GS_RESID_TOL relaxes for correlator-only use).");
+            + " -- declining the factorized DSSF.");
     }
     const double inv = 1.0 / std::sqrt(den);
     for (auto& c : u) c *= inv;
@@ -287,7 +285,7 @@ void little_group_k_sectors_stream(
     LittleGroupOptions o;
     o.n_up          = n_up;
     o.sz_parity     = sz_parity;
-    o.spin_flip     = 0;      // destination sectors are RAW (9d v1)
+    o.spin_flip     = 0;      // destination sectors are RAW
     o.time_reversal = 0;
     EngineContext cx;
     bool tr_on = false;

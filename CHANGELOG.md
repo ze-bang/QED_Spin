@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
+
+The library was rebuilt around one path from a Python call to the kernels (c438459..cf38fcd;
+see `docs/architecture.md`).
+
+**Surface.** `qed.eigs`, `qed.spectrum`, `qed.thermal`, `qed.dynamics`, `qed.expect` over one
+`qed.Symmetry`; `EigResult.save` / `qed.load_eigs`. Retired: `qed.solve`, `qed.spectral`,
+`qed.full_spectrum`, the lane tables, `EDParameters`, the HPhi file interface and `edlib`,
+the `ED` CLI, HDF5 output and every disk-persistence path, MPI and NCCL, KPM (DOS and
+dynamical), block Lanczos, the fp32 mTPQ lane, `FixedSzOperator`. OFTLM is FTLM with
+`exact_states=`.
+
+**Engine.** One little-group sector engine for every symmetry content: Sz or its parity,
+lattice momenta, point-group little groups with higher-dimensional irreps (group sectors
+for one-dimensional irreps, sized by Burnside so the momentum sector is never built), spin
+flip, time reversal and total spin (Löwdin tower projection, also on the GPU). Levels carry
+physical labels (momentum and little-group characters); `Symmetry.select` restricts by them.
+
+**Tasks.** Lowest levels with vectors (Krylov-Schur with a degeneracy probe, pruned by a
+Lanczos estimate, `window=` for degenerate partners); full spectra (batched cuSOLVER on the
+GPU); thermodynamics (exact, FTLM, mTPQ, restricted to a spin tower, and ⟨O⟩(T) with the
+symmetric low-temperature estimator); dynamics at T = 0 (continued fraction averaged over
+the full degenerate ground manifold, including every spin-multiplet member) and at T > 0
+(finite-temperature Lanczos across sectors, on CPU and GPU); ⟨O⟩ and ⟨i|O|j⟩ for operators
+that break the symmetries.
+
+**Backends.** `device="cpu" | "gpu" | "auto"`, honoured strictly. Sampled methods batch their
+random vectors on the GPU (one multi-vector gather launch per H apply); small host blocks run
+concurrently.
+
+**Defects the rebuild's coverage grid found and fixed** (each measured against a dense
+reference): degenerate ground states were not averaged in T = 0 dynamics; FTLM dynamics
+dropped the partition function of sectors O annihilates; `sz="even"` was ignored without a
+spatial group; Sz-sweep eigenvalues and vectors were misaligned; unconverged blocks were
+dropped silently; the GPU mTPQ never measured its spectral bound; Krylov-Schur skipped
+degenerate copies; automatic symmetry crashed on H without spatial symmetry; a
+non-permutation hung the group closure.
+
+**Verification.** Coverage grid 488 / 508 cells pass (20 missing: exact ⟨O⟩(T) on the GPU
+diagonalises on the host), golden suite 497 cases on CPU and GPU (gate 62312406). Code and
+tests: 41.8k lines (include 17.3k, src 10.7k, python/qed 4.3k, tests 9.5k), from about 170k.
+
+
 ## 2026-09-11 — CI: GIL-released Python access crashed the wheel lanes; correctness lane added
 
 * The CI "Python wheel + pytest" and "Examples tour" jobs had been failing with a segfault

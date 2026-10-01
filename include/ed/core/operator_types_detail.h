@@ -2,17 +2,11 @@
 // =============================================================================
 // include/ed/core/operator_types_detail.h
 //
-// Private implementation helpers shared by the concrete operator types in
-// ``operator_types.h`` and ``fixed_sz_operator_types.h``. These factor out
-// the substantial duplication that the position-dependent operator family
-// had accumulated over several refactors:
+// Private implementation helpers shared by the position-dependent term
+// builders in ``operator_builders.h``:
 //
-//   * Pyrochlore sublattice basis (z_mu, repeated in 4 constructors).
-//   * Reading positions.dat (was *inconsistent* between the full and
-//     fixed-Sz versions; the full version's "x y z per line" matches what
-//     ``ed::input::write_positions_file`` actually writes -- the fixed-Sz
-//     version's 6-column reader was a silent format mismatch that
-//     produced all-zero positions when fed canonical files).
+//   * Pyrochlore sublattice basis (z_mu).
+//   * Reading positions.dat ("x y z" per line).
 //   * Computing exp(i Q . R_i) / sqrt(N) phase factors.
 //   * Computing transverse (sublattice-weighted) phase factors.
 //   * Dispatching a Cartesian-basis (Sx / Sy / Sz) single-site term to
@@ -40,8 +34,9 @@ using Complex = std::complex<double>;
 
 // ---------------------------------------------------------------------------
 // Pyrochlore sublattice basis (z_mu, mu = 0..3): the local easy-axis unit
-// vector at each of the four sublattices. Used by Transverse* and
-// TransverseExperimental* operators to weight site contributions.
+// vector at each of the four sublattices. Used by the transverse builders
+// (``add_transverse`` / ``add_transverse_experimental``) to weight site
+// contributions.
 // ---------------------------------------------------------------------------
 inline constexpr double k_inv_sqrt3 = 0.5773502691896258;  // 1 / sqrt(3)
 
@@ -55,20 +50,11 @@ inline constexpr std::array<std::array<double, 3>, 4> kPyrochloreSublatticeBasis
 // ---------------------------------------------------------------------------
 // read_positions_file
 //
-// Parses the canonical positions.dat format produced by
-// ``ed::input::write_positions_file``: one line per site, "x y z" in
-// scientific notation. Lines starting with '#' are treated as comments.
+// Parses the canonical positions.dat format: one line per site, "x y z"
+// in scientific notation. Lines starting with '#' are treated as comments.
 //
 // Returns a vector of size ``expected_sites``; entries that aren't
 // present in the file are left at (0,0,0).
-//
-// History: ``operator_types.h``'s ``BasePositionOperator::readPositionsFromFile``
-// already parsed the canonical format. ``fixed_sz_operator_types.h``'s
-// version expected "site_id matrix_idx sublattice x y z" (a legacy
-// 6-column format), which silently produced all-zero positions when fed
-// the canonical files written by HamiltonianBuilder. Unifying on the
-// 3-column reader fixes that latent bug and removes a 30-line
-// duplicate.
 // ---------------------------------------------------------------------------
 inline std::vector<std::array<double, 3>>
 read_positions_file(const std::string& filename, std::uint64_t expected_sites)
@@ -102,7 +88,7 @@ read_positions_file(const std::string& filename, std::uint64_t expected_sites)
 // compute_phase_factors
 //
 // Returns the per-site complex phase phi_i = norm * exp(i Q . R_i).
-// Used by Sum* and Experimental* operators.
+// Used by ``add_sum``, ``add_sublattice`` and ``add_experimental``.
 // ---------------------------------------------------------------------------
 inline std::vector<Complex>
 compute_phase_factors(const std::vector<double>& Q,
@@ -123,7 +109,7 @@ compute_phase_factors(const std::vector<double>& Q,
 //
 // Per-site phi_i = (1 / sqrt(N)) * (v . z_{sublattice(i)}) * exp(i Q . R_i)
 // where sublattice(i) = i % 4 and z_mu is the pyrochlore basis above.
-// Used by Transverse* and TransverseExperimental* operators.
+// Used by ``add_transverse`` and ``add_transverse_experimental``.
 // ---------------------------------------------------------------------------
 inline std::vector<Complex>
 compute_transverse_phase_factors(const std::vector<double>& Q,
@@ -196,8 +182,8 @@ inline void add_cartesian_site_term(OperatorT& op,
 //   phase_i * ( cos(theta) Sz_i  +  sin(theta) Sx_i ),
 // expanded into the canonical S+/S-/Sz term AoS. Sx is rewritten as
 // (S+ + S-)/2 (see ``add_cartesian_site_term``); the resulting three
-// terms per site are emitted in (Sz, S+, S-) order to match the legacy
-// classifier output for stable diff-based testing.
+// terms per site are emitted in a fixed (Sz, S+, S-) order so the term
+// list is deterministic for diff-based testing.
 // ---------------------------------------------------------------------------
 template <class OperatorT>
 inline void add_experimental_site_term(OperatorT& op,

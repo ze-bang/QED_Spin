@@ -23,7 +23,7 @@
 
 #include <ed/core/linear_operator.h>
 #include <ed/core/operator.h>             // Operator::TransformData
-#include <ed/symmetry/rep_sector_data.h>  // RepSectorData (Stage 8d rep lane)
+#include <ed/symmetry/rep_sector_data.h>  // RepSectorData
 #include <ed/matvec/rep_symmetry_basis_policy.h>  // host rep policy view
 
 #include <complex>
@@ -37,15 +37,12 @@
 
 namespace ed::dssf {
 
-/// Rectangular orbit-basis observable mapping
-///   (src_sector_idx of src_op) -> (dst_sector_idx of dst_op)
+/// Rectangular orbit-basis observable mapping a source rep sector to a
+/// target rep sector.
 ///
-/// ``src_op`` and ``dst_op`` may be the same instance (homogeneous
-/// case, same streaming operator) or different instances with the
-/// same lattice (heterogeneous case, e.g. fixed-Sz x irrep ->
-/// fixed-Sz x irrep with different ``n_up``). Both must define
-/// ``num_sites()`` and have generated their per-sector basis +
-/// state-to-orbit lookup tables.
+/// ``src`` and ``dst`` may wrap the same sector or different sectors on
+/// the same lattice (e.g. fixed-Sz x irrep -> fixed-Sz x irrep with
+/// different ``n_up``).
 class CrossSectorOrbitObservable {
 public:
     using Complex       = std::complex<double>;
@@ -87,11 +84,11 @@ public:
         }
     };
 
-    /// @param src        Source streaming operator (provides the input orbit basis).
-    /// @param src_sector Index into ``src``'s sectors_; the source irrep.
-    /// @param dst        Target streaming operator (provides the output orbit basis).
-    /// @param dst_sector Index into ``dst``'s sectors_; the target irrep.
-    /// @param transforms Observable terms (one/two-body; mirror of
+    /// @param src        Source sector (provides the input orbit basis).
+    /// @param src_sector Sector index within ``src`` (0: a ref wraps one sector).
+    /// @param dst        Target sector (provides the output orbit basis).
+    /// @param dst_sector Sector index within ``dst`` (0: a ref wraps one sector).
+    /// @param transforms Observable terms (one/two-body; same layout as
     ///                   ``Operator::transform_data_``).
     /// @param spin_l     Spin S (0.5 for spin-1/2). Used for the
     ///                   diagonal/off-diagonal matrix-element
@@ -112,8 +109,7 @@ public:
     void apply(const Complex* in, Complex* out, std::size_t dst_size) const;
 
     /// std::function adapter for callers that pass operator
-    /// applications as lambdas (the FTLM/CF matvec API). Matches
-    /// ``CrossSectorObservable::as_apply_function``.
+    /// applications as lambdas (the FTLM/CF matvec API).
     auto as_apply_function() const {
         return [this](const Complex* in, Complex* out, std::size_t n) {
             this->apply(in, out, n);
@@ -149,12 +145,11 @@ private:
     ed::matvec::basis::RepSymmetryBasisPolicy src_pol_{};
     ed::matvec::basis::RepSymmetryBasisPolicy dst_pol_{};
 
-    // Audit 2026-09: cached rectangular reduced matrix A[k, alpha] (dst rows x
-    // src cols), assembled on the first apply() by the same walk and reused
-    // afterwards. The finite-T FTLM lane applies the probe M x R times per
-    // sector pair and the walk costs |G|^2 x terms x index lookups per source
-    // row (measured: 70 ms per apply at N = 20, 12 min per spectral call);
-    // the CSR apply is a memory-bound gather. Refused (walk kept) when the
+    // Cached rectangular reduced matrix A[k, alpha] (dst rows x src cols),
+    // assembled on the first apply() by the same walk and reused afterwards.
+    // The finite-T FTLM lane applies the probe M x R times per sector pair
+    // and the walk costs |G|^2 x terms x index lookups per source row
+    // (~70 ms per apply at N = 20); the CSR apply is a memory-bound gather. Refused (walk kept) when the
     // pre-merge triplet estimate exceeds ED_XSEC_CSR_BUDGET_GIB (default 4).
     mutable std::mutex                 csr_mutex_;
     mutable bool                       csr_built_   = false;

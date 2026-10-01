@@ -56,7 +56,7 @@ def env_snapshot() -> dict:
 
 
 def _check_environment() -> None:
-    """A misspelt ``ED_*`` variable is read by nothing and used to fail silently.
+    """A misspelt ``ED_*`` variable is read by nothing and would fail silently.
     Unknown names warn once at import; ``ED_ENV_STRICT=1`` turns the warning into an
     error (job scripts that must not run with a typo)."""
     import difflib
@@ -82,7 +82,7 @@ _check_environment()
 from .api import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
                   ThermalResult, dynamics, eigs, expect, load_eigs, spectrum, thermal)
 
-__version__: Final[str] = "0.4.0"
+__version__: Final[str] = "0.5.0"
 
 __all__ = [
     "Operator", "OP_SPLUS", "OP_SMINUS", "OP_SZ",

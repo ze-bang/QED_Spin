@@ -26,16 +26,6 @@ characters_for(const EngineContext& cx, int k_ext) {
     return chi;
 }
 
-// Stage 9a/9b env sub-gates (Auto mode only; Require overrides). Read per
-// call, like the other ED_SYM_* gates, so tests can toggle without restart.
-[[nodiscard]] bool little_group_flip_enabled() noexcept {
-    return ed::env::flag("ED_SYM_LG_FLIP", true);
-}
-
-[[nodiscard]] bool little_group_tr_enabled() noexcept {
-    return ed::env::flag("ED_SYM_LG_TR", true);
-}
-
 // One term-level SoA per engine call, shared by the flip and TR resolvers.
 [[nodiscard]] ed::matvec::TermStorage term_soa(const ::Operator& op) {
     ed::matvec::TermStorage soa;
@@ -70,14 +60,13 @@ resolve_flip_engagement(const ed::matvec::TermStorage& soa,
                 "even, or the full space).");
     }
     if (!fe.symmetric || !admissible) return fe;
-    if (opt.spin_flip < 0 && !little_group_flip_enabled()) return fe;
     fe.engaged = true;
     fe.mask = (n_sites >= 64) ? ~0ULL
                               : ((std::uint64_t{1} << n_sites) - 1ULL);
     return fe;
 }
 
-// Stage 9b: TR folding engages when H is real in the computational basis
+// TR folding engages when H is real in the computational basis
 // (then H_{conj(k)} = conj(H_k) -- isospectral, so conjugate momenta fold
 // into one star; and inside a REAL-character star, conjugate little-group
 // irreps sigma/sigma* carry identical spectra).
@@ -92,9 +81,7 @@ resolve_tr_engagement(const ed::matvec::TermStorage& soa,
             "little_group: time_reversal='require' but the Hamiltonian has "
             "complex coefficients (no antiunitary K with [H, K] = 0 in the "
             "computational basis).");
-    if (!h_real) return false;
-    if (opt.time_reversal < 0 && !little_group_tr_enabled()) return false;
-    return true;
+    return h_real;
 }
 
 // chi_k -> chi_{k*} with chi_{k*}(a) == conj(chi_k(a)) for all a, on the
@@ -177,7 +164,7 @@ void build_residue_maps(EngineContext& cx,
             else mp[static_cast<std::size_t>(k)] = hit;
         }
         if (!ok) continue;
-        // Stage 9a: lift to extended irrep indices. A spatial residue
+        // Lift to extended irrep indices. A spatial residue
         // commutes with the global flip (p^-1 (a F) p = (p^-1 a p) F), so the
         // conjugation action is parity-diagonal: (k, s) -> (mp[k], s).
         if (cx.flip_half) {
@@ -239,10 +226,9 @@ build_monomial(const EngineContext& cx, int rp,
     const std::size_t dim = rd.reps.size();
     out.to.assign(dim, -1);
     out.phase.assign(dim, Complex(0, 0));
-    // Jul 2026: rows are independent -- parallelize (this was ~1 h of
-    // SERIAL host work per residue on the 126M-dim 36-site Gamma sector,
-    // before any block was even solved). Failure is latched instead of
-    // early-returned; workers skip once it trips.
+    // Rows are independent -- parallelize (serially this is ~1 h of host
+    // work per residue on the 126M-dim 36-site Gamma sector). Failure is
+    // latched instead of early-returned; workers skip once it trips.
     std::atomic<bool> ok{true};
 #ifdef _OPENMP
 #   pragma omp parallel for schedule(static)
@@ -438,13 +424,13 @@ void make_engine_context(const ::Operator&                    op,
 
     const auto soa = term_soa(op);
 
-    // Stage 9a: extend the ABELIAN factor by the global spin flip when
+    // Extend the ABELIAN factor by the global spin flip when
     // admissible (A' = A x Z2; the flip commutes with every site perm).
     const FlipEngagement fe = resolve_flip_engagement(soa, opt, n_sites);
     cx.flip_half = fe.engaged;
     cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
 
-    // Stage 9b: antiunitary K folding (real H only).
+    // Antiunitary K folding (real H only).
     tr_on = resolve_tr_engagement(soa, opt);
 
     cx.cg = cx.flip_half
@@ -470,7 +456,7 @@ void make_engine_context(const ::Operator&                    op,
 }
 
 // Stars: union-find over (extended) abelian irreps under the residue maps
-// + Stage-9b TR fold. With flip engaged the lifted maps are parity-diagonal,
+// + the TR fold. With flip engaged the lifted maps are parity-diagonal,
 // so a star never mixes (k,+) with (k,-). H real => H_{conj(k)} = conj(H_k),
 // an exact isospectral copy (surviving reps and norms are conjugation-
 // invariant through |sum chi|^2); idempotent when a residue already maps

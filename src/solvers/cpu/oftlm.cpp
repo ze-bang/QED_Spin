@@ -76,10 +76,9 @@ FtlmResult oftlm_cpu(
     std::size_t       Nv = std::min<std::uint64_t>(
         opts.num_exact, (N > 1 ? N - 1 : 0));
 
-    // Audit 2026-07-31: seed == 0 == NONDETERMINISTIC (random_device),
-    // matching the legacy FTLM driver's public contract; explicit seeds
-    // keep bit-reproducibility. (Was a fixed 0xFEEDFACE, which made
-    // "independent" default runs draw identical samples.)
+    // seed == 0 == NONDETERMINISTIC (random_device), as for FTLM, so
+    // independent default runs draw independent samples; explicit seeds
+    // keep bit-reproducibility.
     const std::uint64_t base_seed = ed::thermal::resolve_base_seed(opts.random_seed);
 
     // -------------------------------------------------------------------------

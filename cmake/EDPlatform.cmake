@@ -13,8 +13,6 @@
 # does no find_package() and sets no link-time state -- it just gathers
 # information used by EDBlasProfile.cmake (default profile selection) and by
 # the build-summary block at the end of CMakeLists.txt.
-#
-# P1.1 / audit Q5.
 # =============================================================================
 
 # -----------------------------------------------------------------------------

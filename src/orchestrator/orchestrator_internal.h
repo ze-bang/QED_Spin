@@ -4,13 +4,13 @@
 // orchestrator.
 //
 // The two entry points dispatch through `ed::select_backend` to choose
-// one of the four concrete Backends (Cpu / Cuda / Mpi / MpiCuda) and
-// invoke the matching templated kernel from Phase 2:
+// a concrete Backend (Cpu, or Cuda when built WITH_CUDA) and invoke the
+// matching templated kernel:
 //
 //     ed::solve     -> lanczos_kernel<Backend>            (single eig)
 //                  or krylov_schur_kernel<Backend>       (many eigs / harder problems)
 //                  or full_diag fallback                  (small dim)
-//     ed::thermal   -> tpq_kernel<Backend>  (mTPQ)
+//     ed::thermal   -> mtpq_kernel<Backend>  (mTPQ)
 //                  or the FTLM / OFTLM kernels
 //
 // Every lane returns the uniform Result shape from
@@ -22,9 +22,8 @@
 // Nothing outside src/orchestrator/ includes this header: the public surface
 // is include/ed/orchestrator.h.
 //
-// The split is a pure structural move of the former src/orchestrator.cpp --
-// same lanes, same RAII nesting (ThreadBudgetScope -> pin_omp_threads_once ->
-// select_backend), same env reads, same dispatch order.
+// Every entry point nests its RAII the same way (ThreadBudgetScope ->
+// pin_omp_threads_once -> select_backend).
 //
 // File map
 //   orch_common.cpp    shared plumbing: the exact-small thermal env probe
@@ -35,7 +34,7 @@
 //                      so the CudaBackend instantiation of the solve path
 //                      lives here and nowhere else.
 //   orch_thermal.cpp   thermal(): exact-small eigenspectrum fallback, mTPQ
-//                      sampling, FTLM / OFTLM lanes, all-Sz sweep
+//                      sampling, FTLM / OFTLM lanes
 // =============================================================================
 
 #include <ed/config/env_registry.h>   // typed environment accessors
@@ -45,13 +44,11 @@
 #include <ed/krylov/krylov_schur_kernel.h>
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/ritz_convergence.h>
-#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag* (MPI-free)
+#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag*
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim / krylov_vector_budget
-// Execution planner / feasibility "dictator" removed (sensible defaults +
-// env-override leaf hooks instead). The matvec/symmetry leaf policy hooks
-// (sym_matvec_policy_hook and the ED_CSR_* env) still provide
-// the default + env-override behaviour, consumed lazily inside the operator
-// backends; the orchestrator no longer overrides them.
+// The matvec/symmetry leaf policy hooks (sym_matvec_policy_hook and the
+// ED_CSR_* env) provide the default + env-override behaviour, consumed lazily
+// inside the operator backends; the orchestrator does not override them.
 #include <ed/symmetry/canonical_thermo.h>   // canonical_thermo_from_eigs (single impl)
 
 #include <fstream>   // /proc/meminfo
@@ -71,20 +68,19 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
-#include <cstdlib>      // getenv (Wave 1.1 real-H fast-path opt-out)
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <random>
 #include <stdexcept>
-#include <type_traits>  // std::is_same_v (Wave 1.1)
+#include <type_traits>  // std::is_same_v
 #include <variant>
 
 namespace ed::workflows {
 
 // ---------------------------------------------------------------------------
-// Helpers shared by more than one orchestrator translation unit. They were
-// anonymous-namespace statics inside the single orchestrator.cpp; they now
-// carry external linkage with their one definition in orch_common.cpp.
+// Helpers shared by more than one orchestrator translation unit, with their
+// one definition in orch_common.cpp.
 // ---------------------------------------------------------------------------
 namespace orch_detail {
 
@@ -95,9 +91,9 @@ namespace orch_detail {
 
 }  // namespace orch_detail
 
-// Correctness (2026-09-11): every solver lane assumes a Hermitian operator
-// (Lanczos tridiagonalises the symmetric part silently; the rep kernels apply
-// H^dagger). ``LinearOperator::is_hermitian`` is now a structural check on the
+// Every solver lane assumes a Hermitian operator (Lanczos tridiagonalises
+// the symmetric part silently; the rep kernels apply H^dagger).
+// ``LinearOperator::is_hermitian`` is a structural check on the
 // term list for ``Operator`` and its subclasses; refuse early and loudly.
 inline void require_hermitian_input(const LinearOperator& H, const char* verb) {
     if (!H.is_hermitian()) {

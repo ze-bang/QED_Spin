@@ -1,8 +1,7 @@
 // =============================================================================
 // test_rep_symmetry_backend
 //
-// Phase 1 gate of the "Optimized symmetry ED + NLCE" plan (Jun 2026):
-// the CPU on-the-fly representative SpMV
+// Pins that the CPU on-the-fly representative SpMV
 // (``ed::matvec::make_cpu_rep_symmetry_backend`` +
 // ``CpuMatVecBackend<RepSymmetryBasisPolicy>`` driving the dedicated
 // ``apply_terms_rep_symmetry`` kernel) reproduces an INDEPENDENT reference
@@ -208,8 +207,8 @@ void run_case(int N, std::int64_t n_up) {
 }
 
 // ---------------------------------------------------------------------------
-// GATHER == SCATTER parity + O(1) rank-table parity ("Optimized symmetry ED"
-// plan, Phase E). Drives the rep-symmetry GATHER and SCATTER kernels DIRECTLY
+// GATHER == SCATTER parity + O(1) rank-table parity. Drives the
+// rep-symmetry GATHER and SCATTER kernels DIRECTLY
 // (bypassing the env-read backend tunables) so both run in one process, and
 // asserts they agree bit-for-bit (modulo atomic FP reordering). Also builds
 // the dense O(1) rank table and asserts the O(1) reverse lookup yields the
@@ -287,7 +286,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             INFO("O(1) vs O(log) GATHER sector " << k << " diff " << tab_diff);
             REQUIRE(tab_diff < 1e-13 * (1.0 + scale));
 
-            // Stage 2b (SymmetryEngine v2): the rep-assembled reduced CSR
+            // The rep-assembled reduced CSR
             // (build_reduced_symmetry_csr_rep, no orbit CSR) must reproduce
             // the rep-walk GATHER on the same vectors.
             const auto rep_csr = ed::matvec::build_reduced_symmetry_csr_rep<
@@ -306,7 +305,7 @@ void run_parity_case(int N, std::int64_t n_up) {
             INFO("rep-CSR vs GATHER sector " << k << " diff " << csr_diff);
             REQUIRE(csr_diff < 1e-12 * (1.0 + scale));
 
-            // Stage 4 (SymmetryEngine v2): the two-level shared-rank lookup
+            // The two-level shared-rank lookup
             // (one dense table per (N, n_up) + per-sector local remap) must
             // reproduce the binary-search GATHER exactly (same lookup result
             // -> identical arithmetic).

@@ -1,8 +1,7 @@
 // =============================================================================
 // tests/unit/test_backend_blas3.cpp
 //
-// Phase 1 of the Minimalist ED Collapse (May 2026): lock down the new
-// Level-3 BLAS surface on `Backend` (`gemm`, `qr_thin`)
+// Pins the Level-3 BLAS surface on `Backend` (`gemm`, `qr_thin`)
 // across the concrete backends:
 //
 //     CpuBackend    -- LAPACK / cBLAS path

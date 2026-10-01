@@ -11,7 +11,7 @@
 //        This builds an m-step Lanczos factorisation orthogonal to both
 //        the current cycle's basis AND the locked Ritz vectors.
 //     3. Solve the m x m projected tridiagonal eigenproblem on host
-//        (LAPACKE_dstevd via `solve_tridiag_with_eigenvectors`).
+//        (`solve_tridiag_with_eigenvectors`).
 //     4. For each Ritz pair, evaluate residual = |β_last * y[m-1, i]|.
 //        If below `tolerance`, reconstruct the Ritz vector
 //        (`V_local * y` --- a local linear combination of the basis)
@@ -36,7 +36,7 @@
 
 #include <ed/krylov/lanczos_kernel.h>
 #include <ed/krylov/subspace_policy.h>      // krylov_subspace_dim (shared sizing)
-#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag_with_eigenvectors (MPI-free)
+#include <ed/krylov/tridiag_eigensolver.h>  // solve_tridiag_with_eigenvectors
 #include <ed/matvec/backend.h>
 
 namespace ed::krylov {
@@ -48,15 +48,13 @@ struct KrylovSchurOptions {
     std::size_t max_iter        = 100;
     double      tolerance       = 1e-10;
     bool        compute_vectors = false;
-    /// Maximum restart cycles before we give up (matches the legacy
-    /// `::krylov_schur` body's hard limit).
+    /// Maximum restart cycles before we give up.
     std::size_t max_restarts    = 30;
-    /// Global problem dimension. Distributed backends MUST set this so
-    /// the per-cycle `lanczos_kernel<Backend>` knows the global cap.
-    /// Default 0 means "use local_n" (single-rank / single-GPU runs).
+    /// Global problem dimension, forwarded as the per-cycle
+    /// `lanczos_kernel<Backend>` dimension cap.
+    /// Default 0 means "use local_n" (CPU / single-GPU runs).
     std::uint64_t global_n      = 0;
     /// Breakdown threshold passed to the per-cycle `lanczos_kernel`.
-    /// 1e-13 matches the historical Krylov-Schur restart body.
     double      breakdown_tol   = 1e-13;
     /// Memory cap on the per-cycle Krylov subspace, in resident length-N
     /// vectors (the basis held during each restart cycle is the dominant cost).
@@ -81,7 +79,7 @@ struct KrylovSchurResult {
 
 namespace detail {
 
-// Thin back-compat shim (no memory cap). The real, memory-bounded sizing lives
+// Convenience wrapper with no memory cap. The memory-bounded sizing lives
 // in ed::krylov::krylov_subspace_dim (subspace_policy.h) and is what the kernel,
 // orchestrator, and planner all use so they AGREE on the footprint.
 inline std::size_t ks_subspace_size(std::size_t k, std::size_t max_iter,
@@ -94,10 +92,7 @@ inline std::size_t ks_subspace_size(std::size_t k, std::size_t max_iter,
 }  // namespace detail
 
 /// Run thick-restart Krylov-Schur on `matvec` starting from `seed_local`
-/// (already in backend memory, dimension `local_n`). For distributed
-/// backends `seed_local` is the rank-local slab of a globally
-/// scattered seed; caller is responsible for that scatter (see
-/// `ed::distributed::scatter_initial_vector` for the CPU+MPI path).
+/// (already in backend memory, dimension `local_n`).
 template <typename Backend, typename MatvecFn>
 KrylovSchurResult krylov_schur_kernel(Backend&       be,
                                       MatvecFn&&     matvec,

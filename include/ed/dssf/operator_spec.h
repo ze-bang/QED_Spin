@@ -3,21 +3,11 @@
 //
 // `ed::dssf::OperatorSpec` and `build_observable_pairs()` -- the canonical,
 // library-level entry point for assembling the (O1, O2, name) triplets that
-// every DSSF/SSSF/static workflow needs to evaluate.
+// every DSSF/SSSF/static evaluation needs.
 //
 // Single source of truth for the {operator_type x basis x momentum x
-// spin-combo x fixed-Sz} cross-product. Both the C++ CLI (`ED dssf`) and
-// the Python bindings (`qed.dssf`) call this; bug fixes (e.g. for
-// `transverse` SF/NSF naming) only need to be made once.
-//
-// Historical context: before P1.10 the assembly logic was duplicated
-// across `ed_main.cpp::construct_operators_from_config(...)` and the now-
-// deleted `src/apps/TPQ_DSSF.cpp::main()` inline switch (~270 LOC), and
-// the two copies drifted. P1.10 introduced this seam; P2.14 deleted the
-// `TPQ_DSSF` binary so this header is now the *only* place observable
-// assembly happens.
-//
-// Audit ref: P1.10 (DSSF PR-A); P2.14 (DSSF PR-H).
+// spin-combo x fixed-Sz} cross-product: the Python bindings (`qed.dssf`)
+// call this, and it is the only place observable assembly happens.
 // =============================================================================
 
 #pragma once
@@ -37,9 +27,8 @@ namespace ed::dssf {
 /**
  * Options describing which DSSF observables to assemble.
  *
- * Mirrors the `ED dssf <method>` CLI surface so the parameter blob can
- * flow straight from argv into a single library call. The Python binding
- * (`qed.dssf.OperatorSpec`) exposes the same fields verbatim.
+ * The Python binding (`qed.dssf.OperatorSpec`) exposes the same fields
+ * verbatim.
  */
 struct OperatorSpec {
     /// "sum" | "transverse" | "sublattice" | "experimental"
@@ -51,7 +40,8 @@ struct OperatorSpec {
     std::string basis{"ladder"};
 
     /// Pairs (op1, op2) where each op is 0/1/2 in the chosen basis. For
-    /// the `single_expectation` method, set both entries to the same op.
+    /// single-observable expectation values (`single_obs_only`), set both
+    /// entries to the same op.
     std::vector<std::pair<int, int>> spin_combinations;
 
     /// Momentum grid in units of 2π / a (each Q is a 3-vector). The
@@ -79,8 +69,7 @@ struct OperatorSpec {
     std::string positions_file;
 
     /// If true, build only the left observable (`obs_1`) and leave
-    /// `obs_2` empty. Used by the `single_expectation` workflow that
-    /// evaluates ⟨ψ|O|ψ⟩ rather than ⟨ψ|O₁†O₂|ψ⟩.
+    /// `obs_2` empty, for evaluating ⟨ψ|O|ψ⟩ rather than ⟨ψ|O₁†O₂|ψ⟩.
     ///
     /// When set, the ladder-basis swap of the first operator index
     /// (`first = 1 - first` for op != 2) is also skipped, and the
@@ -93,8 +82,7 @@ struct OperatorSpec {
     /// `i <= j < unit_cell_size` triangle. Ignored for non-sublattice
     /// `operator_type`s.
     ///
-    /// In `single_obs_only` mode (single_expectation workflow) the
-    /// emitted name uses just `_sub<sub_i>` rather than the full
+    /// In `single_obs_only` mode the emitted name uses just `_sub<sub_i>` rather than the full
     /// `_sub<sub_i>_sub<sub_j>`.
     std::optional<std::pair<std::uint64_t, std::uint64_t>> sublattice_filter;
 };
@@ -106,8 +94,7 @@ struct OperatorSpec {
  *
  * For SF/NSF-decomposed operator types (`transverse`,
  * `transverse_experimental`) we emit two consecutive entries per momentum
- * point -- the SF projection first, then the NSF projection -- matching the
- * legacy ordering so existing HDF5 file layouts stay bit-identical.
+ * point: the SF projection first, then the NSF projection.
  */
 struct ObservablePairs {
     std::vector<Operator>    obs_1;
@@ -135,7 +122,7 @@ ObservablePairs build_observable_pairs(const OperatorSpec& spec);
  *   {x, polarization} depending on which component of `polarization`
  *   dominates (pinned bit-for-bit by `test_dssf_operator_spec.cpp`).
  *
- * Exposed publicly so CLI / Python callers can introspect the bases that
+ * Exposed publicly so Python callers can introspect the bases that
  * `build_observable_pairs` will use internally (e.g. for logging).
  *
  * @throws std::invalid_argument if `Q` or `polarization` is not a 3-vector.

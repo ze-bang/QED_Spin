@@ -2,7 +2,7 @@
 // =============================================================================
 // include/ed/matvec/memory_space.h
 //
-// MemorySpace: tag identifying where the bytes that back a Vector / matvec
+// MemorySpace: tag identifying where the bytes that back a vector / matvec
 // input-output buffer live. This is the *only* property a solver needs in
 // order to decide which Backend (CPU / CUDA) to use to drive the surrounding
 // linear algebra (axpy, dot, norm, scale, copy).
@@ -10,14 +10,13 @@
 // The MatVec layer treats this as an opaque tag --- it does not own the
 // runtime (no CUDA context) here, that lives on the Backend object. The split
 // keeps memory_space.h header-only and free of optional dependencies (no CUDA
-// includes required to use Vector).
+// includes required).
 //
 // Convention: each concrete MatVecOperator subclass declares a single
 // MemorySpace from which it expects its `in` buffer to come and into which
 // it will write `out`. Solvers compose this with a Backend of the matching
-// space; mismatches throw at solver-construction time. This is exactly the
-// pattern used by Trilinos Tpetra / Kokkos: tag the data, dispatch the
-// runtime.
+// space. This is the pattern used by Trilinos Tpetra / Kokkos: tag the
+// data, dispatch the runtime.
 // =============================================================================
 
 #include <cstdint>
@@ -31,8 +30,8 @@ enum class MemorySpace : std::uint8_t {
     Host = 0,
 
     // Bytes live in CUDA device memory (cudaMalloc'd) on the current device.
-    // The owning Vector knows the device id; the Backend supplies the
-    // CUDA stream + cuBLAS handles for vector primitives.
+    // The Backend supplies the CUDA stream + cuBLAS handles for vector
+    // primitives.
     CudaDevice = 1,
 };
 

@@ -1,8 +1,8 @@
 # Golden-master harness
 
 Records the VALUES every public verb returns on small systems at a reference commit,
-and compares later commits against them. It complements `benchmarks/audit_correctness.py`
-(which checks against a dense reference and reports pass/fail): the golden harness also
+and compares later commits against them. It complements the coverage grid
+(`python/tests/grid`, which checks against a dense reference): the golden suite also
 pins behaviour that has no closed-form reference -- fixed-seed thermal curves, which
 calls raise, how many eigenvalues come back, which symmetry sector a level lives in.
 
@@ -33,7 +33,7 @@ Thermal sampling kernels are pinned beyond the `qed.thermal` matrix: FTLM with
 `ED_THERMAL_EXACT_SMALL=0` (blocks of dimension <= 512 are otherwise diagonalised
 exactly and never sample), and one FTLM block of
 dimension 16384 (`heis_chain14`, `sz="off"`), where the CPU reductions go multi-threaded
--- its reference is valid for the jobs' `OMP_NUM_THREADS=8` only.
+-- its reference is valid at the gate's `OMP_NUM_THREADS=4` only.
 
 `record` runs every case twice; a case whose two passes disagree is stored under
 `quarantine`, reported by `compare`, and never gates.
@@ -44,9 +44,9 @@ dimension 16384 (`heis_chain14`, `sz="off"`), where the CPU reductions go multi-
     sbatch --export=ALL,DEVICE=cpu,MODE=record,REF=tests/golden/refs/<tag>/cpu.json.gz  scripts/golden/run.sbatch
     sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
     sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
-    sbatch scripts/golden/run_consumers.sbatch      # QED_NLCE_Spin suite + tri_dsl smoke against this tree
 
-A change lands only when the three compare jobs exit 0. Re-blessing a reference is its
+
+A change lands only when both compare jobs exit 0 (the gate runs them). Re-blessing a reference is its
 own commit and carries the `compare` output that justified it.
 
 Removing a feature on purpose: delete its cases from `cases.py`, then

@@ -7,12 +7,9 @@
 // small problems, Lanczos / KrylovSchur kernels, and the
 // sector-projection workflow when the caller passes a fixed-Sz sector operator.
 //
-// Migrated from the legacy `ed::auto_pilot::solve(...)` API during the
-// ED Cleanup Sweep Phase 2 (May 2026). The legacy auto-pilot's
-// `auto_basis` / `sz` / `Device` heuristics are gone --- those decisions
-// are now the caller's responsibility (build a fixed-Sz sector operator yourself
-// for sector projection; set `BackendConstraints{.allow_gpu = true}` to
-// opt into the GPU lane).
+// `workflows::solve` does not choose a basis or Sz sector itself: the
+// caller builds a fixed-Sz sector operator for sector projection and sets
+// `BackendConstraints{.allow_gpu = true}` to opt into the GPU lane.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -57,10 +54,8 @@ TEST_CASE("workflows::solve picks FullDiag on small full Hilbert space "
 TEST_CASE("workflows::solve over a fixed-Sz sector operator at n_up = N/2 lands "
           "on the global ground state for the Heisenberg chain",
           "[workflows][fixed_sz]") {
-    // The legacy `auto_pilot::solve(..., auto_basis = On)` heuristic
-    // auto-built a fixed-Sz sector operator and called the underlying solver on
-    // it. Under the new surface the caller does the projection
-    // explicitly; correctness must match.
+    // The caller does the Sz projection explicitly; the sector ground
+    // state must match the full-space one.
     const uint64_t N = 4;
     auto H_fixed = build_heisenberg_chain_fixed_sz(N, 1.0, /*n_up=*/N / 2);
 
@@ -81,9 +76,8 @@ TEST_CASE("workflows::solve over the full Hilbert space (no Sz pinning) "
           "recovers the full spectrum",
           "[workflows][full_diag]") {
     // Adding a uniform Zeeman field breaks the trivial GS-sector
-    // mapping. The legacy auto-pilot would refuse to auto-project in
-    // that case; under the new surface the caller just hands the full
-    // Operator over and lets `workflows::solve` run FullDiag.
+    // mapping, so the caller hands the full Operator over and
+    // `workflows::solve` runs FullDiag.
     auto H = build_heisen(4);
     Operator::TransformData zeeman{};
     zeeman.is_two_body = false;

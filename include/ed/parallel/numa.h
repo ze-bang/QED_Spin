@@ -1,7 +1,7 @@
 #pragma once
 
 // =============================================================================
-// OpenMP thread-pinning hook                                     (Phase 3a #4)
+// OpenMP thread-pinning hook
 // =============================================================================
 //
 // On a multi-socket node the basis-sized vectors of a Lanczos run land on the

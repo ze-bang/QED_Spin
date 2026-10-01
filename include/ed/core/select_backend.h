@@ -4,16 +4,14 @@
 // include/ed/core/select_backend.h
 //
 // `ed::select_backend(LinearOperator, BackendConstraints)`: the runtime
-// dispatch helper consumed by the Phase-4 orchestrators (`ed::solve`,
-// `ed::thermal`, `ed::spectral`). Resolves the (have_cuda, gpu_mem_fits,
+// dispatch helper consumed by the orchestrators (`ed::workflows::solve`,
+// `ed::workflows::thermal`). Resolves the (have_cuda, gpu_mem_fits,
 // user constraints) tuple into a single `BackendVariant` the caller can
 // `std::visit` over.
 //
 // Decision order:
 //   1. if have_cuda() AND gpu_mem_fits AND allow_gpu --> CudaBackend
 //   2. else                                          --> CpuBackend
-//
-// Phase 4.1 of the Minimalist ED Collapse (May 2026).
 // =============================================================================
 
 #include <cstdio>
@@ -37,7 +35,7 @@ namespace ed {
 
 struct BackendConstraints {
     bool allow_gpu     = true;
-    /// Per-rank GPU memory budget. Empty means "no limit; trust the
+    /// GPU memory budget. Empty means "no limit; trust the
     /// `cudaGetDeviceProperties` query". When set, gpu_mem_fits is
     /// computed as `bytes_per_complex * geometry.local_dim *
     /// fudge_factor <= gpu_mem_bytes`.
@@ -46,12 +44,11 @@ struct BackendConstraints {
     /// is a safe default for Lanczos / TPQ which carry ~5 N-length
     /// scratch vectors plus the basis.
     double fudge_factor = 8.0;
-    /// Minimum problem dimension for the GPU AUTO-promotion (Jul 2026).
+    /// Minimum problem dimension for the GPU AUTO-promotion.
     /// Below this, kernel-launch + transfer overhead makes the GPU
-    /// strictly slower than the CPU -- and on shared-GPU hosts (WSL2)
-    /// tiny solves dispatched to a contended device have produced
-    /// silently-wrong spectra. Matches the Python-side ``dim >= 2^14``
-    /// heuristic in ``qed._resolve_device``. Callers that EXPLICITLY
+    /// strictly slower than the CPU, and on shared-GPU hosts (WSL2)
+    /// tiny solves dispatched to a contended device can return
+    /// silently-wrong spectra. Callers that EXPLICITLY
     /// request the GPU (``device='gpu'``) set this to 0 -- the floor
     /// gates only the automatic promotion, never an explicit choice.
     std::size_t gpu_dim_floor = (std::size_t{1} << 14);
@@ -77,10 +74,9 @@ inline bool have_cuda() noexcept {
 #ifdef WITH_CUDA
     // Probed once per process. Environment-difference failures must be
     // LOUD: a wheel built against a newer CUDA toolkit than the node's
-    // driver used to swallow cudaErrorInsufficientDriver here and silently
-    // degrade every GPU lane to CPU (a cluster ran days of "GPU" jobs on
-    // legacy drivers before anyone noticed). One clear diagnostic, then the
-    // documented CPU fallback.
+    // driver reports cudaErrorInsufficientDriver here, and swallowing it
+    // would silently degrade every GPU lane to CPU. One clear diagnostic,
+    // then the documented CPU fallback.
     static const bool ok = [] {
         int n = 0;
         const cudaError_t err = cudaGetDeviceCount(&n);
@@ -118,8 +114,7 @@ inline bool gpu_mem_fits(const Geometry& geom,
     if (c.gpu_mem_bytes.has_value()) {
         budget = c.gpu_mem_bytes.value();
     } else {
-        // cudaMemGetInfo costs 20-100 ms per call under WSL2 (measured: 6
-        // calls = 116 ms in a 6-solve benchmark). Cache the answer for one
+        // cudaMemGetInfo costs 20-100 ms per call under WSL2. Cache the answer for one
         // second; the feasibility check only needs an order of magnitude.
         static std::size_t cached_free = 0;
         static std::chrono::steady_clock::time_point cached_at{};
@@ -167,13 +162,10 @@ inline BackendVariant select_backend(const Geometry& geom,
         ed::matvec::is_device(geom.memory_space);
 
 #ifdef WITH_CUDA
-    // Phase 2 of the "Unified CPU/GPU symmetry architecture" plan
-    // (May 2026): an operator can advertise device-matvec capability
-    // even when its native storage is host. `bind_cuda()` is expected
-    // to lazily build a GPU mirror in that case. This unblocks the
-    // `qed.solve(symmetry=..., device='gpu')` lane: the symmetry
-    // sector operators are host-resident but their device
-    // mirror (lazily constructed inside `bind_cuda`) runs on the GPU.
+    // An operator can advertise device-matvec capability even when its
+    // native storage is host; `bind_cuda()` then lazily builds a GPU
+    // mirror. Symmetry sector operators use this: they are host-resident
+    // but their device mirror runs on the GPU.
     const bool device_mv = op_is_device || geom.supports_device_matvec;
     // gpu_dim_floor gates only the AUTO promotion: a device-resident
     // operator has already committed to the GPU, and explicit requests
@@ -198,23 +190,16 @@ inline BackendVariant select_backend(const LinearOperator& op,
 // lane_label_for<Backend>() / lane_label_from_variant(v): truthful lane
 // reporting helpers.
 //
-// `R.backend.lane` used to be inferred from `H.geometry().is_device()`.
-// That is correct for native Operator
-// instances, but it lies about every `SectorView` (streaming-symmetry /
-// fixed-Sz streaming-symmetry): the view advertises `Host` memory_space
-// yet lazily wires a GPU mirror via `bind_cuda_for_sector(...)`. With
-// `allow_gpu=true` and `supports_device_matvec=true`, `select_backend`
-// picks `CudaBackend` -- but the legacy reporter still read "cpu",
-// which is what made `qed.thermal(symmetry=..., device='gpu')` look
-// stuck on CPU even though the matvec ran on the device.
+// The lane is derived from the selected Backend, not from
+// `H.geometry().is_device()`: a host-resident operator that advertises
+// `supports_device_matvec` (e.g. a symmetry sector with a lazily built GPU
+// mirror) runs on `CudaBackend` while its memory_space still reads `Host`.
 //
 // `lane_label_for<Backend>()` is the template form (cheap, available
 // inside any `solve_on<Backend>` / `thermal_on<Backend>` body).
 // `lane_label_from_variant(v)` visits the variant for callers that
 // already hold a `BackendVariant`. Both return one of
 // {"cpu","gpu"}.
-//
-// Phase D of the "Backend x Symmetries x Workflows" plan (May 2026).
 // ---------------------------------------------------------------------------
 template <typename Backend>
 inline std::string lane_label_for() {

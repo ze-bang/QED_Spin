@@ -13,7 +13,7 @@
 //   auto H = b.wrap(op.bind_cuda_multi());        // wrap each operator once, share it
 //   b.run(k, [&](std::size_t i) { sample(i, H); });
 //
-// Device work is ordered by the legacy default stream the backends and kernels share, so a
+// Device work is ordered by CUDA's legacy default stream (stream 0) the backends and kernels share, so a
 // launch made by one thread follows everything the others queued before they blocked.
 // =============================================================================
 

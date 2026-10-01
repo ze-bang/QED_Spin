@@ -7,9 +7,9 @@
 // subsystem, default, meaning. Nothing else in the tree may spell a variable name
 // in a getenv call (scripts/check_env_registry.sh enforces this in both directions).
 //
-// Why a table. A run's numerical behaviour depended on ~100 undeclared inputs read
-// ad hoc at their consumption sites, with no inventory, no protection against a
-// misspelt name, and no record of which ones were set. Through this header
+// Why a table. Variables read ad hoc at their consumption sites have no
+// inventory, no protection against a misspelt name, and no record of which ones
+// were set, yet they change a run's numerical behaviour. Through this header
 //   * env::dump()      renders every variable with its live value (bug reports);
 //   * env::snapshot()  returns the variables that ARE set, for result metadata;
 //   * env::unknown()   returns ED_* names found in the environment that no
@@ -18,7 +18,7 @@
 // Reading a variable. Use the typed accessors; they define ONE meaning of "set":
 //   flag      unset or "" -> the default; "0", "false", "off", "no" -> false;
 //             anything else -> true.   (Presence alone never enables a flag:
-//             FOO=0 used to switch several of them ON.)
+//             FOO=0 means off.)
 //   tristate  unset or "" -> nullopt (the engine decides); otherwise as flag.
 //   integer / real   unset, "" or unparsable -> the default.
 //   text      unset -> the default; "" is returned as "".
@@ -64,86 +64,32 @@ struct Row {
       "=0 disables the .otab orbit-table disk cache layer")                    \
     X("ED_SYM_CACHE_DIR", Path, "symmetry", "\"\" -> caller falls back to <lattice_dir>/basis_cache",\
       "Overrides the on-disk symmetry-cache location")                         \
-    X("ED_SYM_PERM_LUT", Flag, "symmetry", "true (LUT built)",                 \
-      "=0 keeps the scalar bit-walk permutation path instead of the byte-decomposition LUT (test gate: pin LUT == scalar)")\
-    X("ED_SYM_REP_RANKTABLE", Tristate, "symmetry", "unset -> budget decides", \
-      "=0 forces binary-search rank lookup, =1 forces the dense combinadic rank table regardless of budget")\
     X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "8.0",              \
       "Memory budget for the per-sector dense int32 rank table")               \
-    X("ED_SYM_SU2_REPROJECT_FREQ", Integer, "symmetry", "1",                   \
-      "Lowdin drift-scrub cadence: project every k-th wrapped apply; 0 = seed projection only")\
     X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \
       "Exactly \"1\" forces the reduced-CSR symmetry matvec, exactly \"0\" the CSR-free rep walk (read once per process)")\
     X("ED_SYM_SECTOR_CSR_BUDGET_GIB", Real, "symmetry", "8.0",                 \
       "AGGREGATE reduced-CSR byte budget; over-budget sectors fall back to the CSR-free walk")\
-    X("ED_SYM_CSR_DIM_MAX", Integer, "symmetry", "0 -> falls back to ED_CSR_DIM_MAX, then the caller default 1<<13",\
-      "Symmetry-lane CSR-vs-matrix-free dimension cutoff")                     \
-    X("ED_SYM_LG_FLIP", Flag, "little-group", "true",                          \
-      "=0 disables A' = A x Z2 inside the little-group engine")                \
-    X("ED_SYM_LG_TR", Flag, "little-group", "true",                            \
-      "=0 disables TR star/sigma folding inside the engine")                   \
-    X("ED_SYM_LG_GROUP_SECTOR", Flag, "little-group", "true",                  \
-      "=0 vetoes the full-little-group basis for 1-dim irreps (lg_group_sector.cpp)")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
-    X("ED_SYM_LG_SEED", Integer, "little-group", "0 (base seed 0x51ED0B70)",   \
-      "Offsets the lowest-k Lanczos start vector (multi-seed degeneracy verification)")\
     X("ED_SYM_LG_DENSE_FLOOR", Integer, "little-group", "max(dense_max_dim, 4 * max_iter_cap)",\
       "Raises the dense/Lanczos crossover so larger blocks solve exactly (=1 in tests forces the Lanczos path at toy dims)")\
-    X("ED_SYM_LG_TWO_PASS_MIN_DIM", Integer, "little-group", "1 << 22 (4.2M)", \
-      "Dim floor above which the GS vector uses two-pass no-reorth Lanczos instead of FullCGS2 + kept basis (memory cap)")\
-    X("ED_SYM_LG_LOWEST_MAX_ITER", Integer, "little-group", "dflt argument if > 0, else max(40*k, 400)",\
-      "Absolute Lanczos budget for the lowest-k eigenvalue scan")              \
-    X("ED_SYM_LG_GS_MAX_ITER", Integer, "little-group", "the caller's dflt argument (600 two-pass lane / 200 small-n lane)",\
-      "Per-attempt Lanczos budget for the certified GS vector")                \
-    X("ED_SYM_LG_GS_RESTARTS", Integer, "little-group", "4",                   \
-      "Restart count for the two-pass GS lane; total work <= (1+restarts) x GS_MAX_ITER")\
-    X("ED_SYM_LG_GS_RESID_TOL", Real, "little-group", "1e-8",                  \
-      "Residual acceptance tolerance for the certified little-group GS vector")\
-    X("ED_SYM_LG_KS_TOL", Real, "little-group", "1e-9",                        \
-      "Absolute residual tolerance of the per-block Krylov-Schur solves (levels >= 2)")\
-    X("ED_SYM_CLIQUE_BUDGET", Integer, "symmetry", "512 (_DEFAULT_CLIQUE_BUDGET)",\
-      "|Aut| above which find_symmetries switches from exact max-clique to greedy maximal-abelian (hang guard)")\
-    X("ED_SYM_NO_DETECT_MEMO", Flag, "symmetry", "\"0\" (memo on)",            \
-      "=1 disables the find_symmetries content memo")                          \
     X("ED_CSR_FORCE", Tristate, "krylov", "-1 (use the dim cutoff)",           \
       "=1 always assemble CSR, =0 never (matrix-free always), unset -> use csr_cutoff_dim")\
-    X("ED_CSR_DIM_MAX", Integer, "krylov", "the factory's default_cutoff argument: 1<<20 full-Hilbert, 1<<22 fi...",\
+    X("ED_CSR_DIM_MAX", Integer, "krylov", "the caller's default cutoff",\
       "Projected-basis dim below which assembled CSR is preferred over matrix-free")\
     X("ED_MATVEC_SCATTER", Flag, "krylov", "false (gather kernel)",            \
-      "=1 falls back to the legacy atomic-SCATTER SpMV kernel (bisection escape hatch) instead of the lock-free row-GATHER")\
-    X("ED_LANCZOS_PROFILE", Flag, "krylov", "false",                           \
-      "=1 enables the per-iteration us timing breakdown in lanczos_real")      \
+      "=1 uses the atomic-scatter SpMV kernel instead of the lock-free row gather (for bisection)")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
       "=1 enables per-bucket us timers inside lanczos_kernel (A/B against lanczos_real)")\
-    X("ED_LANCZOS_REORTH_K", Integer, "krylov", "1 (kernel lane); real lane clamps to [0,4]",\
-      "Local-reorthogonalisation ring width for the LocalDGKS3 policy")        \
-    X("ED_LANCZOS_CHECK_EVERY", Integer, "krylov", "5",                        \
-      "Ritz-convergence check cadence (=1 restores per-iteration checking)")   \
-    X("ED_LANCZOS_EIGVEC_TWOPASS", Flag, "krylov", "true (two-pass on)",       \
-      "=0 restores the kept-basis FullCGS2 eigenvector lane instead of the two-pass no-reorth reconstruction")\
-    X("ED_FORCE_COMPLEX_LANCZOS", Flag, "krylov", "false",                     \
-      "=1 returns the pre-Wave-1.1 unified complex Lanczos kernel (A/B + bisection)")\
-    X("ED_FULLDIAG_DENSE_MAX", Integer, "krylov", "120000",                    \
-      "Dimension threshold below which full diagonalization uses the dense LAPACK path")\
-    X("ED_FULLDIAG_THREADS", Integer, "krylov", "max(1, N / 1024)",            \
-      "OMP/BLAS team size for the dense dsytrd/zhetrd reduction")              \
-    X("ED_FULLDIAG_FORCE_COMPLEX", Flag, "krylov", "false (real fast path allowed)",\
-      "Forces the complex LAPACK driver even when the assembled matrix is real (A/B + equivalence checks)")\
     X("ED_THERMAL_EXACT_SMALL", Flag, "thermal", "true",                       \
       "=0 forces the real sampling kernel even at D <= SMALL_THERMAL_DIM instead of the exact dense fallback")\
-    X("ED_TPQ_BASE_SEED", Integer, "thermal", "0 -> non-deterministic, time-seeded",\
-      "Non-zero value puts TPQ per-sample seeding in deterministic mode (identical CPU and GPU)")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
       "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
       "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\
       "=0/false/FALSE/no/NO disables the dim-aware automatic thread-budget scaling; any other value leaves it on")\
-    X("ED_AUTO_THREADS_PER_K", Integer, "threads-numa", "8",                   \
-      "Aim for one OMP/BLAS worker per K * 1024 basis states")                 \
-    X("ED_AUTO_THREADS_CEIL", Integer, "threads-numa", "8",                    \
-      "Soft cap on the auto-derived thread count; =0 disables the soft cap (use min(dim/per_k, max_t))")\
     X("ED_NUMA_PIN_THREADS", Flag, "threads-numa", "false",                    \
       "Pins OMP worker threads to cores (irreversible, applied once per process via std::once_flag)")\
     X("ED_MEM_GUARD_OFF", Flag, "memory-guard", "false (guard active)",        \

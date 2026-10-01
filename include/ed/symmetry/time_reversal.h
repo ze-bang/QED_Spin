@@ -2,10 +2,8 @@
 // =============================================================================
 // include/ed/symmetry/time_reversal.h
 //
-// Stage 6 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): time reversal as sector
-// PAIRING metadata -- deliberately NOT a projector (an antiunitary
-// element cannot enter P = (1/|G|) sum chi*(g) g).
+// Time reversal as sector PAIRING metadata -- deliberately NOT a projector
+// (an antiunitary element cannot enter P = (1/|G|) sum chi*(g) g).
 //
 // For a Hamiltonian whose computational-basis matrix elements are REAL
 // (every term coefficient real -- the isReal() fast-path condition, i.e.
@@ -19,13 +17,12 @@
 // The sector walk therefore solves ONE member of each conjugate pair
 // {k, -k} and copies the result to the partner; self-conjugate sectors
 // (real characters: k = 0, k = pi, parity irreps) additionally take the
-// existing real-Hermitian fast path (`is_real_hermitian()` already
-// consults the per-sector character -- that half of Stage 6 was wired by
-// the rep-lazy machinery).
+// real-Hermitian fast path (`is_real_hermitian()` consults the per-sector
+// character).
 //
 // Kramers bookkeeping (T^2 = -1 degeneracy tags for odd spin-1/2 counts)
-// is deferred: it only affects degeneracy-aware convergence heuristics,
-// not any produced number.
+// is not implemented: it would only affect degeneracy-aware convergence
+// heuristics, not any produced number.
 // =============================================================================
 
 #include <ed/config/env_registry.h>

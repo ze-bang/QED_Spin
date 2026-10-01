@@ -2,8 +2,7 @@
 // =============================================================================
 // include/ed/symmetry/spin_flip.h
 //
-// Stage 5 of the SymmetryEngine v2 plan
-// (docs/architecture/SYMMETRY_V2_DESIGN.md): global spin-flip Z2.
+// Global spin-flip Z2.
 //
 // The global flip X = prod_i sigma^x_i acts on the term algebra as
 //
@@ -22,14 +21,16 @@
 //   * offdiag_two_body(c S^a S^b)    : image  c S^a~ S^b~ (both ops flipped)
 //                                      -> partner with both ops flipped, same
 //                                      coefficient (site order either way)
-//   * three_body                     : conservative -> any presence returns
-//                                      false (extend when needed)
+//   * three_body                     : partner with every S+/- flipped and
+//                                      coefficient times (-1)^{# Sz factors};
+//                                      a repeated site is conservatively
+//                                      rejected
 //
 // The check is exact multiset matching with a small tolerance on the
 // coefficients; term counts are O(bonds), so the O(n^2) partner search is
 // negligible next to any orbit scan.
 //
-// Physics consequence exploited by the SectorTransporter (workflow level):
+// Physics consequence exploited by the sector walk:
 // X commutes with every site permutation (it acts on the internal spin
 // index, permutations on sites), so it maps the (n_up, irrep k) sector to
 // (N - n_up, SAME k) with an identical spectrum:
@@ -38,8 +39,9 @@
 //
 // The all-Sz thermal loop therefore solves only n_up <= N/2 and mirrors
 // the thermodynamic entries -- no projection, no new basis machinery.
-// (The n_up == N/2 in-sector projection -- flip as a CompiledGroup element
-// halving the biggest sector -- is the Stage-5b follow-up.)
+// Inside a flip-closed subspace (see ``flip_subspace_admissible``) the
+// flip can instead enter the symmetry group as an extra Z2 element that
+// halves the sector.
 // =============================================================================
 
 #include <ed/config/env_registry.h>
@@ -67,8 +69,7 @@ namespace ed::symmetry {
 //   * None   -- some term changes popcount by an odd amount (lone S+-,
 //               Sz S+- mixed terms, transverse fields): no diagonal
 //               reduction.
-// This is the three-valued refinement of the old binary conserves-Sz
-// check; ``Parity`` is the Z2 remnant of the broken U(1).
+// ``Parity`` is the Z2 remnant of the broken U(1).
 // -----------------------------------------------------------------------------
 enum class SzAxis : std::uint8_t { None = 0, Parity = 1, U1 = 2 };
 
@@ -77,11 +78,8 @@ sz_axis_of(const ed::matvec::TermStorage& t) noexcept {
     // Net change of the set-bit count per term: S+ clears a bit (-1),
     // S- sets one (+1), Sz none. U(1) iff every term has net 0; the Z2
     // parity survives iff every net change is even; otherwise nothing.
-    // Audit 2026-09: the previous version demoted ANY three-body term with
-    // off-diagonal content to Parity, so Sz-conserving chiral terms
-    // Sz_i S+_j S-_k were reported as U(1)-breaking and every Sz-blocked
-    // lane (thermal sweeps, full_spectrum, streaming symmetry) fell back
-    // to parity halves for chiral spin liquids.
+    // Three-body terms are classified by their net change too, so
+    // Sz-conserving chiral terms Sz_i S+_j S-_k keep U(1).
     auto dnet = [](std::uint8_t op) -> int {
         return (op == 0) ? -1 : (op == 1) ? +1 : 0;
     };
@@ -114,11 +112,8 @@ inline bool coeff_eq(const std::complex<double>& a,
 
 }  // namespace detail
 
-/// Stage 10a: THE flip-subspace closure rule, single-sourced. It was
-/// restated at every consumer -- the little-group engine, the GS/thermal
-/// binding gates, and the sector factory's comments -- which is exactly
-/// the twin-drift class that shipped one lane unguarded (Stage 9f).
-/// prod sigma^x preserves:
+/// THE flip-subspace closure rule, single-sourced for every consumer (do
+/// not restate it locally). prod sigma^x preserves:
 ///   * a fixed-Sz block   iff n_up == N/2,
 ///   * an Sz-parity half  iff N is even,
 ///   * the full space     always.
@@ -144,7 +139,7 @@ hamiltonian_is_spin_flip_symmetric(const ed::matvec::TermStorage& t) noexcept {
     // (X Sz X = -Sz). Factors on DISTINCT sites commute, so compare
     // site-sorted factor lists. Same-site three-body products don't commute
     // under the sort, so stay conservative (reject) when any term repeats a
-    // site -- correctness over coverage for that exotic case (C10).
+    // site -- correctness over coverage for that exotic case.
     {
         const auto& v = t.three_body;
         using Fac = std::array<std::pair<std::uint64_t, int>, 3>;

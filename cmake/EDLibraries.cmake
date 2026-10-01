@@ -17,20 +17,10 @@
 # test binaries) only need to write `target_link_libraries(<exe> PRIVATE
 # ed_solvers_cpu)` -- the include path and BLAS/LAPACK/OpenMP/CUDA
 # link stack propagate automatically.
-#
-# This module is a pure structural refactor: every TU that the previous
-# inline source-list approach compiled is still compiled here, with the same
-# CPU_OPT_FLAGS, the same -DWITH_* compile definitions, and the same link
-# stack. Build artifacts are bit-identical modulo file paths.
-#
-# P1.2 / audit Q5.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Build the linkage stack ED_COMMON_LINK_LIBS used by the libraries below.
-# Order matters: ScaLAPACK must come before BLAS, because some BLAS profiles
-# (notably AOCL with libflame) carry an incompatible ScaLAPACK in the same
-# directory and we want the explicit one to win in RPATH search order.
 # -----------------------------------------------------------------------------
 set(ED_COMMON_LINK_LIBS "")
 list(APPEND ED_COMMON_LINK_LIBS
@@ -55,15 +45,14 @@ set(_ED_PUBLIC_INCLUDES
     "$<BUILD_INTERFACE:${INCLUDE_DIR}>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/core>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/solvers>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/cli>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/symmetry>"
     "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/parallel>"
-    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/matvec>"  # Matvec-unification revamp
+    "$<BUILD_INTERFACE:${INCLUDE_DIR}/ed/matvec>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 
 # -----------------------------------------------------------------------------
-# ed_parallel: thread-budget + OpenMP thread-pinning hooks (Phase 3a #4).
+# ed_parallel: thread-budget + OpenMP thread-pinning hooks.
 #
 # Tiny utility library: `ed::parallel::ThreadBudgetScope` /
 # `auto_threads_for_dim` and `pin_omp_threads_once` (knob
@@ -95,10 +84,10 @@ set_target_properties(ed_parallel PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ed_core: core types and the CPU stub of the lazy GPU sector mirror.
 # -----------------------------------------------------------------------------
 add_library(ed_core STATIC
-    # Phase A of the "Backend x Symmetries x Workflows" plan (May 2026)
-    # -- CPU-only stub for the lazy GPU sector mirror entry point.
-    # When WITH_CUDA is OFF this TU provides the throwing stub that
-    # makes SectorView::bind_cuda() fail loudly. When WITH_CUDA is ON
+    # CPU-only stub for the GPU sector-matvec factories
+    # (ed/symmetry/sector_gpu_mirror.h). When WITH_CUDA is OFF this TU
+    # provides throwing stubs so a misrouted GPU request fails loudly.
+    # When WITH_CUDA is ON
     # the file is an empty translation unit and the strong definitions
     # come from ${SRC_DIR}/symmetry/streaming_symmetry_gpu_mirror.cu
     # (added to ed_solvers_gpu below). Splitting the TU avoids
@@ -125,12 +114,11 @@ target_compile_options(ed_core PRIVATE
 set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_matvec: unified matrix-vector multiplication layer (Phase 1 of the
-# matvec-unification revamp). Provides:
+# ed_matvec: unified matrix-vector multiplication layer. Provides:
 #
 #   * MatVecOperator       polymorphic base for any operator that acts on
-#                          a vector (any backend, any basis, MPI or not)
-#   * Backend              host/cuda/mpi backends for the surrounding
+#                          a vector (any backend, any basis)
+#   * Backend              host/cuda backends for the surrounding
 #                          level-1 BLAS (axpy/dot/norm/scale)
 #   * basis::*Policy       compile-time basis descriptions used by the
 #                          shared term kernel
@@ -142,7 +130,7 @@ set_target_properties(ed_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # storage); consumed by ed_solvers_cpu and ed_solvers_gpu.
 # -----------------------------------------------------------------------------
 add_library(ed_matvec STATIC
-    # P6: explicit instantiation of the host CpuMatVecBackend cells
+    # Explicit instantiation of the host CpuMatVecBackend cells
     # (Full / RepSymmetry) over the canonical term-view shape.
     ${MATVEC_DIR}/cpu_backend_instantiations.cpp
 )
@@ -171,16 +159,13 @@ set(ED_SOLVERS_CPU_SOURCES
     ${SRC_DIR}/solvers/little_group/lg_group_sector.cpp
     ${SRC_DIR}/solvers/little_group/lg_ground_state.cpp
     ${SRC_DIR}/observables/ftlm_cross_irrep_kernel.cpp
-    # WP14: the ~2700-line src/orchestrator.cpp was split by concern into
-    # src/orchestrator/ (pure move; see orchestrator_internal.h for the
+    # The orchestrator, split by concern (orchestrator_internal.h has the
     # file map). orch_solve.cpp is the single TU that instantiates the
     # backend-templated eigensolver lanes, so the CudaBackend
     # instantiation of the solve path is emitted there and nowhere else.
     ${SRC_DIR}/orchestrator/orch_common.cpp
     ${SRC_DIR}/orchestrator/orch_solve.cpp
     ${SRC_DIR}/orchestrator/orch_thermal.cpp
-    # (execution-planner "dictator" + feasibility advisor removed: sensible
-    #  defaults + env-override leaf policy hooks instead.)
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})
@@ -216,7 +201,7 @@ target_compile_options(ed_dssf PRIVATE
 set_target_properties(ed_dssf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -----------------------------------------------------------------------------
-# ed_symmetry: programmatic site-permutation DSL (P2.11 / audit §3.10) --
+# ed_symmetry: programmatic site-permutation DSL --
 # permutation algebra + generate_group -- and the numerical irrep
 # decomposition (irreps.cpp).
 # -----------------------------------------------------------------------------
@@ -246,12 +231,10 @@ set_target_properties(ed_symmetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
 #
 # `ed_input` PUBLIC-links `ed_core` because `HamiltonianBuilder::emit_into`
 # touches `Operator::transform_data_` / `three_body_data_` directly (matching
-# the way the existing `addOneBody` / `addTwoBody` shortcuts in
-# construct_ham.h push records into those vectors). The only consumers of
-# `ed_input` are (i) the new examples under examples/, (ii) the pybind11
-# bindings under python/qed/_input.cpp, and (iii) the unit tests in
-# tests/unit/test_input_*.cpp -- the production `./ED <dir>` driver does
-# not depend on it.
+# the way the `addOneBody` / `addTwoBody` shortcuts in construct_ham.h push
+# records into those vectors). Its consumers are the pybind11 bindings
+# (python/qed/_bindings/input_bindings.cpp) and the unit tests in
+# tests/unit/test_input_*.cpp.
 # -----------------------------------------------------------------------------
 add_library(ed_input STATIC
     ${SRC_DIR}/input/lattice.cpp
@@ -278,9 +261,8 @@ if(WITH_CUDA)
         # Pascal table the device basis policies rank fixed-Sz states with.
         ${SOLVERS_GPU_DIR}/combinadic.cu
         ${SOLVERS_GPU_DIR}/little_group_gpu.cu
-        # Phase A of the "Backend x Symmetries x Workflows" plan
-        # (May 2026) -- real lazy GPU sector mirror for
-        # the rep sectors. Lives here (and
+        # On-the-fly representative GPU sector matvec for the rep
+        # sectors (ed/symmetry/sector_gpu_mirror.h). Lives here (and
         # not in ed_core) because it pulls in <cuda_runtime.h> +
         # thrust + the device basis policy headers. The ed_core .cpp
         # twin is an empty TU when WITH_CUDA is ON, so there is no

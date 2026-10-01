@@ -8,11 +8,10 @@
 //
 // Why this file exists
 // --------------------
-// Until Jul 2026 the gate required mTPQ specifically, so FTLM kept
-// sampling in a regime where the exact solve is free AND machine precise --
-// measured at dim=64: mTPQ 1.4e-15 vs FTLM 2.3e-02, i.e. 13 orders for
-// microseconds of eigensolve. The deliverable of all four methods here is
-// identical (canonical E/C/S), so all four take the exact route.
+// In this regime the exact solve is free AND machine precise -- measured at
+// dim=64: exact route 1.4e-15 vs FTLM sampling 2.3e-02, i.e. 13 orders for
+// microseconds of eigensolve. Every method's deliverable here is identical
+// (canonical E/C/S), so all of them take the exact route.
 //
 // The fallback is invisible to a tolerance-based check -- it makes things
 // MORE accurate -- so it needs its own pin: assert machine precision, which
@@ -42,8 +41,8 @@ namespace {
 constexpr uint64_t N_SITES = 6;      // dim = 64 << SMALL_THERMAL_DIM = 512
 constexpr double   J       = 1.0;
 
-// A broad grid: the pre-Jul-2026 LTLM bug hid at low T, so a fallback pin that
-// only looked at T -> 0 would repeat that mistake.
+// A broad grid: an estimator stuck at E0 is indistinguishable from exact at
+// low T, so a fallback pin that only looked at T -> 0 could miss it.
 const std::vector<double> BETAS = [] {
     std::vector<double> b;
     for (double T : {0.05, 0.25, 1.0, 3.0, 10.0}) b.push_back(1.0 / T);

@@ -3,18 +3,11 @@
 // include/ed/observables/ftlm_cross_irrep_kernel.h
 //
 // FTLM (Finite-Temperature Lanczos Method) cross-irrep / cross-sector
-// dynamical spectral kernel. Generalises the same-dim multi-T FTLM
-// machinery (`compute_dynamical_correlation_multi_operator_multi_temperature`
-// in `src/solvers/cpu/ftlm_dynamical.cpp`) to
-// the case where the probe observable ``O`` is RECTANGULAR --
-// i.e., it maps a source-sector orbit basis (``dim_src``) to a
-// target-sector orbit basis (``dim_dst``). This is exactly the
-// finite-T analog of the T=0 cross-irrep kernel
-// (``cf_spectral_from_vector`` driven by
-// ``ed::dssf::CrossSectorOrbitObservable``) and the missing piece
-// that closes the SOTA gap flagged in
-// ``docs/architecture/SYMMETRY.md`` for the
-// ``DYNAMICAL_THERMAL`` row (spatial-irrep + cross-irrep).
+// dynamical spectral kernel, for a probe observable ``O`` that is
+// RECTANGULAR -- i.e., it maps a source-sector orbit basis (``dim_src``)
+// to a target-sector orbit basis (``dim_dst``). This is the finite-T
+// analog of the T=0 cross-irrep kernel (``cf_spectral_from_vector``
+// driven by ``ed::dssf::CrossSectorOrbitObservable``).
 //
 // Math
 // ----
@@ -47,8 +40,8 @@
 //   Z_{k_src}(T) = (dim_src / R)
 //        * sum_r sum_i exp(-beta(E_i^{(r)} - E_min)) c_i^{(r)^2}.
 //
-// Aggregation across source sectors (in the caller / streaming-
-// symmetry binding):
+// Aggregation across source sectors (in the caller, e.g. the
+// ed::sectors dynamics verb):
 //
 //   S_total(omega, T) = (sum_k S_k(omega, T)) / (sum_k Z_k(T)),
 //
@@ -65,8 +58,7 @@
 //
 //   1. The outer matvec is ``H_src`` on dim_src; the inner matvec
 //      is ``H_dst`` on dim_dst. Both are passed as
-//      ``std::function<void(const Complex*, Complex*, int)>``,
-//      identical to the legacy lambdas.
+//      ``std::function<void(const Complex*, Complex*, int)>``.
 //   2. The observable application is rectangular -- the kernel
 //      pre-allocates a ``dim_dst``-sized work buffer for the
 //      target sector and calls the user-supplied ``O_apply`` as
@@ -74,12 +66,9 @@
 //      caller is responsible for wiring this up against
 //      ``ed::dssf::CrossSectorOrbitObservable::apply``.
 //
-// Threading: the inner H matvecs are OpenMP-parallel through the
-// streaming-symmetry sector view; the outer FTLM loop runs serial
-// (legacy convention -- nested OMP corrupts the heap allocator on
-// some BLAS builds, see ftlm.cpp line ~3055).
-//
-// SOTA upgrade, May 2026 (closes the finite-T DSSF + symmetry gap).
+// Threading: the H matvecs are OpenMP-parallel internally; on the host
+// the outer FTLM sample loop runs serially (nested OMP corrupts the heap
+// allocator on some BLAS builds).
 // =============================================================================
 
 #include <algorithm>
@@ -97,25 +86,20 @@ namespace ed::observables {
 
 using Complex = std::complex<double>;
 
-/// Parameters for the FTLM cross-irrep kernel. Mirrors the subset
-/// of ``DynamicalResponseParameters`` actually consumed by the
-/// multi-sample multi-T legacy lane, plus a few cross-sector knobs.
+/// Parameters for the FTLM cross-irrep kernel.
 struct FtlmCrossIrrepOptions {
     std::size_t krylov_dim       = 200;
     std::size_t num_samples      = 30;
     double      broadening       = 0.05;
     /// Tolerance for the inner Lanczos breakdown / convergence
-    /// check. Matches the legacy ``DynamicalResponseParameters::tolerance``.
+    /// check.
     double      tolerance        = 1e-12;
     /// Full reorthogonalisation flag for the outer + inner Lanczos.
-    /// Off by default to match the legacy `compute_dynamical_correlation_*`
-    /// default; turn on for problems with near-degeneracies.
+    /// Off by default; turn on for problems with near-degeneracies.
     bool        full_reorthogonalization = false;
     std::size_t reorth_frequency = 1;
     /// Random-seed offset; each sample uses
-    /// ``random_seed + sample_idx * 12345``. Matches the legacy
-    /// FTLM multi-sample convention so seeds are stable across
-    /// the two paths.
+    /// ``random_seed + sample_idx * 12345``.
     std::uint64_t random_seed    = 0;
     /// Verbose progress to stdout. Off by default.
     bool        verbose          = false;

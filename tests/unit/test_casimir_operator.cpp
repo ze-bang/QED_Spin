@@ -1,7 +1,7 @@
 // =============================================================================
 // tests/unit/test_casimir_operator.cpp
 //
-// Stage 12a of the SU(2) rollout: the S^2_tot Casimir in the TermStorage
+// The S^2_tot Casimir in the TermStorage
 // schema (include/ed/operators/casimir.h).
 //
 // Pinned:

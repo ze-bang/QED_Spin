@@ -3,7 +3,7 @@
 // include/ed/symmetry/orbit_table.h
 //
 // OrbitTable: the single irrep-INDEPENDENT group-level artifact of the
-// SymmetryEngine v2 plan (docs/architecture/SYMMETRY_V2_DESIGN.md, Stage 2).
+// symmetry engine.
 //
 // One fused scan over the subspace produces, per orbit:
 //
@@ -13,23 +13,22 @@
 //     subgroups number ~1-100 for any realistic lattice group, so the
 //     per-rep cost is one uint16).
 //
-// This fuses the previous "Pass 1" (rep enumeration) and "Pass 1.5"
-// (build_orbit_stabilizers) into one pass: a state that survives the
-// early-exit min-image test has, in the same |G| loop, already seen every
-// element that fixes it. Non-reps keep the early-exit cost; reps pay the
-// full |G| walk exactly once (they previously paid it twice).
+// Rep enumeration ("pass 1") and stabilizer collection ("pass 1.5") are
+// fused into one pass: a state that survives the early-exit min-image test
+// has, in the same |G| loop, already seen every element that fixes it.
+// Non-reps keep the early-exit cost; reps pay the full |G| walk exactly once.
 //
 // Everything per-irrep derives from this table in O(#reps):
 //
 //   norm²(rep, χ) = |Σ_{h ∈ Stab(rep)} χ(h)|² / |Stab(rep)|
 //
-// (the rep_projection.h closed form, precondition: the full G-orbit of a
-// rep lies inside the subspace -- true for the full 2^N space and every
-// popcount-preserving fixed-Sz subspace, since the compiled elements here
-// are pure site permutations).
+// (closed form; precondition: the full G-orbit of a rep lies inside the
+// subspace -- true for the full 2^N space and every popcount-preserving
+// fixed-Sz subspace, since the compiled elements here are pure site
+// permutations).
 //
 // ``content_hash`` combines the CompiledGroup hash with the subspace
-// signature -- the Stage-3 persistent-cache key.
+// signature -- the persistent-cache key.
 // =============================================================================
 
 #include <algorithm>
@@ -67,10 +66,8 @@ struct OrbitTable {
 };
 
 /// Closed-form orbit-projected norm² of rep ``rep_i`` in the 1-D irrep with
-/// per-element characters ``chi`` (length |G|). Identical math to
-/// ``ed::symmetry::projected_norm_sq(OrbitStabilizers, ...)``
-/// (rep_projection.h) -- |Σ_{h∈Stab}χ(h)|²/|Stab| with the |Stab|=1 fast
-/// path -- just fed from the fused table.
+/// per-element characters ``chi`` (length |G|): |Σ_{h∈Stab}χ(h)|²/|Stab|,
+/// with the |Stab|=1 fast path.
 [[nodiscard]] inline double
 projected_norm_sq_stab(const std::vector<std::uint16_t>& st,
                        const std::vector<std::complex<double>>& chi) {
@@ -127,8 +124,8 @@ struct StabDedup {
     }
 };
 
-/// Fused per-state visit: rejects non-reps with the same early exit the
-/// legacy Pass-1 used; for survivors records the stabilizer element set.
+/// Fused per-state visit: rejects non-reps by early exit on the first
+/// smaller image; for survivors records the stabilizer element set.
 /// Returns true iff ``s`` is its orbit's canonical rep.
 inline bool visit_state(std::uint64_t                s,
                         const CompiledGroup&         cg,
@@ -146,9 +143,7 @@ inline bool visit_state(std::uint64_t                s,
 }  // namespace detail
 
 /// Fused rep + stabilizer scan over the fixed-Sz subspace (streaming
-/// Gosper walk; no C(N,n_up) basis materialization). ``reps`` ascending,
-/// bit-identical to ``enumerate_fixed_sz_orbit_reps_streaming``;
-/// ``stab_elems`` content-identical to ``build_orbit_stabilizers``.
+/// Gosper walk; no C(N,n_up) basis materialization). ``reps`` ascending.
 /// Compiled-group core: the caller supplies the (possibly flip-extended)
 /// CompiledGroup. PRECONDITION for flip elements: every element must
 /// preserve the popcount of every subspace state (the all-ones spin flip
@@ -255,7 +250,7 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
     return tab;
 }
 
-/// Stage 5b: the flip-extended group G' = G x Z2 -- elements
+/// The flip-extended group G' = G x Z2 -- elements
 /// [g_0..g_{|G|-1}, g_0*F, .., g_{|G|-1}*F] with F = XOR all-ones
 /// (the global spin flip; it commutes with every site permutation, so
 /// this IS the direct product). Only meaningful on subspaces F preserves

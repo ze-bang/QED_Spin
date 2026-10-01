@@ -1,7 +1,7 @@
 // =============================================================================
 // src/parallel/numa.cpp
 //
-// OpenMP thread-pinning hook (Phase 3a #4). See include/ed/parallel/numa.h
+// OpenMP thread-pinning hook. See include/ed/parallel/numa.h
 // for the rationale and the env knob.
 //
 // No external dependencies beyond pthread + OpenMP + glibc -- libnuma is
