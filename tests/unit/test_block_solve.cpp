@@ -5,17 +5,25 @@
 //
 //   [place]   place(): THE device decision for every block of every verb, with an
 //             injected DeviceProbe that counts its calls; with_backend().
+//   [thermal] a sampled block up to dense_max_dim is diagonalised on the host (and
+//             counted host_dense); dense_max_dim = 0, a spin tower or observables sample it.
 // =============================================================================
 #include "common/catch2_harness.h"
+#include "common/test_harness.h"
 
 #include <ed/core/device.h>
 #include <ed/core/errors.h>
 #include <ed/core/select_backend.h>
+#include <ed/sectors/thermal.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 using ed::Device;
 using ed::Lane;
@@ -233,4 +241,111 @@ TEST_CASE("with_backend: a fresh backend of the lane", "[place]") {
 #ifndef WITH_CUDA
     REQUIRE_THROWS_AS(ed::with_backend(Lane::DeviceKrylov, [](auto&) { return 0; }), std::logic_error);
 #endif
+}
+
+// -----------------------------------------------------------------------------
+// [thermal]: a sampled block at most dense_max_dim states, with no spin tower and no
+// observables, is diagonalised on the host; dense_max_dim = 0 restores the kernels.
+// -----------------------------------------------------------------------------
+namespace {
+
+constexpr int kRing = 6;   // the periodic Heisenberg ring: one 64-state block without symmetry
+
+ed::sectors::Spec one_block() {
+    ed::sectors::Spec s;
+    s.use_sz = false;
+    s.spin_flip = 0;
+    s.time_reversal = 0;
+    return s;
+}
+
+const std::vector<double> kT = {0.05, 0.25, 1.0, 3.0, 10.0};
+
+std::vector<double> ring_spectrum() {
+    auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
+    return ed_tests::reference_from_operator(*H, 1ULL << kRing).eigs;
+}
+
+std::vector<double> exact_energies(const std::vector<double>& eigs) {
+    const double e0 = *std::min_element(eigs.begin(), eigs.end());
+    std::vector<double> E;
+    for (double t : kT) {
+        double z = 0.0, num = 0.0;
+        for (double e : eigs) {
+            const double w = std::exp(-(e - e0) / t);
+            z += w; num += e * w;
+        }
+        E.push_back(num / z);
+    }
+    return E;
+}
+
+ed::sectors::ThermalSpec few_samples(ed::sectors::ThermalSpec::Method m, std::size_t exact_states = 0) {
+    ed::sectors::ThermalSpec t;
+    t.method       = m;
+    t.temperatures = kT;
+    t.samples      = 4;     // far too few to be accurate...
+    t.krylov       = 8;     // ...with a far too short Krylov space
+    t.exact_states = exact_states;
+    t.seed         = 12345;
+    return t;
+}
+
+}  // namespace
+
+TEST_CASE("thermal: a block up to dense_max_dim is exact for every sampling method", "[thermal]") {
+    using M = ed::sectors::ThermalSpec::Method;
+    auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
+    const auto E = exact_energies(ring_spectrum());
+    // 4 samples of 8 Lanczos steps cannot reach 1e-10 at any temperature: the dense path ran.
+    for (const auto& [m, exact_states] : {std::pair{M::FTLM, std::size_t{0}}, std::pair{M::FTLM, std::size_t{2}},
+                                          std::pair{M::mTPQ, std::size_t{0}}}) {
+        const auto r = ed::sectors::thermal(*H, kRing, one_block(), few_samples(m, exact_states));
+        INFO("method " << static_cast<int>(m) << ", exact_states " << exact_states);
+        REQUIRE(r.placement.host_dense == 1);
+        REQUIRE(r.placement.host_krylov == 0);
+        REQUIRE(r.E.size() == kT.size());
+        for (std::size_t i = 0; i < kT.size(); ++i) REQUIRE(std::abs(r.E[i] - E[i]) < 1e-10);
+    }
+}
+
+TEST_CASE("thermal: dense_max_dim = 0 samples the block", "[thermal]") {
+    auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
+    const auto eigs = ring_spectrum();
+    const auto E = exact_energies(eigs);
+    auto t = few_samples(ed::sectors::ThermalSpec::Method::FTLM);
+    t.dense_max_dim = 0;
+    const auto r = ed::sectors::thermal(*H, kRing, one_block(), t);
+    REQUIRE(r.placement.host_krylov == 1);
+    REQUIRE(r.placement.host_dense == 0);
+    double worst = 0.0;
+    for (std::size_t i = 0; i < kT.size(); ++i) {
+        worst = std::max(worst, std::abs(r.E[i] - E[i]));
+        REQUIRE(r.E[i] >= eigs.front() - 1e-9);   // a thermal average sits above the ground state
+    }
+    INFO("worst |dE| when sampling = " << worst);
+    REQUIRE(worst > 1e-10);
+}
+
+TEST_CASE("thermal: a spin tower or observables keep a small block sampled", "[thermal]") {
+    auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
+    const double e0 = ring_spectrum().front();
+    SECTION("total spin") {
+        auto s = one_block();
+        s.use_sz = true;
+        s.two_S = 0;   // the singlets: the seeds are projected onto the tower
+        const auto r = ed::sectors::thermal(*H, kRing, s, few_samples(ed::sectors::ThermalSpec::Method::FTLM));
+        REQUIRE(r.placement.host_dense == 0);
+        REQUIRE(r.placement.host_krylov >= 1);
+        for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
+    }
+    SECTION("observables") {
+        auto t = few_samples(ed::sectors::ThermalSpec::Method::FTLM);
+        t.observables = {H.get()};
+        const auto r = ed::sectors::thermal(*H, kRing, one_block(), t);
+        REQUIRE(r.placement.host_dense == 0);
+        REQUIRE(r.placement.host_krylov == 1);
+        REQUIRE(r.O.size() == 1);
+        for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
+    }
 }

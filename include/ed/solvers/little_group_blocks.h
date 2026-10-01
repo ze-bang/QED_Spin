@@ -16,8 +16,8 @@
 //     engine's graceful-fallback floor).
 //
 // Each block is an `ed::LinearOperator` inside the engine, so anything the
-// orchestrator can drive (Lanczos, dense eigensolve, FTLM / TPQ sampling
-// kernels via ed::workflows::thermal) runs inside the reduced dimension with
+// solvers drive (Lanczos, dense eigensolve, the FTLM / TPQ sampling
+// kernels) runs inside the reduced dimension with
 // no kernel changes; the public handle lifts block vectors back to the
 // momentum-sector rep basis. Ownership is by shared_ptr: all irrep blocks of
 // one star co-own their star's matrix-free H_{k0} (RepSectorMatVec).

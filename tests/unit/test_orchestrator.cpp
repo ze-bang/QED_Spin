@@ -1,15 +1,10 @@
 // =============================================================================
 // tests/unit/test_orchestrator.cpp
 //
-// Smoke tests for `ed::workflows::solve` / `ed::workflows::thermal` on the
-// same small Heisenberg chain used elsewhere in the unit suite, asserting:
-//
-//   * `ed::workflows::solve` lands near the ground-state energy of the
-//     6-site periodic AFM Heisenberg chain (E_0 = -2.8027757...).
-//   * `ed::workflows::thermal` runs the mTPQ lane end-to-end.
-//
-// Both exercise the BackendVariant dispatch path on the CPU lane; the
-// GPU backend is covered by test_cuda_backend.
+// Smoke test for `ed::workflows::solve` on the same small Heisenberg chain used
+// elsewhere in the unit suite: it lands near the ground-state energy of the
+// 6-site periodic AFM Heisenberg chain (E_0 = -2.8027757...), through the
+// BackendVariant dispatch path on the CPU lane.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -46,21 +41,5 @@ TEST_CASE("workflows::solve recovers the 6-site Heisenberg ground state",
     // but the kernel cap of 50 iterations isn't tight on bare
     // convergence.
     REQUIRE(res.eigenvalues[0] < -2.5);
-    REQUIRE(res.backend.lane == "cpu");
-}
-
-TEST_CASE("workflows::thermal runs the mTPQ lane end-to-end",
-          "[orchestrator][thermal][phase4]") {
-    constexpr std::uint64_t N = 4;
-    auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
-
-    ed::ThermalOptions opts;
-    opts.method      = ed::ThermalOptions::Method::mTPQ;
-    opts.num_samples = 1;
-    opts.krylov_dim  = 50;
-    opts.random_seed = 7;
-    opts.backend.allow_gpu = false;  // CPU-lane smoke test (see above)
-
-    auto res = ed::workflows::thermal(*H, opts);
     REQUIRE(res.backend.lane == "cpu");
 }

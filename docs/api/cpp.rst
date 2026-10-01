@@ -56,7 +56,8 @@ Backends and batching
 Orchestrator
 ------------
 
-``ed::workflows::solve`` and ``ed::workflows::thermal`` run one operator (a block) on the
-backend ``select_backend`` picks; the sector layer calls them per block.
+``ed::workflows::solve`` runs one operator (a block) on the backend ``select_backend`` picks;
+eigs calls it on device-placed blocks (transitional). Sampled thermal blocks call the thermal
+kernels (``ftlm_kernel``, ``mtpq``, ``oftlm_cpu``) directly on the lane ``ed::place`` chooses.
 
 .. doxygenfile:: ed/orchestrator.h

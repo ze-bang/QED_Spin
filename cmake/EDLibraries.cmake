@@ -164,7 +164,6 @@ set(ED_SOLVERS_CPU_SOURCES
     # backend-templated eigensolver lanes, so the CudaBackend
     # instantiation of the solve path is emitted there and nowhere else.
     ${SRC_DIR}/orchestrator/orch_solve.cpp
-    ${SRC_DIR}/orchestrator/orch_thermal.cpp
 )
 
 add_library(ed_solvers_cpu STATIC ${ED_SOLVERS_CPU_SOURCES})

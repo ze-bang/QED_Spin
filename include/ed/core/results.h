@@ -2,10 +2,8 @@
 // =============================================================================
 // include/ed/core/results.h
 //
-// Result types of the orchestrators (`ed::workflows::solve`,
-// `ed::workflows::thermal`): one shape per workflow, with the Backend
-// identity carried in a `BackendMetadata` blob so downstream consumers can
-// branch on lane without re-reading the function signature.
+// TRANSITIONAL (P2.4 C6 deletes it): the result of `ed::workflows::solve`, with
+// the Backend identity carried in a `BackendMetadata` blob.
 // =============================================================================
 
 #include <complex>
@@ -14,8 +12,6 @@
 #include <optional>
 #include <string>
 #include <vector>
-
-#include <ed/core/thermal_types.h>  // ThermodynamicData, FTLMResults
 
 namespace ed {
 
@@ -73,24 +69,6 @@ struct GroundStateResult {
     std::optional<EigenvectorRef> eigenvectors;
     KrylovDiagnostics             krylov;
     BackendMetadata               backend;
-};
-
-// ---------------------------------------------------------------------------
-// ThermalResult --- output of `ed::workflows::thermal(H, opts)`. Covers the FTLM /
-// OFTLM / mTPQ family.
-// ---------------------------------------------------------------------------
-struct ThermalResult {
-    /// Combined (across samples) thermodynamic functions.
-    ThermodynamicData                thermo;
-    /// Ground-state energy for diagnostic / shift purposes.
-    double                           ground_state_energy = 0.0;
-    /// Optional FTLM raw results (Ritz triples per sample). Empty
-    /// for TPQ lanes.
-    std::optional<FTLMResults>       ftlm;
-    KrylovDiagnostics                krylov;
-    BackendMetadata                  backend;
-    /// <O>(T) per ThermalOptions::observables, index-aligned with thermo.temperatures.
-    std::vector<std::vector<std::complex<double>>> observables;
 };
 
 }  // namespace ed

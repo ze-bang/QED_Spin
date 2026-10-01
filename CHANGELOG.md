@@ -74,6 +74,16 @@ C++ API (installed headers; nothing in Python changes):
   (`<ed/core/select_backend.h>`) is the one device decision for every block of every verb;
   `ed::with_backend(lane, fn)` runs `fn` on a fresh backend of that lane.
   `ed::sectors::Placement::add(Lane)` counts one solve.
+- `ed::workflows::thermal`, `ed::ThermalOptions` and `ed::ThermalResult` are gone, with the
+  mTPQ expert knobs `energy_shift` / `e_min_override` / `e_max_override` (nothing set them)
+  and the unreachable `temp_min` / `temp_max` / `num_temp_bins` grid. `ed::sectors::thermal`
+  places each sampled block and calls the kernels itself; the mTPQ recipe (spectral bounds,
+  shift L, step count, one retry) is `ed::thermal::mtpq<Backend>(be, H, n, betas, MtpqRun)`
+  in `<ed/thermal/mtpq_kernel.h>`.
+
+Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
+("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)
+block, which has no device kernel; use device='auto' or 'cpu'").
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

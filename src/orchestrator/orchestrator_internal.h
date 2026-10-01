@@ -31,8 +31,6 @@
 //                      that instantiates a backend-templated eigensolver,
 //                      so the CudaBackend instantiation of the solve path
 //                      lives here and nowhere else.
-//   orch_thermal.cpp   thermal(): exact-small eigenspectrum fallback, mTPQ
-//                      sampling, FTLM / OFTLM lanes
 // =============================================================================
 
 #include <ed/config/env_registry.h>   // typed environment accessors

@@ -22,10 +22,14 @@
 #include <algorithm>
 #include <type_traits>
 
+#include <ed/core/errors.h>
+#include <ed/krylov/lanczos_kernel.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/matvec_batcher.h>
+#include <ed/solvers/lanczos.h>      // estimate_spectral_bounds; LAPACKE_dstev
 #include <ed/thermal/tpq_seeding.h>
 #include <ed/thermal/tpq_kernel.h>
+#include <ed/thermal/tpq_thermo.h>
 
 namespace ed::thermal {
 
@@ -180,6 +184,125 @@ MtpqResult mtpq_kernel(Backend&       backend,
         out.sample_log_norms.push_back(std::move(smp.log_norms));
     }
     return out;
+}
+
+/// One mTPQ run of a block, as the thermal verb asks for it.
+struct MtpqRun {
+    std::size_t   samples = 1;
+    /// Steps per sample; 0 sizes them for the coldest beta (mtpq_steps_for), with one retry at
+    /// twice the count when the trajectory falls short.
+    std::size_t   steps   = 0;
+    std::uint64_t seed    = 0;
+    std::function<void(Complex*, std::size_t)> seed_transform;
+    ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
+};
+
+/// The canonical mTPQ thermodynamics of an n-dimensional block at `betas`. Recipe:
+///   1. spectral bounds (E_min, E_max) from a short Lanczos on this backend;
+///   2. L just above E_max (the series' terms peak near j* = beta (L - E_min), so L - E_max is
+///      pure cost);
+///   3. steps so the series converges at the coldest beta: j* + 8 sqrt(j*) terms; a target the
+///      trajectory cannot reach is refused, never clamped.
+template <typename Backend, typename MatvecFn>
+MtpqThermo mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas,
+                const MtpqRun& run) {
+    std::vector<double> temperatures;
+    temperatures.reserve(betas.size());
+    for (double b : betas) temperatures.push_back(b > 0.0 ? 1.0 / b : 0.0);
+    double beta_max = 0.0;
+    for (double b : betas) beta_max = std::max(beta_max, b);
+    if (!(beta_max > 0.0)) beta_max = 100.0;
+
+    MtpqOptions kopts;
+    kopts.num_samples    = run.samples;
+    kopts.random_seed    = run.seed;
+    kopts.seed_transform = run.seed_transform;
+    kopts.batch_matvec   = run.batch_matvec;
+
+    double e_min_est = 0.0, e_max_est = 0.0;
+    bool have_bounds = false;
+    if constexpr (std::is_same_v<std::decay_t<Backend>, ed::matvec::CpuBackend>) {
+        // The shared Lanczos spectral-bound estimator on a host-pointer wrapper of the matvec.
+        std::function<void(const Complex*, Complex*, int)> legacy_H =
+            [&H](const std::complex<double>* in, std::complex<double>* out, int m) {
+                H(in, out, static_cast<std::size_t>(m));
+            };
+        const std::uint64_t bdim = n;
+        std::mt19937 gen(run.seed ? static_cast<unsigned>(run.seed) : 0x9E3779B9u);
+        try {
+            const int kry = static_cast<int>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
+            ::estimate_spectral_bounds(legacy_H, bdim, kry, /*tol=*/1e-10, gen, e_min_est, e_max_est);
+            have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est) && e_max_est >= e_min_est;
+        } catch (...) {
+            have_bounds = false;
+        }
+    } else {
+        // Device lanes: the same estimate from a short Lanczos run on this backend (vectors stay
+        // device-resident); the extreme Ritz values of 60 steps.
+        const std::uint64_t bdim = n;
+        std::vector<Complex> seed_host(bdim);
+        std::mt19937_64 gen(run.seed ? run.seed : 0x9E3779B97F4A7C15ULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        for (auto& z : seed_host) z = Complex(nd(gen), nd(gen));
+        auto seed = be.make_zero_vector(bdim);
+        be.copy_from_host(seed_host.data(), seed.get(), bdim);
+        ed::krylov::LanczosKernelOptions bo;
+        bo.max_iter   = static_cast<std::size_t>(std::min<std::uint64_t>(60, std::max<std::uint64_t>(bdim, 1)));
+        bo.reorth     = ed::krylov::ReorthPolicy::None;
+        bo.keep_basis = false;
+        bo.dim_cap    = bdim;
+        try {
+            const auto lk = ed::krylov::lanczos_kernel(be, H, bdim, seed.get(), bo);
+            std::vector<double> d = lk.alpha, e;
+            for (std::size_t i = 1; i < lk.alpha.size(); ++i) e.push_back(lk.beta[i]);
+            e.resize(std::max<std::size_t>(d.size(), 1));
+            if (!d.empty() && LAPACKE_dstev(LAPACK_COL_MAJOR, 'N', static_cast<lapack_int>(d.size()),
+                                            d.data(), e.data(), nullptr, 1) == 0) {
+                e_min_est = *std::min_element(d.begin(), d.end());
+                e_max_est = *std::max_element(d.begin(), d.end());
+                have_bounds = std::isfinite(e_min_est) && std::isfinite(e_max_est) && e_max_est >= e_min_est;
+            }
+        } catch (...) {
+            have_bounds = false;
+        }
+    }
+    if (!have_bounds)
+        throw ed::ConvergenceError("mTPQ: the spectral bounds of the block could not be estimated");
+    // L just above the spectrum. The margin covers the Lanczos estimate of E_max, a lower bound on it.
+    const double W = e_max_est - e_min_est;
+    const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(1.0, std::abs(e_max_est)), 1e-9});
+    kopts.large_value = L;
+
+    constexpr std::size_t MTPQ_HARD_CAP = 200000;
+    const bool auto_steps = run.steps == 0;
+    std::size_t steps = auto_steps ? mtpq_steps_for(beta_max, L, e_min_est) : run.steps;
+    if (steps > MTPQ_HARD_CAP)
+        throw ed::ResourceLimit("mTPQ: T_min = " + std::to_string(1.0 / beta_max) + " needs "
+                                + std::to_string(steps) + " steps per sample (cap "
+                                + std::to_string(MTPQ_HARD_CAP) + "); ask for a warmer T_min");
+    for (int attempt = 0;; ++attempt) {
+        kopts.max_iter = std::max<std::size_t>(steps, 1);
+        MtpqResult kres = mtpq_kernel<Backend>(be, H, n, n, kopts);
+        if (temperatures.empty()) return MtpqThermo{};
+        MtpqThermo mt = mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, temperatures,
+                                              static_cast<double>(n));
+        if (mt.unconverged.empty()) return mt;
+        // Too cold for the trajectory. An auto-sized run had underestimated the spectral range:
+        // run once more with twice the steps. Never clamp.
+        double T_reached = std::numeric_limits<double>::infinity();
+        for (std::size_t t = 0; t < temperatures.size(); ++t)
+            if (std::find(mt.unconverged.begin(), mt.unconverged.end(), t) == mt.unconverged.end())
+                T_reached = std::min(T_reached, temperatures[t]);
+        if (auto_steps && attempt == 0 && 2 * steps <= MTPQ_HARD_CAP) {
+            steps *= 2;
+            continue;
+        }
+        throw ed::ConvergenceError(
+            "mTPQ: " + std::to_string(steps) + " steps reach T = "
+            + (std::isfinite(T_reached) ? std::to_string(T_reached) : std::string("none of the targets"))
+            + " but the grid asks for T = " + std::to_string(1.0 / beta_max)
+            + (auto_steps ? std::string("") : std::string("; raise krylov or leave it unset")));
+    }
 }
 
 }  // namespace ed::thermal

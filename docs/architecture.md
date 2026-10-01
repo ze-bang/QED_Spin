@@ -50,7 +50,7 @@ character.
 |---|---|---|
 | lowest levels | `eigs` (lg_sectors.cpp) | dense below a crossover, else Krylov-Schur with a degeneracy probe; blocks whose 40-step Lanczos estimate lies above the k-th level are skipped (`prune`); `window` keeps partners of degenerate levels |
 | full spectrum | `spectrum` | dense; on the GPU all blocks in one batched cuSOLVER call |
-| thermodynamics | `thermal` (lg_sectors_thermal.cpp) | exact spectra, or FTLM / mTPQ through `ed::workflows::thermal`; blocks combine in log space with their multiplicities |
+| thermodynamics | `thermal` (lg_sectors_thermal.cpp) | exact spectra, or FTLM / mTPQ / OFTLM per block on the lane `ed::place` chooses (blocks up to `dense_max_dim` diagonalised); blocks combine in log space with their multiplicities |
 | ⟨O⟩(T) | `thermal(observables=)` | O averaged over the symmetries the block uses; exact from block eigenvectors, FTLM from the symmetric estimator on each sample's Krylov basis |
 | T = 0 dynamics | `dynamics` (lg_sectors_dynamics.cpp) | the degenerate ground manifold (with every member of each spin multiplet), then one continued fraction per target sector O reaches |
 | T > 0 dynamics | `dynamics(T=)` | finite-temperature Lanczos between each source sector and every target it reaches (`CrossSectorOrbitObservable` maps between their bases) |

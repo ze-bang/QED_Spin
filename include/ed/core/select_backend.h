@@ -7,8 +7,7 @@
 // for every verb; with_backend(lane, fn) runs fn on a fresh backend of that lane.
 //
 // TRANSITIONAL (P2.4 C6 deletes it): `ed::select_backend(LinearOperator, BackendConstraints)`, the runtime
-// dispatch helper consumed by the orchestrators (`ed::workflows::solve`,
-// `ed::workflows::thermal`). Resolves the (have_cuda, gpu_mem_fits,
+// dispatch helper consumed by the orchestrator (`ed::workflows::solve`). Resolves the (have_cuda, gpu_mem_fits,
 // user constraints) tuple into a single `BackendVariant` the caller can
 // `std::visit` over.
 //

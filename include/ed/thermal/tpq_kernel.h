@@ -10,7 +10,7 @@
 // The kernel itself does ONLY the iteration; observable measurement and
 // the temperature bookkeeping live in the calling driver. Consumers:
 //
-//   * the `ed::workflows::thermal` orchestrator via `mtpq_kernel.h`
+//   * `ed::thermal::mtpq` (the thermal verb) via `mtpq_kernel.h`
 // =============================================================================
 
 #include <algorithm>

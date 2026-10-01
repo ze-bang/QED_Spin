@@ -445,23 +445,14 @@ if(BUILD_ED_TESTS)
     # matvec wiring through the virtual `LinearOperator::apply` and
     # the orchestrator's solver-family switch in one place.
     ed_add_test(test_ed_solver_matrix_e2e       tests/unit/test_ed_solver_matrix_e2e.cpp USE_CATCH2)
-    # One canonical finite-T entry point: `ed::workflows::thermal(...)`.
-    # Exercises auto-Sz + auto-symmetry + Z-recombination via both the
-    # in-memory and the directory overloads.
-    ed_add_test(test_auto_thermal               tests/unit/test_auto_thermal.cpp USE_CATCH2)
-    target_link_libraries(test_auto_thermal PRIVATE ed_input)
-    # Numerical accuracy: all finite-T methods vs full dense-diag reference,
-    # across all backends (CPU, GPU), all symmetry modes (none, Sz, spatial,
-    # Sz+spatial), multiple random seeds.
     # THE reduced-CSR budget decision (shared by the abelian + little-group
     # lanes): serial admission, and the aggregate split across concurrent
     # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.
     ed_add_test(test_sector_csr_budget          tests/unit/test_sector_csr_budget.cpp USE_CATCH2)
+    # Numerical accuracy: FTLM and mTPQ through ed::sectors::thermal against a dense
+    # reference, without symmetry and over the Sz sectors, on the CPU and (WITH_CUDA) the
+    # device. test_block_solve [thermal] pins the dense crossover these runs switch off.
     ed_add_test(test_thermal_dense_ref          tests/unit/test_thermal_dense_ref.cpp USE_CATCH2)
-    # Complement to the above: pin the D <= dense_max_dim exact fallback
-    # (every sampling method) and the dense_max_dim = 0 escape that
-    # test_thermal_dense_ref relies on to keep gating the real kernels.
-    ed_add_test(test_thermal_exact_small_fallback tests/unit/test_thermal_exact_small_fallback.cpp USE_CATCH2)
     # The Backend-templated FTLM body (both lanes) honours full
     # reorthogonalisation and fills ground_state_estimate.
     ed_add_test(test_ftlm_backend_body          tests/unit/test_ftlm_backend_body.cpp USE_CATCH2)

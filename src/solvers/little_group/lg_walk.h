@@ -371,6 +371,17 @@ inline void require_device(Device d, const char* verb) {
         throw ed::DeviceUnavailable(std::string(verb) + ": device='gpu', but no usable CUDA device is visible");
 }
 
+/// "the block of star K, irrep I, n_up N (dim D)": how a device refusal names a block.
+inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
+    return "the block of star " + std::to_string(tag.k0) + ", irrep " + std::to_string(tag.irrep) + ", n_up "
+           + std::to_string(tag.n_up) + " (dim " + std::to_string(tag.dim) + ")";
+}
+
+/// Why a block has no device kernel, for place()'s refusal.
+inline const char* no_kernel_reason(bool w_block) {
+    return w_block ? "is an isotypic (W) block, which has no device kernel" : "has no device kernel";
+}
+
 /// device='gpu' runs every Krylov solve on the device, so a block without a device kernel (an
 /// isotypic W block: a multi-dimensional irrep, or any irrep of an Sz-parity sector) is refused
 /// before it is solved.

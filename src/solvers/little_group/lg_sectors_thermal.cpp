@@ -6,12 +6,21 @@
 
 #include "lg_walk.h"
 
-#include <ed/orchestrator.h>              // ed::workflows::thermal
+#include <ed/core/mem_guard.h>
+#include <ed/parallel/numa.h>
+#include <ed/parallel/thread_budget.h>
 #include <ed/sectors/thermal.h>
+#include <ed/solvers/lanczos.h>           // full_diagonalization
+#include <ed/symmetry/canonical_thermo.h>
 #include <ed/symmetry/su2_dims.h>
+#include <ed/thermal/ftlm_kernel.h>
+#include <ed/thermal/mtpq_kernel.h>
+#include <ed/thermal/oftlm_kernel.h>
 
+#include <algorithm>
 #include <map>
 #include <optional>
+#include <type_traits>
 
 namespace ed::sectors {
 
@@ -28,7 +37,7 @@ struct BlockThermo {
     double sz2 = 0.0;          // <Sz^2> of the block's states
     bool   mirrored = false;   // holds +sz and -sz in equal parts
     std::vector<std::vector<Complex>> O;   // <O>_b per observable and temperature
-    bool   device = false, dense = false;  // where its solve ran: the device, a dense solve
+    ed::Lane lane = ed::Lane::HostKrylov;  // where its solve ran
 };
 
 // `q[o][n]`: <n|O_o|n> for each kept eigenvalue n, when observables are asked for.
@@ -58,45 +67,121 @@ BlockThermo exact_block(const std::vector<double>& ev, const std::vector<double>
     return b;
 }
 
-// `tower`: the seeds are projected onto it, and Z counts its states instead of the block's.
-// `obs`: the block's averaged observables; with `folded` (a time-reversal pair in one block)
-// each comes with its conjugate, and the pair gives (<O> + conj <O*>) / 2.
+// One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
+// or -- at most dense_max_dim states, with no tower and no observables -- its exact
+// thermodynamics on the host. `tower`: the seeds are projected onto it, and Z counts its states
+// instead of the block's. `obs`: the block's averaged observables; with `folded` (a time-reversal
+// pair in one block) each comes with its conjugate, and the pair gives (<O> + conj <O*>) / 2.
+// `tag` and `w_block` name the block in a device refusal.
 BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
-                          const std::vector<double>& beta, std::uint64_t seed, bool* on_gpu,
+                          const std::vector<double>& beta, std::uint64_t seed,
                           const detail::BlockOp* tower, std::uint64_t tower_dim,
-                          const std::vector<std::shared_ptr<const ed::LinearOperator>>& obs, bool folded) {
-    ed::workflows::ThermalOptions o;
-    o.method        = t.method == ThermalSpec::Method::mTPQ ? ed::workflows::ThermalOptions::Method::mTPQ
-                    : (t.exact_states > 0 ? ed::workflows::ThermalOptions::Method::OFTLM
-                                          : ed::workflows::ThermalOptions::Method::FTLM);
-    o.num_samples   = t.samples;
-    o.krylov_dim    = t.krylov;
-    o.num_exact     = t.exact_states;
-    o.dense_max_dim = t.dense_max_dim;
-    o.betas         = beta;
-    o.random_seed   = seed;
-    o.backend.allow_gpu = t.device != Device::Cpu;
-    o.backend.require_gpu = t.device == Device::Gpu;
-    if (tower) {
-        auto p = tower->projector;
-        o.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
+                          const std::vector<std::shared_ptr<const ed::LinearOperator>>& obs, bool folded,
+                          const LittleGroupBlockTag& tag, bool w_block) {
+    const std::uint64_t n = op.dim();
+    const ed::parallel::ThreadBudgetScope budget(ed::parallel::auto_threads_for_dim(n));
+    const bool mtpq  = t.method == ThermalSpec::Method::mTPQ;
+    const bool oftlm = !mtpq && t.exact_states > 0;
+    {
+        // The kernels' working set, checked before anything is allocated: FTLM keeps a Krylov
+        // window of the block's vectors, OFTLM also the exact states' Lanczos basis, mTPQ a handful.
+        const std::uint64_t vecs = mtpq ? 8
+                                 : oftlm ? std::max<std::size_t>(t.krylov, 4) + 2 * t.exact_states + 34
+                                         : std::max<std::size_t>(t.krylov, 4) + 4;
+        ed::core::guard_working_set(n * vecs * 16ull, "ed::thermal");
     }
-    o.observables = obs;
-    const auto r = ed::workflows::thermal(op, o);
-    *on_gpu = r.backend.lane == "gpu";
-    if (t.device == Device::Gpu && !*on_gpu && !r.backend.dense)
-        throw ed::DeviceUnsupported("thermal: device='gpu', but a block of dim " + std::to_string(op.dim())
-                                    + " ran on the host");
-    const auto& d = r.thermo;
+    std::vector<double> T;
+    T.reserve(beta.size());
+    for (double b : beta) T.push_back(b > 0.0 ? 1.0 / b : 0.0);
+
+    ed::BlockRequest req;
+    req.task  = oftlm ? ed::Task::Oftlm : ed::Task::Sampled;
+    req.dim   = n;
+    req.dense = n > 0 && n <= t.dense_max_dim && !tower && obs.empty();
+    req.device_kernel = op.has_device_kernel()
+                        && std::all_of(obs.begin(), obs.end(), [](const auto& A) { return A->has_device_kernel(); });
+    req.verb  = "thermal";
+    req.what  = [&tag] { return detail::block_name(tag); };
+    req.why   = detail::no_kernel_reason(w_block);
+    BlockThermo b;
+    b.lane = ed::place(t.device, req);
+
+    ::ThermodynamicData d;
+    std::vector<std::vector<Complex>> O;
+    if (b.lane == ed::Lane::HostDense) {
+        std::vector<double> eigs;
+        full_diagonalization(op, n, n, eigs, /*compute_eigenvectors=*/false);
+        if (eigs.empty()) throw std::runtime_error("thermal: the dense solve of a block returned no eigenvalues");
+        d = ed::symmetry::canonical_thermo_from_eigs(eigs, T);
+    } else if (oftlm) {
+        auto host_mv = op.bind_cpu();
+        auto apply_H = [&host_mv](const Complex* in, Complex* out, int m) {
+            host_mv(in, out, static_cast<std::size_t>(m));
+        };
+        ed::thermal::OftlmOptions ko;
+        ko.num_samples = t.samples;
+        ko.krylov_dim  = t.krylov ? t.krylov : 100;
+        ko.num_exact   = t.exact_states;
+        ko.betas       = beta;
+        ko.random_seed = seed;
+        auto kres = ed::thermal::oftlm_cpu(apply_H, n, ko);
+        d.temperatures  = T;
+        d.energy        = std::move(kres.energy);
+        d.specific_heat = std::move(kres.heat_capacity);
+        d.entropy       = std::move(kres.entropy);
+    } else {
+        std::function<void(Complex*, std::size_t)> seed_transform;
+        if (tower) {
+            auto p = tower->projector;
+            seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
+        }
+        ed::with_backend(b.lane, [&](auto& be) {
+            using B = std::decay_t<decltype(be)>;
+            constexpr bool device = !std::is_same_v<B, ed::matvec::CpuBackend>;
+            auto H = op.template bind<B>();
+            if (mtpq) {
+                ed::thermal::MtpqRun run;
+                run.samples = t.samples;
+                run.steps   = t.krylov;
+                run.seed    = seed;
+                run.seed_transform = seed_transform;
+                if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
+                d = ed::thermal::mtpq(be, H, n, beta, run).thermo;
+                return;
+            }
+            ed::thermal::FtlmOptions ko;
+            ko.num_samples    = t.samples;
+            ko.krylov_dim     = t.krylov ? t.krylov : 100;
+            ko.betas          = beta;
+            ko.random_seed    = seed;
+            ko.seed_transform = seed_transform;
+            for (const auto& A : obs) {
+                if (device && !A->has_device_kernel())
+                    throw std::invalid_argument("ed::thermal: an observable has no device kernel for the selected GPU lane");
+                ko.observables.push_back(A->template bind<B>());
+            }
+            if constexpr (device) ko.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
+            auto kres = ed::thermal::ftlm_kernel<B>(be, H, n, n, ko);
+            d.temperatures  = T;
+            d.energy        = std::move(kres.energy);
+            d.specific_heat = std::move(kres.heat_capacity);
+            d.entropy       = std::move(kres.entropy);
+            O = std::move(kres.observables);
+        });
+    }
+    // F = E - T S where the kernel gave none (FTLM and OFTLM return E, C and S).
+    if (d.free_energy.empty() && !d.energy.empty() && d.energy.size() == d.entropy.size()
+        && d.energy.size() == d.temperatures.size()) {
+        d.free_energy.reserve(d.energy.size());
+        for (std::size_t i = 0; i < d.energy.size(); ++i)
+            d.free_energy.push_back(d.energy[i] - d.temperatures[i] * d.entropy[i]);
+    }
     if (d.energy.size() != beta.size())
         throw std::runtime_error("thermal: a block returned " + std::to_string(d.energy.size())
                                  + " temperatures, expected " + std::to_string(beta.size()));
     // The kernels' free energy carries ln(dim) of the block they sampled; a projected trace
     // runs over the tower.
-    const double ln_ratio = tower ? std::log(static_cast<double>(tower_dim) / static_cast<double>(op.dim())) : 0.0;
-    BlockThermo b;
-    b.device = *on_gpu;
-    b.dense  = r.backend.dense;
+    const double ln_ratio = tower ? std::log(static_cast<double>(tower_dim) / static_cast<double>(n)) : 0.0;
     for (std::size_t i = 0; i < beta.size(); ++i) {
         b.lnZ.push_back(-beta[i] * d.free_energy[i] + ln_ratio);
         b.E.push_back(d.energy[i]);
@@ -104,10 +189,10 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     }
     const std::size_t n_obs = folded ? obs.size() / 2 : obs.size();
     for (std::size_t k = 0; k < n_obs; ++k) {
-        const auto& a = r.observables.at(folded ? 2 * k : k);
+        const auto& a = O.at(folded ? 2 * k : k);
         std::vector<Complex> v(a);
         if (folded)
-            for (std::size_t i = 0; i < v.size(); ++i) v[i] = 0.5 * (a[i] + std::conj(r.observables.at(2 * k + 1)[i]));
+            for (std::size_t i = 0; i < v.size(); ++i) v[i] = 0.5 * (a[i] + std::conj(O.at(2 * k + 1)[i]));
         b.O.push_back(std::move(v));
     }
     return b;
@@ -134,6 +219,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         beta.push_back(1.0 / T);
     }
     detail::require_device(t.device, "thermal");
+    ed::parallel::pin_omp_threads_once();
     if (t.device == Device::Gpu && t.method == ThermalSpec::Method::FTLM && t.exact_states > 0)
         throw ed::DeviceUnsupported("thermal: OFTLM (exact_states > 0) runs on the host only; with device='gpu' "
                                     "use FTLM without exact_states, or device='auto' or 'cpu'");
@@ -183,6 +269,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     struct Deferred {
         std::size_t block; detail::BlockOp bop; std::uint64_t seed; std::uint64_t tower_dim;
         std::vector<std::shared_ptr<const ed::LinearOperator>> obs; bool folded;
+        LittleGroupBlockTag tag; bool w_block;
     };
     std::vector<Deferred> deferred;
     std::vector<Pending> pending;
@@ -218,7 +305,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                         for (bool conj : {false, true}) {
                             if (conj && !folded) break;
                             obs.push_back(detail::block_observable(*avg->get(*O, flip, keep, conj), sb, bi,
-                                                                   bop.on_device));
+                                                                   t.device != Device::Cpu));
                         }
                 }
                 if (t.method == ThermalSpec::Method::Exact && n_obs > 0) {
@@ -239,7 +326,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     if (ev.empty()) continue;
                     out.e0 = std::min(out.e0, ev.front());
                     b = exact_block(ev, beta, &q);
-                    b.dense = true;
+                    b.lane = ed::Lane::HostDense;
                 } else if (t.method == ThermalSpec::Method::Exact) {
                     detail::BlockOp filter = bop;
                     filter.op.reset();
@@ -249,22 +336,11 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
                     multiplets += tower_dim * bi->tag.multiplicity;
                     if (t.device == Device::Cpu && bi->tag.dim < ed::kHostPoolMaxDim) {
-                        deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, folded});
+                        deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, folded, bi->tag, bi->W != nullptr});
                     } else {
-                        bool on_gpu = false;
-                        try {
-                            b = sampled_block(mv, t, beta, seed, &on_gpu,
-                                              tower_sampling ? &bop : nullptr, tower_dim, obs, folded);
-                        } catch (const ed::DeviceUnsupported& e) {
-                            // Name the block: a small one takes the exact fallback on the host,
-                            // a sampled one without a device kernel (an isotypic W block) is refused.
-                            throw ed::DeviceUnsupported(
-                                "thermal: block of star " + std::to_string(bi->tag.k0) + ", irrep "
-                                + std::to_string(bi->tag.irrep) + ", n_up " + std::to_string(bi->tag.n_up)
-                                + (bi->W ? " (an isotypic (W) block)" : "") + ": "
-                                + e.what());
-                        }
-                        if (on_gpu) ++out.device_blocks;
+                        b = sampled_block(mv, t, beta, seed, tower_sampling ? &bop : nullptr, tower_dim, obs,
+                                          folded, bi->tag, bi->W != nullptr);
+                        if (ed::on_device(b.lane)) ++out.device_blocks;
                     }
                 }
                 b.weight   = static_cast<double>(bop.multiplicity);
@@ -302,13 +378,11 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             for (long long q = 0; q < static_cast<long long>(deferred.size()); ++q) {
                 try {
                     const Deferred& d = deferred[static_cast<std::size_t>(q)];
-                    bool on_gpu = false;
-                    BlockThermo r = sampled_block(*d.bop.op, t, beta, d.seed,
-                                                  &on_gpu, tower_sampling ? &d.bop : nullptr, d.tower_dim, d.obs,
-                                                  d.folded);
+                    BlockThermo r = sampled_block(*d.bop.op, t, beta, d.seed, tower_sampling ? &d.bop : nullptr,
+                                                  d.tower_dim, d.obs, d.folded, d.tag, d.w_block);
                     BlockThermo& b = blocks[d.block];
                     b.lnZ = std::move(r.lnZ); b.E = std::move(r.E); b.V = std::move(r.V); b.O = std::move(r.O);
-                    b.device = r.device; b.dense = r.dense;
+                    b.lane = r.lane;
                 } catch (...) {
 #pragma omp critical(thermal_failure)
                     if (!failure) failure = std::current_exception();
@@ -340,7 +414,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
             BlockThermo b = exact_block(ev, beta);
             b.weight = blocks[p.block].weight; b.sz = blocks[p.block].sz; b.sz2 = blocks[p.block].sz2;
             b.mirrored = blocks[p.block].mirrored;
-            b.device = ed::on_device(batch.lane(p.id)); b.dense = true;
+            b.lane = batch.lane(p.id);
             blocks[p.block] = std::move(b);
         }
         std::vector<BlockThermo> kept;
@@ -351,7 +425,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     detail::require_some_level(s, blocks.empty(), "thermal");
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
     out.blocks = blocks.size();
-    for (const auto& b : blocks) out.placement.add(b.device, b.dense);
+    for (const auto& b : blocks) out.placement.add(b.lane);
 
     const std::size_t nT = beta.size();
     out.lnZ.resize(nT); out.E.resize(nT); out.C.resize(nT); out.S.resize(nT); out.F.resize(nT);
