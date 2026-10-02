@@ -892,6 +892,30 @@ def test_t0_ground_manifold_is_solved_on_the_folded_blocks(probe):
     np.testing.assert_allclose(folded.S[0], _lehmann_t0(H, O, n, omega, 0.1), atol=1e-8 * scale)
 
 
+def test_t0_continued_fractions_run_on_the_target_blocks():
+    # P6.7 (audit K3-model-scale-07): O|psi> is projected onto the one-dimensional irrep blocks of each
+    # target momentum (C4v at Gamma and M, the flip at half filling) and a continued fraction runs on each;
+    # the part in an irrep of dimension > 1 (E) runs on the momentum sector. S^z_M from the Gamma A1 ground
+    # state lands in blocks; the single-site S^z_0 reaches every momentum, E included. With a Krylov space
+    # as large as every sector both are exact: they equal the momentum-sector run to roundoff.
+    H, (Tx, Ty, C4, sigma) = _square_j1j2()
+    n = 16
+    omega = np.linspace(-0.5, 5.0, 56)
+    folded_sym = qed.Symmetry(spatial=[Tx, Ty, C4, sigma], sz=8)
+    plain_sym = qed.Symmetry(spatial=[Tx, Ty], point_group=False, sz=8, spin_flip="off", time_reversal="off")
+    idx = lambda x, y: (x % 4) + 4 * (y % 4)  # noqa: E731
+    OM = qed.Operator(n)
+    for y in range(4):
+        for x in range(4):
+            OM.add_one_body(qed.OP_SZ, idx(x, y), (-1.0) ** (x + y) / 4.0)
+    O0 = qed.Operator(n)
+    O0.add_one_body(qed.OP_SZ, 0, 1.0)
+    for O in (OM, O0):
+        folded = qed.dynamics(H, O, omega, eta=0.1, krylov=900, sym=folded_sym)
+        plain = qed.dynamics(H, O, omega, eta=0.1, krylov=900, sym=plain_sym)
+        np.testing.assert_allclose(folded.S, plain.S, atol=1e-9 * np.abs(plain.S).max())
+
+
 def _lehmann_finite_t(H, O, n, omega, eta, T):
     E, V = np.linalg.eigh(_dense(H, n))
     M = V.conj().T @ _dense(O, n) @ V                     # <a|O|b>

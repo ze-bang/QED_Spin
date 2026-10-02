@@ -226,6 +226,34 @@ lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepS
     return std::vector<Complex>(buf.get(), buf.get() + n);
 }
 
+std::vector<Complex>
+restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v) {
+    if (g.n_sites != k.n_sites || g.n_up != k.n_up)
+        throw std::invalid_argument("restrict_group_vector: sectors differ in n_sites / n_up");
+    if (g.irrep_dim != 1) throw std::invalid_argument("restrict_group_vector: an irrep of dimension > 1");
+    const auto pg = g.make_policy();
+    const auto pk = k.make_policy();
+    const double scale = std::sqrt(static_cast<double>(k.group_size) / static_cast<double>(g.group_size));
+    // lift: x_j = v_i conj(pg_j) / conj(pk_j) scale, i the g-index of k's representative j; so y_i sums
+    // (pg_j / pk_j) scale x_j over the j of i -- a scatter (several k-orbits make one g-orbit).
+    std::vector<Complex> y(g.reps.size(), Complex(0, 0));
+    double* yd = reinterpret_cast<double*>(y.data());
+    #pragma omp parallel for schedule(dynamic, 1024)
+    for (long long jj = 0; jj < static_cast<long long>(k.reps.size()); ++jj) {
+        const std::size_t j = static_cast<std::size_t>(jj);
+        if (v[j] == Complex(0, 0)) continue;
+        Complex pgp, pkp;
+        const std::int64_t i = pg.index_and_projection(k.reps[j], pgp);
+        if (i < 0 || pk.index_and_projection(k.reps[j], pkp) < 0 || pkp == Complex(0, 0)) continue;
+        const Complex c = (pgp / pkp) * scale * v[j];
+        #pragma omp atomic
+        yd[2 * i] += c.real();
+        #pragma omp atomic
+        yd[2 * i + 1] += c.imag();
+    }
+    return y;
+}
+
 }  // namespace lg_detail
 
 }  // namespace ed::solvers

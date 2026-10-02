@@ -434,8 +434,89 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                 Bt.push_back(connecting_part(*pr[p].Bc, src, tsub));
                 At.push_back(pr[p].cross ? connecting_part(*pr[p].Ac, src, tsub) : ed::ops::MaskedOperator(n_sites));
             }
+            // The folded Spec's blocks of this target subspace (the little co-group of each momentum, the
+            // flip at half filling): a continued fraction runs on each one-dimensional irrep block it reaches,
+            // and only the part in irreps of dimension > 1 on the whole momentum sector (audit
+            // K3-model-scale-07). Time reversal stays off: it would fold sigma* into sigma's block.
+            LittleGroupOptions topt;
+            topt.n_up = tsub.n_up;
+            topt.sz_parity = tsub.n_up >= 0 ? -1 : tsub.sz_parity;
+            topt.spin_flip = s.spin_flip == 0 ? 0 : -1;   // where it applies: 'require' was checked for the call
+            topt.time_reversal = 0;
+            EngineContext tcx;
+            if (!s.residues.empty() || s.spin_flip != 0) {
+                bool tr_on = false;
+                make_engine_context(H, A, s.residues, n_sites, topt, tcx, tr_on);
+            }
             stream_sectors(tsub, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
                 std::shared_ptr<RepSectorMatVec> Ht;       // H of this sector, once a probe reaches it
+                bool counted = false;
+                // The blocks of this momentum (built at the first pair that reaches it); `rest`: an irrep of
+                // dimension > 1, or no fold at all, leaves part of the sector to Ht.
+                struct TBlock {
+                    std::shared_ptr<const ed::symmetry::RepSectorData> sec;
+                    std::shared_ptr<RepSectorMatVec>                   H;
+                };
+                std::vector<TBlock> blocks;
+                std::vector<std::shared_ptr<StarBuild>> stars;
+                bool built = false, rest = true;
+                auto build_blocks = [&] {
+                    built = true;
+                    if (tcx.n_irr_raw == 0) return;
+                    int k = -1;
+                    for (int q = 0; q < tcx.n_irr_raw && k < 0; ++q) {
+                        const auto& c = tcx.giA.irreps[static_cast<std::size_t>(q)].character;
+                        bool same = c.size() == rd->characters.size();
+                        for (std::size_t a = 0; same && a < c.size(); ++a)
+                            // scale-free: unit-modulus characters (group data, not energies)
+                            same = std::abs(c[a] - rd->characters[a]) <= 1e-9;
+                        if (same) k = q;
+                    }
+                    if (k < 0) throw std::logic_error("dynamics: a target sector has no momentum of the abelian group");
+                    bool fixed = tcx.flip_half;
+                    for (std::size_t r = 0; r < tcx.residues.size() && !fixed; ++r)
+                        fixed = tcx.irrep_map[r][static_cast<std::size_t>(k)] == k;
+                    if (!fixed) return;                  // a trivial little co-group: the sector is its one block
+                    rest = false;
+                    for (int par = 0; par < (tcx.flip_half ? 2 : 1); ++par) {
+                        const int kext = k + par * tcx.n_irr_raw;
+                        auto sb = std::make_shared<StarBuild>(build_star_blocks(H, tcx, false, kext, {kext}, topt));
+                        for (const auto& bi : sb->blocks) {
+                            auto sec = bi->gsec ? bi->gsec : sb->hk->rep_data_ptr();
+                            if (sec->irrep_dim == 1) blocks.push_back({std::move(sec), bi->gop ? bi->gop : sb->hk});
+                            else rest = true;
+                        }
+                        stars.push_back(std::move(sb));
+                    }
+                };
+                // One continued fraction (autocorrelation: ya null) or the cross pair's poles, on `op`.
+                auto continued_fraction = [&](RepSectorMatVec& op, std::size_t nb, const Complex* yb, const Complex* ya,
+                                              std::size_t p) {
+                    auto t_cf = std::chrono::steady_clock::now();
+                    // k-sector and one-dimensional group-sector RepSectorMatVecs always have a device kernel.
+                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb));
+                    auto spectrum = [&](auto& bk, auto&& apply) {
+                        if (!ya) {
+                            const auto r = ed::observables::cf_spectral_from_vector(bk, apply, nb, yb, d.omega, cf);
+                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r.spectral_function[i];
+                        } else {
+                            const auto r = ed::observables::cross_spectral_from_vectors(bk, apply, nb, yb, ya, d.omega, cf);
+                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r[i];
+                        }
+                    };
+                    if (ed::on_device(lane)) {
+#ifdef WITH_CUDA
+                        op.enable_device(true);
+                        ed::matvec::CudaBackend cbe;
+                        spectrum(cbe, op.bind_cuda());
+                        ++out.device_blocks;
+#endif
+                    } else {
+                        spectrum(be, [&op](const Complex* in, Complex* o, std::size_t nn) { op.apply(in, o, nn); });
+                    }
+                    out.placement.add(lane);
+                    phase["continued fraction"] += clock_since(t_cf);
+                };
                 const std::size_t n = rd->reps.size();
                 for (std::size_t w = 0; w < who.size(); ++w) {
                     const auto [si, p] = who[w];
@@ -457,35 +538,49 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     std::vector<Complex> phi_b, phi_a;
                     if (!carry(Bt[w], phi_b)) continue;
                     if (pr[p].cross && !carry(At[w], phi_a)) continue;
-                    if (!Ht) { Ht = std::make_shared<RepSectorMatVec>(H, rd); ++reached; }
-                    auto t_cf = std::chrono::steady_clock::now();
-                    // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.
-                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, n));
-                    // The autocorrelation's continued fraction, or the cross pair's poles, on `bk`.
-                    auto spectrum = [&](auto& bk, auto&& apply) {
-                        if (!pr[p].cross) {
-                            const auto r = ed::observables::cf_spectral_from_vector(bk, apply, n, phi_b.data(), d.omega, cf);
-                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r.spectral_function[i];
-                        } else {
-                            const auto r = ed::observables::cross_spectral_from_vectors(bk, apply, n, phi_b.data(),
-                                                                                        phi_a.data(), d.omega, cf);
-                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r[i];
+                    if (!counted) { counted = true; ++reached; }
+                    if (!built) build_blocks();
+                    const Complex* pa = pr[p].cross ? phi_a.data() : nullptr;
+                    double n2b = 0.0;
+                    for (const auto& c : phi_b) n2b += std::norm(c);
+                    double kept = 0.0;
+                    for (const TBlock& b : blocks) {
+                        auto t_pj = std::chrono::steady_clock::now();
+                        const auto yb = restrict_group_vector(*b.sec, *rd, phi_b.data());
+                        const auto ya = pa ? restrict_group_vector(*b.sec, *rd, pa) : std::vector<Complex>{};
+                        phase["project on blocks"] += clock_since(t_pj);
+                        double nb2 = 0.0, na2 = 1.0;
+                        for (const auto& c : yb) nb2 += std::norm(c);
+                        if (pa) { na2 = 0.0; for (const auto& c : ya) na2 += std::norm(c); }
+                        kept += nb2;
+                        if (rest) {                      // the part outside the one-dimensional blocks
+                            const auto lb = lift_group_vector(*b.sec, *rd, yb.data());
+                            for (std::size_t i = 0; i < n; ++i) phi_b[i] -= lb[i];
+                            if (pa) {
+                                const auto la = lift_group_vector(*b.sec, *rd, ya.data());
+                                for (std::size_t i = 0; i < n; ++i) phi_a[i] -= la[i];
+                            }
                         }
-                    };
-                    if (ed::on_device(lane)) {
-#ifdef WITH_CUDA
-                        Ht->enable_device(true);
-                        ed::matvec::CudaBackend cbe;
-                        spectrum(cbe, Ht->bind_cuda());
-                        ++out.device_blocks;
-#endif
-                    } else {
-                        spectrum(be, [&Ht](const Complex* in, Complex* o, std::size_t nn) { Ht->apply(in, o, nn); });
+                        // scale-free: squared norms against the probe image's own
+                        if (nb2 <= 1e-24 * n2b || (pa && na2 <= 1e-24 * n2b)) continue;
+                        continued_fraction(*b.H, yb.size(), yb.data(), pa ? ya.data() : nullptr, p);
                     }
-                    out.placement.add(lane);
-                    phase["continued fraction"] += clock_since(t_cf);
+                    if (!rest) {
+                        // scale-free: squared norms against the probe image's own
+                        if (std::abs(n2b - kept) > 1e-10 * n2b)
+                            throw std::logic_error("dynamics: the irrep blocks of a target momentum hold "
+                                                   + std::to_string(kept / n2b) + " of the probe image");
+                        continue;
+                    }
+                    double r2 = 0.0;
+                    for (const auto& c : phi_b) r2 += std::norm(c);
+                    // scale-free: squared norms against the probe image's own
+                    if (!blocks.empty() && r2 <= 1e-24 * n2b) continue;
+                    if (!Ht) Ht = std::make_shared<RepSectorMatVec>(H, rd);
+                    continued_fraction(*Ht, n, phi_b.data(), pa, p);
                 }
             });
+
         }
         for (std::size_t p = 0; p < P; ++p) {
             for (auto& x : S[p]) x /= static_cast<double>(states.size());

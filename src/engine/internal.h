@@ -987,5 +987,9 @@ private:
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
 [[nodiscard]] std::vector<Complex>
 lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
+/// Its adjoint: the coordinates in sector g (an irrep of dimension 1) of the projection of v (sector k of a
+/// subgroup) onto g's span. The lift is an isometry, so lift(restrict(v)) is that projection.
+[[nodiscard]] std::vector<Complex>
+restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
 }  // namespace lg_detail
 }  // namespace ed::solvers
