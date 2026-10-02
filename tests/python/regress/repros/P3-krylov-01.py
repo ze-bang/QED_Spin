@@ -8,7 +8,11 @@ one after another and the matvec count grows ~k-fold.  Test: random-coupling XXZ
 spatial symmetry, no degeneracies), N=18, Sz=0 sector (dim 48620), qed.eigs(k=1,3,6, prune=False) with
 ED_LANCZOS_KERNEL_PROFILE=1 (one stderr line per Lanczos factorisation -> matvec count and cycle count),
 against ARPACK implicit restart (scipy eigsh, ncv = 2k+60, the same per-cycle subspace) on an
-independently built sparse sector matrix.  CONFIRMED when QED needs >= 2x ARPACK's matvecs at k=6."""
+independently built sparse sector matrix.  CONFIRMED when QED needs >= 2x ARPACK's matvecs at k=6.
+
+RESTATED 2026-10-02 (P6.2): the matvecs are the block's applies from result.block_stats (the thick-restart
+kernel builds its basis itself and emits no [lanczos_kernel] line, which made the count 0); the profile
+lines are still reported where there are any."""
 import json, os, re, subprocess, sys
 import numpy as np
 import scipy.sparse as sp
@@ -30,7 +34,8 @@ H = b.to_operator()
 sym = qed.Symmetry(spatial=None, sz=NUP, spin_flip="off", time_reversal="off")
 k = int(sys.argv[1])
 r = qed.eigs(H, k, sym=sym, prune=False, allow_partial=True)
-print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "complete": bool(r.complete)}), flush=True)
+print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "complete": bool(r.complete),
+                                    "applies": int(sum(b["applies"] for b in r.block_stats))}), flush=True)
 ''' % (N, NUP, repr(bonds))
 
 PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms")
@@ -86,7 +91,7 @@ try:
     for k in (1, 3, 6):
         res, calls = run_qed(k)
         w, nmv = run_arpack(k)
-        qmv = sum(c[0] for c in calls)
+        qmv = res["applies"]
         dE = float(np.max(np.abs(np.array(res["E"][:k]) - w[:len(res["E"][:k])]))) if res["E"] else float("nan")
         out[k] = dict(qed_matvecs=qmv, qed_factorisations=len(calls), qed_ms=sum(c[1] for c in calls),
                       arpack_matvecs=nmv, maxdE=dE, complete=res["complete"], nE=len(res["E"]))

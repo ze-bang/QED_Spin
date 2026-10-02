@@ -11,6 +11,7 @@
 // =============================================================================
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -32,9 +33,10 @@ enum class Path {
     /// `width` mTPQ samples: the spectral-bounds Lanczos (5 vectors), then psi and H psi per
     /// sample plus its host seed.
     Mtpq,
-    /// Krylov-Schur for `k` levels with a `krylov`-vector cycle: the cycle basis, k + 1 locked
-    /// vectors, seeds and working vectors (measured: m + k + 10 on the host); on the device the
-    /// staging copy of the locked and basis columns as well.
+    /// Thick-restart Krylov-Schur for `k` levels with a `krylov`-vector cycle: the m + 1 basis
+    /// columns, the p = k + max(k/2, 8) kept Ritz vectors of a restart (the GEMM's target), the k
+    /// pairs found and a working vector: m + p + k + 3 on the host; on the device the staging copy
+    /// of the found and basis columns as well.
     KrylovSchur,
     /// The certified ground-state vector keeping its basis (`krylov` vectors, host only).
     GsKeptBasis,
@@ -85,10 +87,12 @@ struct Shape {
             if (s.device) { dev = std::max(5.0, 2.0 * W) * V; host = W * (1.0 + t) * V; }
             else          { host = (5.0 + t) * V; }
             break;
-        case Path::KrylovSchur:
-            if (s.device) { dev = (2.0 * M + 2.0 * k + 8.0) * V; host = 3.0 * V; }
-            else          { host = (M + k + 10.0) * V; }
+        case Path::KrylovSchur: {
+            const double p = k + std::max(std::floor(k / 2.0), 8.0);   // the vectors a restart keeps
+            if (s.device) { dev = (2.0 * M + p + 2.0 * k + 8.0) * V; host = 3.0 * V; }
+            else          { host = (M + p + k + 3.0) * V; }
             break;
+        }
         case Path::GsKeptBasis:
             host = (std::min(M, static_cast<double>(s.dim)) + 6.0) * V;
             break;

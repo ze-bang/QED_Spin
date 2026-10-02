@@ -231,9 +231,10 @@ TEST_CASE("place: the request's device working set is what must fit", "[place]")
     REQUIRE_THROWS_AS(ed::place(Device::Gpu, r, FakeMachine::probe()), ed::ResourceLimit);
     FakeMachine::reset(true, std::size_t{1} << 30);
     REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::DeviceKrylov);
-    // Krylov-Schur at its smallest cycle (want + 8): (2 (k + 8) + 2 k + 8) vectors.
+    // Krylov-Schur at its smallest cycle (want + 8), keeping p = k + max(k/2, 8) = 12 Ritz vectors
+    // across a restart: (2 (k + 8) + p + 2 k + 8) vectors.
     const auto k = req(Task::Eigs, std::uint64_t{1} << 20, true, 4);
-    REQUIRE(ed::device_need(k) == std::uint64_t{(2 * 12 + 2 * 4 + 8) * 16} << 20);
+    REQUIRE(ed::device_need(k) == std::uint64_t{(2 * 12 + 12 + 2 * 4 + 8) * 16} << 20);
 
     // ED_MEM_GUARD_OFF: no memory check, so no query either.
     const char* old = std::getenv("ED_MEM_GUARD_OFF");

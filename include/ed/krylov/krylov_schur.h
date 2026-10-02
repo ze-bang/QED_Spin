@@ -2,27 +2,13 @@
 // =============================================================================
 // include/ed/krylov/krylov_schur.h
 //
-// Backend-templated restarted Krylov-Schur with locking, built on
-// `ed::krylov::lanczos_kernel<Backend>`:
-//
-//   for restart cycle r = 0..R-1:
-//     1. Re-orthogonalise the seed against the locked Ritz set.
-//     2. Run `lanczos_kernel<Backend>` with `aux_ortho_ptrs = locked set`.
-//        This builds an m-step Lanczos factorisation orthogonal to both
-//        the current cycle's basis AND the locked Ritz vectors.
-//     3. Solve the m x m projected tridiagonal eigenproblem on host
-//        (`tridiag_eig`).
-//     4. For each Ritz pair, evaluate residual = |β_last * y[m-1, i]|.
-//        If below `tolerance`, reconstruct the Ritz vector
-//        (`V_local * y` --- a local linear combination of the basis)
-//        and append to the locked set.
-//     5. Re-seed with a non-locked Ritz vector and continue -- or, once a cycle has
-//        locked its whole Krylov space (an exact invariant subspace), with a fresh
-//        random start; two such starts inside the locked span exhaust the space.
-//   then the degeneracy probe: one cycle from a fresh random start (see the body).
-//
-// The same body serves every Backend (CPU / CUDA); only the basis-vector
-// reconstruction (`axpy_many`) and the seed transfer touch backend memory.
+// Backend-templated thick-restart Krylov-Schur (Stewart 2001; Wu & Simon 2000) for the lowest
+// eigenpairs of a Hermitian operator: a contiguous basis grown by full CGS2 orthogonalisation,
+// restarts that keep the lowest Ritz vectors (one GEMM), exact pairs of an invariant subspace kept
+// and the search continued from a fresh deflated start, and a degeneracy probe for levels a Krylov
+// space from one vector cannot hold twice. The same body serves every Backend (CPU / CUDA): the
+// basis lives in backend memory and is touched only through the backend's BLAS (dot_many,
+// axpy_many, gemm, copy, scale); the projected eigenproblem is solved on the host.
 // =============================================================================
 
 #include <algorithm>
@@ -30,6 +16,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -82,8 +69,19 @@ struct KrylovSchurResultT {
 };
 using KrylovSchurResult = KrylovSchurResultT<Complex>;
 
-/// Run thick-restart Krylov-Schur on `matvec` starting from `seed_local`
-/// (already in backend memory, dimension `local_n`).
+/// Thick-restart Krylov-Schur for the lowest num_eigs eigenpairs of the Hermitian `matvec`, from
+/// `seed_local` (backend memory, dimension `local_n`).
+///
+/// A cycle grows a contiguous basis V to m vectors, each fully orthogonalised (CGS2) against V and
+/// against the pairs already found; the projected matrix is tridiagonal, with an arrowhead after a
+/// restart. Its lowest Ritz pairs converge when |beta_m s_m,i| < tolerance. A restart keeps the p
+/// lowest Ritz vectors (one GEMM, V <- V S_p) and the residual direction, so each cycle adds m - p
+/// matvecs instead of rebuilding from one vector (Stewart 2001; Wu & Simon 2000). An exact invariant
+/// subspace (breakdown) yields exact pairs: they are kept, and the search goes on from a fresh start
+/// deflated against them; two fresh starts inside the found span mean the space is exhausted.
+/// Then the degeneracy probe: a Krylov space from one vector holds one vector per eigenspace, so a
+/// fresh start deflated against the found pairs looks for a level the search skipped (a second
+/// copy of a degenerate eigenvalue).
 template <typename Backend, typename MatvecFn>
 KrylovSchurResultT<typename Backend::scalar_type>
 krylov_schur_kernel(Backend&                             be,
@@ -98,194 +96,189 @@ krylov_schur_kernel(Backend&                             be,
     if (opts.max_iter == 0) {
         throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");
     }
-
-    const std::size_t   k_target = std::max<std::size_t>(1, opts.num_eigs);
-    // Per-cycle subspace: grown by max_iter, but CAPPED by the memory budget
-    // (max_subspace_vectors) so the basis footprint is predictable / cannot OOM.
-    const std::size_t   m_max    = ed::krylov::krylov_subspace_dim(
-        k_target, opts.max_iter, static_cast<std::uint64_t>(local_n), opts.max_subspace_vectors);
-
-    // --- locked Ritz set (in backend memory) ---------------------------
-    std::vector<UniqueVec>  locked_vecs;
-    std::vector<double>     locked_evals;
-    locked_vecs.reserve(k_target);
-    locked_evals.reserve(k_target);
-
-    // --- seed vector (own copy in backend memory) ----------------------
-    auto v_seed = be.make_zero_vector(local_n);
-    if (local_n > 0) {
-        be.copy(seed_local, v_seed.get(), local_n);
-        const double n0 = be.nrm2(v_seed.get(), local_n);
-        if (n0 > 0.0) {
-            be.scale(Scalar(1.0 / n0), v_seed.get(), local_n);
-        }
-    }
-
     KrylovSchurResultT<Scalar> R;
+    const std::size_t n = local_n;
+    if (n == 0) { R.converged = true; R.exhausted = true; return R; }
 
-    // CGS2 against the locked set.
-    auto deflate = [&](Scalar* v) {
-        for (int pass = 0; pass < 2; ++pass) {
-            for (auto& lv : locked_vecs) {
-                const Scalar c = be.dot(lv.get(), v, local_n);
-                be.axpy(-c, lv.get(), v, local_n);
-            }
+    const std::size_t k = std::max<std::size_t>(1, opts.num_eigs);
+    // The cycle: m basis vectors (within the memory cap and the space), p of them kept per restart.
+    const std::size_t m_cap = ed::krylov::krylov_subspace_dim(k, opts.max_iter, static_cast<std::uint64_t>(n),
+                                                              opts.max_subspace_vectors);
+    const std::size_t p_want = k + std::max<std::size_t>(k / 2, 8);
+    const std::size_t m = std::max<std::size_t>(1, std::min<std::size_t>({m_cap, 2 * p_want + 20, n}));
+    const std::size_t p_keep = std::min(p_want, m > 1 ? m - 1 : std::size_t{1});
+
+    auto V = be.make_zero_vector(n * (m + 1));   // columns 0..m, contiguous
+    auto col = [&](std::size_t j) { return V.get() + j * n; };
+    auto w = be.make_zero_vector(n);
+    std::vector<UniqueVec> found_vecs;
+    std::vector<double>    found_vals;
+
+    // Twice: x -= sum_c <c, x> c over the first `j` columns of V and the found vectors. Returns the
+    // coefficients on the columns.
+    auto orthogonalize = [&](Scalar* x, std::size_t j) {
+        std::vector<const Scalar*> b;
+        b.reserve(j + found_vecs.size());
+        for (std::size_t i = 0; i < j; ++i) b.push_back(col(i));
+        for (const auto& f : found_vecs) b.push_back(f.get());
+        std::vector<Scalar> c(b.size(), Scalar(0)), c2(b.size());
+        for (int pass = 0; pass < 2 && !b.empty(); ++pass) {
+            be.dot_many(b.data(), b.size(), x, n, c2.data());
+            for (std::size_t i = 0; i < b.size(); ++i) { c[i] += c2[i]; c2[i] = -c2[i]; }
+            be.axpy_many(c2.data(), b.data(), b.size(), x, n);
         }
+        c.resize(j);
+        return c;
     };
-    struct Cycle {
-        LanczosKernelResultT<Scalar> kres;
-        std::vector<double>          evals, evecs_cm;
-        std::vector<std::size_t>     idx;          // ascending Ritz values
-        std::size_t                  m = 0;
-        double                       beta_last = 0.0;
+    // out[:, 0..cols) = V[:, 0..mm) S[:, 0..cols), S the projected eigenvectors (column-major, mm x mm).
+    auto rotate = [&](const std::vector<double>& S, std::size_t mm, std::size_t cols, Scalar* out) {
+        std::vector<Scalar> Sh(mm * cols);
+        for (std::size_t c = 0; c < cols; ++c)
+            for (std::size_t r = 0; r < mm; ++r) Sh[c * mm + r] = Scalar(S[c * mm + r]);
+        auto Sd = be.make_zero_vector(mm * cols);
+        be.copy_from_host(Sh.data(), Sd.get(), mm * cols);
+        be.gemm('N', 'N', n, cols, mm, Scalar(1), V.get(), n, Sd.get(), mm, Scalar(0), out, n);
     };
-    // One Lanczos factorisation from v_seed, orthogonal to the locked set. False when the
-    // seed lies in the locked span or nothing was built.
-    auto run_cycle = [&](Cycle& c) -> bool {
-        deflate(v_seed.get());
-        const double seed_norm = be.nrm2(v_seed.get(), local_n);
+
+    // One search for the lowest `want` pairs from the seed in column 0, at most `budget` cycles:
+    // appends what converged to the found pairs. 0: converged (or an invariant subspace was
+    // exhausted); 1: out of cycles; 2: the seed lies in the found span; 3: the first cycle's lowest
+    // Ritz value is at or above `give_up` (the probe's "nothing skipped below").
+    enum Outcome { kConverged = 0, kBudget = 1, kNullSeed = 2, kNothingBelow = 3 };
+    auto search = [&](std::size_t want, std::size_t budget, double give_up) -> Outcome {
+        orthogonalize(col(0), 0);
+        const double nrm = be.nrm2(col(0), n);
         // scale-free: unit-vector norm
-        if (seed_norm < 1e-13) return false;
-        be.scale(Scalar(1.0 / seed_norm), v_seed.get(), local_n);
-        std::vector<const Scalar*> aux;
-        aux.reserve(locked_vecs.size());
-        for (auto& lv : locked_vecs) aux.push_back(lv.get());
-        LanczosKernelOptionsT<Scalar> kopts;
-        kopts.max_iter       = m_max;
-        kopts.reorth         = ReorthPolicy::FullCGS2;
-        kopts.keep_basis     = true;
-        kopts.breakdown_tol  = opts.breakdown_tol;
-        kopts.aux_ortho_ptrs = std::move(aux);
-        c.kres = lanczos_kernel(be, matvec, local_n, v_seed.get(), kopts);
-        R.iters_done += c.kres.iters_done;
-        ++R.restarts;
-        if (c.kres.alpha.empty()) return false;
-        TridiagEig t = tridiag_eig(c.kres.alpha, c.kres.beta, c.kres.alpha.size(), /*vectors=*/true);
-        c.evals     = std::move(t.values);
-        c.evecs_cm  = std::move(t.vectors);
-        c.m         = c.kres.alpha.size();
-        c.beta_last = c.kres.beta.back();
-        c.idx.resize(c.m);
-        std::iota(c.idx.begin(), c.idx.end(), std::size_t{0});
-        std::sort(c.idx.begin(), c.idx.end(),
-                  [&](std::size_t a, std::size_t b) { return c.evals[a] < c.evals[b]; });
-        return true;
-    };
-    auto ritz_vector = [&](const Cycle& c, std::size_t i, Scalar* out) {
-        be.fill_zero(out, local_n);
-        std::vector<Scalar> coefs(c.m);
-        std::vector<const Scalar*> basis_ptrs(c.m);
-        for (std::size_t j = 0; j < c.m; ++j) {
-            coefs[j]      = Scalar(c.evecs_cm[i * c.m + j]);
-            basis_ptrs[j] = c.kres.basis[j].get();
+        if (nrm < 1e-13) return kNullSeed;
+        be.scale(Scalar(1.0 / nrm), col(0), n);
+        std::size_t p = 0;
+        std::vector<double> theta, arrow;   // the kept Ritz values and their couplings to column p
+        for (std::size_t cycle = 0; cycle < budget; ++cycle) {
+            std::vector<double> T(m * m, 0.0);
+            for (std::size_t i = 0; i < p; ++i) {
+                T[i + i * m] = theta[i];
+                T[i + p * m] = T[p + i * m] = arrow[i];
+            }
+            std::size_t mm = m;
+            double beta_last = 0.0;
+            for (std::size_t j = p; j < m; ++j) {
+                matvec(col(j), w.get(), n);
+                ++R.iters_done;
+                const auto c = orthogonalize(w.get(), j + 1);
+                T[j + j * m] = std::real(c[j]);
+                const double beta = be.nrm2(w.get(), n);
+                if (beta <= opts.breakdown_tol) {   // an invariant subspace: its Ritz pairs are exact
+                    mm = j + 1;
+                    beta_last = 0.0;
+                    break;
+                }
+                if (j + 1 < m) T[j + (j + 1) * m] = T[(j + 1) + j * m] = beta;
+                be.copy(w.get(), col(j + 1), n);
+                be.scale(Scalar(1.0 / beta), col(j + 1), n);
+                beta_last = beta;
+            }
+            ++R.restarts;
+            std::vector<double> Tm(mm * mm);
+            for (std::size_t c = 0; c < mm; ++c)
+                for (std::size_t r = 0; r < mm; ++r) Tm[c * mm + r] = T[c * m + r];
+            const TridiagEig e = symmetric_eig(std::move(Tm), mm);
+            if (cycle == 0 && e.values[0] >= give_up) return kNothingBelow;
+            const std::size_t top = std::min(want, mm);
+            std::size_t conv = 0;
+            while (conv < top && std::abs(beta_last) * std::abs(e.vectors[conv * mm + (mm - 1)]) < opts.tolerance)
+                ++conv;
+            const bool done = conv == top;     // an invariant subspace (beta 0) converges all of them
+            if (done || cycle + 1 == budget) {
+                if (conv > 0) {
+                    auto X = be.make_zero_vector(n * conv);
+                    rotate(e.vectors, mm, conv, X.get());
+                    for (std::size_t i = 0; i < conv; ++i) {
+                        auto x = be.make_zero_vector(n);
+                        be.copy(X.get() + i * n, x.get(), n);
+                        found_vals.push_back(e.values[i]);
+                        found_vecs.emplace_back(std::move(x));
+                    }
+                }
+                return done ? kConverged : kBudget;
+            }
+            // Thick restart: the p lowest Ritz vectors, then the residual direction.
+            p = std::min(p_keep, mm - 1);
+            {
+                auto U = be.make_zero_vector(n * p);
+                rotate(e.vectors, mm, p, U.get());
+                be.copy(U.get(), col(0), n * p);
+            }
+            be.copy(col(mm), col(p), n);
+            theta.assign(e.values.begin(), e.values.begin() + static_cast<std::ptrdiff_t>(p));
+            arrow.resize(p);
+            for (std::size_t i = 0; i < p; ++i) arrow[i] = beta_last * e.vectors[i * mm + (mm - 1)];
         }
-        be.axpy_many(coefs.data(), basis_ptrs.data(), c.m, out, local_n);
+        return kBudget;
     };
-    // A fresh Gaussian start (deflated in run_cycle): the way on past an exact invariant
-    // subspace. A cycle that ends on a breakdown spans one vector per distinct eigenvalue
-    // of its start; once those are locked every Ritz vector of it is locked too, so a
-    // re-seed from it deflates to zero, while a fresh start reaches the further copies of
-    // a degenerate level (the Ising ring: a few distinct levels, each thousands of times).
+
+    // Fresh Gaussian starts: the way on past an exact invariant subspace (the Ising ring: a few
+    // distinct levels, each thousands of times), and the probe's.
     std::mt19937_64 fresh_gen(0xF8E5A7C3ULL);
-    std::normal_distribution<double> fresh_nd(0.0, 1.0);
-    std::vector<Scalar> fresh_host;
-    auto fresh_seed = [&] {
-        fresh_host.resize(local_n);
-        for (auto& z : fresh_host) z = gaussian_entry<Scalar>(fresh_nd, fresh_gen);
-        be.copy_from_host(fresh_host.data(), v_seed.get(), local_n);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Scalar> host(n);
+    auto fresh_seed = [&](std::mt19937_64& gen) {
+        for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
+        be.copy_from_host(host.data(), col(0), n);
     };
-    // Set when two fresh starts in a row lie in the locked span: the locked vectors span the
-    // whole space, so every eigenvalue has been found.
+
+    be.copy(seed_local, col(0), n);
     bool exhausted = false;
-    // Restart cycles until `target` pairs are locked or `budget` cycles are spent. Pairs lock
-    // strictly from the bottom of each cycle; the next cycle starts from the lowest unlocked
-    // Ritz vector, or from a fresh start when the cycle locked all it had.
-    auto lock_until = [&](std::size_t target, std::size_t budget) {
-        int null_starts = 0;
-        for (std::size_t cycle = 0; cycle < budget && locked_evals.size() < target; ++cycle) {
-            Cycle c;
-            if (!run_cycle(c)) {
-                if (++null_starts >= 2) { exhausted = true; return; }
-                fresh_seed();
-                continue;
-            }
-            null_starts = 0;
-            const std::size_t need = target - locked_evals.size();
-            std::size_t newly_locked = 0;
-            for (std::size_t r = 0; r < std::min(need, c.m); ++r) {
-                const std::size_t i = c.idx[r];
-                const double residual =
-                    std::abs(c.beta_last) * std::abs(c.evecs_cm[i * c.m + (c.m - 1)]);
-                if (residual >= opts.tolerance) break;
-                auto phi = be.make_zero_vector(local_n);
-                ritz_vector(c, i, phi.get());
-                deflate(phi.get());
-                const double pn = be.nrm2(phi.get(), local_n);
-                // scale-free: unit-vector norm
-                if (pn < 1e-14) break;
-                be.scale(Scalar(1.0 / pn), phi.get(), local_n);
-                locked_evals.push_back(c.evals[i]);
-                locked_vecs.emplace_back(std::move(phi));
-                ++newly_locked;
-            }
-            if (locked_evals.size() >= target) return;
-            if (newly_locked >= c.m) fresh_seed();          // the cycle's whole Krylov space is locked
-            else ritz_vector(c, c.idx[newly_locked], v_seed.get());
+    std::size_t budget = opts.max_restarts;
+    int null_starts = 0;
+    bool stalled = false;
+    while (found_vals.size() < k && R.restarts < budget) {
+        const Outcome o = search(k - found_vals.size(), budget - R.restarts,
+                                 std::numeric_limits<double>::infinity());   // never gives up
+        if (o == kNullSeed) {
+            if (++null_starts >= 2) { exhausted = true; break; }
+            fresh_seed(fresh_gen);
+            continue;
         }
-    };
+        null_starts = 0;
+        if (o == kBudget) { stalled = true; break; }
+        if (found_vals.size() < k) fresh_seed(fresh_gen);
+    }
+    bool converged = !stalled && found_vals.size() >= k;
 
-    lock_until(k_target, opts.max_restarts);
-    bool converged = locked_evals.size() >= k_target;
-
-    // Degeneracy probe. Every cycle restarts from one Ritz vector orthogonal to the locked
-    // set, so a second copy of a locked eigenvalue carries only roundoff weight from then on
-    // and a higher level can be locked in its place. A fresh random start deflated against
-    // the locked set has a generic component on it; a Ritz value of that start below the
-    // highest locked level is an upper bound on a level that was skipped. Lock it, keep the
-    // k lowest, and look again. Runs whenever something was locked and the space is not
-    // exhausted: an unconverged block can have skipped copies too.
-    if (!locked_evals.empty() && !exhausted && opts.probe_degeneracy) {
-        std::mt19937_64 gen(0xDE6E4E7AULL);
-        std::normal_distribution<double> nd(0.0, 1.0);
-        std::vector<Scalar> host(local_n);
-        for (std::size_t round = 0; round < k_target; ++round) {
-            const double top = *std::max_element(locked_evals.begin(), locked_evals.end());
+    // Degeneracy probe: a fresh start deflated against the found pairs has a generic component on
+    // a skipped copy; a Ritz value of it below the highest found level is an upper bound on a level
+    // that was skipped. Take it, keep the k lowest, and look again.
+    if (!found_vals.empty() && !exhausted && opts.probe_degeneracy) {
+        std::mt19937_64 probe_gen(0xDE6E4E7AULL);
+        for (std::size_t round = 0; round < k; ++round) {
+            const double top = *std::max_element(found_vals.begin(), found_vals.end());
             // scale-free: relative to |top|, floored by the (relative) lock tolerance
             const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::abs(top));
-            for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
-            be.copy_from_host(host.data(), v_seed.get(), local_n);
-            {
-                Cycle c;
-                if (!run_cycle(c) || c.evals[c.idx[0]] >= top - gap) break;
-                ritz_vector(c, c.idx[0], v_seed.get());
-            }   // the probe's basis is freed before lock_until runs cycles of its own
-            const std::size_t before = locked_evals.size();
-            lock_until(before + 1, opts.max_restarts);
-            if (locked_evals.size() == before) { converged = false; break; }   // skipped, not recovered
-            while (locked_evals.size() > k_target) {
-                const auto hi = std::max_element(locked_evals.begin(), locked_evals.end()) - locked_evals.begin();
-                locked_evals.erase(locked_evals.begin() + hi);
-                locked_vecs.erase(locked_vecs.begin() + hi);
+            fresh_seed(probe_gen);
+            const std::size_t before = found_vals.size();
+            const Outcome o = search(1, std::max<std::size_t>(opts.max_restarts, 1), top - gap);
+            if (o == kNothingBelow || o == kNullSeed) break;
+            if (found_vals.size() == before) { converged = false; break; }   // skipped, not recovered
+            if (found_vals.back() >= top - gap) {                            // converged above: nothing skipped
+                found_vals.pop_back();
+                found_vecs.pop_back();
+                break;
+            }
+            while (found_vals.size() > k) {
+                const auto hi = std::max_element(found_vals.begin(), found_vals.end()) - found_vals.begin();
+                found_vals.erase(found_vals.begin() + hi);
+                found_vecs.erase(found_vecs.begin() + hi);
             }
         }
     }
 
-    // Sort the locked spectrum ascending.
-    std::vector<std::size_t> order(locked_evals.size());
+    // Ascending.
+    std::vector<std::size_t> order(found_vals.size());
     std::iota(order.begin(), order.end(), std::size_t{0});
-    std::sort(order.begin(), order.end(),
-              [&](std::size_t a, std::size_t b) {
-                  return locked_evals[a] < locked_evals[b];
-              });
-    R.eigenvalues.reserve(locked_evals.size());
-    for (std::size_t i : order) R.eigenvalues.push_back(locked_evals[i]);
-
-    if (opts.compute_vectors) {
-        R.eigenvectors.reserve(locked_vecs.size());
-        for (std::size_t i : order) {
-            R.eigenvectors.emplace_back(std::move(locked_vecs[i]));
-        }
-    }
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return found_vals[a] < found_vals[b]; });
+    for (std::size_t i : order) R.eigenvalues.push_back(found_vals[i]);
+    if (opts.compute_vectors)
+        for (std::size_t i : order) R.eigenvectors.emplace_back(std::move(found_vecs[i]));
     R.converged = converged;
     R.exhausted = exhausted;
     return R;

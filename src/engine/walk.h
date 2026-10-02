@@ -404,7 +404,7 @@ inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* 
 /// The same after the spin-tower filter: under total_spin a selected block can hold no state of
 /// the requested spin (every state of it belongs to a higher multiplet).
 inline void require_some_level(const Spec& s, bool none, const char* verb) {
-    if (has_selection(s) && none)
+    if (has_selection(s) && none && s.two_S >= 0)
         throw ed::EmptySelection(std::string(verb) + ": the selected blocks hold no state of total spin S = "
                                  + (s.two_S % 2 ? std::to_string(s.two_S) + "/2" : std::to_string(s.two_S / 2)));
 }

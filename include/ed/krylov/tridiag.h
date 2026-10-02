@@ -58,4 +58,23 @@ struct TridiagEig {
     return t;
 }
 
+/// Eigenvalues (ascending) and eigenvectors of a dense m x m symmetric matrix `a` (column-major,
+/// overwritten): Krylov-Schur's projected matrix after a thick restart, an arrowhead plus a
+/// tridiagonal. LAPACK dsyevd; throws ed::ConvergenceError on a non-finite entry or when it fails.
+[[nodiscard]] inline TridiagEig symmetric_eig(std::vector<double> a, std::size_t m) {
+    TridiagEig t;
+    t.m = m;
+    if (m == 0) return t;
+    for (double x : a)
+        if (!std::isfinite(x)) throw ed::ConvergenceError("projected eigensolve: non-finite entry");
+    t.values.assign(m, 0.0);
+    const lapack_int n = static_cast<lapack_int>(m);
+    const lapack_int info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'V', 'U', n, a.data(), n, t.values.data());
+    if (info != 0)
+        throw ed::ConvergenceError("projected eigensolve failed (dsyevd info " + std::to_string(info)
+                                   + ", m = " + std::to_string(m) + ")");
+    t.vectors = std::move(a);
+    return t;
+}
+
 }  // namespace ed::krylov

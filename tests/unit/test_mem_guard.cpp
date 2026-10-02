@@ -71,9 +71,10 @@ TEST_CASE("footprint: the paths count the vectors the kernels hold", "[mem_guard
     REQUIRE(ed::core::footprint(Path::Mtpq, s).device == 5 * V);
     s.k = 4;
     s.krylov = 68;
-    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).device == (2 * 68 + 8 + 8) * V);
+    // thick restart: k = 4 keeps p = 4 + max(2, 8) = 12 Ritz vectors
+    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).device == (2 * 68 + 12 + 8 + 8) * V);
     s.device = false;
-    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).host == (68 + 4 + 10) * V);
+    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).host == (68 + 12 + 4 + 3) * V);
     REQUIRE(ed::core::footprint(Path::DenseVectors, s).host == 32ull * 1000 * 1000);
     REQUIRE(ed::core::footprint(Path::Multiplet, s).host == 6 * V + 8 * 1000);
     s.dim = std::uint64_t{1} << 40;   // saturates instead of wrapping

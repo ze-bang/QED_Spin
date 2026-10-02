@@ -320,8 +320,11 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     const std::size_t per_cycle = std::min<std::size_t>(
         ed::krylov::krylov_subspace_dim(k, 2 * k + 60, nb, cap),
         static_cast<std::size_t>(std::max<std::uint64_t>(budget, k + 1)));
-    const std::size_t restarts = static_cast<std::size_t>(std::max<std::uint64_t>(
-        1u, budget / std::max<std::size_t>(per_cycle, 1)));
+    // A thick-restart cycle adds m - p matvecs (m = min(per_cycle, 2p + 20), p = k + max(k/2, 8)
+    // kept): the iteration budget buys that many cycles.
+    const std::size_t p_keep = k + std::max<std::size_t>(k / 2, 8);
+    const std::size_t fresh  = std::max<std::size_t>(std::min(per_cycle, 2 * p_keep + 20), p_keep + 1) - p_keep;
+    const std::size_t restarts = static_cast<std::size_t>(std::max<std::uint64_t>(1u, budget / fresh));
     // The kernels floor a cycle at 2k + 20 vectors unless the SUBSPACE cap says
     // otherwise, so the cycle length is imposed through that cap.
     const std::uint64_t cycle_cap = (cap > 0) ? std::min<std::uint64_t>(cap, per_cycle)
