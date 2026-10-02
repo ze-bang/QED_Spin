@@ -199,6 +199,9 @@ enum class Keep { All, Sz, Parity };
 // O averaged over the site permutations `G` (and the Sz flip), without the terms that change
 // what `keep` conserves. Equal terms are merged, so the result is no larger than it must be.
 inline ::Operator averaged(const ::Operator& O, const std::vector<Perm>& G, bool flip, Keep keep) {
+    if (O.has_extra_terms())
+        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
+                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
     std::vector<std::pair<AvgTerm, Complex>> terms;
     for (const auto& t : O.records()) {
         AvgTerm x;

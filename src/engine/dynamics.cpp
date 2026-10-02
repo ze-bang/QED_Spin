@@ -55,7 +55,10 @@ bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
 }
 
 // Changes of the set-bit count (a set bit is a down spin) the terms of O produce.
-std::set<int> n_up_shifts(const ::Operator& O) {
+std::set<int> n_up_shifts(const ::Operator& O) {   // the first reader of O's records
+    if (O.has_extra_terms())
+        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
+                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
     auto d = [](int op) { return op == 0 ? -1 : (op == 1 ? 1 : 0); };   // S+ clears a set bit
     std::set<int> out;
     for (const auto& t : O.records())

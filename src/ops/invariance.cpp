@@ -55,6 +55,7 @@ MaskedOperator masked(const ::Operator& op) {
                                       {site_of(t.site_index_3, n), site_of(t.site_index_2, n),
                                        site_of(t.site_index_1, n)},
                                       t.coefficient));
+    for (const auto& t : op.extra_terms()) m.add_term(t);
     return m;
 }
 
@@ -84,7 +85,10 @@ std::vector<ProductTerm> product_terms(const MaskedOperator& m) {
 ::Operator to_operator(const MaskedOperator& m) {
     ::Operator op(static_cast<std::uint64_t>(m.n_sites()), 0.5f);
     auto code = [](char c) -> std::uint8_t { return c == '+' ? 0 : (c == '-' ? 1 : 2); };
-    for (const auto& p : product_terms(m)) {
+    const auto terms = m.terms();
+    const auto products = product_terms(m);   // the same terms, in the same (key) order
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        const auto& p = products[i];
         const auto& o = p.ops;
         auto s = [&p](std::size_t k) { return static_cast<std::uint64_t>(p.sites[k]); };
         switch (o.size()) {
@@ -92,9 +96,7 @@ std::vector<ProductTerm> product_terms(const MaskedOperator& m) {
             case 1: op.addOneBodyTerm(code(o[0]), s(0), p.coeff); break;
             case 2: op.addTwoBodyTerm(code(o[0]), s(0), code(o[1]), s(1), p.coeff); break;
             case 3: op.addThreeBodyTerm(code(o[0]), s(0), code(o[1]), s(1), code(o[2]), s(2), p.coeff); break;
-            default:
-                throw ed::Unsupported("Operator: a term on " + std::to_string(o.size()) + " sites; the kernels "
-                                      "take at most three");
+            default: op.add_extra_term(terms[i]); break;   // four or more sites: no record holds it
         }
     }
     return op;

@@ -22,17 +22,17 @@ namespace ed::ops {
 /// Two coefficients agree when they differ by at most this times the largest |coefficient|.
 inline constexpr double kInvarianceRtol = 1e-10;
 
-/// The operator a ::Operator's term records describe, records summed and same-site products
-/// reduced exactly, in the order the kernels apply them: a two-body record is O1 O2 with O2
+/// The operator a ::Operator describes: its records summed, same-site products reduced exactly,
+/// plus its extra canonical terms; in the order the kernels apply them: a two-body record is O1 O2 with O2
 /// acting first (classify_route), a three-body record O1 acting first (its sites are
 /// distinct, so the order does not matter). Throws std::invalid_argument for an op_type
 /// outside {0 = S+, 1 = S-, 2 = Sz} or a site outside [0, n).
 [[nodiscard]] MaskedOperator masked(const ::Operator& op);
 
-/// The Operator whose records are `m`'s canonical terms, in key order: a term on k sites is
-/// one k-body record (Z = 2 Sz folded into the coefficient; the identity is the record
-/// Sz_0 Sz_0 = 1/4), so masked(to_operator(m)) == m. Throws ed::Unsupported for a term on
-/// four or more sites (the kernels take at most three until they run on the canonical terms).
+/// The Operator of `m`'s canonical terms, in key order: a term on k <= 3 sites is one k-body
+/// record (Z = 2 Sz folded into the coefficient; the identity is the record Sz_0 Sz_0 = 1/4),
+/// a term on more sites an extra canonical term (Operator::add_extra_term). masked(to_operator(m))
+/// == m.
 [[nodiscard]] ::Operator to_operator(const MaskedOperator& m);
 
 /// One canonical term as a product: coeff * prod_k ops[k](sites[k]), ops over '+', '-', 'z'

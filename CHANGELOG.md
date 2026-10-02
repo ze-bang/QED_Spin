@@ -39,9 +39,11 @@ Breaking changes so far:
   first), `A.adjoint()`, `A.copy()`, `A.equals(B)` (the same operator however written),
   `A.is_hermitian()`, `A.terms()` (the unique canonical terms as `(coeff, ops, sites)`),
   `A.image(perm, flip=False)` and `Operator.product(N, "+-zxyudI"-string, sites, coeff)`, all
-  exact (same-site products reduced by the spin-1/2 algebra). A result with a term on four or
-  more sites raises `qed.errors.Unsupported` for now. Op types outside S+, S-, S^z and sites
-  outside the operator are refused when a term is added.
+  exact (same-site products reduced by the spin-1/2 algebra). Terms on four or more sites (a
+  ring exchange, (S_i.S_j)^2) work in the Hamiltonian on every lane, CPU and GPU; as an
+  observable (`expect`, thermal observables, `dynamics`, `matrix_element`) they raise
+  `qed.errors.Unsupported` for now. Op types outside S+, S-, S^z and sites outside the operator
+  are refused when a term is added.
 - **Fixed: GPU solves of two operators that differ only in tiny or huge couplings** (all
   below ~5e-10, or above ~9e9) in one process: the device-mirror cache compared coefficients
   rounded to 1e-9, so the second solve reused the first operator's couplings. The cache now
@@ -128,8 +130,9 @@ C++ API (installed headers; nothing in Python changes):
 - `Operator`'s records are private: `records()` / `three_body_records()` read them, and
   `add_record` (which the typed setters call) appends one after checking its op types (0, 1, 2)
   and sites (below `n_bits`). `Operator::canonical()` is the cached canonical form, and
-  `ed::ops::to_operator(m)` writes a `MaskedOperator` back as records (at most three sites
-  per term until the walk runs on canonical terms).
+  `ed::ops::to_operator(m)` writes a `MaskedOperator` back as records, and a term on four or
+  more sites as an extra canonical term (`Operator::add_extra_term`), which the row walks apply
+  and the record readers refuse.
 - `ed::matvec::MatVecOperator` and `<ed/matvec/matvec.h>` are merged into `ed::LinearOperator`
   (`<ed/core/linear_operator.h>`), with `as_apply_function` and `check_size` gone.
   `LinearOperator::has_device_kernel()` says whether `bind_cuda()` has a device apply; the

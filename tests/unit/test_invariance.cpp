@@ -395,7 +395,13 @@ TEST_CASE("to_operator writes the canonical terms as records the kernels apply",
         REQUIRE(d <= 1e-13 * std::max(1.0, max_abs(A)));
     }
     CHECK(ed::ops::to_operator(MaskedOperator(N)).records().empty());
-    CHECK_THROWS_AS(ed::ops::to_operator(MaskedOperator::product(N, "zzzz", {0, 1, 2, 3})), ed::Unsupported);
+    {   // four sites: an extra canonical term, no record
+        const auto four = MaskedOperator::product(N, "+-zz", {0, 1, 2, 3}) + MaskedOperator::product(N, "z", {5});
+        const ::Operator op4 = ed::ops::to_operator(four);
+        CHECK(op4.has_extra_terms());
+        CHECK(op4.records().size() == 1);
+        CHECK(op4.canonical().equals(four, 0.0));
+    }
 }
 
 TEST_CASE("canonical() follows the records, and a copy is independent", "[invariance]") {

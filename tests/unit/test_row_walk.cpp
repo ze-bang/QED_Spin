@@ -16,7 +16,8 @@
 // records whose same-site products and cancelling S+S+ / S-S- pairs the lanes must
 // reduce (J1-J2, XXZ with a transverse field, XYZ, D_z and D_x DM, the Cartesian
 // Heisenberg form, the scalar chirality, S_tot^2 as the full double sum, random
-// translation-symmetrised operators). Sectors: translations Z_8, the dihedral group D_8
+// translation-symmetrised operators, and a four-site ring exchange that only the canonical
+// terms hold). Sectors: translations Z_8, the dihedral group D_8
 // (non-abelian, its four 1-dim irreps), each with and without the spin flip, at
 // n_up = 4, 3 and the full space (n_up = -1) as each model's symmetries allow.
 // This test pins today's lanes before they move onto one row walk (P3.2), and the walk itself:
@@ -157,6 +158,20 @@ std::vector<Model> zoo() {
                 H->addTwoBodyTerm(2, i, 2, j, 1.0);
             }
         z.push_back({"s_tot_squared", H, true, true, true});
+    }
+    {   // J1 + the four-site ring exchange K sum_i (P + P^dagger), P = P_{i,i+1} P_{i+1,i+2} P_{i+2,i+3}
+        // with the transposition P_ij = 1/2 + 2 S_i.S_j: terms on four sites, no record holds them
+        auto Pij = [](int i, int j) { return P("I", {0}, 0.5) + P("zz", {i, j}, 2.0) + P("+-", {i, j}) + P("-+", {i, j}); };
+        MaskedOperator H(N);
+        for (int i = 0; i < N; ++i) {
+            const int a = i, b = (i + 1) % N, c = (i + 2) % N, d = (i + 3) % N;
+            H.add(P("zz", {a, b}) + P("+-", {a, b}, 0.5) + P("-+", {a, b}, 0.5));
+            const auto ring = Pij(a, b) * Pij(b, c) * Pij(c, d);
+            H.add(ring + ring.dagger(), 0.3);
+        }
+        auto op = from_terms(H);
+        REQUIRE(op->has_extra_terms());
+        z.push_back({"ring_exchange", op, true, true, true});
     }
     {   // random translation-symmetrised operators: one U(1), one with no S^z content
         std::mt19937 rng(20261002);

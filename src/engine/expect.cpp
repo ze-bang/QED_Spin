@@ -69,6 +69,9 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
 }
 
 Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
+    if (O.has_extra_terms())
+        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
+                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
     const int n_sites = r.n_sites;
     if (i >= r.levels.size() || j >= r.levels.size()) throw std::out_of_range("matrix_element: level index");
     if (!O.three_body_records().empty())

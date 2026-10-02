@@ -894,8 +894,10 @@ def test_operator_image_copy_and_limits():
     B = ring.copy()
     ring.add_one_body(qed.OP_SZ, 0, 1.0)
     assert not B.equals(ring) and B.equals(ring - qed.Operator.product(n, "z", [0]))
-    with pytest.raises(NotImplementedError):    # four sites: the kernels take three until P3.2
-        qed.Operator.product(n, "zzzz", [0, 1, 2, 3])
+    # four sites: the walk applies it (S^z on every site of a 4-site chain)
+    Z4 = qed.Operator.product(n, "zzzz", [0, 1, 2, 3])
+    sz = np.array([[(0.5 if not (s >> i) & 1 else -0.5) for i in range(n)] for s in range(1 << n)])
+    np.testing.assert_allclose(_dense(Z4, n), np.diag(np.prod(sz, axis=1)), atol=1e-15)
     # three-body records join the algebra (they were missing from transform_tuples)
     A = qed.Operator(n)
     A.add_one_body(qed.OP_SZ, 0, 1.0)
@@ -903,3 +905,37 @@ def test_operator_image_copy_and_limits():
     C.add_three_body(qed.OP_SZ, 0, qed.OP_SZ, 1, qed.OP_SZ, 2, 1.0)
     assert (A @ C).equals(qed.Operator.product(n, "zz", [1, 2], 0.25))
     assert (A + C).equals(qed.Operator.product(n, "z", [0]) + qed.Operator.product(n, "zzz", [0, 1, 2]))
+
+
+def _ring_exchange(n, J=1.0, K=0.3):
+    """J S.S on the ring plus K sum_i (P + P^dagger), P the cyclic permutation of four
+    consecutive sites, P = P_ab P_bc P_cd with P_ij = 1/2 + 2 S_i.S_j."""
+    I = qed.Operator.product(n, "I", [0])
+
+    def dot(i, j, c=1.0):
+        return (qed.Operator.product(n, "zz", [i, j], c) + qed.Operator.product(n, "+-", [i, j], 0.5 * c)
+                + qed.Operator.product(n, "-+", [i, j], 0.5 * c))
+
+    H = qed.Operator(n)
+    for i in range(n):
+        a, b, c, d = i, (i + 1) % n, (i + 2) % n, (i + 3) % n
+        ring = (0.5 * I + dot(a, b, 2.0)) @ (0.5 * I + dot(b, c, 2.0)) @ (0.5 * I + dot(c, d, 2.0))
+        H = H + dot(a, b, J) + K * (ring + ring.adjoint())
+    return H
+
+
+def test_four_site_terms_in_the_hamiltonian():
+    n = 8
+    H = _ring_exchange(n)
+    assert any(len(sites) == 4 for _, _, sites in H.terms())
+    M = _dense(H, n)
+    assert np.allclose(M, M.conj().T)
+    pop = np.array([bin(s).count("1") for s in range(1 << n)])
+    sector = np.flatnonzero(pop == n // 2)
+    ref = np.linalg.eigvalsh(M[np.ix_(sector, sector)])[:3]
+    r = qed.eigs(H, 3, sym=qed.Symmetry(sz=n // 2))   # translations, found on the canonical terms
+    np.testing.assert_allclose(np.sort(np.asarray(r.energies))[:3], ref, atol=1e-10)
+    rv = qed.eigs(qed.Operator.product(n, "zz", [0, 1]) + H, 1, sym=qed.Symmetry(spatial=None, sz=n // 2),
+                  vectors=True)
+    with pytest.raises(NotImplementedError):   # as an observable: not until P3.3
+        rv.expect([H])

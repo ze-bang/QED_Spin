@@ -117,6 +117,9 @@ private:
     /// add_record and the typed setters, which validate every factor.
     std::vector<TransformData>           transform_data_;
     std::vector<ThreeBodyTransformData>  three_body_data_;
+    /// Canonical terms on four or more sites, which no record can hold: part of canonical()
+    /// and of every row walk, invisible to the record readers (which refuse such operators).
+    std::vector<ed::ops::MaskedTerm>     extra_terms_;
 
 public:
 
@@ -152,6 +155,18 @@ public:
         three_body_data_.push_back(t);
         invalidateMatrixCaches();
     }
+
+    /// Append a canonical term on four or more sites (term.h; masks within n_bits). Terms on
+    /// fewer sites go in as records (ed::ops::to_operator writes both).
+    void add_extra_term(const ed::ops::MaskedTerm& t) {
+        const std::uint64_t all = (n_bits_ >= 64) ? ~0ULL : ((1ULL << n_bits_) - 1ULL);
+        if (((t.cond_mask | t.flip_mask | t.sign_mask) & ~all) != 0)
+            throw std::invalid_argument("Operator::add_extra_term: a mask names a site outside the operator");
+        extra_terms_.push_back(t);
+        invalidateMatrixCaches();
+    }
+    [[nodiscard]] const std::vector<ed::ops::MaskedTerm>& extra_terms() const noexcept { return extra_terms_; }
+    [[nodiscard]] bool has_extra_terms() const noexcept { return !extra_terms_.empty(); }
 
     /// The operator's canonical terms (invariance.h), built on first use and kept until the
     /// records change.
@@ -221,6 +236,7 @@ public:
     void copyTermsFrom(const Operator& src) {
         transform_data_  = src.transform_data_;
         three_body_data_ = src.three_body_data_;
+        extra_terms_     = src.extra_terms_;
         invalidateMatrixCaches();
     }
 
@@ -334,6 +350,7 @@ public:
         : LinearOperator(other),
           transform_data_(other.transform_data_),
           three_body_data_(other.three_body_data_),
+          extra_terms_(other.extra_terms_),
           terms_(other.terms_),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
@@ -347,6 +364,7 @@ public:
         : LinearOperator(std::move(other)),
           transform_data_(std::move(other.transform_data_)),
           three_body_data_(std::move(other.three_body_data_)),
+          extra_terms_(std::move(other.extra_terms_)),
           terms_(std::move(other.terms_)),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
@@ -364,6 +382,7 @@ public:
             spin_l_                          = other.spin_l_;
             transform_data_                  = other.transform_data_;
             three_body_data_                 = other.three_body_data_;
+            extra_terms_                     = other.extra_terms_;
             terms_                           = other.terms_;
             terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
@@ -383,6 +402,7 @@ public:
             spin_l_                          = other.spin_l_;
             transform_data_                  = std::move(other.transform_data_);
             three_body_data_                 = std::move(other.three_body_data_);
+            extra_terms_                     = std::move(other.extra_terms_);
             terms_                           = std::move(other.terms_);
             terms_fresh_                     = other.terms_fresh_.load();
             terms_committed_aos_size_        = other.terms_committed_aos_size_;
