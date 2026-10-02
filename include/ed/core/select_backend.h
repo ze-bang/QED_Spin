@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 
+#include <ed/core/config.h>
 #include <ed/core/device.h>
 #include <ed/core/footprint.h>
 #include <ed/core/memory.h>
@@ -167,6 +168,18 @@ auto with_backend(Lane lane, Fn&& fn) {
     }
     ed::matvec::CpuBackend be;
     return fn(be);
+}
+
+/// with_backend for a solve of `op`: a host lane on an operator that is_real() runs on the real
+/// backend (BasicCpuBackend<double>: half the bytes per vector entry and per gathered element)
+/// unless ED_SYM_REAL=0; every other lane as above. fn must return one type for every backend.
+template <class Fn>
+auto with_backend(Lane lane, const ed::LinearOperator& op, Fn&& fn) {
+    if (!on_device(lane) && ed::env::flag("ED_SYM_REAL", true) && op.is_real()) {
+        ed::matvec::BasicCpuBackend<double> be;
+        return fn(be);
+    }
+    return with_backend(lane, std::forward<Fn>(fn));
 }
 
 }  // namespace ed

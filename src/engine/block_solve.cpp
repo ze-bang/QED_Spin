@@ -215,19 +215,24 @@ auto staged_seed(B& be, std::size_t n, std::uint64_t seed) {
     return v;
 }
 
-// A backend vector on the host.
+// A backend vector on the host, in the block coordinates the lanes return: complex amplitudes
+// (a real lane's vector is widened here).
 template <class B>
-auto to_host(B& be, const typename B::scalar_type* v, std::size_t n) {
+std::vector<Complex> to_host(B& be, const typename B::scalar_type* v, std::size_t n) {
     std::vector<typename B::scalar_type> h(n);
     be.copy_to_host(v, h.data(), n);
-    return h;
+    if constexpr (std::is_same_v<typename B::scalar_type, Complex>) return h;
+    else return std::vector<Complex>(h.begin(), h.end());
 }
 
-// H bound to the backend once, counting its applies.
+// H bound to lane B once (on its Scalar), counting its applies.
+template <class B>
 struct CountedH {
-    ed::LinearOperator::MatvecFn H;
+    using Scalar = typename B::scalar_type;
+    ed::LinearOperator::BoundFn<B> H;
     std::uint64_t applies = 0;
-    void operator()(const Complex* in, Complex* out, std::size_t n) {
+    explicit CountedH(const ed::LinearOperator& op) : H(op.bind<B>()) {}
+    void operator()(const Scalar* in, Scalar* out, std::size_t n) {
         ++applies;
         H(in, out, n);
     }
@@ -311,6 +316,7 @@ static std::uint64_t ks_lane_bytes(std::uint64_t nb, std::size_t k, std::size_t 
     s.k      = k;
     s.krylov = m;
     s.device = !ed::matvec::is_cpu_backend_v<B>;
+    s.scalar_bytes = sizeof(typename B::scalar_type);
     const ed::core::Footprint f = ed::core::footprint(ed::core::Path::KrylovSchur, s);
     return s.device ? f.device : f.host;
 }
@@ -343,7 +349,7 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
                                        std::uint64_t max_iter) {
     const std::size_t nb = H.dim();
     // Bound first: the device lane builds its mirror of H here, which the cap then sees.
-    CountedH Hc{H.bind<B>()};
+    CountedH<B> Hc(H);
     const std::uint64_t cap = ks_cycle_cap<B>(nb, k);
     if (cap > 0 && cap < k + 8) {
         throw ed::ResourceLimit(
@@ -432,7 +438,7 @@ template <class B>
 static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::uint64_t max_iter) {
     constexpr std::size_t k = 1;
     const std::uint64_t nb = H.dim();
-    ed::krylov::LanczosKernelOptions kopts;
+    ed::krylov::LanczosKernelOptionsT<typename B::scalar_type> kopts;
     kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
         nb, max_iter > 0 ? max_iter : lg_lowest_max_iter(k)));
     // The pure three-term recurrence: this scan is eigenvalues-only and its gate is ghost-aware
@@ -469,7 +475,7 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
         return lowest_level(alpha, beta, m, nullptr);
     };
     kopts.convergence_check_interval = 1;
-    CountedH Hc{H.bind<B>()};
+    CountedH<B> Hc(H);
     // Fixed start-vector seed. Single-vector Lanczos returns ONE copy of a
     // genuinely degenerate pair (see above for the lanes that count copies).
     auto v0 = staged_seed(be, static_cast<std::size_t>(nb), 0x51ED0B70ULL);
@@ -538,11 +544,11 @@ template <class B>
 BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
     const std::size_t n = H.dim();
     BlockEstimate est;
-    ed::krylov::LanczosKernelOptions kopts;
+    ed::krylov::LanczosKernelOptionsT<typename B::scalar_type> kopts;
     kopts.max_iter   = std::min<std::size_t>(40, n);
     kopts.reorth     = ed::krylov::ReorthPolicy::None;
     kopts.keep_basis = false;
-    CountedH Hc{H.bind<B>()};
+    CountedH<B> Hc(H);
     auto v0 = staged_seed(be, n, 0xE57A7EULL);
     const auto k = ed::krylov::lanczos_kernel(be, Hc, n, v0.get(), kopts);
     v0.reset();
@@ -567,6 +573,7 @@ static std::size_t gs_keep_cap(std::size_t n, std::size_t kept_basis_max_dim, st
     ed::core::Shape s;
     s.dim    = n;
     s.device = !ed::matvec::is_cpu_backend_v<B>;
+    s.scalar_bytes = sizeof(typename B::scalar_type);
     const auto lane = [&s](std::size_t kept) {
         s.krylov = kept;
         const ed::core::Footprint f = ed::core::footprint(ed::core::Path::GsKeptBasis, s);
@@ -597,9 +604,10 @@ struct GsAttempt {
 
 template <class B>
 static std::optional<GsAttempt>
-gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, std::uint64_t max_steps,
+gs_lanczos(B& be, CountedH<B>& H, std::size_t n, std::size_t kept_basis_max_dim, std::uint64_t max_steps,
            double resid_tol) {
     using UV = typename B::UniqueVec;
+    using Scalar = typename B::scalar_type;
     const std::size_t per_attempt = std::min<std::size_t>(n, kLgGsMaxIter);
     std::size_t left = max_steps > 0 ? static_cast<std::size_t>(max_steps)
                                      : per_attempt * static_cast<std::size_t>(kLgGsRestarts + 1);
@@ -608,7 +616,7 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
     {
         const double s0 = be.nrm2(seed.get(), n);
         if (!(s0 > 0.0)) return std::nullopt;
-        be.scale(Complex(1.0 / s0, 0.0), seed.get(), n);
+        be.scale(Scalar(1.0 / s0), seed.get(), n);
     }
     UV vp = be.make_zero_vector(n), vc = be.make_zero_vector(n), w = be.make_zero_vector(n);
     UV u = be.make_zero_vector(n);
@@ -630,8 +638,8 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
             alpha.push_back(a);
             scale = std::max(scale, std::abs(a));
             const double bprev = beta.back();
-            be.axpy(Complex(-a, 0.0), vc.get(), w.get(), n);
-            be.axpy(Complex(-bprev, 0.0), vp.get(), w.get(), n);
+            be.axpy(Scalar(-a), vc.get(), w.get(), n);
+            be.axpy(Scalar(-bprev), vp.get(), w.get(), n);
             const double b = be.nrm2(w.get(), n);
             beta.push_back(b);
             ++m;
@@ -650,7 +658,7 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
             if (m == cap) break;
             std::swap(vp, vc);
             std::swap(vc, w);
-            be.scale(Complex(1.0 / b, 0.0), vc.get(), n);
+            be.scale(Scalar(1.0 / b), vc.get(), n);
             if (keeping && kept.size() >= keep_cap) { kept.clear(); keeping = false; }   // outgrown
             if (keeping) {
                 kept.push_back(be.make_zero_vector(n));
@@ -663,32 +671,32 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
         // ---------------- u = sum_j z_j V_j ----------------------------
         be.fill_zero(u.get(), n);
         if (keeping) {
-            std::vector<const Complex*> V{seed.get()};
+            std::vector<const Scalar*> V{seed.get()};
             for (const UV& v : kept) V.push_back(v.get());
-            const std::vector<Complex> c(z.begin(), z.end());
+            const std::vector<Scalar> c(z.begin(), z.end());
             be.axpy_many(c.data(), V.data(), m, u.get(), n);
             kept.clear();
         } else {
             be.fill_zero(vp.get(), n);
             be.copy(seed.get(), vc.get(), n);
             for (std::size_t j = 0; j < m; ++j) {
-                be.axpy(Complex(z[j], 0.0), vc.get(), u.get(), n);
+                be.axpy(Scalar(z[j]), vc.get(), u.get(), n);
                 if (j + 1 >= m) break;
                 H(vc.get(), w.get(), n);
-                be.axpy(Complex(-alpha[j], 0.0), vc.get(), w.get(), n);
-                be.axpy(Complex(-beta[j], 0.0), vp.get(), w.get(), n);
+                be.axpy(Scalar(-alpha[j]), vc.get(), w.get(), n);
+                be.axpy(Scalar(-beta[j]), vp.get(), w.get(), n);
                 std::swap(vp, vc);
                 std::swap(vc, w);
-                be.scale(Complex(1.0 / beta[j + 1], 0.0), vc.get(), n);
+                be.scale(Scalar(1.0 / beta[j + 1]), vc.get(), n);
             }
         }
         const double un = be.nrm2(u.get(), n);
         if (!(un > 0.0)) return std::nullopt;
-        be.scale(Complex(1.0 / un, 0.0), u.get(), n);
+        be.scale(Scalar(1.0 / un), u.get(), n);
         // ---------------- H u: the result, or the next start -------------
         H(u.get(), w.get(), n);
         out.energy = std::real(be.dot(u.get(), w.get(), n));
-        be.axpy(Complex(-out.energy, 0.0), u.get(), w.get(), n);
+        be.axpy(Scalar(-out.energy), u.get(), w.get(), n);
         out.residual = be.nrm2(w.get(), n);
         if (out.residual <= resid_tol) break;
         be.copy(u.get(), seed.get(), n);   // restarted refinement
@@ -719,7 +727,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         g.certified = g.residual <= tol;
         return g;
     }
-    CountedH Hc{H.bind<B>()};
+    CountedH<B> Hc(H);
     auto r = gs_lanczos(be, Hc, n, kept_basis_max_dim, max_iter, tol);
     g.applies = Hc.applies;
     if (!r) return g;
@@ -740,6 +748,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
                                          std::uint64_t);                                          \
     template BlockEstimate estimate_lowest<B>(B&, const ed::LinearOperator&);
 ED_LG_LANES(ed::matvec::CpuBackend)
+ED_LG_LANES(ed::matvec::BasicCpuBackend<double>)
 #ifdef WITH_CUDA
 ED_LG_LANES(ed::matvec::CudaBackend)
 #endif

@@ -134,7 +134,7 @@ double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device de
         const auto sol = solve_block_dense(op, 1, false);
         return sol.values.empty() ? -std::numeric_limits<double>::infinity() : sol.values.front();
     }
-    return ed::with_backend(lane, [&op](auto& be) {
+    return ed::with_backend(lane, op, [&op](auto& be) {
         const auto e = lg_detail::estimate_lowest(be, op);
         return e.theta - e.residual;
     });
@@ -366,7 +366,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 const std::size_t w = static_cast<std::size_t>(want);
                 BlockSolution sol = lane == ed::Lane::HostDense
                     ? solve_block_dense(mv, w, o.vectors)
-                    : ed::with_backend(lane, [&](auto& be) {
+                    : ed::with_backend(lane, mv, [&](auto& be) {
                           return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
                       });
                 ev = std::move(sol.values);

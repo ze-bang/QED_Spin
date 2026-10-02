@@ -5,8 +5,8 @@
 // The working set of each solver path, in bytes, on the host and on the device: the one
 // estimate every memory guard and planner reads (thermal's guard, the GPU sample batch width,
 // place()'s device fit, the Krylov-Schur subspace cap, the dense crossover, the dense batches,
-// multiplet). A Krylov path counts the length-D complex vectors (V = 16 D bytes) it holds at its
-// peak, read from the kernels; a dense path counts its matrices. Operators (CSR, device mirror)
+// multiplet). A Krylov path counts the length-D vectors it holds at its peak (V = 16 D bytes,
+// 8 D on a real lane), read from the kernels; a dense path counts its matrices. Operators (CSR, device mirror)
 // are budgeted by their own knobs and are not included.
 // =============================================================================
 
@@ -64,13 +64,14 @@ struct Shape {
     std::size_t   krylov = 0;      ///< Lanczos depth, or the Krylov-Schur cycle length
     std::size_t   k      = 0;      ///< levels, or multiplet members
     std::size_t   width  = 1;      ///< samples in lockstep (device)
+    std::size_t   scalar_bytes = 16;   ///< bytes of one vector entry: 16 complex, 8 on a real lane
     bool          device = false;  ///< the Krylov vectors live on the device
     bool          tower  = false;  ///< seeds projected onto a spin tower (one more host vector)
 };
 
 /// Peak bytes of `p` at shape `s` (saturating; a dimension this large never fits anyway).
 [[nodiscard]] inline Footprint footprint(Path p, const Shape& s) {
-    const double V = 16.0 * static_cast<double>(s.dim);
+    const double V = static_cast<double>(s.scalar_bytes) * static_cast<double>(s.dim);
     const double D2 = static_cast<double>(s.dim) * static_cast<double>(s.dim);
     const double M = static_cast<double>(s.krylov), k = static_cast<double>(s.k);
     const double W = static_cast<double>(std::max<std::size_t>(s.width, 1));

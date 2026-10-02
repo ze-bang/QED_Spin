@@ -1513,3 +1513,20 @@ def test_dynamics_prune_flag():
     b = qed.dynamics(H, O, omega, eta=0.1, prune=False)
     assert a.ground_manifold == b.ground_manifold
     np.testing.assert_allclose(np.asarray(b.S[0]), np.asarray(a.S[0]), rtol=1e-9, atol=1e-12)
+
+
+def test_real_blocks_run_in_real_arithmetic(monkeypatch):
+    # The Gamma-point blocks of a real H are real: their host Krylov lanes run on real vectors
+    # ("csr-real") and agree with the complex run (ED_SYM_REAL=0) at roundoff.
+    H = _ring(16, 0.3)
+    sym = qed.Symmetry(spatial=_translations(16), point_group=False, sz=8)
+    for k, vectors in ((1, False), (1, True), (3, False), (3, True)):
+        monkeypatch.delenv("ED_SYM_REAL", raising=False)
+        r = qed.eigs(H, k, sym=sym, vectors=vectors, prune=False, dense_max_dim=0)
+        monkeypatch.setenv("ED_SYM_REAL", "0")
+        c = qed.eigs(H, k, sym=sym, vectors=vectors, prune=False, dense_max_dim=0)
+        np.testing.assert_allclose(r.energies, c.energies, atol=1e-11)
+        lanes = {b["lane"] for b in r.block_stats}
+        assert "csr-real" in lanes and "csr-real" not in {b["lane"] for b in c.block_stats}
+        if vectors:   # the real vectors are eigenvectors: <H> in each level is its energy
+            np.testing.assert_allclose(r.expect([H])[:, 0].real, [lv.energy for lv in r.levels], atol=1e-9)
