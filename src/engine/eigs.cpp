@@ -109,7 +109,7 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, b
     r.device_kernel = bop.op->has_device_kernel();
     r.verb  = "eigs";
     r.what  = [tag = bi.tag] { return detail::block_name(tag); };
-    r.why   = detail::no_kernel_reason(bi.W != nullptr, bi.tag.irrep_dim);
+    r.why   = detail::no_kernel_reason(bi.tag.irrep_dim);
     return r;
 }
 
@@ -146,7 +146,7 @@ double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device de
 }
 
 // The phase record of one solved block, logged at Info. `rep` is the block's H; its counters
-// before the solve are passed in (an isotypic block shares them with its star's other blocks).
+// before the solve are passed in.
 BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const RepSectorMatVec& rep,
                        std::uint64_t applies0, double apply0, double build0, double solve_s,
                        ed::Lane lane, std::uint64_t lane_applies, double context_orbit_s,
@@ -344,8 +344,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     auto solve_block = [&](const Subspace& sub, StarBuild& sb, const std::shared_ptr<BlockData>& bi,
                            Antiunitary star_tr, double context_orbit_s) {
                 const std::size_t dim = bi->tag.dim;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim),
-                                                                   /*tower_lanes=*/true);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 if (!bop.op) return;
                 const std::uint64_t mult = bop.multiplicity;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
@@ -357,8 +356,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 bool converged = true;
                 std::vector<double> ev;
                 std::vector<std::vector<Complex>> vv;
-                // H of this block (an isotypic block shares its star's k-sector operator, so the
-                // counters are read as differences).
+                // H of this block (its counters are read as differences).
                 const RepSectorMatVec& rep = bi->gop ? *bi->gop : *sb.hk;
                 const std::uint64_t applies0 = rep.applies();
                 const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
@@ -384,18 +382,14 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 res.placement.add(lane);
                 if (ed::on_device(lane)) ++res.device_blocks;
                 res.block_stats.push_back(block_stats(
-                    bi->tag, bi->gop ? "group" : (bi->W ? "isotypic" : "plain"), rep, applies0, apply0,
+                    bi->tag, bi->gop ? "group" : "plain", rep, applies0, apply0,
                     build0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                     lane, sol.applies, context_orbit_s, sb));
-                // Off-tower ghosts sit above the spectrum: once one appears the tower is exhausted.
-                bool ghost_seen = false;
-                for (std::size_t i = 0; i < ev.size(); ++i)
-                    if (bop.is_ghost(ev[i])) { ev.resize(i); if (o.vectors) vv.resize(i); ghost_seen = true; break; }
                 // A block that returned its whole spectrum (its whole spin-S tower) owes nothing, however
                 // many levels were wanted from it.
                 const bool whole_block = sol.whole || ev.size() >= dim;
                 const bool short_ = !whole_block
-                                    && (!converged || (static_cast<int>(ev.size()) < want && !ghost_seen));
+                                    && (!converged || static_cast<int>(ev.size()) < want);
                 if (short_) ++res.partial_blocks;
                 // Where an incomplete block's owed levels may lie: above its last level when the returned
                 // ones are certified from the bottom, anywhere from its lowest one when they are not (a
@@ -416,9 +410,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                         if (bi->gop) {                               // group sector: its own basis
                             bv.basis      = bi->gsec;
                             bv.amplitudes = std::move(vv[i]);
-                        } else {                                     // W or plain block: k-sector basis
+                        } else {                                     // plain block: the k-sector basis
                             bv.basis      = sb.hk->rep_data_ptr();
-                            bv.amplitudes = lift_to_rep(*bi, vv[i].data());
+                            bv.amplitudes = std::move(vv[i]);
                         }
                         double n2 = 0.0;
                         for (const auto& c : bv.amplitudes) n2 += std::norm(c);
@@ -452,8 +446,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
         const Subspace& sub = subs[si];
-        const LittleGroupOptions opt = detail::engine_options(s, sub, o.group_irreps_d);
-        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        const LittleGroupOptions opt = detail::engine_options(s, sub);
+        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
@@ -466,8 +460,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                     solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load());
                     continue;
                 }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim),
-                                                                   /*tower_lanes=*/true);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 if (!bop.op) continue;   // no state of the requested spin
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device), nullptr, bi, cx.tr, 0.0});
@@ -535,7 +528,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         // walk (a k0 selection of its own would drop time reversal Theta).
         auto& again = rewalked[{c.sub, c.k0}];
         if (!std::get<0>(again)) {
-            LittleGroupOptions opt = detail::engine_options(s, sub, o.group_irreps_d);
+            LittleGroupOptions opt = detail::engine_options(s, sub);
             opt.only_k0 = {c.k0};
             detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
                 again = {std::make_shared<StarBuild>(std::move(sb)), cx.tr, cx.k_table->seconds.load()};
@@ -604,19 +597,18 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     detail::DenseBatch batch(device, "spectrum");
-    struct Entry { std::size_t id; Level proto; detail::BlockOp filter; };
+    struct Entry { std::size_t id; Level proto; };
     std::vector<Entry> entries;
     std::size_t n_blocks = 0;
     const auto subs = subspaces(H, s);
     for (const Subspace& sub : subs) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub, /*group_irreps_d=*/true);
-        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
+        const LittleGroupOptions opt = detail::engine_options(s, sub);
+        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, Device::Cpu, nullptr,
-                                                             /*tower_lanes=*/true);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
                 if (!bop.op) continue;
                 Level L;
                 L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
@@ -629,10 +621,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
                     if (Ht.rows() == 0) continue;
                 }
                 const std::size_t id = bop.tower ? batch.add(std::move(Ht)) : batch.add(*bop.op);
-                bop.op.reset();                    // keep only the ghost filter past the star
-                bop.projector.reset();
-                bop.tower.reset();
-                entries.push_back({id, L, bop});
+                entries.push_back({id, L});
             }
         });
     }
@@ -643,13 +632,12 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     res.placement.host_dense   = entries.size() - batch.device_blocks();
     for (const auto& en : entries)
         for (double e : batch.spectrum(en.id)) {
-            if (en.filter.is_ghost(e)) continue;
             Level L = en.proto;
             L.energy = e;
             res.levels.push_back(L);
             res.total_dim += L.multiplicity;
         }
-    // Under total_spin the levels below the ghost must be the whole tower (audit C07-su2-05).
+    // Under total_spin the levels must be the whole tower (audit C07-su2-05).
     if (s.two_S >= 0 && !detail::has_selection(s)) {
         const std::uint64_t want = detail::tower_states(subs, n_sites, s.two_S);
         if (res.total_dim != want)

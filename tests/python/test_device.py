@@ -121,19 +121,19 @@ def test_gpu_refuses_a_block_without_a_device_kernel():
     # With every block a Krylov solve (dense floor 0), device='gpu' refuses the E blocks;
     # device='auto' runs them on the host and says so.
     H, sym = _square4x4_c4v()
-    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic|dimension > 1"):
+    with pytest.raises(qed.errors.DeviceUnsupported, match="dimension > 1"):
         qed.eigs(H, 1, sym=sym, device="gpu", prune=False, dense_max_dim=0)
     assert qed.eigs(H, 1, sym=sym, device="auto", prune=False, dense_max_dim=0).placement["host_krylov"] > 0
 
 
 @gpu
-def test_gpu_thermal_solves_small_w_blocks_densely():
+def test_gpu_thermal_solves_small_e_blocks_densely():
     # An E block of at most dense_max_dim states is diagonalised on the host before any device
     # check, so device='gpu' runs it there; sampled (dense_max_dim=0) it is refused, naming it.
     H, sym = _square4x4_c4v()
     r = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu")
     assert r.placement["host_dense"] > 0 and r.placement["host_krylov"] == 0
-    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic|dimension > 1"):
+    with pytest.raises(qed.errors.DeviceUnsupported, match="dimension > 1"):
         qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu", dense_max_dim=0)
 
 

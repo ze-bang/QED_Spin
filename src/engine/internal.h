@@ -1,26 +1,25 @@
 // =============================================================================
 // src/engine/internal.h -- PRIVATE to the little-group engine.
 //
-// The concrete types (RepSectorMatVec, ProjectedBlockOp, Monomial, SparseColumns,
-// EngineContext, StarBuild) and the declarations of the helpers that more than
+// The concrete types (RepSectorMatVec, CrossSectorMatVec, EngineContext, StarBuild, the spin
+// tower's operators) and the declarations of the helpers that more than
 // one engine translation unit calls. Nothing outside src/engine/
 // includes this header but tests/unit/test_block_solve.cpp (which drives the block lanes
 // directly): the public surface is ed::sectors (include/ed/sectors/), built on the block
 // handles of blocks.h.
 //
-// The engine is deliberately defensive: the star folding (solve one momentum
-// per residue orbit, multiply the spectrum) is exact by construction; every
-// LITTLE-GROUP refinement (monomial action, factor system, isotypic split) is
-// numerically validated and, on any failure, the star falls back to solving
-// its plain k0 block. Correctness never depends on the bookkeeping.
+// The star folding (solve one momentum per residue orbit, multiply the spectrum) is exact by
+// construction; each star's blocks are the group sectors of its full little group (every irrep,
+// ordinary or projective factor system), or the plain momentum sector of a trivial co-group. The
+// group sectors must tile the momentum sector (Burnside), or the build throws.
 //
 // File map
-//   context.cpp       EngineContext construction, k-sectors, monomials, irrep tables
+//   context.cpp       EngineContext construction, k-sectors
 //   block_solve.cpp   the per-block eigensolve driver: dense solve, crossover, and the
 //                     Backend-templated lanes (scan, Krylov-Schur, GS vector, estimate)
 //   stars.cpp         per-star block construction (build_star_blocks)
-//   group_sector.cpp  full-little-group sectors for 1-dim irreps (build_star_blocks fast path)
-//   blocks.cpp        lift_to_rep (a block vector in its momentum sector's rep basis)
+//   group_sector.cpp  the full-little-group sectors (any irrep), the raised sector
+//   tower.cpp         the spin tower: valence-bond starts, certification, penalty, Burnside dims
 //   ground_state.cpp  streamed k-sectors, shared sector data
 //   walk.h            the star walk and block operators of the ed::sectors verbs
 //   eigs.cpp          subspaces, eigs, spectrum, multiplet
@@ -505,209 +504,23 @@ private:
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
 };
 
-// Monomial action of one little-group element on the k0 rep basis:
-// M e_i = phase[i] * e_{to[i]}.
-struct Monomial {
-    std::vector<std::int32_t> to;
-    std::vector<Complex>      phase;
-};
-
-// Sparse isotypic column basis: each column is a few (index, coeff) pairs.
-struct SparseColumns {
-    std::vector<std::vector<std::pair<std::int32_t, Complex>>> cols;
-    [[nodiscard]] std::size_t size() const { return cols.size(); }
-};
-
-// Fork/join is ~5-10 us, so the tiny blocks of a small-N walk must stay
-// serial; the same ``if (work > par)`` guard ReducedSymmetryCsr::spmv uses.
-[[nodiscard]] inline std::size_t lg_omp_min_work() {
-#ifdef _OPENMP
-    return static_cast<std::size_t>(omp_get_max_threads()) * 1024u;
-#else
-    return std::numeric_limits<std::size_t>::max();
-#endif
-}
-
-// Per-phase accounting for ProjectedBlockOp::apply, under ED_SYM_PROFILE
-// only -- the clock reads themselves are gated, so a production run pays
-// nothing at all. ONE summary per block, emitted when the block dies: a
-// frontier star runs thousands of applies and a per-apply line would bury
-// every other signal in the log. ``non-H`` is the host overhead of the
-// projection (zero + scatter + gather, i.e. everything that is not H_k0
-// itself).
-struct BlockApplyProfile {
-    bool          on    = false;
-    std::uint64_t calls = 0;
-    std::size_t   dim   = 0;
-    double t_zero = 0, t_scatter = 0, t_hk = 0, t_gather = 0;
-
-    ~BlockApplyProfile() {
-        if (!on || calls == 0) return;
-        const double host = t_zero + t_scatter + t_gather;
-        const double tot  = host + t_hk;
-        ED_LOG(Info,
-            "[sym_profile] projected block dim_k0=%zu applies=%llu: "
-            "zero=%.3fs scatter=%.3fs H=%.3fs gather=%.3fs "
-            "(non-H %.1f%% of %.3fs)",
-            dim, static_cast<unsigned long long>(calls),
-            t_zero, t_scatter, t_hk, t_gather,
-            tot > 0.0 ? 100.0 * host / tot : 0.0, tot);
-    }
-};
-
-// Projected block operator y = W^dagger (H (W x)) -- the factorized
-// little-group matvec (still matrix-free through H_k0).
-//
-// Owns its inputs via shared_ptr (all irrep blocks of one star co-own
-// the star's H_k0), and derives from LinearOperator so the solvers
-// consume it directly. Scratch is allocated LAZILY on first
-// apply: block handles are also built in plan/enumeration passes where a
-// dim_k0-sized allocation per block would be a real memory regression at
-// frontier N. One in-flight apply per instance (the shared hk_ apply is
-// re-entrant: call_once init + read-only CSR spmv / stateless gather).
-class ProjectedBlockOp final : public ed::LinearOperator {
-public:
-    ProjectedBlockOp(std::shared_ptr<const RepSectorMatVec> hk,
-                     std::shared_ptr<const SparseColumns>   W)
-        : hk_(*hk), W_(*W), keep_hk_(std::move(hk)), keep_W_(std::move(W)) {
-        prof_.on  = ed::env::flag("ED_SYM_PROFILE", false);
-        prof_.dim = hk_.dim();
-    }
-
-    void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        using Clock = std::chrono::steady_clock;
-        const bool prof = prof_.on;
-        // Gated clock reads: not profiling => no steady_clock::now() at all.
-        auto stamp = [prof] {
-            return prof ? Clock::now() : Clock::time_point{};
-        };
-        auto charge = [prof](double& acc, Clock::time_point a,
-                             Clock::time_point b) {
-            if (prof) acc += std::chrono::duration<double>(b - a).count();
-        };
-        [[maybe_unused]] const std::size_t par = lg_omp_min_work();
-
-        const std::size_t dk = hk_.dim();
-        const auto t0 = stamp();
-        // The re-zero STAYS: the scatter below writes only the rep rows that
-        // carry a W entry (build_isotypic_columns drops |u| <= 1e-12, and a
-        // whole index-orbit is absent when this irrep's projector has rank 0
-        // there), while hk_.apply reads all dk of them. It is threadable
-        // though -- a pure store stream, numerically a no-op.
-        if (scratch_in_.size() != dk) {
-            scratch_in_.assign(dk, Complex(0, 0));
-            scratch_out_.resize(dk);
-        } else {
-#ifdef _OPENMP
-#           pragma omp parallel for schedule(static) if (dk > par)
-#endif
-            for (long long i = 0; i < static_cast<long long>(dk); ++i)
-                scratch_in_[static_cast<std::size_t>(i)] = Complex(0, 0);
-        }
-        const auto t1 = stamp();
-        // Scatter u += W x. SERIAL by construction: SparseColumns is
-        // column-major, so the only collision-free partition (over rep ROWS
-        // -- several columns of one index-orbit hit the same row) would need
-        // a transpose of W that does not exist. Splitting over columns
-        // instead would need atomics AND would reorder each row's sum.
-        for (std::size_t c = 0; c < W_.cols.size(); ++c)
-            for (const auto& [i, w] : W_.cols[c])
-                scratch_in_[static_cast<std::size_t>(i)] += w * in[c];
-        const auto t2 = stamp();
-        hk_.apply(scratch_in_.data(), scratch_out_.data(), scratch_in_.size());
-        const auto t3 = stamp();
-        // Gather y = W^dagger u -- embarrassingly parallel over block
-        // columns, and each output keeps its own accumulation order (the
-        // entries of W_.cols[c], in order), so this is bitwise identical to
-        // the serial loop for any d_sigma.
-#ifdef _OPENMP
-#       pragma omp parallel for schedule(static) if (n > par)
-#endif
-        for (long long ic = 0; ic < static_cast<long long>(n); ++ic) {
-            const std::size_t c = static_cast<std::size_t>(ic);
-            Complex acc(0, 0);
-            for (const auto& [i, w] : W_.cols[c])
-                acc += std::conj(w) * scratch_out_[static_cast<std::size_t>(i)];
-            out[c] = acc;
-        }
-        const auto t4 = stamp();
-        if (prof) {
-            ++prof_.calls;
-            charge(prof_.t_zero,    t0, t1);
-            charge(prof_.t_scatter, t1, t2);
-            charge(prof_.t_hk,      t2, t3);
-            charge(prof_.t_gather,  t3, t4);
-        }
-    }
-    [[nodiscard]] std::size_t dim() const override { return W_.cols.size(); }
-    [[nodiscard]] bool is_hermitian() const override { return true; }
-    [[nodiscard]] std::string description() const override {
-        return "LittleGroupBlock(W^h H_k W)";
-    }
-    [[nodiscard]] double norm_bound() const override { return hk_.norm_bound(); }
-    [[nodiscard]] const RepSectorMatVec& hk() const { return hk_; }
-    [[nodiscard]] const SparseColumns&   cols() const { return W_; }
-
-private:
-    const RepSectorMatVec&                  hk_;
-    const SparseColumns&                    W_;
-    std::shared_ptr<const RepSectorMatVec>  keep_hk_;   // keepalives
-    std::shared_ptr<const SparseColumns>    keep_W_;
-    // Pageable host buffers: pinning them (cudaHostRegister) would need
-    // <cuda_runtime.h>, and this header is compiled by the HOST compiler in
-    // every engine TU.
-    mutable std::vector<Complex>  scratch_in_, scratch_out_;
-    mutable BlockApplyProfile     prof_;
-};
-
-// Dense H_k (plain block) or W^dagger H_k W (projected block) assembled
-// from the reduced CSR of H_k -- built ONCE, parallel, O(|G|*nnz) -- instead
-// of ``dim`` matvec columns (each a per-column OMP fork/join over a tiny
-// payload). ``W == nullptr`` => the plain k0 block; otherwise the isotypic
-// sandwich.
-[[nodiscard]] inline Eigen::MatrixXcd
-dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
+// A sector's dense matrix assembled from its reduced CSR -- built ONCE, parallel, O(|G| nnz) -- instead of
+// ``dim`` matvec columns (each a per-column OMP fork/join over a tiny payload).
+[[nodiscard]] inline Eigen::MatrixXcd dense_block(const RepSectorMatVec& hk) {
     const auto csr = hk.reduced_csr();
     const std::size_t dk = hk.dim();
-    if (W == nullptr) {
-        Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(
-            static_cast<Eigen::Index>(dk), static_cast<Eigen::Index>(dk));
-        for (std::size_t r = 0; r < dk; ++r)
-            for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e)
-                H(static_cast<Eigen::Index>(r),
-                  static_cast<Eigen::Index>(csr.col_idx[e])) = csr.value(e);
-        return H;
-    }
-    // Projected: A[c1,c2] = sum_{r,j} conj(W[r,c1]) H_k[r,j] W[j,c2]. Index the
-    // columns that touch each rep index once, then a single CSR pass.
-    const std::size_t dw = W->cols.size();
-    std::vector<std::vector<std::pair<std::int32_t, Complex>>> touch(dk);
-    for (std::int32_t c = 0; c < static_cast<std::int32_t>(dw); ++c)
-        for (const auto& [i, w] : W->cols[static_cast<std::size_t>(c)])
-            touch[static_cast<std::size_t>(i)].emplace_back(c, w);
-    Eigen::MatrixXcd A = Eigen::MatrixXcd::Zero(
-        static_cast<Eigen::Index>(dw), static_cast<Eigen::Index>(dw));
-    for (std::size_t r = 0; r < dk; ++r) {
-        if (touch[r].empty()) continue;
-        for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e) {
-            const std::size_t j = csr.col_idx[e];
-            const Complex v = csr.value(e);
-            for (const auto& [c1, w1] : touch[r])
-                for (const auto& [c2, w2] : touch[j])
-                    A(c1, c2) += std::conj(w1) * v * w2;
-        }
-    }
-    return A;
+    Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(static_cast<Eigen::Index>(dk), static_cast<Eigen::Index>(dk));
+    for (std::size_t r = 0; r < dk; ++r)
+        for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e)
+            H(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(csr.col_idx[e])) = csr.value(e);
+    return H;
 }
 
-// Dense materialization dispatch: the little-group blocks (plain rep sector /
-// projected W^dagger H_k W) take the CSR path above; anything else (defensive)
-// falls back to the column-by-column matvec build.
+// Dense materialization: a sector operator takes the CSR path above; anything else (S^2 through
+// its ladder, a penalty) the column-by-column matvec build.
 [[nodiscard]] inline Eigen::MatrixXcd materialize(const ed::LinearOperator& mv) {
     if (const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv))
-        return dense_block(*hk, nullptr);
-    if (const auto* bop = dynamic_cast<const ProjectedBlockOp*>(&mv))
-        return dense_block(bop->hk(), &bop->cols());
+        return dense_block(*hk);
     const std::size_t n = mv.dim();
     Eigen::MatrixXcd H(n, n);
     std::vector<Complex> e(n, Complex(0, 0)), col(n);
@@ -768,17 +581,12 @@ struct FlipEngagement {
 };
 
 // -----------------------------------------------------------------------------
-// Per-star block construction -- everything a star walk does
-// EXCEPT the eigensolves: k0 sector build, monomial little co-group with
-// the numeric [M_p, H] = 0 probe, abstract-table decomposition, isotypic
-// bases, TR sigma/sigma* pairing, and the graceful decline to the plain
-// H_k0 floor block. Returns the blocks in the engine's canonical row order
-// (irreps ascending; TR later partner absent -- folded into the earlier one's
-// multiplicity; plain floor block iff not projected).
+// Per-star block construction -- everything a star walk does EXCEPT the eigensolves: the little
+// co-group and its irreps, the group sectors, the TR sigma/sigma* pairing, or the plain momentum
+// block of a trivial co-group. Returns the blocks in the engine's canonical row order (irreps
+// ascending; the TR later partner absent -- folded into the earlier one's multiplicity).
 //
-// `sb.hk == nullptr` marks an empty sector (info still filled). The three
-// profile accumulators time the sector / monomial / isotypic phases;
-// pass nullptr when not profiling.
+// `sb.hk` is the momentum sector of a plain block; null for group-sector stars and empty sectors.
 // -----------------------------------------------------------------------------
 struct StarBuild {
     std::vector<std::shared_ptr<BlockData>> blocks;
@@ -789,18 +597,12 @@ struct StarBuild {
 };
 
 // ---- naming irreps by character ---------------------------------------------
-using CharAliases = std::vector<std::tuple<int, int, Complex>>;
-
 /// chi_sigma(residue i) in a co-group table: elems[e] is the residue of element e (-1 the
-/// identity) and chars[e] its character; an alias (i, e, c) answers c chars[e]. nullopt when
-/// residue i is not in the group.
+/// identity) and chars[e] its character; nullopt when residue i is not in the group.
 [[nodiscard]] inline std::optional<Complex>
-co_group_char(const std::vector<int>& elems, const std::vector<Complex>& chars,
-              const CharAliases& aliases, int i) {
+co_group_char(const std::vector<int>& elems, const std::vector<Complex>& chars, int i) {
     for (std::size_t e = 0; e < elems.size(); ++e)
         if (elems[e] == i) return chars[e];
-    for (const auto& [r, e, c] : aliases)
-        if (r == i) return c * chars[static_cast<std::size_t>(e)];
     return std::nullopt;
 }
 
@@ -823,11 +625,11 @@ template <class Chi>
 
 /// Whether irrep `ii` of a co-group table passes opt.only_irrep and opt.only_irrep_chars.
 [[nodiscard]] inline bool wanted_irrep(const LittleGroupOptions& opt, int ii, const std::vector<int>& elems,
-                                       const std::vector<Complex>& chars, const CharAliases& aliases) {
+                                       const std::vector<Complex>& chars) {
     if (!opt.only_irrep.empty()
         && std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) == opt.only_irrep.end())
         return false;
-    return meets(opt.only_irrep_chars, [&](int i) { return co_group_char(elems, chars, aliases, i); });
+    return meets(opt.only_irrep_chars, [&](int i) { return co_group_char(elems, chars, i); });
 }
 
 /// The character table of a star's plain block when its co-group is trivial: the identity alone.
@@ -848,18 +650,6 @@ resolve_flip_engagement(const ed::ops::MaskedOperator& h,
 [[nodiscard]] std::vector<int> conjugate_irrep_map(const EngineContext& cx);
 [[nodiscard]] ed::symmetry::RepSectorData
 build_k_sector(const EngineContext& cx, int k, int n_up);
-[[nodiscard]] bool
-build_monomial(const EngineContext& cx, int rp,
-               const ed::symmetry::RepSectorData& rd, Monomial& out);
-[[nodiscard]] bool
-monomial_commutes(const RepSectorMatVec& hk, const Monomial& m,
-                  std::uint64_t seed);
-[[nodiscard]] bool
-build_little_tables(const std::vector<Monomial>& M,
-                    std::vector<std::vector<int>>& mult);
-[[nodiscard]] SparseColumns
-build_isotypic_columns(const std::vector<Monomial>&     M,
-                       const ed::symmetry::IrrepData&   ir);
 void make_engine_context(const ::Operator&                    op,
                          const std::vector<std::vector<int>>& abelian_group,
                          const std::vector<std::vector<int>>& residue_perms,
@@ -1059,39 +849,30 @@ build_star_blocks(const ::Operator&         op,
                   bool                      tr_on,
                   int                       k0,
                   const std::vector<int>&   members,
-                  const LittleGroupOptions& opt,
-                  bool                      plan_print,
-                  double* t_sector, double* t_monomial, double* t_isotypic);
+                  const LittleGroupOptions& opt);
 
 }  // namespace lg_detail
 
 // =============================================================================
-// BlockData -- one (star, irrep) block. `pop == nullptr` marks the plain fallback-floor
-// block, whose operator IS the star's H_k0.
+// BlockData -- one (star, irrep) block: a group sector, or (gop null) the plain momentum
+// sector of a trivial co-group, whose operator IS the star's H_k0.
 // =============================================================================
 struct BlockData {
     LittleGroupBlockTag                   tag;
     std::shared_ptr<lg_detail::RepSectorMatVec>      hk;    // shared across the star's blocks
-    std::shared_ptr<const lg_detail::SparseColumns>  W;     // null => plain floor block
-    std::unique_ptr<lg_detail::ProjectedBlockOp>     pop;   // null => op() is *hk
-    // Group-sector block (group_sector.cpp): a 1-dim irrep solved in the rep basis of the FULL little group
-    // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on `gsec`; `hk`
-    // stays the star's k-sector (rep_data(), the lift target). Null on isotypic (W) and plain blocks.
+    // Group-sector block (group_sector.cpp): an irrep solved in the rep basis of the FULL little group
+    // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on
+    // `gsec`. Null on a plain block.
     std::shared_ptr<const ed::symmetry::RepSectorData> gsec;
     std::shared_ptr<lg_detail::RepSectorMatVec>        gop;
 };
 
 namespace lg_detail {
-// The operator a block is solved with: group sector, isotypic sandwich, or the plain k-sector.
+// The operator a block is solved with: its group sector, or the plain k-sector.
 [[nodiscard]] inline const ed::LinearOperator& block_mv(const BlockData& b) {
     if (b.gop) return *b.gop;
-    if (b.pop) return *b.pop;
     return *b.hk;
 }
-
-// A block-coordinate vector lifted to the momentum sector's rep basis, u = W_sigma v (a copy
-// for plain blocks; a group-sector block is re-expressed in the k-sector). Norms are kept.
-[[nodiscard]] std::vector<Complex> lift_to_rep(const BlockData& b, const Complex* v);
 
 // The reps of an orbit table that survive the projection onto `characters`, in table order, into
 // rd.reps with 1/norm in rd.inv_norms; `local` (when given) gets each table entry's index among them,
@@ -1103,7 +884,7 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
 // The context's orbit table and rank lookup, acquired on the first call (context.cpp).
 [[nodiscard]] const EngineContext::KTable& k_sector_table(const EngineContext& cx);
 
-// group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, stars.cpp).
+// group_sector.cpp: the group sectors of build_star_blocks (build_group_blocks, stars.cpp).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::OrbitTable>
 group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, int sz_parity, bool flip);
 [[nodiscard]] ed::symmetry::RepSectorData

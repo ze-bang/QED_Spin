@@ -13,9 +13,7 @@
 //     full space, M(N,S) in a fixed-Sz sector (each multiplet contributes
 //     exactly one state per admissible Sz);
 //   * `project` restores the exact (unnormalised) P_S v against a dense
-//     eigenbasis reference;
-//   * CasimirProjectedOperator preserves H's action on the targeted tower
-//     and shifts off-tower drift above the block spectrum.
+//     eigenbasis reference.
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -35,7 +33,6 @@
 using Cx = std::complex<double>;
 using ed::ops::make_S2_carrier;
 using ed::symmetry::allowed_two_S_in_block;
-using ed::symmetry::CasimirProjectedOperator;
 using ed::symmetry::LowdinS2Projector;
 using ed::symmetry::multiplet_count;
 
@@ -224,67 +221,3 @@ TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
     }
 }
 
-TEST_CASE("CasimirProjectedOperator preserves H on the tower and scrubs "
-          "drift", "[casimir_proj]") {
-    const std::uint64_t N = 6;
-    const int n_up = 3;
-    auto h_full = std::make_shared<::Operator>(N, 0.5f);
-    add_heisenberg_ring(*h_full, N);
-    auto h = std::make_shared<ed_tests::SzSectorOperator>(h_full, n_up);
-    auto s2sz = std::make_shared<ed_tests::SzSectorOperator>(make_S2_carrier(N), n_up);
-    const std::uint64_t dim = h->dim();
-
-    const auto towers = allowed_two_S_in_block(static_cast<int>(N), n_up);
-    auto s2 =
-        std::static_pointer_cast<const ed::LinearOperator>(s2sz);
-    auto proj = std::make_shared<const LowdinS2Projector>(s2, 0, towers);
-    CasimirProjectedOperator wrapped(
-        std::static_pointer_cast<const ed::LinearOperator>(h), proj,
-        /*reproject_freq=*/1);
-
-    // Seed preparation lands in the S = 0 tower.
-    auto v = random_vector(dim, 5);
-    const double w0 = wrapped.prepare_start_vector(v.data(), dim);
-    REQUIRE(w0 > 1e-8);
-    REQUIRE(eigen_residual(*s2, v, 0.0) < 1e-10);
-
-    // On the tower the wrapper action equals plain H (freq = 1 projects
-    // every apply; [H, P] = 0 makes that a no-op up to roundoff).
-    std::vector<Cx> hv(dim), wv(dim);
-    h->apply(v.data(), hv.data(), dim);
-    wrapped.apply(v.data(), wv.data(), dim);
-    double d2 = 0.0, n2 = 0.0;
-    for (std::uint64_t i = 0; i < dim; ++i) {
-        d2 += std::norm(wv[i] - hv[i]);
-        n2 += std::norm(hv[i]);
-    }
-    REQUIRE(std::sqrt(d2 / n2) < 1e-10);
-
-    // Drift handling (ghost-shift contract): contaminate
-    // the input with an S = 1 component. The wrapper maps the off-tower
-    // part to mu * (that part) -- NOT to zero: annihilating it would leave the
-    // complement as an exact eigenvalue-0 kernel, and Lanczos would converge a
-    // ghost 0 below any tower whose true minimum is positive. Subtracting
-    // mu * dirt from the output must land back in the S = 0 eigenspace,
-    // and mu must sit above the block's spectral radius so no
-    // lowest-eigenvalue lane can mistake a ghost for physics.
-    auto dirt = random_vector(dim, 6);
-    LowdinS2Projector P1(s2, 2, towers);
-    P1.project(dirt.data(), dim);
-    for (std::uint64_t i = 0; i < dim; ++i) v[i] += 0.05 * dirt[i];
-    wrapped.apply(v.data(), wv.data(), dim);
-    const double mu = wrapped.ghost_shift();
-    REQUIRE(mu > 0.0);
-    std::vector<Cx> tower_part(dim);
-    for (std::uint64_t i = 0; i < dim; ++i) {
-        tower_part[i] = wv[i] - mu * 0.05 * dirt[i];
-    }
-    REQUIRE(eigen_residual(*s2, tower_part, 0.0) < 1e-8);
-    h->apply(v.data(), hv.data(), dim);
-    REQUIRE(eigen_residual(*s2, hv, 0.0) > 1e-4);
-
-    // The ghost sits ABOVE the tower minimum for the N=6 Heisenberg ring
-    // (E0(S=0) ~ -2.803, ||H|| ~ a few): a positively shifted spectrum
-    // stays below mu too, by the 2x margin on the power-iteration bound.
-    REQUIRE(mu > 2.0);
-}

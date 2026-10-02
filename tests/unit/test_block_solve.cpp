@@ -10,8 +10,8 @@
 //   [lanes]   the Backend-templated block lanes (scan, Krylov-Schur, GS vector, estimate)
 //             on toy blocks against Eigen; [lanes][cuda] the same lanes on CudaBackend.
 //   [dense]   solve_block_full and solve_block_dense.
-//   [linear_operator] bind<Backend>, has_device_kernel (the Casimir wrapper needs H and
-//             S^2 both); a host-only operator refuses bind_cuda.
+//   [linear_operator] bind<Backend>, has_device_kernel; a host-only operator refuses
+//             bind_cuda.
 // =============================================================================
 #include "common/catch2_harness.h"
 #include "common/dense_operator.h"
@@ -158,10 +158,10 @@ TEST_CASE("place: Gpu refuses in order and says why", "[place]") {
     FakeMachine::reset();
     auto w = req(Task::Eigs, 924, /*kernel=*/false);
     w.what = [] { return std::string("the block of star 3, irrep 1, n_up 6 (dim 924)"); };
-    w.why  = "is an isotypic (W) block, which has no device kernel";
+    w.why  = "is a sector of an irrep of dimension > 1, which has no device kernel";
     REQUIRE(message_of<ed::DeviceUnsupported>(Device::Gpu, w)
-            == "eigs: device='gpu', but the block of star 3, irrep 1, n_up 6 (dim 924) is an isotypic (W) "
-               "block, which has no device kernel; use device='auto' or 'cpu'");
+            == "eigs: device='gpu', but the block of star 3, irrep 1, n_up 6 (dim 924) is a sector of an irrep "
+               "of dimension > 1, which has no device kernel; use device='auto' or 'cpu'");
     REQUIRE(FakeMachine::free_calls == 0);
     REQUIRE(message_of<ed::DeviceUnsupported>(Device::Gpu, req(Task::Sampled, 500, false))
             == "eigs: device='gpu', but a block of dim 500 has no device kernel; use device='auto' or 'cpu'");
@@ -732,30 +732,13 @@ TEST_CASE("linear_operator: device capability", "[linear_operator]") {
     auto S = std::make_shared<ed_tests::SzSectorOperator>(
         std::shared_ptr<const Operator>(ed_tests::build_heisenberg_chain(4, 1.0, true)), 2);
     REQUIRE_FALSE(S->has_device_kernel());
-    // The Casimir wrapper has a device kernel exactly when H and S^2 both have one.
-    auto S2op = std::make_shared<Operator>(std::uint64_t{4}, 0.5f);
-    for (int i = 0; i < 4; ++i)
-        for (int j = i + 1; j < 4; ++j) {
-            const auto a = static_cast<std::uint64_t>(i), b = static_cast<std::uint64_t>(j);
-            S2op->addTwoBodyTerm(2, a, 2, b, Complex(2.0, 0));
-            S2op->addTwoBodyTerm(0, a, 1, b, Complex(1.0, 0));
-            S2op->addTwoBodyTerm(1, a, 0, b, Complex(1.0, 0));
-        }
-    const Eigen::MatrixXcd S2 = ed_tests::reference_from_operator(*S2op, 16).H
-                                + 3.0 * Eigen::MatrixXcd::Identity(16, 16);   // + 3N/4
     const Eigen::MatrixXcd Hd = ed_tests::reference_from_operator(*H, 16).H;
-    auto dense_h  = std::make_shared<ed_tests::DenseOperator>(Hd);
-    auto dense_s2 = std::make_shared<ed_tests::DenseOperator>(S2);
-    auto proj_dev  = std::make_shared<ed::symmetry::LowdinS2Projector>(dense_s2, 0, std::vector<int>{0, 2, 4});
-    auto proj_host = std::make_shared<ed::symmetry::LowdinS2Projector>(S2op, 0, std::vector<int>{0, 2, 4});
-    ed::symmetry::CasimirProjectedOperator both(dense_h, proj_dev, 1), host_s2(dense_h, proj_host, 1);
+    auto dense_h = std::make_shared<ed_tests::DenseOperator>(Hd);
 #ifdef WITH_CUDA
     REQUIRE(dense_h->has_device_kernel());
-    REQUIRE(both.has_device_kernel());
 #else
-    REQUIRE_FALSE(both.has_device_kernel());
+    REQUIRE_FALSE(dense_h->has_device_kernel());
 #endif
-    REQUIRE_FALSE(host_s2.has_device_kernel());
 }
 
 #ifdef WITH_CUDA
@@ -785,3 +768,4 @@ TEST_CASE("dense: the host DenseBatch solves its queue concurrently, as single s
             REQUIRE(std::abs(got[j] - ref[j]) <= 1e-12 * std::max(1.0, std::abs(ref[j])));
     }
 }
+

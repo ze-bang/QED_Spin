@@ -2,10 +2,10 @@
 // =============================================================================
 // include/ed/ops/casimir_projector.h
 //
-// The Lowdin total-spin projector and the Krylov-targeting operator wrapper,
-// realised at the OPERATOR level (a polynomial in S^2 acting on vectors),
-// NOT as a Subspace: S-eigenspaces are not spanned by computational basis
-// states, so there is nothing for an `index_of` to filter.
+// The Lowdin total-spin projector, realised at the OPERATOR level (a
+// polynomial in S^2 acting on vectors), NOT as a Subspace: S-eigenspaces are
+// not spanned by computational basis states, so there is nothing for an
+// `index_of` to filter.
 //
 // Lowdin projector onto the spin-S eigenspace of S^2:
 //
@@ -24,18 +24,9 @@
 //     multiplier (product of intermediate norms / product of denominators)
 //     is accumulated in log space and restored at the end, so `project`
 //     computes EXACTLY P_S v, not a rescaled cousin;
-//   * cost: one factor = one S^2 matvec (~1.5 N^2 terms, i.e. ~(N/2z) of a
-//     short-range H matvec). Full projection ~ degree * that. Applied at
-//     the start vector plus every `reproject_freq`-th operator apply.
-//
-// Krylov targeting: since [H, S^2] = 0 exactly for an SU(2)-invariant H,
-// a start vector inside the S-eigenspace keeps its whole Krylov space
-// there; P_S is the IDENTITY on the exact Krylov space and only scrubs
-// floating-point drift. `CasimirProjectedOperator` therefore wraps any
-// sector matvec without changing its spectrum on the targeted tower --
-// Lanczos / Krylov-Schur / FTLM / mTPQ consume it via the ordinary
-// `LinearOperator` surface. The wrapped operator lives on the host; when it and S^2 both
-// have a device mirror, `bind_cuda` runs the whole apply (H and the projection) there.
+//   * cost: one factor = one S^2 matvec. The engine applies it only to
+//     resolve a cluster of mixed-S levels (tower_filter) and to scrub sampled
+//     sources; Krylov runs on the bare H (src/engine/tower.cpp).
 // =============================================================================
 
 #include <algorithm>
@@ -44,7 +35,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -54,20 +44,8 @@
 #include <ed/matvec/linear_operator.h>
 #include <ed/ops/spin_flip.h>
 #include <ed/basis/su2_dims.h>
-#ifdef WITH_CUDA
-#include <ed/gpu/cuda_backend.cuh>
-#endif
 
 namespace ed::symmetry {
-
-/// Default reprojection cadence for the targeting wrapper: project every
-/// apply. Eigenvalue-only Lanczos lanes run bounded (local)
-/// reorthogonalisation, where an off-tower roundoff component is
-/// AMPLIFIED toward the global extremal eigenvalue and converges as a
-/// ghost within ~30 iterations if left unscrubbed -- correctness first.
-/// Callers pass an explicit cadence (k = project every k-th apply;
-/// 0 = seed projection only) to the constructor to override.
-inline constexpr int kSu2ReprojectFreq = 1;
 
 /// The set of total-spin labels (as two_S) present in a symmetry block,
 /// the single source consumed by the Lowdin excluded-set and by the dense
@@ -155,30 +133,6 @@ public:
     [[nodiscard]] int two_S() const noexcept { return two_S_; }
     [[nodiscard]] const std::shared_ptr<const ed::LinearOperator>& s2() const noexcept { return s2_; }
 
-#ifdef WITH_CUDA
-    /// `project` on device vectors: `s2_dev` is the device S^2 matvec, `w` a device scratch
-    /// vector of `dim`.
-    void project_device(const ed::matvec::CudaBackend& be, const ed::LinearOperator::MatvecFn& s2_dev,
-                        std::complex<double>* v, std::complex<double>* w, std::uint64_t dim) const {
-        const double lam_t = 0.25 * two_S_ * (two_S_ + 2);
-        double n = be.nrm2(v, dim);
-        if (n == 0.0) return;
-        be.scale(1.0 / n, v, dim);
-        double log_scale = std::log(n), sign = 1.0;
-        for (const double lam : excluded_) {
-            s2_dev(v, w, dim);
-            be.axpy(-lam, v, w, dim);
-            be.copy(w, v, dim);
-            n = be.nrm2(v, dim);
-            if (n == 0.0) return;                    // annihilated: v is the zero vector
-            be.scale(1.0 / n, v, dim);
-            const double denom = lam_t - lam;
-            log_scale += std::log(n) - std::log(std::abs(denom));
-            if (denom < 0.0) sign = -sign;
-        }
-        be.scale(sign * std::exp(log_scale), v, dim);
-    }
-#endif
 
     /// In-place EXACT P_S v (per-factor renormalisation is undone through
     /// the log-space multiplier). `v` and the scratch live on the host.
@@ -241,158 +195,6 @@ private:
     std::shared_ptr<const ed::LinearOperator> s2_;
     int two_S_;
     std::vector<double> excluded_;  // S'(S'+1), farthest-first
-};
-
-// ---------------------------------------------------------------------------
-// CasimirProjectedOperator
-// ---------------------------------------------------------------------------
-/// Wraps any host sector matvec H with periodic P_S drift scrubbing.
-/// Spectrally H and the wrapper agree on the targeted tower ([H, P_S] = 0
-/// and P_S == Id there).
-///
-/// GHOST SHIFT: a plain scrub `out = P(H v)` would leave the ENTIRE
-/// off-tower complement as an exact eigenvalue-0 kernel of the effective
-/// operator (P H = P H P, and P H Q = 0). The Lanczos recurrence recycles
-/// off-tower roundoff through its -alpha*v terms, so a ghost Ritz value
-/// would converge at 0 -- BELOW the tower whenever the tower minimum is
-/// positive. The scrubbed apply therefore computes
-///
-///     out = P((H - mu) v) + mu v
-///
-/// which equals H exactly on the tower and mu*Id on the complement --
-/// same cost (one Lowdin projection per apply), but the ghost spectrum
-/// sits at mu, placed ABOVE the block's spectral radius by a one-time
-/// power-iteration estimate, where no lowest-eigenvalue or Boltzmann-
-/// weighted lane can mistake it for physics.
-class CasimirProjectedOperator : public ed::LinearOperator {
-public:
-    CasimirProjectedOperator(
-        std::shared_ptr<const ed::LinearOperator> h,
-        std::shared_ptr<const LowdinS2Projector> projector,
-        int reproject_freq = -1)  // -1 = kSu2ReprojectFreq
-        : h_(std::move(h)),
-          projector_(std::move(projector)),
-          freq_(reproject_freq >= 0 ? reproject_freq
-                                    : kSu2ReprojectFreq) {
-        if (!h_ || !projector_) {
-            throw std::invalid_argument(
-                "CasimirProjectedOperator: null operator/projector");
-        }
-        ghost_shift_ = estimate_ghost_shift();
-    }
-
-    void apply(const Complex* in, Complex* out,
-               std::size_t size) const override {
-        h_->apply(in, out, size);
-        if (freq_ > 0 && (++apply_count_ % freq_) == 0) {
-            // out = P((H - mu) in) + mu in  (== H on tower, mu off it)
-            const double mu = ghost_shift_;
-            for (std::size_t i = 0; i < size; ++i) out[i] -= mu * in[i];
-            projector_->project(out, size);
-            for (std::size_t i = 0; i < size; ++i) out[i] += mu * in[i];
-        }
-    }
-
-    [[nodiscard]] std::size_t dim() const override { return h_->dim(); }
-    [[nodiscard]] bool is_hermitian() const override {
-        return h_->is_hermitian();
-    }
-    /// The inner bound, or the ghost level when that lies further out (0: unknown).
-    [[nodiscard]] double norm_bound() const override {
-        const double b = h_->norm_bound();
-        return b > 0.0 ? std::max(b, std::abs(ghost_shift_)) : 0.0;
-    }
-
-    /// Project a (random) seed into the target tower and normalise it.
-    /// Returns ||P_S seed|| -- ~0 tells the caller to redraw.
-    double prepare_start_vector(Complex* v, std::uint64_t dim) const {
-        return projector_->project_normalized(v, dim);
-    }
-
-    [[nodiscard]] const LowdinS2Projector& projector() const noexcept {
-        return *projector_;
-    }
-
-    /// The mu placing the off-tower ghost spectrum (see class comment).
-    [[nodiscard]] double ghost_shift() const noexcept { return ghost_shift_; }
-
-    /// Move the ghost spectrum to `mu`. Above the band (the default) suits lowest-level solves;
-    /// a Krylov run that uses its VECTORS across the whole band (FTLM dynamics) wants it inside
-    /// the tower's spectrum instead: an extreme eigenvalue is exactly what Lanczos amplifies, so
-    /// roundoff leaving the tower grows exponentially there and not at an interior point.
-    void place_ghost(double mu) noexcept { ghost_shift_ = mu; }
-
-#ifdef WITH_CUDA
-    /// Device-capable when H and S^2 both have a device kernel.
-    [[nodiscard]] bool has_device_kernel() const override {
-        return h_->has_device_kernel() && projector_->s2()->has_device_kernel();
-    }
-
-    /// The same apply with every vector on the device.
-    [[nodiscard]] MatvecFn bind_cuda() const override {
-        if (!has_device_kernel()) return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
-        const ed::LinearOperator* h = h_.get();
-        const ed::LinearOperator* s2 = projector_->s2().get();
-        struct Scratch {
-            ed::matvec::CudaBackend be;
-            ed::matvec::Backend::UniqueVec w;
-            explicit Scratch(std::size_t n) : w(be.make_zero_vector(n)) {}
-        };
-        auto st = std::make_shared<Scratch>(dim());
-        return [this, st, hd = h->bind_cuda(), sd = s2->bind_cuda()](const Complex* in, Complex* out,
-                                                                     std::size_t n) {
-            hd(in, out, n);
-            if (freq_ > 0 && (++apply_count_ % freq_) == 0) {
-                st->be.axpy(-ghost_shift_, in, out, n);
-                projector_->project_device(st->be, sd, out, st->w.get(), n);
-                st->be.axpy(ghost_shift_, in, out, n);
-            }
-        };
-    }
-#endif
-
-private:
-    /// One-time spectral-radius estimate for the ghost shift: a dozen
-    /// power iterations from a fixed-seed random start give |lambda|_max
-    /// from below; the 2x + 1 margin keeps mu above the true radius (and
-    /// therefore above every tower eigenvalue) for any realistic
-    /// convergence deficit. Cost: 12 H matvecs, once per wrapper.
-    [[nodiscard]] double estimate_ghost_shift() const {
-        const std::uint64_t n = h_->dim();
-        if (n == 0) return 1.0;
-        std::vector<Complex> v(n), w(n);
-        std::mt19937_64 gen(0x5EEDC0DEULL);
-        std::normal_distribution<double> nd(0.0, 1.0);
-        double sumsq = 0.0;
-        for (auto& z : v) {
-            z = Complex(nd(gen), nd(gen));
-            sumsq += std::norm(z);
-        }
-        if (!(sumsq > 0.0)) return 1.0;
-        double inv = 1.0 / std::sqrt(sumsq);
-        for (auto& z : v) z *= inv;
-        double rho = 0.0;
-        for (int it = 0; it < 12; ++it) {
-            h_->apply(v.data(), w.data(), n);
-            double n2 = 0.0;
-            for (std::uint64_t i = 0; i < n; ++i) n2 += std::norm(w[i]);
-            const double nw = std::sqrt(n2);
-            if (!(nw > 0.0)) break;  // v in the kernel: rho stays put
-            rho = nw;  // ||H v||, v unit: converges to |lambda|_max
-            inv = 1.0 / nw;
-            for (std::uint64_t i = 0; i < n; ++i) v[i] = w[i] * inv;
-        }
-        // Above the band by at least H's bound s_H >= ||H|| (relative: s H keeps its ghost s times
-        // over); 1 for an H that vanishes on the block.
-        const double g = 2.0 * rho + h_->norm_bound();
-        return g > 0.0 ? g : 1.0;
-    }
-
-    std::shared_ptr<const ed::LinearOperator> h_;
-    std::shared_ptr<const LowdinS2Projector> projector_;
-    int freq_;
-    double ghost_shift_ = 1.0;
-    mutable std::uint64_t apply_count_ = 0;
 };
 
 }  // namespace ed::symmetry

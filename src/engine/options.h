@@ -13,26 +13,18 @@
 //
 //   1. Solve only the star representative k0; every member contributes the
 //      same spectrum (multiplicity |star|).
-//   2. The little co-group P_k0 = {p : p·k0 = k0} acts WITHIN the k0
-//      sector. On the matrix-free rep basis {|ψ^{k0}_i⟩} its action is a
-//      MONOMIAL matrix M_p (index permutation + unit phase): with
-//      U_p|r_i⟩ = U_b|r_j⟩ for b ∈ A,
+//   2. The little co-group P_k0 = {p : p.k0 = k0} with A gives the little group
+//      G_k0 = A . P_k0 (x the flip): its multiplication table p_e p_f = a_ef p_g and factor
+//      system omega(e, f) = chi_k0(a_ef) give the (ordinary or projective) irreps of P_k0,
+//      D(a p_e) = chi_k0(a) D(e).
+//   3. Block = the group sector of each irrep sigma of G_k0 (group_sector.cpp, rep_sector.h):
+//      C(N, n_up) / |G| representatives (partner-0 states for d_sigma > 1), the matrix-free
+//      rep-kernel matvec or its reduced CSR -- memory linear in the representatives, never O(2^N). Eigenvalues
+//      carry multiplicity |star| x d_sigma. A trivial co-group solves the plain k0 sector.
 //
-//        U_p |ψ^{k0}_i⟩ = χ_{k0}(b) · |ψ^{k0}_j⟩.
-//
-//   3. The abstract little co-group (elements close modulo A; the factor
-//      system ω(p,q) = χ_{k0}(a_{pq}) must be trivial -- checked) is
-//      decomposed with `decompose_irreps_tables`; per irrep σ a sparse
-//      isotypic basis W_σ over the k0 REP INDICES (SVD per index-orbit).
-//   4. Block = W_σ† H_{k0} W_σ with H_{k0} the MATRIX-FREE rep-kernel
-//      matvec -- memory O(#reps(k0)), never O(2^N). Eigenvalues carry
-//      multiplicity |star| × d_σ.
-//
-// Robustness contract: a residue that does not normalise A is refused
-// (ed::InvalidRequest); every other reduction step degrades GRACEFULLY. A
-// nontrivial (projective) factor system or a monomial action that fails the
-// numerical [M_p, H] = 0 check falls back to solving the plain k0 block
-// (correct, merely less reduced; LittleGroupStarInfo::declined says why).
+// Robustness contract: a residue that does not normalise A, or does not commute with H, is
+// refused (ed::InvalidRequest); the group sectors must tile the momentum sector (Burnside), or
+// the build throws.
 // =============================================================================
 
 #include <ed/ops/operator.h>
@@ -76,7 +68,7 @@ struct LittleGroupOptions {
     /// star.
     std::vector<int> only_k0;
     /// Solve ONLY these little-co-group irreps (indices into the star's own
-    /// isotypic decomposition -- the same index ``LittleGroupBlockTag::irrep``
+    /// irrep decomposition -- the same index ``LittleGroupBlockTag::irrep``
     /// reports, and the row index of ``LittleGroupStarInfo::little_characters``).
     /// Empty = every irrep, the default.
     ///
@@ -98,13 +90,6 @@ struct LittleGroupOptions {
     /// decision: a star whose wanted irreps are all one-dimensional takes the group-sector
     /// path even when the co-group also has larger irreps.
     std::vector<CharConstraint> only_irrep_chars;
-    /// The group-sector path also takes irreps of dimension > 1 and little co-groups whose factor
-    /// system is not trivial (coboundaries and projective ones), building group sectors of any
-    /// dimension (rep_sector.h) instead of handing them to the isotypic W path. For the verbs whose
-    /// consumers read such sectors through their operators only (eigenvalues, spectra, thermal);
-    /// vectors, expectation values, dynamics and multiplets keep the W path until they read d > 1
-    /// sectors too (P6.3 step 6).
-    bool group_irreps_d = false;
 };
 
 /// One star's diagnostics.
@@ -142,19 +127,11 @@ struct LittleGroupStarInfo {
     //                             parallel to `LittleGroupBlockTag::irrep`.
     //   little_irrep_dims[s]   -- d_sigma. Sum of d_sigma^2 == little_order.
     //
-    // Empty when the star was not projected (trivial co-group, or a graceful
-    // per-star fallback): there is no table to report.
+    // Empty for a trivial co-group (its plain block): there is no table to report.
     // -----------------------------------------------------------------------
     std::vector<int> little_elems;
     std::vector<std::vector<std::complex<double>>> little_characters;
     std::vector<int> little_irrep_dims;
-    /// Residues missing from little_elems because they act on this k-sector as a fixed multiple
-    /// of a listed element (M_p = c M_e; element 0, the identity: a scalar). Each is (residue
-    /// index, element e, c), and chi_sigma(residue) = c chi_sigma(element e).
-    std::vector<std::tuple<int, int, std::complex<double>>> little_aliases;
-    /// Why a NON-TRIVIAL little co-group could not be projected; empty when it was, or when the
-    /// co-group is trivial. A declined star has one plain block that mixes irreps.
-    std::string declined;
     /// chi_k0(a) over the RAW abelian group (the caller's order) for the representative.
     std::vector<std::complex<double>> momentum;
 };

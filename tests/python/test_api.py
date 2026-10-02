@@ -149,7 +149,7 @@ def test_tower_sampling_pairs_blocks_by_their_labels():
 
 @pytest.mark.parametrize("spatial", [None, "ring"])
 def test_exact_paths_hold_the_whole_tower(spatial):
-    # spectrum and exact thermal keep the levels below the tower operator's ghost; together they
+    # spectrum and exact thermal keep the S^2 eigenvectors of the tower; together they
     # must be the whole tower (audit C07-su2-05), as the sampled path already checks.
     n, S = 8, 1
     H = _ring(n)

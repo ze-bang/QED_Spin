@@ -82,7 +82,7 @@ using Perm    = std::vector<int>;
 
 /// Where the blocks run (ed::Device, include/ed/core/device.h). place() (select_backend.h)
 /// decides each block: Cpu never touches CUDA; Gpu runs every Krylov solve on the device or
-/// raises naming the block (isotypic W blocks, OFTLM, blocks without a device kernel); blocks
+/// raises naming the block (OFTLM, blocks without a device kernel); blocks
 /// the verb solves densely stay on the host under every device; Auto uses the device above the
 /// task's floor in the 'auto' table (auto_row). Results count where the solves ran.
 using Device = ed::Device;
@@ -161,11 +161,6 @@ struct EigsOptions {
     /// a block that could hold one. Each block still contributes only its quota of rows, so
     /// this finds the partners of a level in OTHER blocks (e.g. a degenerate ground state).
     double window       = 0.0;
-    /// The levels of an irrep of dimension > 1 (and of a projective factor system) are solved in
-    /// group sectors of that dimension; false keeps them in isotypic blocks of the momentum sector,
-    /// for a consumer whose operators read one-dimensional sectors only (dynamics, until its
-    /// cross-sector rows take d > 1).
-    bool group_irreps_d = true;
 };
 
 /// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host, one
@@ -221,7 +216,7 @@ struct BlockVector {
 struct BlockStats {
     int           k0 = 0, irrep = -1, flip_parity = -1, n_up = -1;
     std::uint64_t dim = 0;
-    std::string   kind;              ///< "group" (full little group), "isotypic" (W), "plain" (k-sector)
+    std::string   kind;              ///< "group" (full little group), "plain" (k-sector of a trivial co-group)
     /// How H was applied: "dense" (materialised), "csr" (reduced CSR), "walk" (CSR-free gather),
     /// "gpu-gather" (device kernel on host vectors), "device" (the whole solve on the device lane).
     std::string   lane;

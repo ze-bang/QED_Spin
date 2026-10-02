@@ -6,7 +6,7 @@
 // consumer is the ed::sectors dense batch (DenseBatch, walk.h).
 //
 // Design (minimal host<->device traffic): the host builds every dense block
-// (irregular orbit/isotypic work), ONE cudaMemcpy uploads all packed blocks,
+// (irregular orbit work), ONE cudaMemcpy uploads all packed blocks,
 // an 8-stream cusolverDnZheevd pool overlaps the per-block eigensolves
 // (the tiny-block batching mechanism), and ONE cudaMemcpy downloads the
 // concatenated eigenvalue array. Two transfers total, any block count.

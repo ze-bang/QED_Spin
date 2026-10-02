@@ -23,7 +23,6 @@ set(ED_ENGINE_SOURCES
     src/engine/dynamics.cpp
     src/engine/expect.cpp
     src/engine/validate.cpp
-    src/engine/blocks.cpp
     src/engine/group_sector.cpp
     src/engine/ground_state.cpp
     src/engine/tower.cpp

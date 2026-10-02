@@ -56,7 +56,7 @@ STATUSES = ("pass", "wrong", "crash", "refused", "timeout", "invalid_ok", "inval
             "harness_error", "skip")
 OK_STATUSES = ("pass", "invalid_ok", "skip")
 # A device refusal of a block kind that has no device kernel yet (classify): documented, a pass.
-DOCUMENTED_NO_KERNEL = re.compile(r"(is an isotypic \(W\) block|is a sector of an irrep of dimension > 1), which has no device kernel")
+DOCUMENTED_NO_KERNEL = re.compile(r"is a sector of an irrep of dimension > 1, which has no device kernel")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # =============================================================================
@@ -1091,7 +1091,7 @@ def classify(exc, qed):
         if isinstance(exc, errs.ConvergenceError):
             return "crash", msg, extra
         # device='gpu' is strict: a block kind without a device kernel -- a sector of an irrep of
-        # dimension > 1, or an isotypic (W) block -- is refused, naming it (device kernels for
+        # dimension > 1 -- is refused, naming it (device kernels for
         # them: plan P7.5, ledger K2-task-backend-01). That documented refusal passes.
         if isinstance(exc, errs.DeviceUnsupported) and DOCUMENTED_NO_KERNEL.search(str(exc)):
             return "pass", "documented refusal: " + msg, extra

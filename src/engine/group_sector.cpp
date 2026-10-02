@@ -1,7 +1,7 @@
-// Group-sector fast path: a symmetric basis under the FULL little group of a block (translations x little co-group
-// x {1, flip}) in a 1-dim representation, so the block dimension is C(N, n_up) / |G| instead of the whole k-sector.
-// Assembled from the engine's existing pieces (orbit table, closed-form norms, rep-sector matvec + reduced CSR);
-// build_star_blocks (stars.cpp, try_group_path) makes this the engine default for one-dimensional irreps.
+// Group sectors: a symmetric basis under the FULL little group of a block (translations x little co-group
+// x {1, flip}) in an irrep of dimension d, so the block dimension is about d C(N, n_up) / |G| instead of the whole
+// k-sector. Assembled from the engine's existing pieces (orbit table, closed-form norms, rep-sector matvec + reduced
+// CSR); build_star_blocks (stars.cpp, build_group_blocks) uses it for every irrep of a nontrivial little co-group.
 #include "internal.h"
 
 #include <ed/basis/orbit_table.h>

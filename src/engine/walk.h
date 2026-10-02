@@ -33,13 +33,9 @@ inline std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
     return {id};
 }
 
-/// The walk options of one subspace. `group_irreps_d`: irreps of dimension > 1 and projective factor
-/// systems take the group-sector path too (options.h; the verbs that read blocks through their
-/// operators only).
-inline ed::solvers::LittleGroupOptions
-engine_options(const Spec& s, const Subspace& sub, bool group_irreps_d = false) {
+/// The walk options of one subspace.
+inline ed::solvers::LittleGroupOptions engine_options(const Spec& s, const Subspace& sub) {
     ed::solvers::LittleGroupOptions o;
-    o.group_irreps_d = group_irreps_d;
     o.n_up          = sub.n_up;
     o.sz_parity     = sub.sz_parity;
     // subspaces() already enforced 'require' against H. Inside a subspace the engine engages
@@ -54,22 +50,16 @@ engine_options(const Spec& s, const Subspace& sub, bool group_irreps_d = false) 
     return o;
 }
 
-/// The operator one block is solved with. With a total-spin restriction it is either the bare H with
-/// the block's `tower` (the eigs lanes, block_operator's `tower_lanes`; internal.h, Tower), or the
-/// block's H wrapped in the Lowdin projector onto the spin-S tower (S^2 built on the same basis):
-/// H on the tower and `ghost` on the rest, which callers drop. `multiplicity` includes the
-/// 2S + 1 members of each multiplet. A null `op` means the block holds no
+/// The operator one block is solved with: its H, and with a total-spin restriction the block's spin-S
+/// `tower` (internal.h, Tower: the lanes run the bare H from starts inside it and certify what they
+/// return) with the Lowdin `projector` onto it for the sampled lanes' Gaussian starts.
+/// `multiplicity` includes the 2S + 1 members of each multiplet. A null `op` means the block holds no
 /// state of the requested spin.
 struct BlockOp {
     std::shared_ptr<const ed::LinearOperator> op;
-    std::shared_ptr<const ed::solvers::lg_detail::Tower> tower;   ///< the eigs lanes' spin-S tower (SU(2) only)
-    double        ghost        = std::numeric_limits<double>::infinity();
+    std::shared_ptr<const ed::solvers::lg_detail::Tower> tower;   ///< the spin-S tower (SU(2) only)
     std::uint64_t multiplicity = 1;
     std::shared_ptr<const ed::symmetry::LowdinS2Projector> projector;   ///< onto the tower (SU(2) only)
-    [[nodiscard]] bool is_ghost(double e) const {
-        // scale-free: relative to the ghost level, which lies at least s_H above the band
-        return std::isfinite(ghost) && e > ghost - 1e-6 * std::abs(ghost);
-    }
 };
 
 /// The block budget of a block's reduced CSRs (csr_policy.h): block_csr_budget_bytes less the
@@ -83,21 +73,15 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const std::shared_ptr<ed::solvers::BlockData>& bi,
                               const std::shared_ptr<::Operator>& s2_carrier,
                               Device device = Device::Cpu,
-                              const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr,
-                              bool tower_lanes = false) {
+                              const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
     b.op = std::shared_ptr<const ed::LinearOperator>(bi, &block_mv(*bi));
     b.multiplicity = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
-    // H's reduced CSR first, then S^2's, from the block's budget (a W block's H is the star's
-    // k-sector operator).
-    if (budget) {
-        if (bi->gop) bi->gop->set_csr_budget(budget);
-        else if (sb.hk) sb.hk->set_csr_budget(budget);
-    }
-    // Group and momentum sectors have a device kernel; the isotypic sandwich does not.
-    RepSectorMatVec* rep = bi->gop ? bi->gop.get() : (bi->W ? nullptr : sb.hk.get());
-    const bool dev = rep && device != Device::Cpu;
+    // H's reduced CSR first, then S^2's, from the block's budget.
+    RepSectorMatVec* rep = bi->gop ? bi->gop.get() : sb.hk.get();
+    if (budget) rep->set_csr_budget(budget);
+    const bool dev = device != Device::Cpu;
     if (s.two_S < 0) {
         if (dev) rep->enable_device(true);   // its device kernel: op->has_device_kernel()
         return b;
@@ -108,54 +92,38 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         b.op.reset();                   // this flip-parity block holds no spin-S state
         return b;
     }
+    // The block's spin-S states, by Burnside.
+    const std::shared_ptr<const ed::symmetry::RepSectorData> sec = bi->gop ? bi->gsec : sb.hk->rep_data_ptr();
+    auto t = std::make_shared<Tower>();
+    t->sector = sec;
+    t->two_S  = s.two_S;
+    t->towers = towers;
+    t->dim    = tower_dimension(*sec, s.two_S);
+    if (t->dim == 0) {
+        b.op.reset();
+        return b;
+    }
     // S^2 on the block. On the host S- S+ + Sz(Sz + 1) through the sector one up spin higher (P6.5):
     // ~N entries a row against ~N^2/4 for the S^2 carrier; a spin-flip sector (n_up + 1 is not its own
     // flip image) through the sector without the flip (FlipLadderS2). The carrier stays for the device
-    // lane (its kernel) and for a flip sector of an irrep of dimension > 1.
-    const std::shared_ptr<const ed::symmetry::RepSectorData> sec =
-        bi->gop ? bi->gsec : (bi->W ? nullptr : sb.hk->rep_data_ptr());
-    std::shared_ptr<const ed::LinearOperator> s2;
-    std::shared_ptr<RepSectorMatVec> s2rep;
-    if (sec && !dev && sub.n_up >= 0 && !sec->has_flips()) {
-        s2 = std::make_shared<LadderS2>(sec);
-    } else if (sec && !dev && FlipLadderS2::fits(*sec)) {
-        s2 = std::make_shared<FlipLadderS2>(sec);   // through the sector without the flip
-    } else if (sec) {
-        s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, sec);
-        s2rep->set_csr_budget(budget);
+    // lane (its kernel: the penalty of the fallback solve runs there) and for a flip sector of an irrep
+    // of dimension > 1; certifying a level or two walks it, a second apply builds its CSR.
+    if (!dev && sub.n_up >= 0 && !sec->has_flips()) {
+        t->s2 = std::make_shared<LadderS2>(sec);
+    } else if (!dev && FlipLadderS2::fits(*sec)) {
+        t->s2 = std::make_shared<FlipLadderS2>(sec);
     } else {
-        auto s2k = std::make_shared<RepSectorMatVec>(*s2_carrier, sb.hk->rep_data_ptr());
-        s2k->set_csr_budget(budget);
-        s2 = std::make_shared<ProjectedBlockOp>(s2k, bi->W);
+        auto s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, sec);
+        s2rep->set_csr_budget(budget);
+        s2rep->defer_csr(1);
+        if (dev) s2rep->enable_device(true);
+        t->s2 = s2rep;
     }
-    if (dev && s2rep) {                 // H and S^2 on the device
-        rep->enable_device(true);
-        s2rep->enable_device(true);
-    }
+    if (dev) rep->enable_device(true);
     b.multiplicity *= static_cast<std::uint64_t>(sub.members);
-    if (tower_lanes && sec) {
-        // The lanes on the bare H (Tower), with the block's spin-S dimension by Burnside.
-        auto t = std::make_shared<Tower>();
-        t->sector = sec;
-        t->s2     = s2;
-        t->two_S  = s.two_S;
-        t->towers = towers;
-        t->dim    = tower_dimension(*sec, s.two_S);
-        if (t->dim == 0) {
-            b.op.reset();
-            return b;
-        }
-        if (s2rep) s2rep->defer_csr(1);   // certifying one level walks; a second apply builds the CSR
-        // The sampled lanes start from P_S of a Gaussian (isotropic in the tower: an unbiased trace).
-        b.projector = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
-        b.tower = std::move(t);
-        return b;
-    }
-    auto proj = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
-    auto wrapped = std::make_shared<ed::symmetry::CasimirProjectedOperator>(b.op, proj, 1);
-    b.ghost = wrapped->ghost_shift();
-    b.projector = proj;
-    b.op = wrapped;
+    // The sampled lanes start from P_S of a Gaussian (isotropic in the tower: an unbiased trace).
+    b.projector = std::make_shared<ed::symmetry::LowdinS2Projector>(t->s2, s.two_S, towers);
+    b.tower = std::move(t);
     return b;
 }
 
@@ -457,14 +425,13 @@ block_observable(const std::shared_ptr<const ed::ops::MaskedProgram>& A, const e
     using namespace ed::solvers::lg_detail;
     auto rep = std::make_shared<RepSectorMatVec>(A, bi->gop ? bi->gsec : sb.hk->rep_data_ptr());
     rep->set_csr_budget(budget);
-    if (bi->W) return std::make_shared<ProjectedBlockOp>(rep, bi->W);
     if (device) rep->enable_device(true);
     return rep;
 }
 
-/// The co-group character table of block `irrep` of a star, as (elements, characters): a projected
-/// block's row; for a plain block of a trivial co-group the trivial irrep (the identity, character 1);
-/// for a declined non-trivial co-group, whose plain block mixes irreps, none (false).
+/// The co-group character table of block `irrep` of a star, as (elements, characters): a group
+/// sector's row; for the plain block of a trivial co-group the trivial irrep (the identity, character
+/// 1); none (false) for an irrep index the star does not have.
 inline bool irrep_table(const ed::solvers::LittleGroupStarInfo& info, int irrep,
                         const std::vector<int>*& elems, const std::vector<Complex>*& chars) {
     using namespace ed::solvers::lg_detail;
@@ -474,23 +441,22 @@ inline bool irrep_table(const ed::solvers::LittleGroupStarInfo& info, int irrep,
         chars = &info.little_characters[static_cast<std::size_t>(irrep)];
         return true;
     }
-    if (!info.declined.empty()) return false;
     elems = &trivial_elems();
     chars = &trivial_chars();
     return true;
 }
 
-/// chi_sigma(residue i) of block `irrep` of a star (-1: the identity), aliases included; nullopt when
+/// chi_sigma(residue i) of block `irrep` of a star (-1: the identity); nullopt when
 /// i is not in its group or the block has no character table.
 inline std::optional<Complex> irrep_char(const ed::solvers::LittleGroupStarInfo& info, int irrep, int i) {
     const std::vector<int>* elems = nullptr;
     const std::vector<Complex>* chars = nullptr;
     if (!irrep_table(info, irrep, elems, chars)) return std::nullopt;
-    return ed::solvers::lg_detail::co_group_char(*elems, *chars, info.little_aliases, i);
+    return ed::solvers::lg_detail::co_group_char(*elems, *chars, i);
 }
 
-/// The physical labels (momentum, co-group irrep characters) of a level of star `sb`: every listed
-/// co-group element, then the aliased residues.
+/// The physical labels (momentum, co-group irrep characters) of a level of star `sb`: every
+/// co-group element.
 inline void label(Level& L, const ed::solvers::lg_detail::StarBuild& sb) {
     const auto& info = sb.info;
     L.momentum = info.momentum;
@@ -499,8 +465,6 @@ inline void label(Level& L, const ed::solvers::lg_detail::StarBuild& sb) {
     const std::vector<Complex>* chars = nullptr;
     if (!irrep_table(info, L.tag.irrep, elems, chars)) return;
     for (std::size_t e = 0; e < elems->size(); ++e) L.irrep_characters.emplace_back((*elems)[e], (*chars)[e]);
-    for (const auto& [r, e, c] : info.little_aliases)
-        L.irrep_characters.emplace_back(r, c * (*chars)[static_cast<std::size_t>(e)]);
 }
 
 inline bool has_selection(const Spec& s) {
@@ -536,8 +500,7 @@ inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
 }
 
 /// Why a block has no device kernel, for place()'s refusal.
-inline const char* no_kernel_reason(bool w_block, int irrep_dim) {
-    if (w_block) return "is an isotypic (W) block, which has no device kernel";
+inline const char* no_kernel_reason(int irrep_dim) {
     if (irrep_dim > 1) return "is a sector of an irrep of dimension > 1, which has no device kernel";
     return "has no device kernel";
 }
@@ -602,8 +565,7 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
         if (!hit) continue;
         ed::core::poll_interrupt();
         const auto t_build = std::chrono::steady_clock::now();
-        StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt, false,
-                                         nullptr, nullptr, nullptr);
+        StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt);
         if (tr_on && members.size() > residue_star.at(k0))
             for (auto& bi : sb.blocks) bi->tag.tr_folded = true;
         sb.t_build = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_build).count();

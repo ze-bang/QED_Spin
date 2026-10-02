@@ -29,15 +29,16 @@ reversal, and an optional total spin. The engine then decomposes H in three stag
 2. **Stars** (`detail::walk`): the momenta, grouped into orbits of the point group. One
    star is resident at a time.
 3. **Blocks** (`build_star_blocks`): the irreps of the star's little co-group.
-   - One-dimensional irreps use the **group-sector path**: the representative basis of the
-     full little group, which has C(N, n_up)/|G_k| states. The momentum sector is never
-     built; its size, needed to check that the irreps tile it, comes from Burnside's count.
-   - Higher-dimensional irreps use the isotypic projection `W` of the momentum sector.
+   - Every irrep uses the **group-sector path**: the representative basis of the full little
+     group, about C(N, n_up)/|G_k| states per row of a d-dimensional irrep, with the states
+     |r; j> = P^σ_{0j}|r>. The momentum sector is never built; its size, needed to check that
+     the irreps tile it, comes from Burnside's count. A trivial co-group is the plain
+     momentum sector.
    - Time reversal folds σ and σ* into one block with doubled multiplicity.
 
-`block_operator()` returns the block's operator. A total-spin restriction wraps it in
-`CasimirProjectedOperator`: the Löwdin projector onto the tower, applied every step, with
-the off-tower spectrum sent to a ghost value.
+`block_operator()` returns the block's operator. A total-spin restriction keeps the bare H:
+Krylov starts from valence-bond states of spin S, every converged level is certified against
+S², and a penalty H + μ f(S²) is the fallback when certification fails (`src/engine/tower.cpp`).
 
 Every level carries its block's labels: `n_up`, flip parity, `k0` and `irrep` (the engine's
 indices), `momentum` (the characters χ_k(a) over the abelian group) and `irrep_characters`
