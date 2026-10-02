@@ -123,6 +123,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
         };
         energy(0);
         for (std::size_t k = 1; k <= opts.max_iter; ++k) {
+            ed::core::poll_interrupt();
             be.axpby(Complex(L, 0.0), psi.get(), Complex(-1.0, 0.0), hpsi.get(), local_n);
             std::swap(psi, hpsi);
             const double nrm = be.nrm2(psi.get(), local_n);

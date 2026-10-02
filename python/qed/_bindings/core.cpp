@@ -22,6 +22,7 @@
 #include <ed/core/config.h>
 #include <ed/ops/construct_ham.h>
 #include <ed/core/errors.h>
+#include <ed/core/interrupt.h>
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
 #include <ed/ops/algebra.h>
@@ -260,6 +261,12 @@ PYBIND11_MODULE(_core, m) {
     // ed:: error types -> qed.errors (python/qed/errors.py). Anything else falls through
     // to pybind11's standard translation.
     py::register_exception_translator(&translate_ed_errors);
+    // Ctrl-C: the engine polls this between blocks and at every Krylov step (on this thread,
+    // outside parallel regions); a pending signal surfaces as KeyboardInterrupt.
+    ed::core::set_interrupt_check([] {
+        py::gil_scoped_acquire gil;
+        if (PyErr_CheckSignals() != 0) throw py::error_already_set();
+    });
 
     m.doc() =
         "qed._core: pybind11 binding for the C++ exact-diagonalization "

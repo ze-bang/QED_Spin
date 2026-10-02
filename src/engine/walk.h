@@ -8,6 +8,7 @@
 #include "internal.h"
 
 #include <ed/sectors/sectors.h>
+#include <ed/core/interrupt.h>
 #include <ed/ops/casimir.h>
 #include <ed/ops/casimir_projector.h>
 
@@ -358,6 +359,7 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
             });
         });
         if (!hit) continue;
+        ed::core::poll_interrupt();
         const auto t_build = std::chrono::steady_clock::now();
         StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt, false,
                                          nullptr, nullptr, nullptr);

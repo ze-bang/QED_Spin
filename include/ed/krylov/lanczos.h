@@ -44,6 +44,7 @@
 // =============================================================================
 
 #include <ed/core/config.h>
+#include <ed/core/interrupt.h>
 #include <ed/core/log.h>
 #include <algorithm>
 #include <chrono>     // ED_LANCZOS_KERNEL_PROFILE wallclock timers
@@ -352,6 +353,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     const std::size_t cap = std::min<std::size_t>(opts.max_iter, local_n);
 
     for (std::size_t j = 0; j < cap; ++j) {
+        ed::core::poll_interrupt();   // Ctrl-C from Python (a no-op elsewhere)
         const double t0 = profile_on ? now_us() : 0.0;
         // w = H * v_curr (matvec is opaque to this kernel --- it may
         // be a host term-matvec, a cuBLAS-backed SpMV, etc.)
