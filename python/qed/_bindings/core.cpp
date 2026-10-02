@@ -239,6 +239,9 @@ void translate_ed_errors(std::exception_ptr p) {
         set_qed_error("ResourceLimit", e.what(), PyExc_MemoryError);
     } catch (const ed::ConvergenceError& e) {
         set_qed_error("ConvergenceError", e.what(), PyExc_RuntimeError);
+    } catch (const std::invalid_argument& e) {
+        // Every refusal of a request, whichever layer raised it: an InvalidRequest (a ValueError).
+        set_qed_error("InvalidRequest", e.what(), PyExc_ValueError);
     }
 }
 
@@ -259,8 +262,8 @@ int cuda_device_count() {
 } // namespace
 
 PYBIND11_MODULE(_core, m) {
-    // ed:: error types -> qed.errors (python/qed/errors.py). Anything else falls through
-    // to pybind11's standard translation.
+    // ed:: error types -> qed.errors (python/qed/errors.py), and std::invalid_argument ->
+    // InvalidRequest. Anything else falls through to pybind11's standard translation.
     py::register_exception_translator(&translate_ed_errors);
     // Ctrl-C: the engine polls this between blocks and at every Krylov step (on this thread,
     // outside parallel regions); a pending signal surfaces as KeyboardInterrupt.

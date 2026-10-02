@@ -68,7 +68,7 @@ resolve_tr_engagement(const ed::ops::MaskedOperator& h,
     if (opt.time_reversal == 0) return false;
     const bool h_real = ed::ops::conjugation_invariant(h);
     if (opt.time_reversal == 1 && !h_real)
-        throw std::runtime_error(
+        throw ed::InvalidRequest(
             "little_group: time_reversal='require' but the Hamiltonian has "
             "complex coefficients (no antiunitary K with [H, K] = 0 in the "
             "computational basis).");

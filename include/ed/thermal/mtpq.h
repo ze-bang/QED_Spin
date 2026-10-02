@@ -27,6 +27,7 @@
 #include <ed/matvec/backend.h>
 #include <ed/matvec/batcher.h>
 #include <ed/thermal/sample_seed.h>
+#include <ed/core/numerics.h>
 #include <ed/thermal/tpq_thermo.h>
 
 namespace ed::thermal {
@@ -176,6 +177,7 @@ struct MtpqRun {
     std::function<void(Complex*, std::size_t)> seed_transform;
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
     std::size_t   batch_width = 8;                     ///< device: samples in lockstep at most
+    double        scale = 0.0;   ///< s_H (LinearOperator::norm_bound()), floors the shift margin; 0: unknown
 };
 
 /// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
@@ -223,8 +225,10 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     }
     // L just above the spectrum. The margin covers the Lanczos estimate of E_max, a lower bound on it.
     const double W = e_max_est - e_min_est;
+    // Relative throughout (s * H alike); s_H floors it, so a block of zero width at E = 0 still
+    // gets a margin (DBL_MIN made (L - H) psi underflow to zero).
     const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(std::abs(e_max_est), W),
-                                           std::numeric_limits<double>::min()});   // relative: s * H alike
+                                           1e-6 * ed::numerics::scale_or_one(run.scale)});
     kopts.large_value = L;
 
     constexpr std::size_t MTPQ_HARD_CAP = 200000;

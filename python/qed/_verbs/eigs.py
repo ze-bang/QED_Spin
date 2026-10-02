@@ -54,11 +54,11 @@ class EigResult(Labelled):
         ascending integer order); only the levels with a component there contribute.
         """
         if not any(l.vector >= 0 for l in self.levels):
-            raise ValueError("no vectors: call qed.eigs(..., vectors=True)")
+            raise InvalidRequest("no vectors: call qed.eigs(..., vectors=True)")
         if basis not in ("full", "sz"):
-            raise ValueError("basis must be 'full' or 'sz'")
+            raise InvalidRequest("basis must be 'full' or 'sz'")
         if basis == "sz" and n_up is None:
-            raise ValueError("basis='sz' needs n_up")
+            raise InvalidRequest("basis='sz' needs n_up")
         want = -1 if basis == "full" else int(n_up)
         out = []
         for i, lvl in enumerate(self.levels):
@@ -139,10 +139,10 @@ def load_eigs(path) -> "EigResult":
         d = {key: f[key] for key in f.files}
     version = int(d.get("format_version", 0))
     if version == 1:
-        raise ValueError(f"{path}: an EigResult file of format 1, written when a set bit meant spin down "
+        raise InvalidRequest(f"{path}: an EigResult file of format 1, written when a set bit meant spin down "
                          "(qed < 0.6); its states and n_up labels mean the opposite now -- recompute it")
     if version != 2:
-        raise ValueError(f"{path}: not an EigResult file (format_version 2)")
+        raise InvalidRequest(f"{path}: not an EigResult file (format_version 2)")
     raw, spec = _core.sectors.eigs_from_arrays(d)
     return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
                      symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),

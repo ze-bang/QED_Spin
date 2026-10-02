@@ -1149,8 +1149,65 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
                        (perms, np.full_like(base[perms], 100000))):
         damaged = dict(base, **{key: value})
         np.savez(tmp_path / "bad.npz", **damaged)
-        with pytest.raises(ValueError):
+        with pytest.raises(E):
             qed.load_eigs(tmp_path / "bad.npz").vectors()
+
+
+def test_every_refusal_is_a_qed_error():
+    # The fuzzer (P4.3) found refusals that surfaced as builtin ValueError / RuntimeError: those
+    # the engine raised as std::invalid_argument, and time_reversal='require' as runtime_error.
+    E = qed.errors.InvalidRequest
+    n = 6
+    H = _ring(n)
+    field_x = qed.Operator(n)
+    for i in range(n):
+        field_x.add_one_body(qed.OP_SPLUS, i, 0.1)
+        field_x.add_one_body(qed.OP_SMINUS, i, 0.1)
+    flux = qed.Operator(n)
+    for i in range(n):
+        flux.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5j)
+        flux.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, -0.5j)
+    for H_, sym in ((H + field_x, qed.Symmetry(spatial=None, sz=3)),            # no U(1)
+                    (H + field_x, qed.Symmetry(spatial=None, sz="even")),        # no Sz parity
+                    (H + field_x, qed.Symmetry(spatial=None, total_spin=0)),     # no SU(2)
+                    (H, qed.Symmetry(spatial=None, sz=2, total_spin=0)),         # disagree
+                    (H + flux, qed.Symmetry(spatial=None, time_reversal="require"))):
+        with pytest.raises(E):
+            qed.eigs(H_, 1, sym=sym)
+    with pytest.raises(E):
+        qed.eigs(H, 1).vectors()                                                 # no vectors kept
+
+
+def test_a_coefficient_that_is_not_finite_is_refused():
+    # A NaN coupling was accepted: is_hermitian() said True and eigs returned finite, wrong
+    # levels (the fuzzer, P4.3).
+    n = 4
+    for bad in (float("nan"), float("inf")):
+        H = _ring(n)
+        H.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, bad)
+        assert not H.is_hermitian()
+        for call in (lambda: qed.eigs(H, 2), lambda: qed.spectrum(H),
+                     lambda: qed.thermal(H, [1.0], method="exact")):
+            with pytest.raises(qed.errors.InvalidRequest, match="not finite"):
+                call()
+        O = qed.Operator(n)
+        O.add_one_body(qed.OP_SZ, 0, bad)
+        with pytest.raises(qed.errors.InvalidRequest, match="not finite"):
+            qed.expect(_ring(n), [O], 1)
+
+
+def test_mtpq_on_a_block_of_zero_width():
+    # One state (or a flat block) at E = 0: the shift margin had no scale but DBL_MIN, and
+    # (L - H) psi underflowed to zero (ConvergenceError; the fuzzer, P4.3). It is floored by s_H.
+    n = 4
+    xx = qed.Operator(n)
+    for i in range(n):
+        xx.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5)
+        xx.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.5)
+    sym = qed.Symmetry(spatial=None, sz=0)                     # the all-down state alone, E = 0
+    r = qed.thermal(xx, [1.0, 2.0], method="mtpq", samples=2, seed=3, sym=sym, dense_max_dim=0)
+    np.testing.assert_allclose(r.E, [0.0, 0.0], atol=1e-12)
+    np.testing.assert_allclose(r.lnZ, [0.0, 0.0], atol=1e-12)
 
 
 @pytest.mark.parametrize("scale", [1e-13, 1e-6, 1e6])

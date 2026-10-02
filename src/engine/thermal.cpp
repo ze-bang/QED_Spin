@@ -161,6 +161,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 run.seed    = seed;
                 run.seed_transform = seed_transform;
                 run.batch_width    = w;
+                run.scale          = op.norm_bound();
                 if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
                 return ed::thermal::mtpq(be, H, n, beta, run);
             }

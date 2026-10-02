@@ -9,6 +9,7 @@
 // =============================================================================
 #pragma once
 
+#include <cmath>
 #include <ed/ops/algebra.h>
 
 #include <complex>
@@ -83,9 +84,10 @@ enum class SzKeep { All, Zero, Even };
     return invariant(H, H.image(MaskedOperator::Map::K), rtol);
 }
 
-/// H^dagger = H.
+/// H^dagger = H. A non-finite coefficient (NaN, inf) is never Hermitian: the tolerance test
+/// cannot compare it.
 [[nodiscard]] inline bool hermitian(const MaskedOperator& H, double rtol = kInvarianceRtol) {
-    return invariant(H, H.dagger(), rtol);
+    return std::isfinite(H.l1_norm()) && invariant(H, H.dagger(), rtol);
 }
 
 /// What H conserves of S^z: every term keeps the number of up spins (U1), changes it by

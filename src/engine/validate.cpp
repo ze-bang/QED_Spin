@@ -39,6 +39,8 @@ void validate_hamiltonian(const ::Operator& H, const char* verb) {
     validate_environment(verb);
     const auto n = H.getNumBits();
     if (n < 1 || n > 63) refuse(verb, "H acts on " + std::to_string(n) + " sites; 1..63 are supported");
+    if (!std::isfinite(H.canonical().l1_norm()))
+        refuse(verb, "H has a coefficient that is not finite (NaN or inf)");
     if (!ed::ops::hermitian(H.canonical()))
         refuse(verb, "H is not Hermitian (H - H^dagger exceeds 1e-10 of its largest coefficient); its "
                      "eigenvalues need not be real");
@@ -66,6 +68,8 @@ void validate_observable(const ::Operator* O, int n_sites, const char* verb, std
     if (static_cast<int>(O->getNumBits()) != n_sites)
         refuse(verb, "observable " + std::to_string(index) + " acts on " + std::to_string(O->getNumBits())
                      + " sites, H on " + std::to_string(n_sites));
+    if (!std::isfinite(O->canonical().l1_norm()))
+        refuse(verb, "observable " + std::to_string(index) + " has a coefficient that is not finite (NaN or inf)");
 }
 
 void validate_eigs_options(const EigsOptions& o) {
