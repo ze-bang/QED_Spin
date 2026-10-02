@@ -40,7 +40,7 @@ BLAS-shim locations can be set with `-DED_LAPACKE_ROOT=` and `-DED_BLAS_SHIM_DIR
 
 - **A task or a symmetry**: the sector drivers in `src/engine/` (`eigs.cpp`, `thermal.cpp`, `dynamics.cpp`, `expect.cpp`),
   the star walk and block operators in `walk.h`, and the Python verbs in
-  `python/qed/api/`. See [`docs/architecture.md`](docs/architecture.md).
+  `python/qed/_verbs/`. See [`docs/architecture.md`](docs/architecture.md).
 - **A kernel**: `include/ed/krylov/`, `include/ed/thermal/`, `include/ed/dynamics/`,
   written once against the backend interface (`include/ed/matvec/backend.h`).
 - **A device kernel**: `include/ed/gpu/term_kernels.cuh` and

@@ -414,7 +414,7 @@ void bind_sectors(py::module_& m) {
           "S(omega) = <O^dag delta(omega - H + E) O> over the momentum sectors of H.");
 
     s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"),
-          "A result as named arrays (qed.api EigResult.save).");
+          "A result as named arrays (EigResult.save).");
     s.def("eigs_from_arrays", &eigs_from_arrays, py::arg("arrays"),
           "(result, spec) from eigs_to_arrays output (qed.load_eigs); result.n_sites is restored.");
     s.def("eigs",

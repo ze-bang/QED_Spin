@@ -1,16 +1,16 @@
-"""Grid adapter: one function per task over qed.api. Each takes the model, the symmetry
+"""Grid adapter: one function per task over the verbs (qed._verbs). Each takes the model, the symmetry
 content, the device and the task knobs, and returns plain numpy data for the oracle.
 `Missing` means the API has no route for the cell."""
 from __future__ import annotations
 
 import numpy as np
 
-from qed.api import Symmetry
-from qed.api import dynamics as _dynamics
-from qed.api import eigs as _eigs
-from qed.api import expect as _expect
-from qed.api import spectrum as _spectrum
-from qed.api import thermal as _thermal
+from qed import Symmetry
+from qed import dynamics as _dynamics
+from qed import eigs as _eigs
+from qed import expect as _expect
+from qed import spectrum as _spectrum
+from qed import thermal as _thermal
 
 
 class Missing(Exception):

@@ -17,8 +17,8 @@ Symmetry
 .. autoclass:: qed.Symmetry
    :members: auto, none, select, groups, resolve
 
-.. autofunction:: qed.api.symmetry.momentum_of
-.. autofunction:: qed.api.symmetry.irrep_characters_of
+.. autofunction:: qed.symmetry.momentum_of
+.. autofunction:: qed.symmetry.irrep_characters_of
 
 Levels and vectors
 ------------------

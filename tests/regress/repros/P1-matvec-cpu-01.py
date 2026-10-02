@@ -41,7 +41,7 @@ def worker(cfg):
     t1, t2 = lat.momentum_generators()
     spec.only_momentum = [[(idx[tuple(t1)], 1 + 0j), (idx[tuple(t2)], 1 + 0j)]]
     spec.only_irrep = list(cfg["irreps"])
-    from qed.api import _device
+    from qed._verbs import _device
     t0 = time.perf_counter()
     raw = qed._core.sectors.eigs(H, spec, k=1, vectors=False, dense_max_dim=64,
                                  allow_partial=True, device=_device.resolve("cpu"), prune=False,

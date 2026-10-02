@@ -4,7 +4,7 @@ QED_Spin has one path from a Python call to the kernels. Each layer does one job
 is duplicated across tasks, symmetries or backends.
 
 ```
-python/qed/api        eigs · spectrum · thermal · dynamics · expect      (verbs)
+python/qed/_verbs     eigs · spectrum · thermal · dynamics · expect      (verbs)
         │             Symmetry.resolve(H) -> _core.sectors.Spec
         ▼
 ed::sectors           subspaces -> stars -> blocks; one driver per task   (src/engine/)

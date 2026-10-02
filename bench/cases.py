@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
 from grid.models import Model, chain, fourier, triangular  # noqa: E402
 
-from qed.api import Symmetry, dynamics, eigs, expect, spectrum, thermal  # noqa: E402
+from qed import Symmetry, dynamics, eigs, expect, spectrum, thermal  # noqa: E402
 
 import qed  # noqa: E402
 import bench_models as bm  # noqa: E402

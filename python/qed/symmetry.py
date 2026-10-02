@@ -27,6 +27,7 @@ from ._core.symmetry import (  # type: ignore[attr-defined]
 )
 from ._groups import split_nonabelian
 from ._perm import close_group
+from ._verbs.symmetry import irrep_characters_of, momentum_of
 
 __all__ = [
     "close_group",
@@ -39,4 +40,6 @@ __all__ = [
     "reflection_1d",
     "site_swap",
     "generate_group",
+    "momentum_of",
+    "irrep_characters_of",
 ]

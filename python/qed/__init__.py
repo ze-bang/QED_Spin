@@ -104,7 +104,7 @@ def _check_environment() -> None:
 
 _check_environment()
 
-from .api import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
+from ._verbs import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
                   ThermalResult, dynamics, eigs, expect, load_eigs, spectrum, thermal)
 
 __version__: Final[str] = "0.5.0"

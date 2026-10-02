@@ -92,7 +92,7 @@ pybind11 ≥ 2.10, NumPy. Automatic symmetry detection also needs `pynauty`. Sit
 ## Layout
 
 ```
-python/qed/        the package: verbs (qed/api), symmetry discovery, Hamiltonian builders
+python/qed/        the package: verbs (qed/_verbs), symmetry discovery, Hamiltonian builders
 include/ed/, src/  the engine: symmetry sectors, matvec kernels (CPU, CUDA), Krylov,
                    thermal and dynamics kernels, backends
 tests/             C++ unit tests and the golden suite (python/tests: API tests, the grid)

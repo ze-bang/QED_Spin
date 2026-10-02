@@ -50,6 +50,10 @@ Breaking changes so far:
   - the orbit-table disk cache (`ED_SYM_CACHE`, `ED_SYM_CACHE_DIR`, `<dir>/sym_v2/*.otab`):
     nothing used it, and concurrent writers could leave a torn table that a later run read
     back as wrong norms. Orbit tables are still shared within a process.
+- **`qed.api` is private** (`qed._verbs`): the verbs and their results were always exported
+  at the top level (`qed.eigs`, `qed.EigResult`, ...), which is where to import them from;
+  `momentum_of` and `irrep_characters_of` are `qed.symmetry.momentum_of` and
+  `qed.symmetry.irrep_characters_of`.
 - **`dense_max_dim` is the dense crossover, and an argument of `eigs`, `thermal` and
   `dynamics`.** Blocks up to that dimension are diagonalised densely. `eigs` used it only as a
   lower bound (the crossover was max(dense_max_dim, 1600) for k <= 10, 160 k above); it now

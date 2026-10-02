@@ -4,7 +4,7 @@
 //   * Operator: the spin-1/2 Hamiltonian / observable builder (terms,
 //     apply, and the term iterators symmetry discovery reads);
 //   * input (input.cpp): lattices and the Hamiltonian DSL;
-//   * sectors (sectors.cpp): the symmetry-sector verbs behind qed.api;
+//   * sectors (sectors.cpp): the symmetry-sector verbs behind qed._verbs;
 //   * dssf, symmetry: observable assembly and site-permutation helpers;
 //   * the environment registry (env_*) and build / device probes;
 //   * the log bridge (log_*) behind qed.set_log_level, and the translation of the
