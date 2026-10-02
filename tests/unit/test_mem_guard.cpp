@@ -79,3 +79,17 @@ TEST_CASE("footprint: the paths count the vectors the kernels hold", "[mem_guard
     s.dim = std::uint64_t{1} << 40;   // saturates instead of wrapping
     REQUIRE(ed::core::footprint(Path::DenseVectors, s).host > (std::uint64_t{1} << 63));
 }
+
+TEST_CASE("footprint: finite-temperature dynamics counts both sectors", "[mem_guard][footprint]") {
+    using ed::core::Path;
+    ed::core::Shape s;
+    s.dim = 1000;
+    s.dim_target = 3000;
+    s.krylov = 50;
+    const std::uint64_t Vs = 16 * 1000, Vt = 16 * 3000;
+    REQUIRE(ed::core::footprint(Path::DynamicsFtlm, s).host == 55 * Vs + 55 * Vt);
+    s.device = true;
+    s.width = 2;
+    REQUIRE(ed::core::footprint(Path::DynamicsFtlm, s).device == 2 * (54 * Vs + 55 * Vt + 50 * Vt));
+    REQUIRE(ed::core::footprint(Path::DynamicsFtlm, s).host == 2 * Vs);
+}

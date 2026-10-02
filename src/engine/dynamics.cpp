@@ -7,6 +7,8 @@
 #include "validate.h"
 #include "walk.h"
 
+#include <ed/core/footprint.h>
+#include <ed/core/memory.h>
 #include <ed/dynamics/cf.h>
 #include <ed/dynamics/ftlm_dynamics.h>
 #include <ed/parallel/numa.h>
@@ -15,7 +17,6 @@
 #include <ed/ops/casimir_projector.h>
 #include <ed/basis/su2_dims.h>
 #ifdef WITH_CUDA
-#include <cuda_runtime.h>                     // cudaMemGetInfo
 #include <ed/gpu/cuda_backend.cuh>
 #endif
 
@@ -250,6 +251,16 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
         return it->second;
     };
+    // One sector at a time, for the paths that need no cache: the momentum sectors of `sub` are
+    // built one by one and handed to `visit`, which keeps what it wants.
+    auto stream_sectors = [&](const Subspace& sub,
+                              const std::function<void(const std::shared_ptr<const ed::symmetry::RepSectorData>&)>& visit) {
+        ed::solvers::little_group_k_sectors_stream(
+            H, A, n_sites, sub.n_up, sub.sz_parity, [&](ed::symmetry::RepSectorData& rd) {
+                if (rd.reps.empty()) return;
+                visit(ed::solvers::share_rep_sector(std::move(rd)));
+            });
+    };
 
     if (d.temperatures.empty()) {
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
@@ -266,14 +277,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             states.push_back({v, L.tag.sz_parity});
             for (int m = 0; m < s.two_S; ++m) {
                 const BlockVector& x = states.back().first;
-                const auto& ts = sectors_of({x.basis->n_up - 1, -1, 1});
-                const auto t = std::find_if(ts.begin(), ts.end(),
-                                            [&](const Target& c) { return same_momentum(*x.basis, *c.rd); });
-                if (t == ts.end())
+                std::shared_ptr<const ed::symmetry::RepSectorData> below;
+                stream_sectors({x.basis->n_up - 1, -1, 1}, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
+                    if (!below && same_momentum(*x.basis, *rd)) below = rd;
+                });
+                if (!below)
                     throw std::runtime_error("dynamics: no momentum sector one Sz lower holds the multiplet");
-                BlockVector y{t->rd, std::vector<Complex>(t->rd->reps.size(), Complex(0, 0))};
-                if (const auto P = cross_program(s_minus, *x.basis, *t->rd))
-                    CrossSectorMatVec(P, x.basis, t->rd).apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
+                BlockVector y{below, std::vector<Complex>(below->reps.size(), Complex(0, 0))};
+                if (const auto P = cross_program(s_minus, *x.basis, *below))
+                    CrossSectorMatVec(P, x.basis, below).apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
                 double n2 = 0.0;
                 for (const auto& c : y.amplitudes) n2 += std::norm(c);
                 if (n2 < 1e-20) throw std::runtime_error("dynamics: S- annihilated a tower state above Sz = -S");
@@ -291,52 +303,64 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         cf.broadening = d.eta;
         cf.tolerance  = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         cf.energy_shift = out.e0;
-        std::set<std::pair<int, int>> reached;
-        for (const auto& [v, parity] : states) {
-            const Subspace src{v.basis->n_up, parity, 1};
-            for (const Subspace& tsub : targets_of(src, shifts, n_sites)) {
-                const auto& ts = sectors_of(tsub);
-                const auto Ot = connecting_part(Oc, src, tsub);
-                for (std::size_t ti = 0; ti < ts.size(); ++ti) {
-                    const Target& t = ts[ti];
+        // The target subspaces, each with the states O takes into it. A target subspace is
+        // streamed one momentum sector at a time: a sector is built once, used by every state O
+        // takes into it, and freed before the next, so the call holds one target sector rather
+        // than every sector of every target subspace.
+        std::map<std::pair<int, int>, std::vector<std::size_t>> reaching;
+        for (std::size_t si = 0; si < states.size(); ++si) {
+            const Subspace src{states[si].first.basis->n_up, states[si].second, 1};
+            for (const Subspace& tsub : targets_of(src, shifts, n_sites))
+                reaching[{tsub.n_up, tsub.sz_parity}].push_back(si);
+        }
+        std::size_t reached = 0;
+        for (const auto& [key, who] : reaching) {
+            const Subspace tsub{key.first, key.second, 1};
+            std::vector<ed::ops::MaskedOperator> Ot;
+            for (std::size_t si : who)
+                Ot.push_back(connecting_part(Oc, {states[si].first.basis->n_up, states[si].second, 1}, tsub));
+            stream_sectors(tsub, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
+                std::shared_ptr<RepSectorMatVec> Ht;       // H of this sector, once O reaches it
+                for (std::size_t w = 0; w < who.size(); ++w) {
+                    const BlockVector& v = states[who[w]].first;
                     auto t_pr = std::chrono::steady_clock::now();
-                    const auto P = cross_program(Ot, *v.basis, *t.rd);
+                    const auto P = cross_program(Ot[w], *v.basis, *rd);
                     phase["compile O"] += clock_since(t_pr);
                     if (!P) continue;
-                    const std::size_t n = t.rd->reps.size();
+                    const std::size_t n = rd->reps.size();
                     std::vector<Complex> phi(n);
                     auto t_sc = std::chrono::steady_clock::now();
-                    CrossSectorMatVec(P, v.basis, t.rd).apply(v.amplitudes.data(), phi.data(), n);
+                    CrossSectorMatVec(P, v.basis, rd).apply(v.amplitudes.data(), phi.data(), n);
                     phase["apply O"] += clock_since(t_sc);
                     double n2 = 0.0;
                     for (const auto& c : phi) n2 += std::norm(c);
                     if (n2 < 1e-24) continue;
-                    reached.insert({tsub.n_up * 1000 + tsub.sz_parity, static_cast<int>(ti)});
+                    if (!Ht) { Ht = std::make_shared<RepSectorMatVec>(H, rd); ++reached; }
                     ed::observables::CfSpectralResult r;
                     auto t_cf = std::chrono::steady_clock::now();
                     // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.
                     const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsCf, n, false, 1, true, "dynamics"});
                     if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
-                        t.H->enable_device(true);
+                        Ht->enable_device(true);
                         ed::matvec::CudaBackend cbe;
-                        r = ed::observables::cf_spectral_from_vector(cbe, t.H->bind_cuda(), n, phi.data(),
+                        r = ed::observables::cf_spectral_from_vector(cbe, Ht->bind_cuda(), n, phi.data(),
                                                                      d.omega, cf);
                         ++out.device_blocks;
 #endif
                     } else {
-                        auto apply = [&t](const Complex* in, Complex* o, std::size_t nn) { t.H->apply(in, o, nn); };
+                        auto apply = [&Ht](const Complex* in, Complex* o, std::size_t nn) { Ht->apply(in, o, nn); };
                         r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
                     }
                     out.placement.add(lane);
                     phase["continued fraction"] += clock_since(t_cf);
                     for (std::size_t i = 0; i < S.size(); ++i) S[i] += r.spectral_function[i];
                 }
-            }
+            });
         }
         for (auto& x : S) x /= static_cast<double>(states.size());
         out.S.push_back(std::move(S));
-        out.target_sectors = reached.size();
+        out.target_sectors = reached;
         report();
         return out;
     }
@@ -350,13 +374,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     struct Source { std::map<double, std::vector<double>> S; std::map<double, double> Z; double emin = 0.0; };
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
-    // use. Build them all first (the cache is not thread-safe), with the targets they reach.
-    // With a spin tower the initial states are its members at every Sz = S .. -S. Each source
-    // samples seeds projected onto the tower; a momentum sector holds one member per multiplet
-    // at every such Sz, so its tower dimension is its dimension at Sz = S less that of the same
-    // momentum at Sz = S + 1 (one more up spin).
+    // use. With a spin tower the initial states are its members at every Sz = S .. -S. Each
+    // source samples seeds projected onto the tower; a momentum sector holds one member per
+    // multiplet at every such Sz, so its tower dimension is its dimension at Sz = S less that of
+    // the same momentum at Sz = S + 1 (one more up spin).
     struct Job {
-        const Target* src; Subspace sub; std::vector<const Target*> targets;
+        std::size_t id = 0;                     // its index over the whole call: seeds its samples
+        const Target* src = nullptr; Subspace sub; std::vector<const Target*> targets;
         std::vector<std::shared_ptr<const ed::ops::MaskedProgram>> programs;   // O to each target
         std::shared_ptr<const ed::symmetry::LowdinS2Projector> tower;
         std::shared_ptr<RepSectorMatVec> s2;
@@ -367,80 +391,79 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     };
     std::vector<Subspace> source_subs = subspaces(H, u);
     std::shared_ptr<::Operator> s2c;
+    const int n0 = source_subs.front().n_up;
     if (s.two_S >= 0) {
-        const int n0 = source_subs.front().n_up;
         for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 - m, -1, 1});
         s2c = detail::s2_carrier_for(u, n_sites);
     }
+    // Sector dimensions per momentum (its characters on A) at Sz = S and S + 1, measured once by
+    // streaming those two subspaces (only the characters and counts are kept).
+    using Dims = std::vector<std::pair<std::vector<Complex>, std::uint64_t>>;
+    Dims dims_at_S, dims_above_S;
+    if (s.two_S >= 0) {
+        auto measure = [&](int n_up, Dims& into) {
+            if (n_up < 0 || n_up > n_sites) return;
+            stream_sectors({n_up, -1, 1}, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
+                into.push_back({rd->characters, rd->reps.size()});
+            });
+        };
+        measure(n0, dims_at_S);
+        measure(n0 + 1, dims_above_S);
+    }
     auto tower_dim_of = [&](const Target& src) -> std::uint64_t {
-        const int n0 = source_subs.front().n_up;
-        auto dim_at = [&](int n_up) -> std::uint64_t {
-            if (n_up < 0 || n_up > n_sites) return 0;
-            for (const Target& c : sectors_of({n_up, -1, 1}))
-                if (same_momentum(*src.rd, *c.rd)) return c.rd->reps.size();
+        auto dim_in = [&](const Dims& dims) -> std::uint64_t {
+            for (const auto& [chi, n] : dims) {
+                if (chi.size() != src.rd->characters.size()) continue;
+                bool same = true;
+                for (std::size_t g = 0; g < chi.size() && same; ++g)
+                    // scale-free: unit-modulus characters / phases (group data, not energies)
+                    same = std::abs(chi[g] - src.rd->characters[g]) <= 1e-9;
+                if (same) return n;
+            }
             return 0;
         };
-        const std::uint64_t at = dim_at(n0), above = dim_at(n0 + 1);
+        const std::uint64_t at = dim_in(dims_at_S), above = dim_in(dims_above_S);
         if (above > at)
             throw std::runtime_error("dynamics: a momentum sector is larger at Sz = S + 1 than at Sz = S");
         return at - above;
     };
-    std::vector<Job> jobs;
-    std::set<const Target*> reached;
-    std::uint64_t multiplets = 0;
-    for (const Subspace& sub : source_subs) {
-        for (const Target& src : sectors_of(sub)) {
-            if (!selected(u, *src.rd)) continue;
-            Job j{&src, sub, {}, {}, nullptr, nullptr, nullptr, 0};
-            if (s.two_S >= 0) {
-                j.tower_dim = tower_dim_of(src);
-                if (j.tower_dim == 0) continue;
-                if (sub.n_up == source_subs.front().n_up) multiplets += j.tower_dim;
-                j.s2    = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
-                j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
-                    j.s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
-                auto hp = std::make_shared<ed::symmetry::CasimirProjectedOperator>(src.H, j.tower, 1);
-                hp->place_ghost(tower_midpoint(*hp));   // interior: Lanczos does not amplify it
-                j.Hp = hp;
-            }
-            for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
-                const auto& ts = sectors_of(tsub);
-                const auto Ot = connecting_part(Oc, sub, tsub);
-                auto t_pr = std::chrono::steady_clock::now();
-                for (std::size_t ti = 0; ti < ts.size(); ++ti)
-                    if (auto P = cross_program(Ot, *src.rd, *ts[ti].rd)) {
-                        j.targets.push_back(&ts[ti]);
-                        j.programs.push_back(std::move(P));
-                        reached.insert(&ts[ti]);
-                    }
-                phase["compile O"] += clock_since(t_pr);
-            }
-            jobs.push_back(std::move(j));
-        }
+    // The source subspaces are processed one at a time, and a subspace's sectors stay cached only
+    // until the last source subspace that needs them (as its own or as a target): the call holds
+    // one source subspace and its targets, not every sector of every subspace with their operators.
+    using Key = std::pair<int, int>;
+    std::map<Key, std::size_t> last_use;
+    for (std::size_t si = 0; si < source_subs.size(); ++si) {
+        auto use = [&](const Subspace& x) {
+            if (x.n_up >= 0 && x.n_up <= n_sites) last_use[{x.n_up, x.sz_parity}] = si;
+        };
+        use(source_subs[si]);
+        for (const Subspace& t : targets_of(source_subs[si], shifts, n_sites)) use(t);
     }
-    if (!u.only_momentum.empty() && jobs.empty())
-        throw ed::EmptySelection("dynamics: the selection matches no source sector: no momentum sector of the "
-                                 "requested Sz sectors has that momentum");
-    if (s.two_S >= 0 && u.only_momentum.empty() && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
-        throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
-                                 + std::to_string(s.two_S) + "/2 multiplets, expected "
-                                 + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
 
     // One source: FTLM against each reachable target with the same samples (seeded from the
-    // source index, so the result does not depend on scheduling). A source O annihilates still
+    // source's index, so the result does not depend on scheduling). A source O annihilates still
     // weighs in the partition function: `kernel(nullptr)` runs it against a zero O.
-    auto options = [&](std::size_t i) {
+    auto options = [&](const Job& j) {
         ed::observables::FtlmCrossIrrepOptions fo;
         fo.krylov_dim  = d.krylov;
         fo.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         fo.num_samples = d.samples;
         fo.broadening  = d.eta;
-        fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (i + 1);
-        if (const auto p = jobs[i].tower) {
+        fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (j.id + 1);
+        if (const auto p = j.tower) {
             fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
-            fo.trace_dim      = jobs[i].tower_dim;
+            fo.trace_dim      = j.tower_dim;
         }
         return fo;
+    };
+    // The working set of one sample from a job's source to its largest target (core/footprint.h).
+    auto job_shape = [&](const Job& j) {
+        ed::core::Shape sh;
+        sh.dim    = j.src->rd->reps.size();
+        sh.krylov = d.krylov;
+        sh.dim_target = sh.dim;                 // the zero-O run when nothing is reached
+        for (const Target* t : j.targets) sh.dim_target = std::max<std::uint64_t>(sh.dim_target, t->rd->reps.size());
+        return sh;
     };
     auto collect = [&](const Job& j, auto&& kernel) {
         Source src;
@@ -459,9 +482,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
         return src;
     };
-    auto run = [&](std::size_t i) {
-        const Job& j = jobs[i];
-        const auto fo = options(i);
+    auto run = [&](const Job& j) {
+        const auto fo = options(j);
         const std::size_t dim_src = j.src->rd->reps.size();
         const ed::LinearOperator& Hs = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
@@ -480,30 +502,38 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         });
     };
     // The same estimator with both Krylov bases, H and O on the device.
-    auto run_device = [&](std::size_t i) {
+    auto run_device = [&](const Job& j) {
 #ifdef WITH_CUDA
-        const Job& j = jobs[i];
-        const auto fo = options(i);
+        const auto fo = options(j);
         const std::size_t dim_src = j.src->rd->reps.size();
         ed::matvec::CudaBackend cbe;
         j.src->H->enable_device(true);
         if (j.s2) j.s2->enable_device(true);
         const auto H_src = j.Hp ? j.Hp->bind_cuda() : j.src->H->bind_cuda();
         // Samples in lockstep (one multi-vector launch per H apply) when both H have a
-        // multi-vector kernel and their Krylov bases fit in half the free memory.
+        // multi-vector kernel: as many as fit in 90% of the free device memory (at most 8).
         const ed::LinearOperator& src_op = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
         auto batched = [&](const ed::LinearOperator& dst_op, std::size_t dim_dst) {
             auto f = fo;
             auto ms = src_op.bind_cuda_multi();
             auto md = dst_op.bind_cuda_multi();
-            std::size_t free_b = 0, total_b = 0;
-            if (!ms || !md || cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) return f;
-            const double per_sample = 16.0 * static_cast<double>(d.krylov) * static_cast<double>(dim_src + 3 * dim_dst);
-            const auto width = static_cast<std::size_t>(0.5 * static_cast<double>(free_b) / per_sample);
+            if (!ms || !md) return f;
+            std::size_t width = std::min<std::size_t>(8, d.samples);
+            if (!ed::core::mem_guard_off()) {
+                const auto free = ed::core::available_device_bytes(/*fresh=*/true);
+                if (!free) return f;
+                ed::core::Shape sh;
+                sh.dim = dim_src; sh.dim_target = dim_dst; sh.krylov = d.krylov; sh.device = true;
+                for (; width > 1; --width) {
+                    sh.width = width;
+                    if (static_cast<double>(ed::core::footprint(ed::core::Path::DynamicsFtlm, sh).device)
+                        <= 0.9 * static_cast<double>(*free)) break;
+                }
+            }
             if (width < 2) return f;
             f.batch_src   = std::move(ms);
             f.batch_dst   = std::move(md);
-            f.batch_width = std::min<std::size_t>(width, 8);
+            f.batch_width = width;
             return f;
         };
         return collect(j, [&](const Target* t, std::size_t k) {
@@ -520,61 +550,134 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                                                          d.temperatures, d.omega, batched(*t->H, dim_dst));
         });
 #else
-        return run(i);
+        return run(j);
 #endif
     };
 
-    // On a device every source large enough to fill it (all of them for Device::Gpu) runs
-    // there, one at a time. Sources are k-sector RepSectorMatVecs: they always have a device kernel.
-    std::vector<Source> sources(jobs.size());
-    std::vector<std::size_t> host_jobs, device_jobs;
-    for (std::size_t i = 0; i < jobs.size(); ++i) {
-        const std::size_t dim = jobs[i].src->rd->reps.size();
-        const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsFtlm, dim, false, 1, true, "dynamics"});
-        (ed::on_device(lane) ? device_jobs : host_jobs).push_back(i);
-        out.placement.add(lane);
-    }
-    auto t_k = std::chrono::steady_clock::now();
-    for (std::size_t i : device_jobs) { sources[i] = run_device(i); ++out.device_blocks; }
-    phase["ftlm kernel (device)"] += clock_since(t_k);
-
-    // On the host, small sectors run concurrently, one thread each: at a few thousand states a
-    // Lanczos step is too short for a thread team (measured 8x slower at 32 threads than at 4).
-    // Large ones run one at a time with every thread.
-    std::vector<std::size_t> small, large;
-    for (std::size_t i : host_jobs)
-        (jobs[i].src->rd->reps.size() < ed::kHostPoolMaxDim ? small : large).push_back(i);
-    t_k = std::chrono::steady_clock::now();
-    for (std::size_t i : small) {        // warm the lazily built operators before going parallel
-        std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
-        jobs[i].src->H->apply(x.data(), y.data(), x.size());
-        if (jobs[i].s2) jobs[i].s2->apply(x.data(), y.data(), x.size());
-        for (const Target* t : jobs[i].targets) {
-            std::vector<Complex> a(t->rd->reps.size(), Complex(0, 0)), b(a.size());
-            t->H->apply(a.data(), b.data(), a.size());
+    std::vector<Source> sources;
+    std::set<std::pair<Key, std::size_t>> reached;   // (target subspace, sector index)
+    std::uint64_t multiplets = 0;
+    std::size_t n_jobs = 0;
+    for (std::size_t si = 0; si < source_subs.size(); ++si) {
+        const Subspace& sub = source_subs[si];
+        std::vector<Job> jobs;
+        for (const Target& src : sectors_of(sub)) {
+            if (!selected(u, *src.rd)) continue;
+            Job j;
+            j.src = &src;
+            j.sub = sub;
+            if (s.two_S >= 0) {
+                j.tower_dim = tower_dim_of(src);
+                if (j.tower_dim == 0) continue;
+                if (sub.n_up == n0) multiplets += j.tower_dim;
+                j.s2    = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
+                j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
+                    j.s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
+                auto hp = std::make_shared<ed::symmetry::CasimirProjectedOperator>(src.H, j.tower, 1);
+                hp->place_ghost(tower_midpoint(*hp));   // interior: Lanczos does not amplify it
+                j.Hp = hp;
+            }
+            for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
+                const auto& ts = sectors_of(tsub);
+                const auto Ot = connecting_part(Oc, sub, tsub);
+                auto t_pr = std::chrono::steady_clock::now();
+                for (std::size_t ti = 0; ti < ts.size(); ++ti)
+                    if (auto P = cross_program(Ot, *src.rd, *ts[ti].rd)) {
+                        j.targets.push_back(&ts[ti]);
+                        j.programs.push_back(std::move(P));
+                        reached.insert({Key{tsub.n_up, tsub.sz_parity}, ti});
+                    }
+                phase["compile O"] += clock_since(t_pr);
+            }
+            j.id = n_jobs++;
+            jobs.push_back(std::move(j));
         }
-    }
-    std::exception_ptr failure;
-    {
-        // Full team for the loop over sectors; BLAS single-threaded inside it (the kernel's own
-        // OpenMP loops run serially there, nested parallelism being inactive).
-#ifdef _OPENMP
-        ed::parallel::ThreadBudgetScope blas_serial(omp_get_max_threads(), 1);
-#endif
-#pragma omp parallel for schedule(dynamic, 1)
-        for (long long q = 0; q < static_cast<long long>(small.size()); ++q) {
-            try {
-                const std::size_t i = small[static_cast<std::size_t>(q)];
-                sources[i] = run(i);
-            } catch (...) {
-#pragma omp critical(dynamics_failure)
-                if (!failure) failure = std::current_exception();
+
+        if (si == 0 && s.two_S >= 0 && u.only_momentum.empty()
+            && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))   // all at Sz = S: known now
+            throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
+                                     + std::to_string(s.two_S) + "/2 multiplets, expected "
+                                     + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
+
+        // On a device every source large enough to fill it (all of them for Device::Gpu) runs
+        // there, one at a time. Sources are k-sector RepSectorMatVecs: they always have a device kernel.
+        std::vector<std::size_t> host_jobs, device_jobs;
+        for (std::size_t i = 0; i < jobs.size(); ++i) {
+            const std::size_t dim = jobs[i].src->rd->reps.size();
+            const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsFtlm, dim, false, 1, true, "dynamics"});
+            (ed::on_device(lane) ? device_jobs : host_jobs).push_back(i);
+            out.placement.add(lane);
+        }
+        std::vector<Source> local(jobs.size());
+        auto t_k = std::chrono::steady_clock::now();
+        for (std::size_t i : device_jobs) { local[i] = run_device(jobs[i]); ++out.device_blocks; }
+        phase["ftlm kernel (device)"] += clock_since(t_k);
+
+        // On the host, small sectors run concurrently, one thread each: at a few thousand states
+        // a Lanczos step is too short for a thread team (measured 8x slower at 32 threads than at
+        // 4). Large ones run one at a time with every thread. Each is checked against the RAM
+        // first, and the team is no larger than the concurrent samples that fit in it.
+        std::vector<std::size_t> small, large;
+        for (std::size_t i : host_jobs)
+            (jobs[i].src->rd->reps.size() < ed::kHostPoolMaxDim ? small : large).push_back(i);
+        std::uint64_t per_small = 1;
+        for (std::size_t i : small)
+            per_small = std::max<std::uint64_t>(per_small,
+                ed::core::footprint(ed::core::Path::DynamicsFtlm, job_shape(jobs[i])).host);
+        t_k = std::chrono::steady_clock::now();
+        for (std::size_t i : small) {        // warm the lazily built operators before going parallel
+            std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
+            jobs[i].src->H->apply(x.data(), y.data(), x.size());
+            if (jobs[i].s2) jobs[i].s2->apply(x.data(), y.data(), x.size());
+            for (const Target* t : jobs[i].targets) {
+                std::vector<Complex> a(t->rd->reps.size(), Complex(0, 0)), b(a.size());
+                t->H->apply(a.data(), b.data(), a.size());
             }
         }
+        std::exception_ptr failure;
+        if (!small.empty()) {
+            int team = 1;
+#ifdef _OPENMP
+            team = omp_get_max_threads();
+#endif
+            const std::uint64_t avail = ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
+            if (avail > 0)
+                team = static_cast<int>(std::max<std::uint64_t>(1, std::min<std::uint64_t>(
+                    static_cast<std::uint64_t>(team), static_cast<std::uint64_t>(0.9 * static_cast<double>(avail)) / per_small)));
+            // Full team for the loop over sectors; BLAS single-threaded inside it (the kernel's
+            // own OpenMP loops run serially there, nested parallelism being inactive).
+#ifdef _OPENMP
+            ed::parallel::ThreadBudgetScope blas_serial(omp_get_max_threads(), 1);
+#endif
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team)
+            for (long long q = 0; q < static_cast<long long>(small.size()); ++q) {
+                try {
+                    const std::size_t i = small[static_cast<std::size_t>(q)];
+                    local[i] = run(jobs[i]);
+                } catch (...) {
+#pragma omp critical(dynamics_failure)
+                    if (!failure) failure = std::current_exception();
+                }
+            }
+        }
+        if (failure) std::rethrow_exception(failure);
+        for (std::size_t i : large) {
+            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DynamicsFtlm, job_shape(jobs[i])).host,
+                                        "dynamics");
+            local[i] = run(jobs[i]);
+        }
+        phase["ftlm kernel"] += clock_since(t_k);
+        for (auto& x : local) sources.push_back(std::move(x));
+        jobs.clear();
+        for (auto it = cache.begin(); it != cache.end();) {   // sectors no later source needs
+            const auto lu = last_use.find(it->first);
+            if (lu == last_use.end() || lu->second <= si) it = cache.erase(it);
+            else ++it;
+        }
     }
-    if (failure) std::rethrow_exception(failure);
-    for (std::size_t i : large) sources[i] = run(i);
-    phase["ftlm kernel"] += clock_since(t_k);
+    if (!u.only_momentum.empty() && n_jobs == 0)
+        throw ed::EmptySelection("dynamics: the selection matches no source sector: no momentum sector of the "
+                                 "requested Sz sectors has that momentum");
     phase["total"] += clock_since(t_all);
     out.target_sectors = reached.size();
     out.S.assign(nT, std::vector<double>(nW, 0.0));

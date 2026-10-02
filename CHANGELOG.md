@@ -60,6 +60,20 @@ Breaking changes so far:
   removes. A block that cannot certify all N_V samples the rest and adds an
   `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
   `exact_vectors`) in place of `num_exact` and `exact_krylov`.
+- **Memory: one working-set estimate** (`<ed/core/footprint.h>`) behind every guard and planner.
+  FTLM without observables is charged its five vectors, not `krylov + 4` (blocks that fit were
+  refused); GPU FTLM / mTPQ run as many samples in lockstep as fit (they ran 8 wide, and ran out of
+  device memory), retrying narrower on an allocation failure; `place()` checks each block's own
+  device working set; the device Krylov-Schur cycle is capped by free device memory (it was
+  uncapped) and the kept-basis GS vector by the RAM; dense batches on a device are solved in
+  pieces of at most 256 MiB (they held every block's matrix at once), with a host fallback; the
+  automatic eigs dense crossover is capped by memory and at 8192 (it grew as 160 k);
+  `multiplet()` builds only the vectors asked for (`vectors()` asks for k); dynamics holds one
+  target sector at T = 0 and one source subspace with its targets at T > 0 (it cached every
+  sector of every subspace), forms its overlap matrix row by row, and sizes its host fan-out and
+  device batch by memory; the orbit-table registry has a byte budget. A refused working set
+  raises `ResourceLimit`; `ED_MEM_GUARD_OFF` lifts every check; the cgroup headroom counts
+  reclaimable page cache as free.
 - **Host Krylov results repeat bit for bit** at a fixed seed and thread count: the BLAS-1 sums
   add per-thread partials in thread order (they combined in arrival order, so T = 0 dynamics
   differed run to run in the 11th digit).

@@ -169,16 +169,22 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         const std::vector<double> ritzS = std::move(ts.values);
         const std::vector<double> VS = std::move(ts.vectors);   // VS[j * mS + b]
 
-        // W[a + b mH] = <O v_a | w_b> from one GEMM over backend-resident blocks.
-        auto A = bk.make_zero_vector(dim_dst * mH);
-        auto B = bk.make_zero_vector(dim_dst * mS);
-        for (std::size_t a = 0; a < mH; ++a) O_apply(kh.basis[a].get(), A.get() + a * dim_dst, dim_dst);
-        for (std::size_t b = 0; b < mS; ++b) bk.copy(ks.basis[b].get(), B.get() + b * dim_dst, dim_dst);
-        auto Wd = bk.make_zero_vector(mH * mS);
-        bk.gemm('C', 'N', mH, mS, dim_dst, Complex(1.0, 0.0), A.get(), dim_dst, B.get(), dim_dst,
-                Complex(0.0, 0.0), Wd.get(), mH);
+        // W[a + b mH] = <O v_a | w_b>, one row a at a time: O v_a into one target-sized scratch
+        // vector, then its overlaps with the target basis (dot_many gives <w_b | O v_a>). Holding
+        // O V_H and a copy of the target basis for one GEMM cost 2 krylov target vectors more.
         std::vector<Complex> W(mH * mS);
-        bk.copy_to_host(Wd.get(), W.data(), mH * mS);
+        {
+            auto ov = bk.make_zero_vector(dim_dst);
+            std::vector<const Complex*> wb(mS);
+            for (std::size_t b = 0; b < mS; ++b) wb[b] = ks.basis[b].get();
+            std::vector<Complex> row(mS);
+            for (std::size_t a = 0; a < mH; ++a) {
+                bk.fill_zero(ov.get(), dim_dst);
+                O_apply(kh.basis[a].get(), ov.get(), dim_dst);
+                bk.dot_many(wb.data(), mS, ov.get(), dim_dst, row.data());
+                for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
+            }
+        }
 
         std::vector<Complex> Tm(mH * mS, Complex(0, 0));         // Tm[i mS + b] = sum_a VH[i,a] W[a,b]
         for (std::size_t i = 0; i < mH; ++i)

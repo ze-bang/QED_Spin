@@ -47,10 +47,16 @@ enum class Path {
     /// `k` vectors of a multiplet in an Sz sector of dimension `dim`: the vectors, the expanded
     /// state and a seed, and the 8-byte state table.
     Multiplet,
+    /// `width` samples of finite-temperature dynamics from a source sector of `dim` states to a
+    /// target of `dim_target`: per sample both `krylov`-vector bases with their seeds and working
+    /// vectors, and one target scratch vector; on the device also the backend's staging buffer
+    /// (one, sized for the larger basis) and the seed on the host.
+    DynamicsFtlm,
 };
 
 struct Shape {
     std::uint64_t dim    = 0;      ///< D
+    std::uint64_t dim_target = 0;  ///< DynamicsFtlm: the target sector's dimension
     std::size_t   krylov = 0;      ///< Lanczos depth, or the Krylov-Schur cycle length
     std::size_t   k      = 0;      ///< levels, or multiplet members
     std::size_t   width  = 1;      ///< samples in lockstep (device)
@@ -99,6 +105,12 @@ struct Shape {
         case Path::Multiplet:
             host = (k + 2.0) * V + 8.0 * static_cast<double>(s.dim);
             break;
+        case Path::DynamicsFtlm: {
+            const double Vt = 16.0 * static_cast<double>(s.dim_target);
+            if (s.device) { dev = W * ((M + 4.0) * V + (M + 5.0) * Vt + M * std::max(V, Vt)); host = W * V; }
+            else          { host = W * ((M + 5.0) * V + (M + 5.0) * Vt); }
+            break;
+        }
     }
     constexpr double cap = 1.8e19;   // below 2^64
     return {static_cast<std::uint64_t>(std::min(host, cap)), static_cast<std::uint64_t>(std::min(dev, cap))};

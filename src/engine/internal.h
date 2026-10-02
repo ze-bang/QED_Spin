@@ -437,7 +437,9 @@ private:
         const double est = static_cast<double>(r) * static_cast<double>(1 + rows_->n_groups())
                                * (sizeof(std::uint32_t) + sizeof(Complex))
                            + static_cast<double>(r + 1) * sizeof(std::uint64_t);
-        const double budget = std::max(0.0, ed::env::real("ED_XSEC_CSR_BUDGET_GIB", 4.0)) * 1073741824.0;
+        // Shared by the sectors building at once (the concurrent small dynamics sources).
+        const double budget = std::max(0.0, ed::env::real("ED_XSEC_CSR_BUDGET_GIB", 4.0)) * 1073741824.0
+                              / static_cast<double>(ed::planner::concurrent_sector_builders());
         if (est > budget) return;
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             ed::matvec::build_cross_csr(rows_->view(), tgt_pol_, src_pol_, same_, r));
