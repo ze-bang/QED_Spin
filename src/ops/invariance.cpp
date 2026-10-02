@@ -5,7 +5,6 @@
 #include <ed/core/errors.h>
 #include <ed/ops/operator.h>
 
-#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -59,52 +58,62 @@ MaskedOperator masked(const ::Operator& op) {
     return m;
 }
 
-::Operator to_operator(const MaskedOperator& m) {
+std::vector<ProductTerm> product_terms(const MaskedOperator& m) {
     const int n = m.n_sites();
-    ::Operator op(static_cast<std::uint64_t>(n), 0.5f);
-    const double zf = kSetBitIsDown ? 2.0 : -2.0;   // Z = (-1)^bit = zf Sz
+    const double zf = kSetBitIsDown ? 2.0 : -2.0;   // Z = (-1)^bit = zf S^z
+    std::vector<ProductTerm> out;
     for (const auto& t : m.terms()) {
-        const std::uint64_t on = t.flip_mask | t.sign_mask;
-        const int k = masked_popcount(on);
-        if (k > 3)
-            throw ed::Unsupported("Operator: a term on " + std::to_string(k) + " sites; the kernels take at "
-                                  "most three");
-        std::array<std::uint8_t, 3> o{};
-        std::array<std::uint64_t, 3> st{};
-        Complex c = t.coeff;
-        int f = 0;
+        ProductTerm p{t.coeff, {}, {}};
         for (int i = 0; i < n; ++i) {
             const std::uint64_t b = 1ULL << i;
-            if (!(on & b)) continue;
-            st[static_cast<std::size_t>(f)] = static_cast<std::uint64_t>(i);
-            if (t.flip_mask & b) {   // S+ lifts a down spin, S- lowers an up one
-                o[static_cast<std::size_t>(f)] = ((t.cond_val & b) == down_bits(b)) ? 0 : 1;
+            if (t.flip_mask & b) {          // S+ lifts a down spin, S- lowers an up one
+                p.ops.push_back((t.cond_val & b) == down_bits(b) ? '+' : '-');
+            } else if (t.sign_mask & b) {
+                p.ops.push_back('z');
+                p.coeff *= zf;
             } else {
-                o[static_cast<std::size_t>(f)] = 2;
-                c *= zf;
+                continue;
             }
-            ++f;
+            p.sites.push_back(i);
         }
-        if (k == 0)      op.addTwoBodyTerm(2, 0, 2, 0, 4.0 * c);
-        else if (k == 1) op.addOneBodyTerm(o[0], st[0], c);
-        else if (k == 2) op.addTwoBodyTerm(o[0], st[0], o[1], st[1], c);
-        else             op.addThreeBodyTerm(o[0], st[0], o[1], st[1], o[2], st[2], c);
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+::Operator to_operator(const MaskedOperator& m) {
+    ::Operator op(static_cast<std::uint64_t>(m.n_sites()), 0.5f);
+    auto code = [](char c) -> std::uint8_t { return c == '+' ? 0 : (c == '-' ? 1 : 2); };
+    for (const auto& p : product_terms(m)) {
+        const auto& o = p.ops;
+        auto s = [&p](std::size_t k) { return static_cast<std::uint64_t>(p.sites[k]); };
+        switch (o.size()) {
+            case 0: op.addTwoBodyTerm(2, 0, 2, 0, 4.0 * p.coeff); break;   // Sz_0 Sz_0 = 1/4
+            case 1: op.addOneBodyTerm(code(o[0]), s(0), p.coeff); break;
+            case 2: op.addTwoBodyTerm(code(o[0]), s(0), code(o[1]), s(1), p.coeff); break;
+            case 3: op.addThreeBodyTerm(code(o[0]), s(0), code(o[1]), s(1), code(o[2]), s(2), p.coeff); break;
+            default:
+                throw ed::Unsupported("Operator: a term on " + std::to_string(o.size()) + " sites; the kernels "
+                                      "take at most three");
+        }
     }
     return op;
 }
 
-bool commutes_with_permutation(const MaskedOperator& H, const std::vector<int>& perm, double rtol) {
-    const int n = H.n_sites();
+void require_permutation(const std::vector<int>& perm, int n) {
     if (static_cast<int>(perm.size()) != n)
-        throw std::invalid_argument("commutes_with_permutation: " + std::to_string(perm.size())
-                                    + " entries for " + std::to_string(n) + " sites");
+        throw std::invalid_argument("permutation: " + std::to_string(perm.size()) + " entries for "
+                                    + std::to_string(n) + " sites");
     std::vector<char> seen(static_cast<std::size_t>(n), 0);
     for (int p : perm) {
         if (p < 0 || p >= n || seen[static_cast<std::size_t>(p)])
-            throw std::invalid_argument("commutes_with_permutation: not a permutation of 0.."
-                                        + std::to_string(n - 1));
+            throw std::invalid_argument("permutation: not a permutation of 0.." + std::to_string(n - 1));
         seen[static_cast<std::size_t>(p)] = 1;
     }
+}
+
+bool commutes_with_permutation(const MaskedOperator& H, const std::vector<int>& perm, double rtol) {
+    require_permutation(perm, H.n_sites());
     return invariant(H, H.image(perm.data(), 0), rtol);
 }
 

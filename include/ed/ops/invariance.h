@@ -11,6 +11,8 @@
 
 #include <ed/ops/algebra.h>
 
+#include <complex>
+#include <string>
 #include <vector>
 
 class Operator;   // ops/operator.h: the term records the kernels read
@@ -32,6 +34,19 @@ inline constexpr double kInvarianceRtol = 1e-10;
 /// Sz_0 Sz_0 = 1/4), so masked(to_operator(m)) == m. Throws ed::Unsupported for a term on
 /// four or more sites (the kernels take at most three until they run on the canonical terms).
 [[nodiscard]] ::Operator to_operator(const MaskedOperator& m);
+
+/// One canonical term as a product: coeff * prod_k ops[k](sites[k]), ops over '+', '-', 'z'
+/// (S+, S-, S^z), sites ascending; the identity has no factors.
+struct ProductTerm {
+    std::complex<double> coeff;
+    std::string          ops;
+    std::vector<int>     sites;
+};
+/// m's canonical terms in key order, each as a product of S+, S-, S^z (Z = 2 S^z folded in).
+[[nodiscard]] std::vector<ProductTerm> product_terms(const MaskedOperator& m);
+
+/// Throws std::invalid_argument unless perm is a permutation of 0..n-1.
+void require_permutation(const std::vector<int>& perm, int n);
 
 /// g H g^-1 == H, given the image.
 [[nodiscard]] inline bool invariant(const MaskedOperator& H, const MaskedOperator& image,

@@ -820,3 +820,86 @@ def test_s_squared_with_same_site_records_is_su2():
             S2.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, total_spin=0), vectors=True)
     assert abs(complex(r.expect([S2])[0, 0])) < 1e-8
+
+
+# ---------------------------------------------------------------------------
+# Operator algebra (audit K3-model-scale-09)
+# ---------------------------------------------------------------------------
+
+def _hermitian_operator(n, rng, terms=5, max_factors=2):
+    R = qed.Operator(n)
+    for _ in range(terms):
+        k = int(rng.integers(1, max_factors + 1))
+        ops = "".join(rng.choice(list("+-zxyudI"), size=k))
+        sites = [int(s) for s in rng.integers(0, n, size=k)]
+        R = R + qed.Operator.product(n, ops, sites, complex(rng.normal(), rng.normal()))
+    return R + R.adjoint()
+
+
+def test_operator_algebra_matches_the_kernels():
+    n = 6
+    rng = np.random.default_rng(20261001)
+    for _ in range(5):
+        A, B = _hermitian_operator(n, rng), _hermitian_operator(n, rng)
+        C = _hermitian_operator(n, rng, max_factors=1)
+        dA, dB, dC = _dense(A, n), _dense(B, n), _dense(C, n)
+        np.testing.assert_allclose(_dense(A + B, n), dA + dB, atol=1e-12)
+        np.testing.assert_allclose(_dense(A - B, n), dA - dB, atol=1e-12)
+        np.testing.assert_allclose(_dense(-A, n), -dA, atol=1e-12)
+        np.testing.assert_allclose(_dense(2.5 * A, n), 2.5 * dA, atol=1e-12)
+        np.testing.assert_allclose(_dense(A * 3, n), 3 * dA, atol=1e-12)
+        np.testing.assert_allclose(_dense(A / 4, n), dA / 4, atol=1e-12)
+        np.testing.assert_allclose(_dense(A @ C + C @ A, n), dA @ dC + dC @ dA, atol=1e-12)
+        assert (A + 1j * B).adjoint().equals(A - 1j * B)
+        assert A.is_hermitian()
+        assert not (A + 1j * B).is_hermitian()
+
+
+def test_operator_product_terms_and_equality():
+    n = 4
+    # the records and Operator.product describe the same operator
+    R = qed.Operator(n)
+    R.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5)
+    assert R.equals(qed.Operator.product(n, "+-", [0, 1], 0.5))
+    # S^x S^x + S^y S^y + S^z S^z in Cartesian form equals the ladder form
+    cart = (qed.Operator.product(n, "xx", [0, 1]) + qed.Operator.product(n, "yy", [0, 1])
+            + qed.Operator.product(n, "zz", [0, 1]))
+    ladder = (qed.Operator.product(n, "+-", [0, 1], 0.5) + qed.Operator.product(n, "-+", [0, 1], 0.5)
+              + qed.Operator.product(n, "zz", [0, 1]))
+    assert cart.equals(ladder) and not cart.equals(2 * ladder)
+    # spin-1/2 identities on one site
+    assert qed.Operator.product(n, "++", [2, 2]).equals(qed.Operator(n))
+    assert qed.Operator.product(n, "zz", [3, 3], 4.0).equals(qed.Operator.product(n, "I", [0]))
+    # terms() sums back to the operator, uniquely
+    total = qed.Operator(n)
+    for c, ops, sites in ladder.terms():
+        assert list(sites) == sorted(sites) and set(ops) <= set("+-z")
+        total = total + qed.Operator.product(n, ops, list(sites), c)
+    assert total.equals(ladder)
+    assert sorted(t[1] for t in cart.terms()) == sorted(t[1] for t in ladder.terms())
+
+
+def test_operator_image_copy_and_limits():
+    n = 4
+    T = [(i + 1) % n for i in range(n)]
+    ring = qed.Operator(n)
+    for i in range(n):
+        ring = ring + qed.Operator.product(n, "zz", [i, (i + 1) % n])
+    assert ring.image(T).equals(ring)
+    assert qed.Operator.product(n, "z", [1]).image(T).equals(qed.Operator.product(n, "z", [0]))
+    assert qed.Operator.product(n, "z", [0]).image(list(range(n)), flip=True).equals(
+        -qed.Operator.product(n, "z", [0]))
+    with pytest.raises(ValueError):
+        ring.image([0, 0, 1, 2])
+    B = ring.copy()
+    ring.add_one_body(qed.OP_SZ, 0, 1.0)
+    assert not B.equals(ring) and B.equals(ring - qed.Operator.product(n, "z", [0]))
+    with pytest.raises(NotImplementedError):    # four sites: the kernels take three until P3.2
+        qed.Operator.product(n, "zzzz", [0, 1, 2, 3])
+    # three-body records join the algebra (they were missing from transform_tuples)
+    A = qed.Operator(n)
+    A.add_one_body(qed.OP_SZ, 0, 1.0)
+    C = qed.Operator(n)
+    C.add_three_body(qed.OP_SZ, 0, qed.OP_SZ, 1, qed.OP_SZ, 2, 1.0)
+    assert (A @ C).equals(qed.Operator.product(n, "zz", [1, 2], 0.25))
+    assert (A + C).equals(qed.Operator.product(n, "z", [0]) + qed.Operator.product(n, "zzz", [0, 1, 2]))

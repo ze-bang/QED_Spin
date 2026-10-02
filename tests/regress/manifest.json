@@ -104,7 +104,7 @@
   {"id":"K3-model-scale-04","rep":"K3-model-scale-04","sev":"medium","axis":"capability","status":"open","dev":"cpu","seconds":10},
   {"id":"K3-model-scale-05","rep":"C12-dynamics-01","sev":"high","axis":"correctness","status":"open","dev":"cpu","seconds":30},
   {"id":"K3-model-scale-06","rep":"K3-model-scale-06","sev":"low","axis":"capability","status":"open","dev":"cpu","seconds":30},
-  {"id":"K3-model-scale-09","rep":"K3-model-scale-09","sev":"low","axis":"capability","status":"open","dev":"cpu","seconds":10},
+  {"id":"K3-model-scale-09","rep":"K3-model-scale-09","sev":"low","axis":"capability","status":"fixed","dev":"cpu","seconds":10},
   {"id":"L2-numerics-01","rep":"C06-symmetry-core-01","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"L2-numerics-02","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":120},
   {"id":"L2-numerics-03","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":120},

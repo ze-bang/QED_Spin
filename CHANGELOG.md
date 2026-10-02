@@ -34,6 +34,13 @@ Breaking changes so far:
   and flip-invariant. One relative tolerance, 1e-10 of H's largest coefficient, replaces the
   detectors' mixed absolute ones. `_core.check_generators_commute` refuses a list that is not
   a permutation of the sites.
+- **`qed.Operator` has an algebra.** `A + B`, `A - B`, `-A`, `2 * A`, `A / 2`, `A @ B` (B acting
+  first), `A.adjoint()`, `A.copy()`, `A.equals(B)` (the same operator however written),
+  `A.is_hermitian()`, `A.terms()` (the unique canonical terms as `(coeff, ops, sites)`),
+  `A.image(perm, flip=False)` and `Operator.product(N, "+-zxyudI"-string, sites, coeff)`, all
+  exact (same-site products reduced by the spin-1/2 algebra). A result with a term on four or
+  more sites raises `qed.errors.Unsupported` for now. Op types outside S+, S-, S^z and sites
+  outside the operator are refused when a term is added.
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.

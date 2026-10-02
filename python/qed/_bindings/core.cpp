@@ -25,6 +25,7 @@
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
 #include <ed/dssf/operator_spec.h>
+#include <ed/ops/algebra.h>
 #include <ed/ops/invariance.h>
 #include <ed/basis/group.h>
 
@@ -51,6 +52,7 @@ namespace {
 using Complex = std::complex<double>;
 using ComplexVec = std::vector<Complex>;
 using ComplexArray = py::array_t<Complex, py::array::c_style | py::array::forcecast>;
+using ed::ops::MaskedOperator;
 
 // Helpers to convert NumPy arrays <-> std::vector<Complex>.
 ComplexVec from_numpy(const ComplexArray& arr) {
@@ -347,7 +349,76 @@ PYBIND11_MODULE(_core, m) {
              "``iter_one_body_terms``.")
         .def("iter_three_body_terms", &op_iter_three_body,
              "List of ``(op_type_1, site_1, op_type_2, site_2, op_type_3, "
-             "site_3, coeff)`` tuples for every three-body term.");
+             "site_3, coeff)`` tuples for every three-body term.")
+        // The algebra: every result is computed exactly on the canonical terms and written
+        // back as records (a term on four or more sites raises Unsupported until the
+        // kernels run on canonical terms).
+        .def_static("product",
+                    [](uint64_t num_sites, const std::string& ops, const std::vector<int>& sites, Complex coeff) {
+                        return ed::ops::to_operator(
+                            MaskedOperator::product(static_cast<int>(num_sites), ops, sites, coeff));
+                    },
+                    py::arg("num_sites"), py::arg("ops"), py::arg("sites"), py::arg("coeff") = Complex(1.0, 0.0),
+                    R"pbdoc(
+             ``coeff * O_0(sites[0]) O_1(sites[1]) ...``, the last factor acting first. Each
+             character of ``ops`` is one of ``+ - z x y u d I``: S+, S-, S^z, S^x, S^y,
+             the projectors |up><up| and |dn><dn|, and the identity. Sites may
+             repeat: the spin-1/2 algebra is applied exactly (S+ S+ = 0, ...).
+             )pbdoc")
+        .def("__add__", [](const Operator& a, const Operator& b) {
+                 return ed::ops::to_operator(a.canonical() + b.canonical());
+             }, py::is_operator())
+        .def("__sub__", [](const Operator& a, const Operator& b) {
+                 return ed::ops::to_operator(a.canonical() - b.canonical());
+             }, py::is_operator())
+        .def("__neg__", [](const Operator& a) { return ed::ops::to_operator(-a.canonical()); })
+        .def("__mul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
+             py::is_operator())
+        .def("__rmul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
+             py::is_operator())
+        .def("__truediv__", [](const Operator& a, Complex s) {
+                 if (s == Complex(0.0, 0.0)) throw py::value_error("Operator: division by zero");
+                 return ed::ops::to_operator(a.canonical().scaled(Complex(1.0, 0.0) / s));
+             }, py::is_operator())
+        .def("__matmul__", [](const Operator& a, const Operator& b) {
+                 return ed::ops::to_operator(a.canonical() * b.canonical());
+             }, py::is_operator(), "``A @ B``: the operator product, B acting first.")
+        .def("adjoint", [](const Operator& a) { return ed::ops::to_operator(a.canonical().dagger()); },
+             "The Hermitian conjugate.")
+        .def("copy", [](const Operator& a) { return Operator(a); }, "An independent copy.")
+        .def("__copy__", [](const Operator& a) { return Operator(a); })
+        .def("__deepcopy__", [](const Operator& a, py::dict) { return Operator(a); }, py::arg("memo"))
+        .def("equals", [](const Operator& a, const Operator& b, double rtol) {
+                 return a.canonical().equals(b.canonical(), rtol);
+             }, py::arg("other"), py::arg("rtol") = ed::ops::kInvarianceRtol,
+             "The same operator: equal canonical terms, each within ``rtol`` times the largest "
+             "coefficient (however the two were written).")
+        .def("is_hermitian", [](const Operator& a, double rtol) { return ed::ops::hermitian(a.canonical(), rtol); },
+             py::arg("rtol") = ed::ops::kInvarianceRtol)
+        .def("terms", [](const Operator& a) {
+                 py::list out;
+                 for (const auto& p : ed::ops::product_terms(a.canonical()))
+                     out.append(py::make_tuple(p.coeff, p.ops, py::tuple(py::cast(p.sites))));
+                 return out;
+             },
+             R"pbdoc(
+             The canonical terms, as ``(coeff, ops, sites)`` with ``ops`` over ``+ - z`` on
+             ascending ``sites`` (the identity has ``ops == ''``): the operator is the sum of
+             ``Operator.product(num_sites, ops, sites, coeff)``. Unique however the operator
+             was written.
+             )pbdoc")
+        .def("image", [](const Operator& a, const std::vector<int>& perm, bool flip) {
+                 const int n = static_cast<int>(a.getNumBits());
+                 ed::ops::require_permutation(perm, n);
+                 const std::uint64_t all = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
+                 return ed::ops::to_operator(a.canonical().image(perm.data(), flip ? all : 0ULL));
+             }, py::arg("perm"), py::arg("flip") = false,
+             R"pbdoc(
+             ``U O U^dagger`` for the site permutation ``perm``, followed by the global spin
+             flip when ``flip``. ``perm`` is read as in the engine: site ``i`` of the image
+             carries what site ``perm[i]`` carried, so ``perm[i] = (i + 1) % N`` moves an
+             operator on site 1 to site 0.
+             )pbdoc");
 
     m.def("have_cuda", [] { return ed::have_cuda(); },
           "True when this build has CUDA support AND a device is present "
