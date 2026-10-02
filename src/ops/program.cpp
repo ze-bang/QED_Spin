@@ -5,6 +5,7 @@
 #include <ed/ops/program.h>
 
 #include <ed/basis/rep_sector.h>
+#include <ed/core/log.h>
 
 #include <algorithm>
 #include <cmath>
@@ -106,8 +107,7 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
         P.group_vbegin.push_back(static_cast<std::uint32_t>(P.vsub_val.size()));
     }
     if (P.n_groups() > 100000 || P.n_terms() > 1000000)
-        std::fprintf(stderr, "compile_program: large program (%zu groups, %zu terms)\n",
-                     P.n_groups(), P.n_terms());
+        ED_LOG(Info, "compile_program: large program (%zu groups, %zu terms)", P.n_groups(), P.n_terms());
     return P;
 }
 
