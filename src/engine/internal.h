@@ -1171,6 +1171,30 @@ private:
     std::unique_ptr<CrossSectorMatVec> plus_, minus_;
     double shift_ = 0.0, bound_ = 0.0;
 };
+
+/// S^2 on a spin-flip sector (a 1-dim irrep at n_up = N/2): the sector with the same characters
+/// under the group without the flip holds it isometrically (E, lift_group_vector's map: each state
+/// on at most two), and S^2 = E^dag LadderS2 E there -- ~N entries a row on twice the states,
+/// against the S^2 carrier's ~N^2/4. Host only. (tower.cpp)
+class FlipLadderS2 final : public ed::LinearOperator {
+public:
+    explicit FlipLadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> sec);
+    void apply(const Complex* in, Complex* out, std::size_t n) const override;
+    [[nodiscard]] std::size_t dim() const override { return sec_->states(); }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    [[nodiscard]] double norm_bound() const override { return ladder_->norm_bound(); }
+    [[nodiscard]] std::string description() const override { return "FlipLadderS2(E^dag LadderS2 E)"; }
+    /// Whether a sector takes it: flips, a 1-dim irrep, n_up = N/2.
+    [[nodiscard]] static bool fits(const ed::symmetry::RepSectorData& sec) noexcept;
+
+private:
+    std::shared_ptr<const ed::symmetry::RepSectorData> sec_, plain_;
+    std::unique_ptr<LadderS2> ladder_;
+    std::vector<std::int64_t> from_;    // per state of the plain sector: its flip-sector state (-1: none)
+    std::vector<Complex>      coef_;    // and E's entry there
+    std::vector<std::uint64_t> to_ptr_; // per flip-sector state: its plain states (CSR of E^T)
+    std::vector<std::uint64_t> to_;
+};
 /// Re-express v (sector g, group G) in sector k of a subgroup (conj convention, norm kept); both sectors must
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
 [[nodiscard]] std::vector<Complex>

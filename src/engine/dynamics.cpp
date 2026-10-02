@@ -541,8 +541,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 // S^2 as S- S+ + Sz(Sz + 1) through the sector one up spin higher, or the S^2 carrier on a
                 // sector with the spin flip.
                 std::shared_ptr<const ed::LinearOperator> s2;
-                if (src.rd->has_flips()) s2 = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
-                else                     s2 = std::make_shared<LadderS2>(src.rd);
+                if (!src.rd->has_flips())                 s2 = std::make_shared<LadderS2>(src.rd);
+                else if (FlipLadderS2::fits(*src.rd))     s2 = std::make_shared<FlipLadderS2>(src.rd);
+                else                                      s2 = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
                     s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
             }

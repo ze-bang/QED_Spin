@@ -452,3 +452,84 @@ Eigen::MatrixXcd tower_block(const ed::LinearOperator& H, const Tower& t, Eigen:
 }
 
 }  // namespace ed::solvers::lg_detail
+
+namespace ed::solvers::lg_detail {
+
+bool FlipLadderS2::fits(const ed::symmetry::RepSectorData& sec) noexcept {
+    return sec.has_flips() && sec.irrep_dim == 1 && sec.n_up >= 0 && 2 * sec.n_up == sec.n_sites;
+}
+
+FlipLadderS2::FlipLadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> sec) : sec_(std::move(sec)) {
+    if (!fits(*sec_)) throw std::invalid_argument("FlipLadderS2: needs a 1-dim spin-flip sector at n_up = N/2");
+    const int N = sec_->n_sites;
+    const auto Nz = static_cast<std::size_t>(N);
+    // The group without the flip, and its characters.
+    std::vector<std::vector<int>> perms;
+    std::vector<Complex> chi;
+    for (int g = 0; g < sec_->group_size; ++g) {
+        if (sec_->flip_masks[static_cast<std::size_t>(g)] != 0) continue;
+        perms.emplace_back(sec_->perms_flat.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(g) * Nz),
+                           sec_->perms_flat.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(g) + 1) * Nz));
+        chi.push_back(sec_->characters[static_cast<std::size_t>(g)]);
+    }
+    const auto tab = group_orbit_table(perms, N, sec_->n_up, -1, false);
+    auto plain = std::make_shared<ed::symmetry::RepSectorData>(
+        group_sector_from_table(*tab, perms, N, sec_->n_up, false, chi));
+    plain->build_perm_lut();
+    plain->build_buckets();
+    plain_ = plain;
+    ladder_ = std::make_unique<LadderS2>(plain_);
+    // E: the flip sector's state i on the plain state j, lift_group_vector's entry.
+    const auto pf = sec_->make_policy();
+    const auto pp = plain_->make_policy();
+    const double scale = std::sqrt(static_cast<double>(plain_->group_size) / static_cast<double>(sec_->group_size));
+    const std::size_t m = plain_->reps.size();
+    from_.assign(m, -1);
+    coef_.assign(m, Complex(0, 0));
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+    for (long long jj = 0; jj < static_cast<long long>(m); ++jj) {
+        const auto j = static_cast<std::size_t>(jj);
+        Complex pfp, ppp;
+        const std::int64_t i = pf.index_and_projection(plain_->reps[j], pfp);
+        const std::int64_t j2 = pp.index_and_projection(plain_->reps[j], ppp);
+        if (i < 0 || j2 != jj || std::abs(ppp) == 0.0) continue;
+        from_[j] = i;
+        coef_[j] = std::conj(pfp) / std::conj(ppp) * scale;   // lift_group_vector's convention
+    }
+    // E^T as rows of the flip sector (counted, then placed).
+    const std::size_t n = sec_->states();
+    to_ptr_.assign(n + 1, 0);
+    for (std::size_t j = 0; j < m; ++j)
+        if (from_[j] >= 0) ++to_ptr_[static_cast<std::size_t>(from_[j]) + 1];
+    for (std::size_t i = 0; i < n; ++i) to_ptr_[i + 1] += to_ptr_[i];
+    to_.resize(to_ptr_[n]);
+    std::vector<std::uint64_t> at(to_ptr_.begin(), to_ptr_.end() - 1);
+    for (std::size_t j = 0; j < m; ++j)
+        if (from_[j] >= 0) to_[at[static_cast<std::size_t>(from_[j])]++] = j;
+}
+
+void FlipLadderS2::apply(const Complex* in, Complex* out, std::size_t n) const {
+    const std::size_t m = plain_->reps.size();
+    std::vector<Complex> x(m), y(m);
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+    for (long long jj = 0; jj < static_cast<long long>(m); ++jj) {
+        const auto j = static_cast<std::size_t>(jj);
+        x[j] = from_[j] >= 0 ? coef_[j] * in[static_cast<std::size_t>(from_[j])] : Complex(0, 0);
+    }
+    ladder_->apply(x.data(), y.data(), m);
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static)
+#endif
+    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+        const auto i = static_cast<std::size_t>(ii);
+        Complex s(0, 0);
+        for (std::uint64_t q = to_ptr_[i]; q < to_ptr_[i + 1]; ++q) s += std::conj(coef_[to_[q]]) * y[to_[q]];
+        out[i] = s;
+    }
+}
+
+}  // namespace ed::solvers::lg_detail

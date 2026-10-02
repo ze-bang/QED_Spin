@@ -109,14 +109,17 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         return b;
     }
     // S^2 on the block. On the host S- S+ + Sz(Sz + 1) through the sector one up spin higher (P6.5):
-    // ~N entries a row against ~N^2/4 for the S^2 carrier, which the device lane keeps (its kernel)
-    // and a sector with the spin flip needs (n_up + 1 is not its own flip image).
+    // ~N entries a row against ~N^2/4 for the S^2 carrier; a spin-flip sector (n_up + 1 is not its own
+    // flip image) through the sector without the flip (FlipLadderS2). The carrier stays for the device
+    // lane (its kernel) and for a flip sector of an irrep of dimension > 1.
     const std::shared_ptr<const ed::symmetry::RepSectorData> sec =
         bi->gop ? bi->gsec : (bi->W ? nullptr : sb.hk->rep_data_ptr());
     std::shared_ptr<const ed::LinearOperator> s2;
     std::shared_ptr<RepSectorMatVec> s2rep;
     if (sec && !dev && sub.n_up >= 0 && !sec->has_flips()) {
         s2 = std::make_shared<LadderS2>(sec);
+    } else if (sec && !dev && FlipLadderS2::fits(*sec)) {
+        s2 = std::make_shared<FlipLadderS2>(sec);   // through the sector without the flip
     } else if (sec) {
         s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, sec);
         s2rep->set_csr_budget(budget);

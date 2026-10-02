@@ -1209,3 +1209,25 @@ TEST_CASE("tower: Burnside dimensions on spin-flip sectors match S^2's spectrum"
     }
     CHECK(checked > 0);
 }
+
+TEST_CASE("tower: S^2 on a spin-flip sector through the sector without the flip equals the carrier",
+          "[row_walk][su2]") {
+    using namespace ed::solvers::lg_detail;
+    const auto s2 = ed::ops::make_S2_carrier(static_cast<std::uint64_t>(N));
+    const auto G = ring_group(/*dihedral=*/true, /*with_flip=*/true);
+    int checked = 0;
+    for (const auto& chi : characters(G, /*dihedral=*/true, /*with_flip=*/true)) {
+        auto rd = std::make_shared<RepSectorData>(make_sector(G, chi, N / 2));
+        const std::size_t d = rd->states();
+        if (d == 0) continue;
+        REQUIRE(FlipLadderS2::fits(*rd));
+        INFO("states " << d);
+        const RepSectorMatVec carrier(*s2, std::shared_ptr<const RepSectorData>(rd));
+        const FlipLadderS2 ladder(rd);
+        const Mat A = columns(d, [&](const Cx* in, Cx* out) { carrier.apply(in, out, d); });
+        const Mat B = columns(d, [&](const Cx* in, Cx* out) { ladder.apply(in, out, d); });
+        CHECK(max_diff(A, B) <= 1e-12 * std::max(1.0, max_abs(A)));
+        ++checked;
+    }
+    CHECK(checked > 0);
+}
