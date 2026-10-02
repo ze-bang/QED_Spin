@@ -60,6 +60,11 @@ Breaking changes so far:
   removes. A block that cannot certify all N_V samples the rest and adds an
   `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
   `exact_vectors`) in place of `num_exact` and `exact_krylov`.
+- **Fixed: stars that time reversal closes.** For a real H whose momenta k and -k are related by
+  time reversal but by no spatial operation (translations only, or a chain without its
+  reflection), a level counts both but carried no sign of it: `vectors()` returned too few vectors,
+  and `expect` and thermal `observables` gave nonzero averages of time-reversal-odd operators.
+  Such blocks are now folded like a sigma <-> sigma* pair (`tag.tr_folded`).
 - **Abelian characters are exact.** An abelian group's characters are built in closed form
   (integer phases modulo the group's exponent), not from a random |A| x |A| eigensolve, which
   failed for groups of ~10^3 elements (ten or more local Z2 swaps). The order of the abelian

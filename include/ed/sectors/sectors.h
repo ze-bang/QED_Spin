@@ -54,11 +54,15 @@ struct LittleGroupBlockTag {
     int irrep     = -1;   ///< little-co-group irrep index; -1 = plain floor block
     int irrep_dim = 1;    ///< d_sigma
     int star_size = 1;    ///< |star| (residue orbit of momenta)
-    bool tr_folded = false; ///< sigma* partner folded in (multiplicity doubled)
+    /// The block's states come with their complex conjugates, which the block does not hold: the
+    /// sigma* irrep of a real sector (multiplicity doubled), or the -k members of a star that time
+    /// reversal closed (counted in star_size). multiplet, expect and the thermal observables
+    /// add or average the conjugate.
+    bool tr_folded = false;
 
     std::uint64_t dim          = 0; ///< block operator dimension (m_sigma or dim_k0)
     /// How many times this block's spectrum appears in the subspace:
-    /// star_size * irrep_dim * (tr_folded ? 2 : 1). NEVER includes the Sz
+    /// star_size * irrep_dim, doubled for a sigma* pair. NEVER includes the Sz
     /// flip-transport mirror -- that axis lives in the subspace sweep.
     std::uint64_t multiplicity = 1;
 };

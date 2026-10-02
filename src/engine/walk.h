@@ -390,6 +390,13 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
     auto momentum_of = [&](int k_ext) -> const std::vector<Complex>& {
         return cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
     };
+    // A star that time reversal closes -- k with -k where no residue relates them -- counts the
+    // conjugate members in its multiplicity, so its blocks are folded like a sigma <-> sigma* pair:
+    // multiplet adds the conjugate, expect and the thermal observables average <O> with it.
+    std::map<int, std::size_t> residue_star;   // momentum -> the size of its star under the residues
+    if (tr_on)
+        for (const auto& [root, mem] : star_partition(cx, false))
+            for (int k : mem) residue_star[k] = mem.size();
     std::size_t n_blocks = 0;
     for (const auto& [k0, members] : star_partition(cx, tr_on)) {
         if (!only.empty() && only.count(k0) == 0) continue;
@@ -405,6 +412,8 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
         const auto t_build = std::chrono::steady_clock::now();
         StarBuild sb = build_star_blocks(H, cx, tr_on, k0, members, opt, false,
                                          nullptr, nullptr, nullptr);
+        if (tr_on && members.size() > residue_star.at(k0))
+            for (auto& bi : sb.blocks) bi->tag.tr_folded = true;
         sb.t_build = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_build).count();
         sb.info.momentum = momentum_of(k0);
         // build_star_blocks solved only the wanted irreps already; the filter states the contract.

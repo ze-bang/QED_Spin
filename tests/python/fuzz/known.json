@@ -2,27 +2,6 @@
  "comment": "Accepted known failures of tests/python/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/python/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
  "accepted": [
   {
-   "name": "tr_fold_vectors_short",
-   "ledger": "F-C-1",
-   "why": "time reversal merges k with -k but tag.tr_folded stays false, so multiplet() cannot build the conjugate partner and vectors() returns fewer than min(k, dim) vectors (cluster C01-pyapi-01)",
-   "match": {"task.kind": ["vectors"], "status": ["wrong"], "extra.tr_engaged": [true],
-             "extra.mult_deficit": {"nonempty": true}, "extra.passes_with": {"contains": "time_reversal=off"}}
-  },
-  {
-   "name": "tr_fold_expect",
-   "ledger": "F-DE-2",
-   "why": "expect() of a TR-odd or non-real observable ignores the conjugate partner of a TR-merged star (cluster C01-pyapi-01)",
-   "match": {"task.kind": ["expect"], "status": ["wrong"], "extra.tr_engaged": [true],
-             "extra.passes_with": {"contains": "time_reversal=off"}}
-  },
-  {
-   "name": "tr_fold_thermal_observables",
-   "ledger": "F-DE-2",
-   "why": "thermal <O>(T) of a TR-odd or non-real observable ignores the conjugate partner of a TR-merged star (cluster C01-pyapi-01)",
-   "match": {"task.kind": ["th_obs"], "status": ["wrong"], "content.real": [true],
-             "request.time_reversal": ["auto", "require"], "extra.passes_with": {"contains": "time_reversal=off"}}
-  },
-  {
    "name": "flip_require_total_spin",
    "ledger": "C04-engine-core-04",
    "why": "spin_flip='require' raises 'the subspace is not flip-invariant' under total_spin S > 0 although H is flip-symmetric",

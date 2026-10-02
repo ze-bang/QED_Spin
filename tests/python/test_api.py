@@ -1153,6 +1153,32 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
             qed.load_eigs(tmp_path / "bad.npz").vectors()
 
 
+def test_a_star_closed_by_time_reversal_is_folded():
+    # Translations only on a real H: time reversal merges k with -k (no reflection relates them),
+    # and the level counts the conjugate members. vectors() must return them, and expect() and the
+    # thermal observables must average a time-reversal-odd O with its conjugate, where it vanishes
+    # (audit C01-pyapi-01 / F-C-1 / F-DE-2: too few vectors, nonzero currents).
+    n = 8
+    H = _ring(n)
+    T = [(i + 1) % n for i in range(n)]
+    sym = qed.Symmetry(spatial=[T], point_group=False, spin_flip="off")
+    current = qed.Operator(n)                                   # Hermitian, odd under time reversal
+    current.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5j)
+    current.add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, -0.5j)
+    k = 24                                                      # reaches levels at generic momenta
+    r = qed.eigs(H, k, sym=sym, vectors=True)
+    vs = np.array([np.asarray(v, complex) for v in r.vectors()])
+    assert len(vs) == k
+    Hd = _dense(H, n)
+    np.testing.assert_allclose(vs.conj() @ vs.T, np.eye(k), atol=1e-10)
+    ray = np.real(np.einsum("ij,jk,ik->i", vs.conj(), Hd, vs))
+    np.testing.assert_allclose(np.sort(ray), np.linalg.eigvalsh(Hd)[:k], atol=1e-9)
+    assert max(np.linalg.norm(Hd @ v - e * v) for v, e in zip(vs, ray)) < 1e-8
+    np.testing.assert_allclose(qed.expect(H, [current], k, sym=sym).values[:, 0], 0.0, atol=1e-10)
+    th = qed.thermal(H, [0.5, 1.0], method="exact", sym=sym, observables=[current])
+    np.testing.assert_allclose(th.O[0], 0.0, atol=1e-10)
+
+
 def test_every_refusal_is_a_qed_error():
     # The fuzzer (P4.3) found refusals that surfaced as builtin ValueError / RuntimeError: those
     # the engine raised as std::invalid_argument, and time_reversal='require' as runtime_error.
