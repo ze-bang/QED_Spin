@@ -134,7 +134,7 @@
   {"id":"P3-krylov-07","rep":"P3-krylov-07","sev":"low","axis":"performance","status":"info","dev":"cpu","seconds":200},
   {"id":"P3-krylov-08","rep":"P3-krylov-08","sev":"medium","axis":"performance","status":"fixed","dev":"cpu","seconds":240},
   {"id":"P3-krylov-09","rep":"P3-krylov-09","sev":"low","axis":"performance","status":"info","dev":"both","seconds":200},
-  {"id":"P3-krylov-10","rep":"P3-krylov-10","sev":"medium","axis":"performance","status":"info","dev":"cpu","seconds":240},
+  {"id":"P3-krylov-10","rep":"P3-krylov-10","sev":"medium","axis":"performance","status":"fixed","dev":"cpu","seconds":240},
   {"id":"P4-thermal-01","rep":"P4-thermal-01","sev":"high","axis":"performance","status":"perf","dev":"cpu","seconds":120},
   {"id":"P4-thermal-05","rep":"P4-thermal-05","sev":"medium","axis":"performance","status":"info","dev":"cpu","seconds":150},
   {"id":"P4-thermal-09","rep":"P4-thermal-09","sev":"medium","axis":"performance","status":"perf","dev":"cpu","seconds":120},
