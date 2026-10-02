@@ -85,8 +85,8 @@ struct Spec {
     std::vector<Perm> abelian;      ///< closed abelian group; empty = identity only
     std::vector<Perm> residues;     ///< point-group coset representatives; each must normalise
                                     ///< `abelian` (p A p^-1 = A), else ed::InvalidRequest
-    int  n_up          = -1;        ///< one Sz sector (set-bit count); -1 = every sector
-    int  sz_parity     = -1;        ///< one Sz-parity half (set-bit count parity); -1 = both
+    int  n_up          = -1;        ///< one Sz sector: the number of up spins (Sz = n_up - N/2); -1 = all
+    int  sz_parity     = -1;        ///< one half by the parity of the up-spin count; -1 = both
     bool use_sz        = true;      ///< decompose by Sz / parity when H conserves it
     int  spin_flip     = -1;        ///< -1 auto, 0 off, 1 require
     int  time_reversal = -1;        ///< -1 auto, 0 off, 1 require

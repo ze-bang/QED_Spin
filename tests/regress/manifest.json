@@ -72,7 +72,7 @@
   {"id":"C15-input-06","rep":"C15-input-06","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C15-input-07","rep":"C15-input-07","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":10},
   {"id":"C15-input-08","rep":"C15-input-08","sev":"low","axis":"robustness","status":"open","dev":"cpu","seconds":10},
-  {"id":"C16-claims-01","rep":"C16-claims-01","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":30},
+  {"id":"C16-claims-01","rep":"C16-claims-01","sev":"medium","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C16-claims-02","rep":"C03-bindings-10","sev":"medium","axis":"robustness","status":"fixed","dev":"gpu","seconds":180},
   {"id":"C16-claims-03","rep":"P1-matvec-cpu-01","sev":"high","axis":"performance","status":"info","dev":"gpu","seconds":120},
   {"id":"C16-claims-05","rep":"C11-thermal-03","sev":"high","axis":"correctness","status":"open","dev":"cpu","seconds":30},

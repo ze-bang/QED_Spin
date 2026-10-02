@@ -2,19 +2,18 @@
 // include/ed/ops/term.h -- one general spin-1/2 operator term, the unit of the operator
 // algebra (algebra.h) and of the compiled programs swept in symmetry sectors (program.h).
 //
-// A MaskedTerm acts on a computational basis state s (bit set = spin DOWN, the
-// engine convention of term_gate_math.h) as
+// A MaskedTerm acts on a computational basis state s (a set bit is spin UP, kSetBitIsDown
+// below) as
 //
 //     T|s> = coeff * (-1)^{popcount(s & sign_mask)} |s ^ flip_mask>
 //            if (s & cond_mask) == cond_val,   and 0 otherwise.
 //
 // Every product of S+, S-, S^z, S^x, S^y and the projectors |up><up|, |dn><dn| on any
-// set of sites is a finite sum of such terms (see MaskedOperator, algebra.h). The kernels
-// still read the six fixed Hamiltonian term bins (matvec/term_storage.h) until the walk is
-// rebuilt on these terms.
+// set of sites is a finite sum of such terms (see MaskedOperator, algebra.h); every lane walks
+// them (row_walk.h).
 //
 // Canonical form (what MaskedOperator stores): cond_mask == flip_mask (a condition
-// only where a ladder operator acts: bit 1 -> S+, bit 0 -> S-), and sign_mask is
+// only where a ladder operator acts: the bit's value says which ladder), and sign_mask is
 // disjoint from flip_mask (Z = 2 S^z factors on unflipped sites). In that form every
 // site carries exactly one of {I, Z, S+, S-}, which is a basis of the 2x2 matrices,
 // so the expansion of an operator into terms is unique.
@@ -32,9 +31,9 @@
 
 namespace ed::ops {
 
-/// The engine's basis convention: a SET bit is a DOWN spin (term_gate_math.h). The operator
-/// algebra reads it only through up_bits / down_bits (P3.4 flips it here).
-inline constexpr bool kSetBitIsDown = true;
+/// The engine's basis convention: a SET bit is an UP spin, so n_up counts set bits and
+/// Sz = n_up - N/2. The operator algebra reads it only through up_bits / down_bits.
+inline constexpr bool kSetBitIsDown = false;
 
 /// The value bit pattern `b` takes on its sites when they are all up / all down.
 ED_OPS_HD std::uint64_t up_bits(std::uint64_t b)   { return kSetBitIsDown ? 0 : b; }
@@ -66,8 +65,8 @@ ED_OPS_HD bool masked_apply(const MaskedTerm& t, std::uint64_t s,
     return true;
 }
 
-/// Change of the number of set bits (down spins) the term produces, when it acts:
-/// a flipped bit that was set (S+) removes one, a flipped bit that was clear (S-) adds one.
+/// Change of the number of set bits (up spins) the term produces, when it acts: a flipped
+/// bit that was set removes one, a flipped bit that was clear adds one.
 ED_OPS_HD int masked_delta_set_bits(const MaskedTerm& t) {
     const std::uint64_t flipped_set   = t.flip_mask & t.cond_val;             // S+ sites
     const std::uint64_t flipped_clear = t.flip_mask & ~t.cond_val & t.cond_mask;  // S- sites

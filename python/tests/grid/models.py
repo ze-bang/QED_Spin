@@ -2,8 +2,8 @@
 
 Every model is a term list. The same list builds the library operator and,
 independently, a dense numpy matrix, so the reference never goes through the
-library's matvec. Conventions match the library: one bit per site, bit 0 is
-Sz = +1/2, S+ acts on a set bit and clears it.
+library's matvec. Conventions match the library: one bit per site, a set bit is
+Sz = +1/2 (n_up counts set bits), S+ acts on a clear bit and sets it.
 """
 from __future__ import annotations
 
@@ -112,16 +112,16 @@ def _apply(ops, s):
     for op, site in reversed(ops):
         bit = (s >> site) & 1
         if op == "z":
-            amp *= 0.5 if bit == 0 else -0.5
+            amp *= 0.5 if bit == 1 else -0.5
         elif op in "ud":
-            if bit != (op == "d"):
+            if bit != (op == "u"):
                 return 0.0, s
         elif op == "+":
-            if bit == 0:
+            if bit == 1:
                 return 0.0, s
             s ^= 1 << site
         else:
-            if bit == 1:
+            if bit == 0:
                 return 0.0, s
             s ^= 1 << site
     return amp, s

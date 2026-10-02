@@ -50,7 +50,7 @@ class EigResult(Labelled):
         """Eigenvectors of the lowest k energies.
 
         ``basis="full"``: the 2^N computational basis (bit 0 of a state is site 0,
-        a set bit is spin down). ``basis="sz"``: the Sz sector ``n_up`` (its states in
+        a set bit is spin up). ``basis="sz"``: the Sz sector ``n_up`` (its states in
         ascending integer order); only the levels with a component there contribute.
         """
         if not any(l.vector >= 0 for l in self.levels):
@@ -94,7 +94,7 @@ class EigResult(Labelled):
         :meth:`matrix_element` then work without H."""
         arrays = {k: np.asarray(v) for k, v in
                   _core.sectors.eigs_to_arrays(self._raw, self._spec).items()}
-        np.savez_compressed(path, format_version=np.int64(1), k=np.int64(self.k),
+        np.savez_compressed(path, format_version=np.int64(2), k=np.int64(self.k),
                             energies=np.asarray(self.energies), **arrays)
 
 
@@ -137,8 +137,12 @@ def load_eigs(path) -> "EigResult":
     resolved group data travels in the file instead)."""
     with np.load(path) as f:
         d = {key: f[key] for key in f.files}
-    if int(d.get("format_version", 0)) != 1:
-        raise ValueError(f"{path}: not an EigResult file (format_version 1)")
+    version = int(d.get("format_version", 0))
+    if version == 1:
+        raise ValueError(f"{path}: an EigResult file of format 1, written when a set bit meant spin down "
+                         "(qed < 0.6); its states and n_up labels mean the opposite now -- recompute it")
+    if version != 2:
+        raise ValueError(f"{path}: not an EigResult file (format_version 2)")
     raw, spec = _core.sectors.eigs_from_arrays(d)
     return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
                      symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),

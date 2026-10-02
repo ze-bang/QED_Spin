@@ -50,7 +50,7 @@ public:
     [[nodiscard]] MaskedOperator image(Map g) const;
     /// equals(dagger(), tol).
     [[nodiscard]] bool is_hermitian(double tol = 1e-12) const;
-    /// Net change of the number of set bits (down spins) if uniform over all terms,
+    /// Net change of the number of set bits (up spins) if uniform over all terms,
     /// else throws: an operator that changes S^z by different amounts is two operators.
     [[nodiscard]] int delta_set_bits() const;
     /// Net change of the number of UP spins, if uniform (throws otherwise).

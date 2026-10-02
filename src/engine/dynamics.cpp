@@ -52,7 +52,7 @@ bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
     });
 }
 
-// Changes of the set-bit count (a set bit is a down spin) the canonical terms of O produce.
+// Changes of the up-spin count (set bits) the canonical terms of O produce.
 std::set<int> n_up_shifts(const ed::ops::MaskedOperator& O) {
     std::set<int> out;
     for (const auto& t : O.terms()) out.insert(ed::ops::masked_delta_set_bits(t));
@@ -168,7 +168,7 @@ bool same_momentum(const ed::symmetry::RepSectorData& a, const ed::symmetry::Rep
     return true;
 }
 
-// Total S- = sum_i S-_i: commutes with the lattice, lowers Sz by one (sets one bit).
+// Total S- = sum_i S-_i: commutes with the lattice, lowers Sz by one (clears one bit).
 ed::ops::MaskedOperator total_s_minus(int n_sites) {
     ed::ops::MaskedOperator S(n_sites);
     for (int i = 0; i < n_sites; ++i) S.add(ed::ops::MaskedOperator::product(n_sites, "-", {i}));
@@ -264,7 +264,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             states.push_back({v, L.tag.sz_parity});
             for (int m = 0; m < s.two_S; ++m) {
                 const BlockVector& x = states.back().first;
-                const auto& ts = sectors_of({x.basis->n_up + 1, -1, 1});
+                const auto& ts = sectors_of({x.basis->n_up - 1, -1, 1});
                 const auto t = std::find_if(ts.begin(), ts.end(),
                                             [&](const Target& c) { return same_momentum(*x.basis, *c.rd); });
                 if (t == ts.end())
@@ -352,7 +352,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     // With a spin tower the initial states are its members at every Sz = S .. -S. Each source
     // samples seeds projected onto the tower; a momentum sector holds one member per multiplet
     // at every such Sz, so its tower dimension is its dimension at Sz = S less that of the same
-    // momentum at Sz = S + 1 (one set bit fewer).
+    // momentum at Sz = S + 1 (one more up spin).
     struct Job {
         const Target* src; Subspace sub; std::vector<const Target*> targets;
         std::vector<std::shared_ptr<const ed::ops::MaskedProgram>> programs;   // O to each target
@@ -367,18 +367,18 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     std::shared_ptr<::Operator> s2c;
     if (s.two_S >= 0) {
         const int n0 = source_subs.front().n_up;
-        for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 + m, -1, 1});
+        for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 - m, -1, 1});
         s2c = detail::s2_carrier_for(u, n_sites);
     }
     auto tower_dim_of = [&](const Target& src) -> std::uint64_t {
         const int n0 = source_subs.front().n_up;
         auto dim_at = [&](int n_up) -> std::uint64_t {
-            if (n_up < 0) return 0;
+            if (n_up < 0 || n_up > n_sites) return 0;
             for (const Target& c : sectors_of({n_up, -1, 1}))
                 if (same_momentum(*src.rd, *c.rd)) return c.rd->reps.size();
             return 0;
         };
-        const std::uint64_t at = dim_at(n0), above = dim_at(n0 - 1);
+        const std::uint64_t at = dim_at(n0), above = dim_at(n0 + 1);
         if (above > at)
             throw std::runtime_error("dynamics: a momentum sector is larger at Sz = S + 1 than at Sz = S");
         return at - above;

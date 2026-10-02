@@ -13,8 +13,8 @@
 //   <X>    = sum_b p_b <X>_b,     p_b = w_b Z_b / Z
 //   C      = beta^2 (<E^2> - <E>^2),   S = ln Z + beta <E>,   F = -ln Z / beta
 //
-// When H conserves Sz each block has a definite magnetisation Sz = (N - 2 n_up) / 2
-// (a set bit is a down spin), so M = <Sz> and chi = beta (<Sz^2> - <Sz>^2) / N come
+// When H conserves Sz each block has a definite magnetisation Sz = n_up - N / 2
+// (n_up up spins), so M = <Sz> and chi = beta (<Sz^2> - <Sz>^2) / N come
 // from the same weights. A flip-mirrored block holds +Sz and -Sz in equal parts.
 // =============================================================================
 

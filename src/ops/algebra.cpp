@@ -62,7 +62,7 @@ void MaskedOperator::add_term(const MaskedTerm& in) {
         if (const std::uint64_t proj = it.C & ~it.F) {
             // a condition on an unflipped site is a projector (1 +- Z)/2
             const std::uint64_t b = lowest_bit(proj);
-            const double s = (it.V & b) ? -1.0 : 1.0;   // bit set (down): (1 - Z)/2
+            const double s = (it.V & b) ? -1.0 : 1.0;   // bit set: (1 - Z)/2
             stack.push_back({it.C & ~b, it.V & ~b, it.F, it.S, 0.5 * it.c});
             stack.push_back({it.C & ~b, it.V & ~b, it.F, it.S | b, 0.5 * s * it.c});
             continue;
@@ -218,7 +218,7 @@ int MaskedOperator::delta_set_bits() const {
     for (const auto& [k, c] : t_) {
         if (c == Complex(0.0, 0.0)) continue;
         const auto [F, V, S] = k;
-        const int d = popc(F & ~V) - popc(F & V);   // clear->set adds a down spin
+        const int d = popc(F & ~V) - popc(F & V);   // clear -> set adds a set bit
         if (first) { delta = d; first = false; }
         else if (d != delta)
             throw std::invalid_argument(

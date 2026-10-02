@@ -11,7 +11,7 @@ Fuzzer cluster C (9 of 10 cases), two shapes reproduced here:
      sz=4 (5 states): k=6 must give 5 vectors; the fuzzer saw 3.
  (b) 8-site sawtooth Heisenberg, spatial=[T], total_spin=1: k=6 must give 6 vectors (one
      two-member star x 3 Sz members); the fuzzer saw 3 (only the S- ladder is generated).
-Reference: dense numpy H in the library basis (bit i of a state = site i, set bit = spin down)."""
+Reference: dense numpy H in the library basis (bit i of a state = site i, set bit = spin up)."""
 import signal
 import sys
 
@@ -40,11 +40,11 @@ def dense_ops(N):
     Sz, Sp, Sm = [], [], []
     for i in range(N):
         bit = (s >> i) & 1
-        Sz.append(np.diag(np.where(bit == 0, 0.5, -0.5)))
+        Sz.append(np.diag(np.where(bit == 1, 0.5, -0.5)))
         P = np.zeros((dim, dim))
         M = np.zeros((dim, dim))
-        P[s[bit == 1] ^ (1 << i), s[bit == 1]] = 1.0   # S+ clears a set (down) bit
-        M[s[bit == 0] ^ (1 << i), s[bit == 0]] = 1.0   # S- sets it
+        P[s[bit == 0] ^ (1 << i), s[bit == 0]] = 1.0   # S+ sets a clear (down) bit
+        M[s[bit == 1] ^ (1 << i), s[bit == 1]] = 1.0   # S- clears it
         Sp.append(P)
         Sm.append(M)
     return Sz, Sp, Sm

@@ -190,7 +190,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
 
     // Sampling one spin tower: every multiplet has exactly one Sz = S member and S+ commutes
     // with the lattice symmetries, so a block's tower dimension is its dimension at Sz = S
-    // less that of the same (momentum, irrep) block at Sz = S + 1 (one set bit fewer).
+    // less that of the same (momentum, irrep) block at Sz = S + 1 (one more up spin).
     const bool tower_sampling = s.two_S >= 0 && t.method != ThermalSpec::Method::Exact;
     std::map<BlockKey, std::uint64_t> dim_at, dim_above;
     std::uint64_t multiplets = 0;
@@ -200,7 +200,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                                         "use FTLM or mTPQ");
         const Subspace hw = subspaces(H, s).front();
         dim_at    = block_dims(H, n_sites, s, hw);
-        dim_above = block_dims(H, n_sites, s, {hw.n_up - 1, -1, 1});
+        if (hw.n_up < n_sites) dim_above = block_dims(H, n_sites, s, {hw.n_up + 1, -1, 1});
     }
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     ThermalCurves out;
@@ -297,7 +297,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     const double S = 0.5 * s.two_S;
                     b.sz = 0.0; b.sz2 = S * (S + 1.0) / 3.0; b.mirrored = false;
                 } else {
-                    b.sz       = sub.n_up >= 0 ? 0.5 * (n_sites - 2 * sub.n_up) : 0.0;
+                    b.sz       = sub.n_up >= 0 ? 0.5 * (2 * sub.n_up - n_sites) : 0.0;
                     b.sz2      = b.sz * b.sz;
                     b.mirrored = sub.mirror == 2;
                 }

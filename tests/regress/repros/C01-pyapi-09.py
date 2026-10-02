@@ -14,7 +14,7 @@ b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
 H = b.to_operator()
 try:
     r = qed.eigs(H, 3, sym=qed.Symmetry(spatial=None, total_spin=1), vectors=True)
-    n_hw = (N - 2) // 2                      # set-bit count of the Sz = S member
+    n_hw = (N + 2) // 2                      # up-spin count of the Sz = S member
     counts = {}
     for n_up in (n_hw, N // 2, N - n_hw):
         counts[n_up] = len(r.vectors(basis="sz", n_up=n_up))

@@ -24,7 +24,7 @@ class Model:
     real: bool                        # real Hamiltonian (time-reversal symmetric)
     su2: bool = False
     flip: bool = True                 # [H, prod sigma^x] = 0
-    parity: bool = True               # (-1)^{n_down} conserved (true when u1 is true)
+    parity: bool = True               # (-1)^{n_up} conserved (true when u1 is true)
     lattice: Optional[tuple] = None   # (Lx, Ly) for 2D models, site = x + Lx*y
     notes: str = ""
 
@@ -154,7 +154,7 @@ def make_audit_models():
 # =============================================================================
 class Reference:
     """Dense ED of a term list. Basis: computational bit strings, bit i = site i in the
-    QED convention (set bit = DOWN spin, S^- raises the set-bit count). We only need
+    QED convention (set bit = UP spin, S^+ raises the set-bit count). We only need
     the spectrum and Sz-resolved spectra, which are convention independent, plus the
     same matrix-element convention as QED for the spectral checks."""
 
@@ -174,19 +174,19 @@ class Reference:
 
     def _add_term(self, H, ops, sites, c):
         # Apply the product right-to-left on each basis state; QED's convention: set bit =
-        # down spin, S^+ clears a set bit (down -> up), S^- sets it, Sz = +1/2 for clear bit.
+        # up spin, S^+ sets a clear bit (down -> up), S^- clears it, Sz = +1/2 for a set bit.
         D = self.D
         for s in range(D):
             amp = c; t = s; ok = True
             for op, site in zip(reversed(ops), reversed(sites)):
                 bit = (t >> site) & 1
                 if op == "z":
-                    amp *= (-0.5 if bit else 0.5)
+                    amp *= (0.5 if bit else -0.5)
                 elif op == "+":
-                    if bit: t ^= (1 << site)
+                    if not bit: t ^= (1 << site)
                     else: ok = False; break
                 else:
-                    if not bit: t ^= (1 << site)
+                    if bit: t ^= (1 << site)
                     else: ok = False; break
             if ok and amp != 0:
                 H[t, s] += amp

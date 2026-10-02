@@ -4,7 +4,7 @@
 """Claim: T=0 qed.dynamics re-references omega to each target sector's lowest Ritz value when
 E0 == 0 (or |E0| < 1e-14): lg_sectors_dynamics.cpp:309 passes denorm_min, which
 cf_spectral_kernel.h:139 treats as 'auto-detect'. Test: 8-site XX ring, source restricted to the
-all-up sector (sz=0 set bits, E0 = 0 exactly), O = S^-_q. The one-magnon pole must sit at
+all-up sector (sz=N up spins, E0 = 0 exactly), O = S^-_q. The one-magnon pole must sit at
 omega = E_q - E0 != 0. Control: the same with a field h*sum Sz (E0 = h*N/2 != 0) must be right."""
 import cmath
 import numpy as np
@@ -75,7 +75,7 @@ for i in range(N):
     xx += [(0.5, [(qed.OP_SPLUS, i), (qed.OP_SMINUS, j)]), (0.5, [(qed.OP_SMINUS, i), (qed.OP_SPLUS, j)])]
 Oq, Od = build([(cmath.exp(-1j * q * j) / np.sqrt(N), [(qed.OP_SMINUS, j)]) for j in range(N)], N)
 t = [(i + 1) % N for i in range(N)]
-sym = qed.Symmetry(spatial=[t], point_group=False, sz=0, spin_flip="off", time_reversal="off")
+sym = qed.Symmetry(spatial=[t], point_group=False, sz=N, spin_flip="off", time_reversal="off")
 out = {}
 for name, h in (("E0=0", 0.0), ("control h=0.3", 0.3)):
     terms = xx + ([(h, [(qed.OP_SZ, i)]) for i in range(N)] if h else [])

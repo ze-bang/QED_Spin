@@ -4,7 +4,7 @@
 """Claim: CrossSectorOrbitObservable (used by qed.dynamics and EigResult.matrix_element) applies a
 same-site two-body term Op1[i] Op2[i] with Op1 acting first, the opposite of the documented
 'coeff * Op1[site_1] Op2[site_2]' and of the H/expect convention. Test: 6-site Heisenberg ring,
-one down spin (sz=1 set bit, Sz=+2), O = S+_0 S-_0 (= 1/2 + Sz_0, expectation 5/6). Compare
+one down spin (sz=N-1 up spins, Sz=+2), O = S+_0 S-_0 (= 1/2 + Sz_0, expectation 5/6). Compare
 expect, matrix_element and dynamics against the dense reference for S+S- and for the reversed S-S+."""
 import numpy as np
 import qed
@@ -69,7 +69,7 @@ eta = 0.05
 omega = np.linspace(-6.0, 6.0, 1201)
 Hq, Hd = build(heis(N), N)
 t = [(i + 1) % N for i in range(N)]
-sym = qed.Symmetry(spatial=[t], point_group=False, sz=1, spin_flip="off", time_reversal="off")
+sym = qed.Symmetry(spatial=[t], point_group=False, sz=N - 1, spin_flip="off", time_reversal="off")
 O, Dright = build([(1.0, [(qed.OP_SPLUS, 0), (qed.OP_SMINUS, 0)])], N)
 _, Drev = build([(1.0, [(qed.OP_SMINUS, 0), (qed.OP_SPLUS, 0)])], N)
 # ground state of the one-down-spin sector (popcount 1 in the dense index: down = 1)

@@ -247,19 +247,19 @@ TEST_CASE("cross-Sz elements of ladder strings", "[rep_me]") {
         const auto G = torus_group(L1, L2, /*flip=*/false);
         const auto s6 = make_sector(G, L1, L2, 0, 0, 1, n / 2, true);
         const auto s5 = make_sector(G, L1, L2, 1, 0, 1, n / 2 - 1, true);
-        std::vector<MaskedOperator> up{MaskedOperator::product(n, "+", {0}, 1.0),
-                                       MaskedOperator::product(n, "+z", {2, 0}, 1.0),
-                                       MaskedOperator::product(n, "++-", {0, 1, 3}, 1.0),
-                                       MaskedOperator::product(n, "-", {0}, 1.0)};   // wrong direction: dropped
+        std::vector<MaskedOperator> lower{MaskedOperator::product(n, "-", {0}, 1.0),
+                                          MaskedOperator::product(n, "-z", {2, 0}, 1.0),
+                                          MaskedOperator::product(n, "--+", {0, 1, 3}, 1.0),
+                                          MaskedOperator::product(n, "+", {0}, 1.0)};   // wrong direction: dropped
         const std::vector<std::vector<Cx>> k6{random_vec(s6.dim(), rng), random_vec(s6.dim(), rng)},
             b5{random_vec(s5.dim(), rng)};
         INFO((torus ? "4x4 torus" : "12-ring"));
-        CHECK(check_all(up, s6, s5, k6, b5) < 1e-12);   // S+ removes a set bit: n_up -> n_up - 1
-        const auto prog = compile_program(up, s6, s5);
+        CHECK(check_all(lower, s6, s5, k6, b5) < 1e-12);   // S- clears a set bit (an up spin): n_up -> n_up - 1
+        const auto prog = compile_program(lower, s6, s5);
         CHECK(prog.terms_per_obs[3] == 0);
-        std::vector<MaskedOperator> dn{MaskedOperator::product(n, "-", {7}, 1.0),
-                                       MaskedOperator::product(n, "-z-+", {0, 4, 5, 9}, 1.0)};
-        CHECK(check_all(dn, s5, s6, b5, k6) < 1e-12);
+        std::vector<MaskedOperator> raise{MaskedOperator::product(n, "+", {7}, 1.0),
+                                          MaskedOperator::product(n, "+z+-", {0, 4, 5, 9}, 1.0)};
+        CHECK(check_all(raise, s5, s6, b5, k6) < 1e-12);
     }
 }
 

@@ -133,6 +133,13 @@ def test_saved_eigs_reload_with_vectors_expect_and_matrix_elements(tmp_path):
     for i in range(n):
         for j in range(n):
             assert abs(s.matrix_element(sp, i, j) - r.matrix_element(sp, i, j)) < 1e-14
+    # A format-1 file (a set bit meant spin down) is refused, not reinterpreted.
+    with np.load(path) as f:
+        old = {key: f[key] for key in f.files}
+    old["format_version"] = np.int64(1)
+    np.savez_compressed(tmp_path / "old.npz", **old)
+    with pytest.raises(ValueError, match="format 1"):
+        qed.load_eigs(tmp_path / "old.npz")
 
 
 def _permute(v, p):
@@ -337,7 +344,7 @@ def test_a_selection_matching_nothing_raises(verb):
 
 @pytest.mark.parametrize("n", [8, 9])
 def test_sz_parity_with_a_u1_hamiltonian(n):
-    # sz='even'/'odd' keeps the sectors whose set-bit count has that parity (audit C02-discovery-01:
+    # sz='even'/'odd' keeps the sectors whose up-spin count has that parity (audit C02-discovery-01:
     # ignored for a U(1) H); the flip folds n with N - n only when both survive (N even).
     H = _ring(n, 0.3)
     for key, parity in (("even", 0), ("odd", 1)):
@@ -514,7 +521,7 @@ def test_omega_is_measured_from_a_zero_ground_energy():
     for j in range(n):
         O.add_one_body(qed.OP_SMINUS, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
     omega = np.linspace(-1.5, 1.5, 601)
-    sym = qed.Symmetry(spatial=_translations(n), point_group=False, sz=0, spin_flip="off",
+    sym = qed.Symmetry(spatial=_translations(n), point_group=False, sz=n, spin_flip="off",
                        time_reversal="off")
     r = qed.dynamics(H, O, omega, eta=0.02, sym=sym)
     assert r.e0 == 0.0

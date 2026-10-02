@@ -12,8 +12,8 @@ into the engine's :class:`qed._core.sectors.Spec`:
   graph has more automorphisms than its lattice) the abelian part need not be the lattice
   translations: pass the translations and point group as a list to label by them.
 * ``sz`` -- ``"auto"`` (decompose by Sz, or by Sz parity when H only conserves that),
-  an integer (one Sz sector, counted in set bits), ``"even"`` / ``"odd"`` (one parity
-  half), or ``"off"``.
+  an integer n (one Sz sector: n spins up, Sz = n - N/2), ``"even"`` / ``"odd"`` (the half
+  whose number of up spins has that parity), or ``"off"``.
 * ``spin_flip`` / ``time_reversal`` -- ``"auto"`` (use when H has it), ``"off"``,
   ``"require"`` (fail when H lacks it).
 * ``point_group`` -- ``False`` keeps only the abelian part.

@@ -221,12 +221,12 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
         if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
             throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "
                                         + std::to_string(n_sites));
-        const int n = (n_sites - s.two_S) / 2;              // the Sz = S member of each multiplet
+        const int n = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);   // the Sz = S member
         if (s.n_up >= 0 && s.n_up != n)
             throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
         if (s.sz_parity >= 0 && n % 2 != s.sz_parity)
             throw ed::InvalidRequest("sectors: sz_parity and the total-spin restriction name disjoint sectors "
-                                     "(the spin-S tower is solved at the set-bit count " + std::to_string(n) + ")");
+                                     "(the spin-S tower is solved at n_up = " + std::to_string(n) + ")");
         out.push_back({n, -1, 1});
         return out;
     }
@@ -238,13 +238,14 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
         if (s.n_up >= 0) {
             out.push_back({s.n_up, -1, 1});
         } else {
-            // sz_parity keeps the sectors whose set-bit count n has that parity. The flip pairs n with
+            // sz_parity keeps the sectors whose up-spin count n has that parity. The flip pairs n with
             // N - n, which has the same parity only when N is even: otherwise no sector is folded.
+            // Of a mirror pair the Sz >= 0 member (n >= N - n) is solved.
             const bool pair = fold && (s.sz_parity < 0 || n_sites % 2 == 0);
             for (int n = 0; n <= n_sites; ++n) {
                 if (s.sz_parity >= 0 && n % 2 != s.sz_parity) continue;
                 const int m = n_sites - n;
-                if (pair && m < n) continue;                       // solved as its mirror
+                if (pair && m > n) continue;                       // solved as its mirror
                 out.push_back({n, -1, (pair && m != n) ? 2 : 1});
             }
         }
@@ -593,13 +594,13 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
             for (std::size_t i = 0; i < x.size(); ++i) y[i] = std::conj(x[i]);
             return y;
         });
-    if (s.two_S > 0 && n_up < 0)   // the other members of an SU(2) multiplet: total S-
+    if (s.two_S > 0 && n_up < 0)   // the other members of an SU(2) multiplet: total S- (clears an up spin)
         ops.push_back([&](const std::vector<Complex>& x) {
             std::vector<Complex> y(dim, Complex(0, 0));
             for (std::uint64_t st = 0; st < dim; ++st) {
                 if (x[st] == Complex(0, 0)) continue;
                 for (int i = 0; i < n_sites; ++i)
-                    if (!((st >> i) & 1u)) y[st | (std::uint64_t{1} << i)] += x[st];
+                    if ((st >> i) & 1u) y[st & ~(std::uint64_t{1} << i)] += x[st];
             }
             return y;
         });

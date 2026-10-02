@@ -9,7 +9,7 @@ automorphism group, the engine drops every residue that does not normalise A
 applies all of spec.residues, so the expanded multiplet of one level leaks into the eigenspace
 owned by another level and EigResult.vectors() is not orthonormal. Fuzzer case 114-64 saw
 max|Gram - I| = 0.8165 = sqrt(2/3) (the same value as the K4 repro of C01-pyapi-03) with
-residuals ~1e-14. Reference: dense numpy H in the library basis (set bit = spin down)."""
+residuals ~1e-14. Reference: dense numpy H in the library basis (set bit = spin up)."""
 import signal
 import sys
 
@@ -56,7 +56,7 @@ for i, j in bonds:
 for i in range(N):
     H.add_one_body(qed.OP_SZ, i, complex(hz))
 
-# dense reference (real; bit i = site i, set bit = spin down, S+ clears a set bit)
+# dense reference (real; bit i = site i, set bit = spin up, S+ sets a clear bit)
 dim = 1 << N
 s = np.arange(dim)
 bits = [(s >> i) & 1 for i in range(N)]
@@ -67,7 +67,7 @@ for i, j in bonds:
     m = bi != bj
     Hd[s[m] ^ ((1 << i) | (1 << j)), s[m]] += 0.5 * J
 for i in range(N):
-    Hd[s, s] += hz * np.where(bits[i] == 0, 0.5, -0.5)
+    Hd[s, s] += hz * np.where(bits[i] == 1, 0.5, -0.5)
 ref = np.linalg.eigvalsh(Hd)
 
 

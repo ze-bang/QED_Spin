@@ -286,11 +286,11 @@ TEST_CASE("Operator: a record added between applies is honoured",
     const uint64_t dim = 1ULL << 4;
 
     std::vector<Complex> x(dim, Complex(0.0, 0.0));
-    x[0] = Complex(1.0, 0.0);  // |0000>
+    x[dim - 1] = Complex(1.0, 0.0);  // |1111>: every spin up (a set bit is up)
     std::vector<Complex> y_before(dim, Complex(0.0, 0.0));
     op->apply(x.data(), y_before.data(), dim);
 
-    // Add a non-trivial diagonal term on site 0; |0000> picks up
+    // Add a non-trivial diagonal term on site 0; |1111> picks up
     // +spin * coeff under Sz_0.
     Operator::TransformData t;
     t.op_type      = 2;     // Sz
@@ -302,10 +302,10 @@ TEST_CASE("Operator: a record added between applies is honoured",
     std::vector<Complex> y_after(dim, Complex(0.0, 0.0));
     op->apply(x.data(), y_after.data(), dim);
 
-    // The contributions on the diagonal entry y[|0000>] must differ by
+    // The contributions on the diagonal entry y[|1111>] must differ by
     // exactly +spin * 3.14159 = +0.5 * 3.14159 = +1.57080 (spin-1/2).
     const double expected_delta = 0.5 * 3.14159;
-    const double actual_delta   = std::real(y_after[0] - y_before[0]);
+    const double actual_delta   = std::real(y_after[dim - 1] - y_before[dim - 1]);
     INFO("expected delta " << expected_delta << ", got " << actual_delta);
     REQUIRE(std::abs(actual_delta - expected_delta) < 1e-12);
 }

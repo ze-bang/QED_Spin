@@ -23,6 +23,14 @@ Breaking changes so far:
   `describe()`; `SymmetryReport`, `GeneratorSet` and the options `translation_only=` and
   `lattice=` are gone. Graphs with more than 4096 automorphisms run without spatial symmetry
   (with a diagnostic), and co-groups are capped at 128 elements.
+- **`n_up` counts up spins: a set bit is spin up.** `Symmetry(sz=n)` selects Sz = n - N/2 (it
+  selected N/2 - n), `Level.n_up` and `block_stats["n_up"]` count up spins, and `sz="even"` /
+  `"odd"` name the halves by the parity of the up-spin count (for odd N that is the other half
+  than before). Full-basis vectors (`vectors(basis="full")`, multiplets) are indexed with a set
+  bit = up: the old vector with every bit complemented. Spectra, thermodynamics, S(omega) and
+  <O> do not change; of a flip-mirrored pair of sectors the Sz >= 0 one is solved, as before,
+  and a spin-S tower is solved at its Sz = +S member. `EigResult.save` writes format 2 and
+  `load_eigs` refuses a format-1 file (its states meant the opposite).
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.

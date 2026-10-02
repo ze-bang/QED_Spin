@@ -4,7 +4,7 @@
 """Claim: the target-reachability probe (lg_sectors_dynamics.cpp:118-152) applies O to only 8 evenly
 spaced source representatives, so an O that acts only on unsampled orbits makes the target
 'unreachable' and its spectral weight is silently dropped. Test: 18-site Heisenberg ring, source
-sector with 2 down spins (sz=2 set bits, k=0 ground state, 9 reps ordered by separation d=1..9;
+sector with 2 down spins (sz=N-2 up spins, k=0 ground state, 9 reps ordered by separation d=1..9;
 picks r = p*9/8 skip d=9), O = sum_i S+_i S+_{i+9} -> all-up state. Reference: dense diagonalisation
 inside the 153-state sector (independent of the library; N=18 is too large for a full Kronecker
 reference). Control: O = sum_i S+_i S+_{i+1} (d=1, sampled)."""
@@ -38,7 +38,7 @@ for i in range(N):
     Hq.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
     Hq.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
 t = [(i + 1) % N for i in range(N)]
-sym = qed.Symmetry(spatial=[t], point_group=False, sz=2, spin_flip="off", time_reversal="off")
+sym = qed.Symmetry(spatial=[t], point_group=False, sz=N - 2, spin_flip="off", time_reversal="off")
 omega = np.array([E_up - E0])
 res = {}
 for d in (9, 1):
