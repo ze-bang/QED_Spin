@@ -9,7 +9,7 @@ import qed
 
 params = list(inspect.signature(qed.dynamics).parameters)
 ops_like = [p for p in params if p not in ("H", "omega", "eta", "T", "sym", "krylov", "samples", "seed", "dense_max_dim",
-                                           "degeneracy_tol", "device")]
+                                           "degeneracy_tol", "device", "prune")]
 doc = (qed._core.sectors.dynamics.__doc__ or "").splitlines()[:3]
 N = 4
 H = qed.Operator(N)
