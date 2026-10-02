@@ -15,15 +15,16 @@
 // =============================================================================
 
 #include <ed/matvec/linear_operator.h>   // ed::LinearOperator::MatvecFn
-#include <ed/matvec/term_storage.h>      // ed::matvec::TermStorage
+#include <ed/ops/program.h>              // ed::ops::MaskedProgram
 #include <ed/basis/rep_sector.h>         // ed::symmetry::RepSectorData
 
 namespace ed::symmetry {
 
 /// Build a RESIDENT on-the-fly representative GPU matvec for one symmetry
 /// sector. Consumes a CSR-free ``RepSectorData`` (representatives +
-/// ``1/norm`` + the |G| per-sector characters + the group permutations) and
-/// returns a complex matvec callable taking DEVICE pointers. Allocates NO
+/// ``1/norm`` + the |G| per-sector characters + the group permutations) and the
+/// operator's row program (Operator::row_program: the walk of the adjoint, sector_rows.h)
+/// and returns a complex matvec callable taking DEVICE pointers. Allocates NO
 /// orbit CSR and NO O(full-Sz-dim) projection table: the group action +
 /// projection are regenerated arithmetically on the device, so per-SpMV
 /// traffic is just the in/out vectors (a genuine 1/|G| memory saving).
@@ -35,16 +36,14 @@ namespace ed::symmetry {
 /// needs WITH_CUDA.
 ed::LinearOperator::MatvecFn
 make_sector_matvec_gpu_rep(const RepSectorData&            rep,
-                           double                          spin_l,
-                           const ed::matvec::TermStorage&  terms);
+                           const ed::ops::MaskedProgram&   rows);
 
 /// The same sector matvec on k vectors at once (device pointers ins[i] -> outs[i]): one walk
 /// over each row's terms and orbit lookups serves up to 8 vectors, and every output equals
 /// the single-vector apply bit for bit.
 ed::LinearOperator::MultiMatvecFn
 make_sector_matvec_gpu_rep_multi(const RepSectorData&            rep,
-                                 double                          spin_l,
-                                 const ed::matvec::TermStorage&  terms);
+                                 const ed::ops::MaskedProgram&   rows);
 
 /// HOST-pointer twin of ``make_sector_matvec_gpu_rep`` for callers whose
 /// Krylov loop keeps its vectors in host RAM (the little-group engine's
@@ -55,7 +54,6 @@ make_sector_matvec_gpu_rep_multi(const RepSectorData&            rep,
 /// as the device-pointer factory.
 ed::LinearOperator::MatvecFn
 make_sector_matvec_gpu_rep_hostptr(const RepSectorData&            rep,
-                                   double                          spin_l,
-                                   const ed::matvec::TermStorage&  terms);
+                                   const ed::ops::MaskedProgram&   rows);
 
 } // namespace ed::symmetry

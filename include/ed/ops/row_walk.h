@@ -24,6 +24,10 @@
 
 namespace ed::ops {
 
+// Instantiated in kernels with device-only emit lambdas: no host-side execution check.
+#if defined(__CUDACC__)
+#pragma nv_exec_check_disable
+#endif
 template <class C, class Emit>
 ED_OPS_HD void for_each_connection(const ProgramView<C>& P, std::uint64_t s, Emit&& emit) {
     for (std::uint32_t g = 0; g < P.n_groups; ++g) {

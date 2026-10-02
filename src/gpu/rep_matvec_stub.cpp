@@ -25,9 +25,7 @@
 #include <string>
 
 ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*rep*/,
-                                         double                         /*spin_l*/,
-                                         const ed::matvec::TermStorage& /*terms*/) {
+ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
     throw std::logic_error(
         "ed::symmetry::make_sector_matvec_gpu_rep: built without WITH_CUDA. "
         "Rebuild with -DWITH_CUDA=ON to enable the on-the-fly representative "
@@ -36,9 +34,7 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*re
 
 ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
-    const ed::symmetry::RepSectorData& /*rep*/,
-    double                             /*spin_l*/,
-    const ed::matvec::TermStorage&     /*terms*/) {
+    const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
     throw std::logic_error(
         "ed::symmetry::make_sector_matvec_gpu_rep_hostptr: built without "
         "WITH_CUDA. Rebuild with -DWITH_CUDA=ON, or route the workload "
@@ -46,9 +42,7 @@ ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
 }
 
 ed::LinearOperator::MultiMatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/,
-                                               double                         /*spin_l*/,
-                                               const ed::matvec::TermStorage& /*terms*/) {
+ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
     throw std::logic_error(
         "ed::symmetry::make_sector_matvec_gpu_rep_multi: built without WITH_CUDA.");
 }

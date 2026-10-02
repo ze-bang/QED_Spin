@@ -23,12 +23,13 @@
 #include <ed/core/config.h>
 #include <ed/core/log.h>
 #include <ed/gpu/device_basis_policy.cuh>
-#include <ed/gpu/term_kernels.cuh>
-#include <ed/matvec/term_storage.h>
 #include <ed/gpu/rep_matvec.h>
+#include <ed/ops/program.h>
+#include <ed/ops/row_walk.h>
 
 #include <cuda_runtime.h>
 #include <cuComplex.h>
+#include <thrust/complex.h>
 #include <thrust/device_vector.h>
 
 #include <algorithm>
@@ -148,14 +149,12 @@ struct GpuRepSectorMirror {
     int           n_sites    = 0;
     int           n_up       = -1;
     std::uint64_t dim        = 0;
-    double        spin_l     = 0.5;
 
-    thrust::device_vector<ed::matvec::DiagOneBody>     d_diag_one_body;
-    thrust::device_vector<ed::matvec::OffDiagOneBody>  d_offdiag_one_body;
-    thrust::device_vector<ed::matvec::DiagTwoBody>     d_diag_two_body;
-    thrust::device_vector<ed::matvec::MixedTwoBody>    d_mixed_two_body;
-    thrust::device_vector<ed::matvec::OffDiagTwoBody>  d_offdiag_two_body;
-    thrust::device_vector<ed::matvec::ThreeBodyTerm>   d_three_body;
+    // The operator's row program (ed::ops::MaskedProgram), on the device.
+    thrust::device_vector<std::uint64_t>           d_group_flip, d_vsub_val, d_term_sign;
+    thrust::device_vector<int>                     d_group_setbits;
+    thrust::device_vector<std::uint32_t>           d_group_vbegin, d_vsub_tbegin;
+    thrust::device_vector<thrust::complex<double>> d_term_coeff;
 
     ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis_view() const noexcept {
         ed::matvec::basis::DeviceRepSymmetryBasisPolicy v;
@@ -183,32 +182,25 @@ struct GpuRepSectorMirror {
         return v;
     }
 
-    ed::matvec::kernel::gpu::DeviceTermStorage terms_view() const noexcept {
-        ed::matvec::kernel::gpu::DeviceTermStorage t;
-        t.diag_one_body        = thrust::raw_pointer_cast(d_diag_one_body.data());
-        t.num_diag_one_body    = static_cast<std::uint32_t>(d_diag_one_body.size());
-        t.offdiag_one_body     = thrust::raw_pointer_cast(d_offdiag_one_body.data());
-        t.num_offdiag_one_body = static_cast<std::uint32_t>(d_offdiag_one_body.size());
-        t.diag_two_body        = thrust::raw_pointer_cast(d_diag_two_body.data());
-        t.num_diag_two_body    = static_cast<std::uint32_t>(d_diag_two_body.size());
-        t.mixed_two_body       = thrust::raw_pointer_cast(d_mixed_two_body.data());
-        t.num_mixed_two_body   = static_cast<std::uint32_t>(d_mixed_two_body.size());
-        t.offdiag_two_body     = thrust::raw_pointer_cast(d_offdiag_two_body.data());
-        t.num_offdiag_two_body = static_cast<std::uint32_t>(d_offdiag_two_body.size());
-        t.three_body           = thrust::raw_pointer_cast(d_three_body.data());
-        t.num_three_body       = static_cast<std::uint32_t>(d_three_body.size());
-        return t;
+    ed::ops::ProgramView<thrust::complex<double>> program_view() const noexcept {
+        return {static_cast<std::uint32_t>(d_group_flip.size()),
+                thrust::raw_pointer_cast(d_group_flip.data()),
+                thrust::raw_pointer_cast(d_group_setbits.data()),
+                thrust::raw_pointer_cast(d_group_vbegin.data()),
+                thrust::raw_pointer_cast(d_vsub_val.data()),
+                thrust::raw_pointer_cast(d_vsub_tbegin.data()),
+                thrust::raw_pointer_cast(d_term_sign.data()),
+                thrust::raw_pointer_cast(d_term_coeff.data())};
     }
 };
 
 namespace detail {
 
-// Build a GpuRepSectorMirror from a CSR-free RepSectorData + term storage.
+// Build a GpuRepSectorMirror from a CSR-free RepSectorData + the operator's row program.
 // Builds the reverse rank table from ``reps`` only (no orbit walk).
 inline std::shared_ptr<GpuRepSectorMirror>
 build_rep_mirror(const ed::symmetry::RepSectorData& data,
-                 double spin_l,
-                 const ed::matvec::TermStorage& terms)
+                 const ed::ops::MaskedProgram& rows)
 {
     if (!data.usable()) {
         throw std::runtime_error(
@@ -224,7 +216,6 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     // sector (below): nothing is indexed by the state itself, so N is not capped.
 
     auto mirror = std::make_shared<GpuRepSectorMirror>();
-    mirror->spin_l     = spin_l;
     mirror->group_size = data.group_size;
     mirror->n_sites    = n_sites;
     mirror->n_up       = n_up;
@@ -304,12 +295,16 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
         mirror->perm_lut_bpw = tmp.perm_lut_bpw;
     }
 
-    mirror->d_diag_one_body    = terms.diag_one_body;
-    mirror->d_offdiag_one_body = terms.offdiag_one_body;
-    mirror->d_diag_two_body    = terms.diag_two_body;
-    mirror->d_mixed_two_body   = terms.mixed_two_body;
-    mirror->d_offdiag_two_body = terms.offdiag_two_body;
-    mirror->d_three_body       = terms.three_body;
+    mirror->d_group_flip    = rows.group_flip;
+    mirror->d_group_setbits = rows.group_setbits;
+    mirror->d_group_vbegin  = rows.group_vbegin;
+    mirror->d_vsub_val      = rows.vsub_val;
+    mirror->d_vsub_tbegin   = rows.vsub_tbegin;
+    mirror->d_term_sign     = rows.term_sign;
+    {   // std::complex<double> and thrust::complex<double> share their layout
+        const auto* c = reinterpret_cast<const thrust::complex<double>*>(rows.term_coeff.data());
+        mirror->d_term_coeff.assign(c, c + rows.term_coeff.size());
+    }
 
     cuda_check(cudaDeviceSynchronize(), "synchronize after rep mirror upload");
     return mirror;
@@ -317,39 +312,80 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
 
 }  // namespace detail
 
-void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
-                                const cuDoubleComplex* d_in,
-                                cuDoubleComplex* d_out,
-                                std::size_t dim,
-                                double spin_l)
+// -----------------------------------------------------------------------------
+// The sector rows on the device: one thread per row walks the operator's row program
+// (row_walk.h) from its representative, as the host sector_rows.h does -- the diagonal
+// without a lookup, every other group's target looked up once and conjugated:
+//     out[r] = sum conj(h) in[r] + inv_norm[r] conj(h proj) in[j].
+// One walk serves NV vectors, each accumulated in the same order, so a multi-vector apply
+// equals NV single applies bit for bit.
+// -----------------------------------------------------------------------------
+namespace {
+
+using DC = thrust::complex<double>;
+
+template <int NV>
+struct WalkPointers {
+    const DC* in[NV];
+    DC*       out[NV];
+};
+
+template <int NV>
+__global__ void sector_walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis,
+                                   ed::ops::ProgramView<DC> P, WalkPointers<NV> p) {
+    const std::uint64_t r = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (r >= basis.dim()) return;
+    const std::uint64_t s = basis.state_of(r);
+    const double w = basis.inv_norms[r];
+    DC acc[NV];
+#pragma unroll
+    for (int v = 0; v < NV; ++v) acc[v] = DC(0.0, 0.0);
+    ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const DC& h) {
+        DC c;
+        std::uint64_t j;
+        if (t == s) {
+            c = thrust::conj(h);
+            j = r;
+        } else {
+            cuDoubleComplex proj;
+            j = basis.index_and_projection(t, proj);
+            if (j == ed::matvec::basis::kDeviceNotFound) return;
+            c = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
+        }
+#pragma unroll
+        for (int v = 0; v < NV; ++v) acc[v] += c * p.in[v][j];
+    });
+#pragma unroll
+    for (int v = 0; v < NV; ++v) p.out[v][r] = acc[v];
+}
+
+}  // namespace
+
+// out[i] = O in[i] for i < k (device pointers), in launches of up to 8 vectors.
+void launch_sector_walk(const GpuRepSectorMirror& mirror, const DC* const* ins, DC* const* outs, std::size_t k)
 {
     using detail::cuda_check;
-    if (dim == 0) return;
+    const std::uint64_t dim = mirror.dim;
+    if (dim == 0 || k == 0) return;
     const auto basis = mirror.basis_view();
-    const auto terms = mirror.terms_view();
-
-    // DEFAULT: lock-free row GATHER (one write per row, no atomics, no
-    // pre-zero memset; the diagonal is fused inline). Bisection fallback to the
-    // validated atomic scatter via ED_MATVEC_SCATTER=1.
-    static const bool use_scatter = []() {
-        return ed::env::flag("ED_MATVEC_SCATTER", false);
-    }();
-
-    cudaError_t err;
-    if (use_scatter) {
-        cuda_check(cudaMemsetAsync(d_out, 0, dim * sizeof(cuDoubleComplex)),
-                   "zero output before rep scatter kernel");
-        err = ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu<
-            ed::matvec::basis::DeviceRepSymmetryBasisPolicy,
-            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
-                             /*stream=*/0, /*threads_per_block=*/256);
-    } else {
-        err = ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu_gather<
-            ed::matvec::basis::DeviceRepSymmetryBasisPolicy,
-            cuDoubleComplex>(basis, spin_l, terms, d_in, d_out,
-                             /*stream=*/0, /*threads_per_block=*/256);
+    const auto prog  = mirror.program_view();
+    constexpr unsigned kThreads = 256;
+    const auto blocks = static_cast<unsigned>((dim + kThreads - 1) / kThreads);
+    auto launch = [&](auto nv_tag, std::size_t off) {
+        constexpr int NV = decltype(nv_tag)::value;
+        WalkPointers<NV> p;
+        for (int v = 0; v < NV; ++v) { p.in[v] = ins[off + v]; p.out[v] = outs[off + v]; }
+        sector_walk_gather<NV><<<blocks, kThreads>>>(basis, prog, p);
+    };
+    std::size_t off = 0;
+    while (off < k) {
+        const std::size_t left = k - off;
+        if (left >= 8)      { launch(std::integral_constant<int, 8>{}, off); off += 8; }
+        else if (left >= 4) { launch(std::integral_constant<int, 4>{}, off); off += 4; }
+        else if (left >= 2) { launch(std::integral_constant<int, 2>{}, off); off += 2; }
+        else                { launch(std::integral_constant<int, 1>{}, off); off += 1; }
+        cuda_check(cudaGetLastError(), "sector walk kernel launch");
     }
-    cuda_check(err, "apply_terms_rep_symmetry kernel launch");
 }
 
 }  // namespace ed::symmetry::gpu_mirror
@@ -359,7 +395,7 @@ void launch_rep_symmetry_matvec(const GpuRepSectorMirror& mirror,
 //
 // Builds a resident GpuRepSectorMirror from a CSR-free RepSectorData (reps +
 // inv_norms + |G| characters + group perms) and returns a DEVICE-pointer
-// MatvecFn driving the rep-symmetry kernels (launch_rep_symmetry_matvec).
+// MatvecFn driving the sector walk kernel (launch_sector_walk).
 // No orbit CSR / no O(full-Sz-dim) projection table is allocated or
 // streamed.
 // =============================================================================
@@ -368,8 +404,7 @@ namespace ed::symmetry::gpu_mirror::detail {
 // The resident device mirror of (sector, operator), shared by every bind of it.
 std::shared_ptr<const GpuRepSectorMirror>
 acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
-                   double                         spin_l,
-                   const ed::matvec::TermStorage& terms)
+                   const ed::ops::MaskedProgram&      rows)
 {
 
     // Memoise the resident device mirror across binds. A single GS solve
@@ -384,7 +419,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
     // across DIFFERENT sectors and returns the wrong mirror (GPU OOB on a
     // dim-equal parity/flip pair). Key on the sector's own content: the
     // per-sector characters (unique per irrep), the rep-list signature
-    // (n_up / size / samples), spin, and the term footprint.
+    // (n_up / size / samples), and the program's footprint.
     // Doubles enter the keys by their exact bit pattern: a rounded value (llround(c * 1e9))
     // let operators whose coefficients agree to 1e-9, or overflow alike, share one mirror.
     auto bits = [](double x) {
@@ -393,7 +428,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         return u;
     };
     auto content_key = [&bits](const ed::symmetry::RepSectorData& r,
-                          const ed::matvec::TermStorage& t, double sl) {
+                               const ed::ops::MaskedProgram& P) {
         std::uint64_t h = 1469598103934665603ULL;
         // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold:
         // the plain XOR-multiply mix is structurally degenerate on the
@@ -422,37 +457,30 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
             mix(bits(c.imag()));
         }
         if (!r.flip_masks.empty()) mix(r.flip_masks.front());
-        mix(bits(sl));
-        mix(t.diag_one_body.size());    mix(t.offdiag_one_body.size());
-        mix(t.diag_two_body.size());    mix(t.mixed_two_body.size());
-        mix(t.offdiag_two_body.size()); mix(t.three_body.size());
-        if (!t.offdiag_two_body.empty()) mix(bits(t.offdiag_two_body.back().coefficient.real()));
+        mix(P.n_groups());
+        mix(P.n_terms());
+        if (P.n_terms() > 0) mix(bits(P.term_coeff.back().real()));
         return h;
     };
-    // The operator terms, word for word. The sector fingerprint below identifies the rep
-    // basis but NOT the operator terms -- fine when one operator (H) is mirrored per sector,
-    // WRONG when several operators share a sector (e.g. a q-mesh of transverse probes O_q
-    // on the GS sector). Every term field (bin sizes, sites, op types, coefficient bits) is
-    // kept in the slot and compared exactly, so distinct operators never share a mirror.
-    auto term_words = [&bits](const ed::matvec::TermStorage& t) {
+    // The operator's program, word for word. The sector fingerprint below identifies the rep
+    // basis but NOT the operator -- fine when one operator (H) is mirrored per sector, WRONG
+    // when several operators share a sector (e.g. a q-mesh of transverse probes O_q on the
+    // GS sector). Every program array (coefficients by their bits) is kept in the slot and
+    // compared exactly, so distinct operators never share a mirror.
+    auto program_words = [&bits](const ed::ops::MaskedProgram& P) {
         std::vector<std::uint64_t> w;
-        w.push_back(t.diag_one_body.size());    w.push_back(t.offdiag_one_body.size());
-        w.push_back(t.diag_two_body.size());    w.push_back(t.mixed_two_body.size());
-        w.push_back(t.offdiag_two_body.size()); w.push_back(t.three_body.size());
-        auto c = [&](const std::complex<double>& z) { w.push_back(bits(z.real())); w.push_back(bits(z.imag())); };
-        for (const auto& d : t.diag_one_body)   { w.push_back(d.site_index); c(d.coefficient); }
-        for (const auto& o : t.offdiag_one_body){ w.push_back(o.site_index); w.push_back(o.op_type); c(o.coefficient); }
-        for (const auto& d : t.diag_two_body)   { w.push_back(d.site_index_1); w.push_back(d.site_index_2); c(d.coefficient); }
-        for (const auto& m : t.mixed_two_body)  { w.push_back(m.sz_site); w.push_back(m.flip_site);
-                                                  w.push_back(m.flip_op_type); c(m.coefficient); }
-        for (const auto& o : t.offdiag_two_body){ w.push_back(o.site_index_1); w.push_back(o.site_index_2);
-                                                  w.push_back(o.op_type_1); w.push_back(o.op_type_2); c(o.coefficient); }
-        for (const auto& b : t.three_body)      { w.push_back(b.site_index_1); w.push_back(b.site_index_2);
-                                                  w.push_back(b.site_index_3); w.push_back(b.op_type_1);
-                                                  w.push_back(b.op_type_2); w.push_back(b.op_type_3); c(b.coefficient); }
+        w.push_back(P.n_groups());
+        w.push_back(P.n_terms());
+        w.insert(w.end(), P.group_flip.begin(), P.group_flip.end());
+        for (int b : P.group_setbits) w.push_back(static_cast<std::uint64_t>(static_cast<std::int64_t>(b)));
+        w.insert(w.end(), P.group_vbegin.begin(), P.group_vbegin.end());
+        w.insert(w.end(), P.vsub_val.begin(), P.vsub_val.end());
+        w.insert(w.end(), P.vsub_tbegin.begin(), P.vsub_tbegin.end());
+        w.insert(w.end(), P.term_sign.begin(), P.term_sign.end());
+        for (const auto& z : P.term_coeff) { w.push_back(bits(z.real())); w.push_back(bits(z.imag())); }
         return w;
     };
-    const std::vector<std::uint64_t> terms_w = term_words(terms);
+    const std::vector<std::uint64_t> terms_w = program_words(rows);
     // Registry entries carry a FULL fingerprint of what the mirror encodes:
     // reuse must never depend on hash quality (a silent wrong-mirror hit is
     // wrong PHYSICS with correct-looking norms). The fingerprint covers
@@ -461,7 +489,6 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
     // and cross-checked by its (size, front, mid, back) signature.
     struct MirrorSlot {
         int                                       n_up;
-        double                                    spin;
         std::uint64_t                             reps_sig[4];
         std::vector<std::uint64_t>                terms;
         std::vector<std::complex<double>>         chi;
@@ -471,8 +498,8 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
     };
     auto fingerprint_matches = [](const MirrorSlot& s,
                                   const ed::symmetry::RepSectorData& r,
-                                  double sl, const std::vector<std::uint64_t>& tw) {
-        return s.n_up == r.n_up && s.spin == sl
+                                  const std::vector<std::uint64_t>& tw) {
+        return s.n_up == r.n_up
             && s.terms == tw                  // operator terms, not just sector
             && s.reps_sig[0] == r.reps.size()
             && s.reps_sig[1] == (r.reps.empty() ? 0 : r.reps.front())
@@ -494,23 +521,22 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         static const double kKeepBudget = [] {
             return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 16.0)) * 1073741824.0;
         }();
-        const std::uint64_t key = content_key(rep, terms, spin_l);
+        const std::uint64_t key = content_key(rep, rows);
         std::lock_guard<std::mutex> lk(mtx);
         auto& bucket = registry[key];
         for (auto it = bucket.begin(); it != bucket.end();) {
             auto locked = it->mirror.lock();
             if (!locked) { it = bucket.erase(it); continue; }   // expired
-            if (fingerprint_matches(*it, rep, spin_l, terms_w)) {
+            if (fingerprint_matches(*it, rep, terms_w)) {
                 mirror = std::move(locked);
                 break;
             }
             ++it;
         }
         if (!mirror) {
-            mirror = build_rep_mirror(rep, spin_l, terms);
+            mirror = build_rep_mirror(rep, rows);
             MirrorSlot s;
             s.n_up        = rep.n_up;
-            s.spin        = spin_l;
             s.reps_sig[0] = rep.reps.size();
             s.reps_sig[1] = rep.reps.empty() ? 0 : rep.reps.front();
             s.reps_sig[2] = rep.reps.empty() ? 0
@@ -545,29 +571,24 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
 
 ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
-                                         double                         spin_l,
-                                         const ed::matvec::TermStorage& terms)
+                                         const ed::ops::MaskedProgram&      rows)
 {
-    using ed::symmetry::gpu_mirror::launch_rep_symmetry_matvec;
-    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, spin_l, terms);
-    const double spin = spin_l;
+    using DC = thrust::complex<double>;
+    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, rows);
     const std::uint64_t dim_captured = mirror->dim;
 
-    return [mirror, spin, dim_captured](const ed::matvec::Complex* in,
-                                        ed::matvec::Complex* out,
-                                        std::size_t n) {
+    return [mirror, dim_captured](const ed::matvec::Complex* in,
+                                  ed::matvec::Complex* out,
+                                  std::size_t n) {
         if (n != dim_captured) {
             throw std::runtime_error(
                 "ed::symmetry::make_sector_matvec_gpu_rep: size mismatch (" +
                 std::to_string(n) + " vs " +
                 std::to_string(dim_captured) + ")");
         }
-        launch_rep_symmetry_matvec(
-            *mirror,
-            reinterpret_cast<const cuDoubleComplex*>(in),
-            reinterpret_cast<cuDoubleComplex*>(out),
-            n,
-            spin);
+        const DC* ins[1] = {reinterpret_cast<const DC*>(in)};
+        DC* outs[1] = {reinterpret_cast<DC*>(out)};
+        ed::symmetry::gpu_mirror::launch_sector_walk(*mirror, ins, outs, 1);
     };
 }
 
@@ -575,24 +596,18 @@ ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
 // k vectors per call through the multi-vector gather (one row walk serves up to 8 of them).
 ed::LinearOperator::MultiMatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& rep,
-                                               double                         spin_l,
-                                               const ed::matvec::TermStorage& terms)
+                                               const ed::ops::MaskedProgram&      rows)
 {
-    using ed::symmetry::gpu_mirror::detail::cuda_check;
-    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, spin_l, terms);
-    const double spin = spin_l;
+    using DC = thrust::complex<double>;
+    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, rows);
     const std::uint64_t dim_captured = mirror->dim;
-    return [mirror, spin, dim_captured](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
-                                        std::size_t n, std::size_t k) {
+    return [mirror, dim_captured](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
+                                  std::size_t n, std::size_t k) {
         if (n != dim_captured)
             throw std::runtime_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: size mismatch (" +
                                      std::to_string(n) + " vs " + std::to_string(dim_captured) + ")");
-        cuda_check(ed::matvec::kernel::gpu::launch_apply_terms_rep_symmetry_gpu_gather_multi<
-                       ed::matvec::basis::DeviceRepSymmetryBasisPolicy, cuDoubleComplex>(
-                       mirror->basis_view(), spin, mirror->terms_view(),
-                       reinterpret_cast<const cuDoubleComplex* const*>(ins),
-                       reinterpret_cast<cuDoubleComplex* const*>(outs), k),
-                   "apply_terms_rep_symmetry multi-vector kernel launch");
+        ed::symmetry::gpu_mirror::launch_sector_walk(*mirror, reinterpret_cast<const DC* const*>(ins),
+                                                     reinterpret_cast<DC* const*>(outs), k);
     };
 }
 // ---------------------------------------------------------------------------
@@ -633,12 +648,11 @@ struct HostPtrStagingProfile {
 ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
     const ed::symmetry::RepSectorData& rep,
-    double                             spin_l,
-    const ed::matvec::TermStorage&     terms)
+    const ed::ops::MaskedProgram&      rows)
 {
     using ed::symmetry::gpu_mirror::detail::cuda_check;
 
-    auto dev_fn = ed::symmetry::make_sector_matvec_gpu_rep(rep, spin_l, terms);
+    auto dev_fn = ed::symmetry::make_sector_matvec_gpu_rep(rep, rows);
     auto d_in   = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
     auto d_out  = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
     auto prof   = std::make_shared<HostPtrStagingProfile>();

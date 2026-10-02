@@ -450,3 +450,49 @@ TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly",
     CHECK(Px.group_setbits[0] == -1);
     CHECK(ed::ops::compile_operator(P("+-", {0, 1})).group_setbits[0] == 1);
 }
+
+#ifdef WITH_CUDA
+#include <cuda_runtime.h>
+
+TEST_CASE("device: the multi-vector walk equals single applies bit for bit", "[row_walk][cuda]") {
+    if (!ed::have_cuda()) SKIP("no CUDA device");
+    for (const auto& m : zoo()) {
+        if (m.name != "chirality" && m.name != "random_none") continue;
+        INFO("model " << m.name);
+        const auto G = ring_group(false, false);
+        const int n_up = m.u1 ? N / 2 : -1;
+        auto rds = std::make_shared<const RepSectorData>(make_sector(G, characters(G, false, false)[1], n_up));
+        const std::size_t d = rds->reps.size();
+        RepSectorMatVec op(*m.H, rds);
+        op.enable_device(true);
+        const auto single = op.bind_cuda();
+        const auto multi = op.bind_cuda_multi();
+        REQUIRE(multi);
+        constexpr std::size_t K = 5;               // one launch of 4 vectors, one of 1
+        std::mt19937 rng(7);
+        std::normal_distribution<double> g(0.0, 1.0);
+        std::vector<std::vector<Cx>> x(K, std::vector<Cx>(d));
+        for (auto& v : x) for (auto& z : v) z = Cx(g(rng), g(rng));
+        std::vector<Cx*> din(K), dout_m(K), dout_s(K);
+        for (std::size_t i = 0; i < K; ++i) {
+            REQUIRE(cudaMalloc(&din[i], d * sizeof(Cx)) == cudaSuccess);
+            REQUIRE(cudaMalloc(&dout_m[i], d * sizeof(Cx)) == cudaSuccess);
+            REQUIRE(cudaMalloc(&dout_s[i], d * sizeof(Cx)) == cudaSuccess);
+            REQUIRE(cudaMemcpy(din[i], x[i].data(), d * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
+        }
+        std::vector<const Cx*> cin(din.begin(), din.end());
+        multi(cin.data(), dout_m.data(), d, K);
+        for (std::size_t i = 0; i < K; ++i) single(din[i], dout_s[i], d);
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+        for (std::size_t i = 0; i < K; ++i) {
+            std::vector<Cx> ym(d), ys(d), yh(d);
+            REQUIRE(cudaMemcpy(ym.data(), dout_m[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+            REQUIRE(cudaMemcpy(ys.data(), dout_s[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+            op.apply(x[i].data(), yh.data(), d);   // the host lane
+            CHECK(max_diff(ym, ys) == 0.0);
+            CHECK(max_diff(ys, yh) <= 1e-12 * std::max(1.0, max_abs(yh)));
+            cudaFree(din[i]); cudaFree(dout_m[i]); cudaFree(dout_s[i]);
+        }
+    }
+}
+#endif

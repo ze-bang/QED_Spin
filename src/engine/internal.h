@@ -151,7 +151,7 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 // -----------------------------------------------------------------------------
 // An operator on one symmetry sector (RepSectorData: reps + 1/norms + characters + group
 // perms), its rows from the row walk of the operator's program (sector_rows.h): the
-// reduced CSR when it fits the budget, else the walk per apply, or the device gather.
+// reduced CSR when it fits the budget, else the walk per apply, or the same walk on a device.
 // Memory O(#reps), never O(2^N).
 // -----------------------------------------------------------------------------
 class RepSectorMatVec final : public ed::LinearOperator {
@@ -172,8 +172,6 @@ public:
         : rd_(std::move(rd)),
           rows_(op.row_program()),
           pol_(rd_->make_policy()),
-          terms_(op.getTerms()),
-          spin_(static_cast<double>(op.getSpin())),
           force_gpu_(force_gpu)
     {
         for (std::size_t g = 0; g < rows_->n_groups(); ++g)
@@ -215,13 +213,13 @@ public:
     }
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, spin_, terms_);
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
 #endif
         return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
     }
     [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, spin_, terms_);
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
 #endif
         return {};
     }
@@ -318,8 +316,7 @@ private:
         if (!ed::have_cuda()) return;
         try {
             const auto t0 = std::chrono::steady_clock::now();
-            gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
-                *rd_, spin_, terms_);
+            gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(*rd_, *rows_);
             gpu_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (ed::env::flag("ED_SYM_PROFILE", false)) {
                 ED_LOG(Info,
@@ -347,8 +344,6 @@ private:
     std::shared_ptr<const ed::ops::MaskedProgram>  rows_;    // the operator's row program
     ed::matvec::basis::RepSymmetryBasisPolicy      pol_;     // views into *rd_
     std::uint64_t                                  offdiag_terms_ = 0;
-    ed::matvec::TermStorage                        terms_;   // the device lane's bins (until it walks too)
-    double                                         spin_ = 0.5;
     mutable std::once_flag                         csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
     mutable std::once_flag                         gpu_once_;
