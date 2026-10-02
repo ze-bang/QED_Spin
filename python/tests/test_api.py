@@ -940,6 +940,41 @@ def test_four_site_terms_in_the_hamiltonian():
     np.testing.assert_allclose(np.asarray(rv.expect([H]))[:, 0].real, [float(L.energy) for L in rv.levels], atol=1e-10)
 
 
+def _lehmann_t0(H, O, n, omega, eta):
+    E, V = np.linalg.eigh(_dense(H, n))
+    g = np.flatnonzero(E - E[0] < 1e-8)
+    W = (np.abs(V.conj().T @ _dense(O, n) @ V[:, g]) ** 2).sum(axis=1) / len(g)
+    om = np.asarray(omega)[:, None]
+    return (W[None, :] * eta / math.pi / ((om - (E - E[0])[None, :]) ** 2 + eta ** 2)).sum(axis=1)
+
+
+def _xyz_ring(n, jx=1.0, jy=0.7, jz=0.4):
+    H = qed.Operator(n)
+    for i in range(n):
+        for c, j in (("x", jx), ("y", jy), ("z", jz)):
+            H = H + qed.Operator.product(n, c + c, [i, (i + 1) % n], j)
+    return H
+
+
+@pytest.mark.parametrize("model", ["ring_exchange", "xyz"])
+@pytest.mark.parametrize("body", [3, 4])
+def test_dynamics_of_three_and_four_site_observables(model, body):
+    # O_q = sum_j e^{iqj} S^z_j S^z_{j+1} S^a_{j+2} (S^z_{j+3}): the three-body records and the
+    # four-site terms reach dynamics through the compiled cross-sector programs (three-body
+    # terms were dropped, four-site ones refused). The XYZ ring runs in Sz-parity halves.
+    n, q = 8, 2 * math.pi * 3 / 8
+    H = _ring_exchange(n) if model == "ring_exchange" else _xyz_ring(n)
+    ops = "zz" + ("+" if model == "ring_exchange" else "x") + "z" * (body - 3)
+    O = qed.Operator(n)
+    for j in range(n):
+        O = O + qed.Operator.product(n, ops, [(j + a) % n for a in range(body)], complex(np.exp(1j * q * j)))
+    omega = np.linspace(-1.0, 6.0, 141)
+    r = qed.dynamics(H, O, omega, eta=0.1, device="cpu")
+    ref = _lehmann_t0(H, O, n, omega, 0.1)
+    assert ref.max() > 1e-3
+    np.testing.assert_allclose(r.S[0], ref, atol=1e-8 * ref.max())
+
+
 def test_a_multiplet_at_the_kth_level_comes_back_whole():
     # Open Heisenberg chain N=10: the 5th-7th states are one triplet, spread over blocks.
     # eigs(k=6) returns its every copy (the levels may hold more than k states), whatever

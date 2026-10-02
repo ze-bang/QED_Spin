@@ -6,7 +6,6 @@
 
 #include "walk.h"
 
-#include <ed/dynamics/cross_sector.h>
 #include <ed/dynamics/cf.h>
 #include <ed/dynamics/ftlm_dynamics.h>
 #include <ed/parallel/numa.h>
@@ -54,18 +53,31 @@ bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
     });
 }
 
-// Changes of the set-bit count (a set bit is a down spin) the terms of O produce.
-std::set<int> n_up_shifts(const ::Operator& O) {   // the first reader of O's records
-    if (O.has_extra_terms())
-        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
-                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
-    auto d = [](int op) { return op == 0 ? -1 : (op == 1 ? 1 : 0); };   // S+ clears a set bit
+// Changes of the set-bit count (a set bit is a down spin) the canonical terms of O produce.
+std::set<int> n_up_shifts(const ed::ops::MaskedOperator& O) {
     std::set<int> out;
-    for (const auto& t : O.records())
-        if (std::abs(t.coefficient) > 1e-15) out.insert(d(t.op_type) + (t.is_two_body ? d(t.op_type_2) : 0));
-    for (const auto& t : O.three_body_records())
-        if (std::abs(t.coefficient) > 1e-15) out.insert(d(t.op_type_1) + d(t.op_type_2) + d(t.op_type_3));
+    for (const auto& t : O.terms()) out.insert(ed::ops::masked_delta_set_bits(t));
     return out;
+}
+
+// The part of O that can connect two Sz-parity halves: compile_program keeps every term
+// between full or parity sectors, so the terms that change the parity otherwise go here.
+ed::ops::MaskedOperator connecting_part(const ed::ops::MaskedOperator& O, const Subspace& src, const Subspace& tgt) {
+    if (src.n_up >= 0 || src.sz_parity < 0 || tgt.sz_parity < 0) return O;
+    const int change = ((tgt.sz_parity - src.sz_parity) % 2 + 2) % 2;
+    ed::ops::MaskedOperator out(O.n_sites());
+    for (const auto& t : O.terms())
+        if ((ed::ops::masked_delta_set_bits(t) % 2 + 2) % 2 == change) out.add_term(t);
+    return out;
+}
+
+// O from sector `src` to sector `tgt` as rows of the target (CrossSectorMatVec's program), or
+// null when the projected program is empty: no term of O connects the two (exact reachability).
+std::shared_ptr<const ed::ops::MaskedProgram>
+cross_program(const ed::ops::MaskedOperator& O, const ed::symmetry::RepSectorData& src,
+              const ed::symmetry::RepSectorData& tgt) {
+    auto P = std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({O.dagger()}, tgt, src));
+    return P->n_terms() == 0 ? nullptr : P;
 }
 
 // The subspaces O maps `src` into.
@@ -103,64 +115,6 @@ std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std
             t.H  = std::make_shared<RepSectorMatVec>(H, t.rd);
             out.push_back(std::move(t));
         });
-    return out;
-}
-
-using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
-
-// One term of O applied to a basis state (spin-1/2: bit 0 is Sz = +1/2, S+ clears a set bit);
-// the rightmost operator acts first. Returns false when the term annihilates the state.
-bool apply_term(const ::Operator::TransformData& t, std::uint64_t& st, Complex& amp) {
-    auto one = [&](std::uint8_t op, std::uint64_t site) {
-        const bool set = (st >> site) & 1u;
-        if (op == 2) { amp *= set ? -0.5 : 0.5; return true; }
-        if ((op == 0) != set) return false;                 // S+ needs a set bit, S- a clear one
-        st ^= std::uint64_t{1} << site;
-        return true;
-    };
-    amp = t.coefficient;
-    if (t.is_two_body && !one(t.op_type_2, t.site_index_2)) return false;
-    return one(t.op_type, t.site_index);
-}
-
-// Which target sectors O reaches from `src`. O is applied to a random combination of a few
-// source basis vectors |b_r> = inv_norm_r sum_g conj(chi(g)) |g r> and the image is projected
-// onto each target's basis with index_and_projection (the same convention). A momentum or Sz
-// selection rule makes a projection vanish exactly; random weights cannot cancel an allowed one.
-std::vector<bool> reachable(const ed::symmetry::RepSectorData& src, const std::vector<Target>& ts,
-                            const ::Operator& O) {
-    if (!O.three_body_records().empty()) return std::vector<bool>(ts.size(), true);
-    std::unordered_map<std::uint64_t, Complex> psi;
-    const auto sp = src.make_policy();
-    std::mt19937_64 gen(0x5E1EC7ULL);
-    std::normal_distribution<double> nd(0.0, 1.0);
-    const std::size_t n = src.reps.size(), picks = std::min<std::size_t>(n, 8);
-    for (std::size_t p = 0; p < picks; ++p) {
-        const std::size_t r = p * n / picks;
-        const Complex c = Complex(nd(gen), nd(gen)) * src.inv_norms[r];
-        for (int g = 0; g < src.group_size; ++g) {
-            const std::uint64_t base = sp.apply_perm(src.reps[r], g);
-            const Complex w = c * std::conj(src.characters[static_cast<std::size_t>(g)]);
-            for (const auto& t : O.records()) {
-                std::uint64_t st = base;
-                Complex amp;
-                if (apply_term(t, st, amp)) psi[st] += w * amp;
-            }
-        }
-    }
-    std::vector<bool> out(ts.size(), false);
-    for (std::size_t j = 0; j < ts.size(); ++j) {
-        const auto pol = ts[j].rd->make_policy();
-        std::unordered_map<std::int64_t, Complex> acc;
-        double scale = 0.0;
-        for (const auto& [st, a] : psi) {
-            Complex proj;
-            const std::int64_t k = pol.index_and_projection(st, proj);
-            if (k >= 0) { acc[k] += a * proj; scale = std::max(scale, std::abs(a * proj)); }
-        }
-        for (const auto& [k, v] : acc)
-            if (std::abs(v) > 1e-10 * std::max(scale, 1e-300)) { out[j] = true; break; }
-    }
     return out;
 }
 
@@ -216,14 +170,10 @@ bool same_momentum(const ed::symmetry::RepSectorData& a, const ed::symmetry::Rep
 }
 
 // Total S- = sum_i S-_i: commutes with the lattice, lowers Sz by one (sets one bit).
-std::vector<::Operator::TransformData> total_s_minus(int n_sites) {
-    std::vector<::Operator::TransformData> t(static_cast<std::size_t>(n_sites));
-    for (int i = 0; i < n_sites; ++i) {
-        t[static_cast<std::size_t>(i)].op_type     = 1;
-        t[static_cast<std::size_t>(i)].site_index  = static_cast<std::uint64_t>(i);
-        t[static_cast<std::size_t>(i)].coefficient = Complex(1.0, 0.0);
-    }
-    return t;
+ed::ops::MaskedOperator total_s_minus(int n_sites) {
+    ed::ops::MaskedOperator S(n_sites);
+    for (int i = 0; i < n_sites; ++i) S.add(ed::ops::MaskedOperator::product(n_sites, "-", {i}));
+    return S;
 }
 
 // The middle of a spin tower's spectrum: the extreme Ritz values of a short Lanczos run on the
@@ -256,6 +206,9 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
 DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O, const DynamicsSpec& d) {
     const int n_sites = static_cast<int>(H.getNumBits());
     if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
+    if (O.getNumBits() != H.getNumBits())
+        throw ed::InvalidRequest("dynamics: the operator acts on " + std::to_string(O.getNumBits()) + " sites, H on "
+                                 + std::to_string(n_sites));
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
     for (double T : d.temperatures)
@@ -273,8 +226,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
-    const auto shifts = n_up_shifts(O);
-    const float spin = static_cast<float>(H.getSpin());
+    const ed::ops::MaskedOperator& Oc = O.canonical();
+    const auto shifts = n_up_shifts(Oc);
 
     DynamicsCurves out;
     out.omega = d.omega;
@@ -317,11 +270,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                                             [&](const Target& c) { return same_momentum(*x.basis, *c.rd); });
                 if (t == ts.end())
                     throw std::runtime_error("dynamics: no momentum sector one Sz lower holds the multiplet");
-                ed::dssf::CrossSectorOrbitObservable lower(
-                    Ref::from_rep(*x.basis, static_cast<std::uint64_t>(n_sites)), 0,
-                    Ref::from_rep(*t->rd, static_cast<std::uint64_t>(n_sites)), 0, s_minus, spin);
-                BlockVector y{t->rd, std::vector<Complex>(t->rd->reps.size())};
-                lower.apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
+                BlockVector y{t->rd, std::vector<Complex>(t->rd->reps.size(), Complex(0, 0))};
+                if (const auto P = cross_program(s_minus, *x.basis, *t->rd))
+                    CrossSectorMatVec(P, x.basis, t->rd).apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
                 double n2 = 0.0;
                 for (const auto& c : y.amplitudes) n2 += std::norm(c);
                 if (n2 < 1e-20) throw std::runtime_error("dynamics: S- annihilated a tower state above Sz = -S");
@@ -344,21 +295,18 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             const Subspace src{v.basis->n_up, parity, 1};
             for (const Subspace& tsub : targets_of(src, shifts, n_sites)) {
                 const auto& ts = sectors_of(tsub);
-                auto t_pr = std::chrono::steady_clock::now();
-                const auto reach = reachable(*v.basis, ts, O);
-                phase["selection probe"] += clock_since(t_pr);
+                const auto Ot = connecting_part(Oc, src, tsub);
                 for (std::size_t ti = 0; ti < ts.size(); ++ti) {
-                    if (!reach[ti]) continue;
                     const Target& t = ts[ti];
-                    ed::dssf::CrossSectorOrbitObservable obs(
-                        Ref::from_rep(*v.basis, static_cast<std::uint64_t>(n_sites)), 0,
-                        Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0,
-                        O.records(), spin);
+                    auto t_pr = std::chrono::steady_clock::now();
+                    const auto P = cross_program(Ot, *v.basis, *t.rd);
+                    phase["compile O"] += clock_since(t_pr);
+                    if (!P) continue;
                     const std::size_t n = t.rd->reps.size();
                     std::vector<Complex> phi(n);
                     auto t_sc = std::chrono::steady_clock::now();
-                    obs.apply(v.amplitudes.data(), phi.data(), n);
-                    phase["scatter"] += clock_since(t_sc);
+                    CrossSectorMatVec(P, v.basis, t.rd).apply(v.amplitudes.data(), phi.data(), n);
+                    phase["apply O"] += clock_since(t_sc);
                     double n2 = 0.0;
                     for (const auto& c : phi) n2 += std::norm(c);
                     if (n2 < 1e-24) continue;
@@ -408,6 +356,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     // momentum at Sz = S + 1 (one set bit fewer).
     struct Job {
         const Target* src; Subspace sub; std::vector<const Target*> targets;
+        std::vector<std::shared_ptr<const ed::ops::MaskedProgram>> programs;   // O to each target
         std::shared_ptr<const ed::symmetry::LowdinS2Projector> tower;
         std::shared_ptr<RepSectorMatVec> s2;
         // H with the off-tower drift scrubbed (the thermal blocks' wrapper): roundoff that leaves
@@ -441,7 +390,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     for (const Subspace& sub : source_subs) {
         for (const Target& src : sectors_of(sub)) {
             if (!selected(u, *src.rd)) continue;
-            Job j{&src, sub, {}, nullptr, nullptr, nullptr, 0};
+            Job j{&src, sub, {}, {}, nullptr, nullptr, nullptr, 0};
             if (s.two_S >= 0) {
                 j.tower_dim = tower_dim_of(src);
                 if (j.tower_dim == 0) continue;
@@ -455,11 +404,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             }
             for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
                 const auto& ts = sectors_of(tsub);
+                const auto Ot = connecting_part(Oc, sub, tsub);
                 auto t_pr = std::chrono::steady_clock::now();
-                const auto reach = reachable(*src.rd, ts, O);
-                phase["selection probe"] += clock_since(t_pr);
                 for (std::size_t ti = 0; ti < ts.size(); ++ti)
-                    if (reach[ti]) { j.targets.push_back(&ts[ti]); reached.insert(&ts[ti]); }
+                    if (auto P = cross_program(Ot, *src.rd, *ts[ti].rd)) {
+                        j.targets.push_back(&ts[ti]);
+                        j.programs.push_back(std::move(P));
+                        reached.insert(&ts[ti]);
+                    }
+                phase["compile O"] += clock_since(t_pr);
             }
             jobs.push_back(std::move(j));
         }
@@ -487,23 +440,21 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
         return fo;
     };
-    auto observable = [&](const Job& j, const Target& t) {
-        return ed::dssf::CrossSectorOrbitObservable(
-            Ref::from_rep(*j.src->rd, static_cast<std::uint64_t>(n_sites)), 0,
-            Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0, O.records(), spin);
+    auto observable = [](const Job& j, std::size_t k) {
+        return CrossSectorMatVec(j.programs[k], j.src->rd, j.targets[k]->rd);
     };
     auto collect = [&](const Job& j, auto&& kernel) {
         Source src;
         bool any = false;
-        for (const Target* t : j.targets) {
-            auto r = kernel(t);
+        for (std::size_t k = 0; k < j.targets.size(); ++k) {
+            auto r = kernel(j.targets[k], k);
             if (!any) { src.Z = r.Z; src.emin = r.E_min; any = true;
                         for (double T : d.temperatures) src.S[T].assign(nW, 0.0); }
             for (double T : d.temperatures)
                 for (std::size_t w = 0; w < nW; ++w) src.S[T][w] += r.S_real.at(T)[w];
         }
         if (!any) {
-            auto r = kernel(nullptr);
+            auto r = kernel(nullptr, std::size_t{0});
             src.Z = r.Z; src.emin = r.E_min;
             for (double T : d.temperatures) src.S[T].assign(nW, 0.0);
         }
@@ -516,13 +467,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         const ed::LinearOperator& Hs = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
         auto& be = ed::matvec::default_cpu_backend();
-        return collect(j, [&](const Target* t) {
+        return collect(j, [&](const Target* t, std::size_t k) {
             if (!t) {
                 auto zero = [](const Complex*, Complex* o, std::size_t nn) { std::fill(o, o + nn, Complex(0, 0)); };
                 return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, fo);
             }
-            const auto obs = observable(j, *t);
+            const auto obs = observable(j, k);
             auto H_dst = [t](const Complex* in, Complex* o, std::size_t nn) { t->H->apply(in, o, nn); };
             auto O_ap  = [&obs](const Complex* in, Complex* o, std::size_t nn) { obs.apply(in, o, nn); };
             return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, O_ap, dim_src, t->rd->reps.size(),
@@ -556,20 +507,21 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             f.batch_width = std::min<std::size_t>(width, 8);
             return f;
         };
-        return collect(j, [&](const Target* t) {
+        return collect(j, [&](const Target* t, std::size_t k) {
             if (!t) {
                 auto zero = [&cbe](const Complex*, Complex* o, std::size_t nn) { cbe.fill_zero(o, nn); };
                 return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, batched(src_op, dim_src));
             }
-            const auto obs = observable(j, *t);
+            const auto obs = observable(j, k);
             const std::size_t dim_dst = t->rd->reps.size();
             t->H->enable_device(true);
             const auto H_dst = t->H->bind_cuda();
             ed::matvec::DeviceMatvecFn O_ap;
-            const auto c = obs.csr();
-            if (c.row_ptr)
-                O_ap = ed::matvec::make_device_csr_matvec(c.row_ptr, c.col, c.val, c.rows, c.nnz);
+            const auto* c = obs.csr();
+            if (c)
+                O_ap = ed::matvec::make_device_csr_matvec(reinterpret_cast<const std::int64_t*>(c->row_ptr.data()),
+                                                          c->col_idx.data(), c->val.data(), c->dim, c->nnz());
             else    // no CSR within budget: stage through the host walk
                 O_ap = [&obs, &cbe, dim_src](const Complex* in, Complex* o, std::size_t nn) {
                     std::vector<Complex> hi(dim_src), ho(nn);
@@ -579,7 +531,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 };
             return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, O_ap, dim_src, dim_dst,
                                                          d.temperatures, d.omega,
-                                                         c.row_ptr ? batched(*t->H, dim_dst) : fo);
+                                                         c ? batched(*t->H, dim_dst) : fo);
         });
 #else
         return run(i);

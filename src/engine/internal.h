@@ -396,6 +396,58 @@ public:
 private:
 };
 
+// -----------------------------------------------------------------------------
+// An operator from one sector to another of the same group (sector_rows.h cross rows): rows of
+// the target from the program of (O_lambda)^dagger -- compile_program({O.dagger()}, tgt, src) --
+// each target looked up in the source. Its merged CSR when the exact upper bound fits
+// ED_XSEC_CSR_BUDGET_GIB (built on the first apply), else the row walk per apply.
+// -----------------------------------------------------------------------------
+class CrossSectorMatVec {
+public:
+    CrossSectorMatVec(std::shared_ptr<const ed::ops::MaskedProgram> rows,
+                      std::shared_ptr<const ed::symmetry::RepSectorData> src,
+                      std::shared_ptr<const ed::symmetry::RepSectorData> tgt)
+        : rows_(std::move(rows)), src_(std::move(src)), tgt_(std::move(tgt)),
+          src_pol_(src_->make_policy()), tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {}
+
+    [[nodiscard]] std::size_t rows() const noexcept { return tgt_->reps.size(); }
+    [[nodiscard]] std::size_t cols() const noexcept { return src_->reps.size(); }
+
+    /// out (target) = O in (source).
+    void apply(const Complex* in, Complex* out, std::size_t n_out) const {
+        if (n_out != rows()) throw std::invalid_argument("CrossSectorMatVec: output length != target dim");
+        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+        if (csr_) csr_->spmv(in, out);
+        else ed::matvec::cross_gather(rows_->view(), tgt_pol_, src_pol_, same_, rows(), in, out);
+    }
+    /// The merged CSR (built on demand when it fits the budget), or null.
+    [[nodiscard]] const ed::matvec::ReducedSymmetryCsr<Complex>* csr() const {
+        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+        return csr_.get();
+    }
+
+private:
+    void maybe_build_csr_() const {
+        const std::uint64_t r = rows();
+        if (r == 0 || cols() >= (std::uint64_t{1} << 32)) return;
+        // Exact bound before merging: at most one entry per group and row (index + value).
+        const double est = static_cast<double>(r) * static_cast<double>(1 + rows_->n_groups())
+                               * (sizeof(std::uint32_t) + sizeof(Complex))
+                           + static_cast<double>(r + 1) * sizeof(std::uint64_t);
+        const double budget = std::max(0.0, ed::env::real("ED_XSEC_CSR_BUDGET_GIB", 4.0)) * 1073741824.0;
+        if (est > budget) return;
+        csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
+            ed::matvec::build_cross_csr(rows_->view(), tgt_pol_, src_pol_, same_, r));
+    }
+
+    std::shared_ptr<const ed::ops::MaskedProgram>      rows_;
+    std::shared_ptr<const ed::symmetry::RepSectorData> src_, tgt_;
+    ed::matvec::basis::RepSymmetryBasisPolicy          src_pol_, tgt_pol_;
+    bool                                               same_;
+    mutable std::once_flag                             csr_once_;
+    mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
+};
+
 // Monomial action of one little-group element on the k0 rep basis:
 // M e_i = phase[i] * e_{to[i]}.
 struct Monomial {
