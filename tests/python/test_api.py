@@ -161,6 +161,43 @@ def test_exact_paths_hold_the_whole_tower(spatial):
     np.testing.assert_allclose(th.lnZ[0], math.log(_towers(n, S)), rtol=1e-6)
 
 
+def _spin_levels(H, n, S):
+    # The spin-S levels, one per multiplet: the Sz = S spectrum less the Sz = S + 1 one (S+ maps the
+    # spin >= S + 1 states of the one onto the other).
+    a = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=n // 2 + S)).energies)
+    b = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=n // 2 + S + 1)).energies)
+    out, j = [], 0
+    for x in a:
+        if j < len(b) and abs(b[j] - x) < 1e-8:
+            j += 1
+        else:
+            out.append(x)
+    assert j == len(b)
+    return np.array(out)
+
+
+@pytest.mark.parametrize("spatial", [None, "ring"])
+@pytest.mark.parametrize("S", [0, 1])
+@pytest.mark.parametrize("J", [1.0, -1.0])
+def test_total_spin_eigs_solve_the_bare_h(J, S, spatial):
+    # P6.5: eigs under total_spin runs the bare H from spin-S starts and certifies through S^2. On the
+    # ferromagnet every off-tower state lies below the spin-S tower, so roundoff grows along them into
+    # the solve and the penalty fallback takes over. dense_max_dim=0 keeps the blocks on the Krylov lanes.
+    n, k = 14, 4
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=J)
+    b.heisenberg([(i, (i + 2) % n) for i in range(n)], J=0.3 * J)
+    H = b.to_operator()
+    want = np.repeat(_spin_levels(H, n, S), 2 * S + 1)[:k]
+    groups = None if spatial is None else [_translations(n)[0], _reflection(n)]
+    sym = qed.Symmetry(spatial=groups, total_spin=S)
+    for prune in (True, False):
+        for vectors in (False, True):
+            r = qed.eigs(H, k, sym=sym, dense_max_dim=0, prune=prune, vectors=vectors)
+            np.testing.assert_allclose(np.sort(r.energies)[:k], want, atol=1e-9)
+            assert r.complete
+
+
 def test_total_spin_in_a_uniform_field():
     # A uniform field h S^z_tot keeps S^2 and S^z, and splits each spin-S multiplet into members
     # at E + h m (audit C07-su2-06): every member is then a level of its own, in its own Sz sector.

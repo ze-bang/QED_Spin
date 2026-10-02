@@ -199,6 +199,36 @@ solve_block_full(const ed::LinearOperator& mv) {
     return sol;
 }
 
+BlockSolution solve_block_dense_tower(const ed::LinearOperator& H, const Tower& t, std::size_t want, bool vectors) {
+    BlockSolution sol;
+    const std::size_t nb = H.dim();
+    if (nb == 0 || t.dim == 0) { sol.whole = true; return sol; }
+    ed::core::Shape shape;
+    shape.dim = nb;
+    ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseVectors, shape).host,
+                                "dense block eigensolve");
+    std::vector<double> values;
+    std::vector<std::vector<Complex>> vecs;
+    {
+        Eigen::MatrixXcd Hb = materialize(H);
+        const DenseEigenpairs d = dense_eigenpairs_inplace(Hb, nb);
+        values = d.values;
+        for (std::size_t j = 0; j < nb; ++j) {
+            const Complex* col = d.vectors.data() + j * nb;
+            vecs.emplace_back(col, col + nb);
+        }
+    }
+    TowerLevels lv = tower_filter(t, H, values, std::move(vecs),
+                                  ed::numerics::kClusterRel * ed::numerics::scale_or_one(H.norm_bound()));
+    const std::size_t k = std::min(std::max<std::size_t>(want, 1), lv.values.size());
+    sol.values.assign(lv.values.begin(), lv.values.begin() + static_cast<std::ptrdiff_t>(k));
+    if (vectors)
+        for (std::size_t j = 0; j < k; ++j) sol.vectors.push_back(std::move(lv.vectors[j]));
+    sol.whole     = k == lv.values.size();
+    sol.converged = !lv.ambiguous;
+    return sol;
+}
+
 namespace {
 
 // A unit-variance Gaussian start of dimension n from `seed`, drawn on the host and staged on
@@ -211,6 +241,28 @@ auto staged_seed(B& be, std::size_t n, std::uint64_t seed) {
     std::mt19937_64 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& c : host) c = ed::krylov::gaussian_entry<Scalar>(nd, gen);
+    be.copy_from_host(host.data(), v.get(), n);
+    return v;
+}
+
+// A tower start (Tower::seed) in Scalar: a real lane takes the real part (a real block's sector
+// basis and valence-bond weights are real); zeros when the block holds no spin-S state.
+template <class Scalar>
+void tower_start(const Tower& t, std::uint64_t seed, std::vector<Scalar>& v) {
+    const std::vector<Complex> s = t.seed(seed);
+    if (s.empty()) { std::fill(v.begin(), v.end(), Scalar(0)); return; }
+    if constexpr (std::is_same_v<Scalar, Complex>) v = s;
+    else for (std::size_t i = 0; i < v.size(); ++i) v[i] = s[i].real();
+}
+
+// The lanes' start of dimension n on lane B: the tower's when there is one, else Gaussian from `seed`.
+template <class B>
+auto staged_start(B& be, std::size_t n, std::uint64_t seed, const Tower* tower) {
+    if (!tower) return staged_seed(be, n, seed);
+    using Scalar = typename B::scalar_type;
+    std::vector<Scalar> host(n);
+    tower_start(*tower, seed, host);
+    auto v = be.make_zero_vector(n);
     be.copy_from_host(host.data(), v.get(), n);
     return v;
 }
@@ -346,7 +398,7 @@ static std::uint64_t ks_cycle_cap(std::uint64_t nb, std::size_t k) {
 // ghost-prone scan. The total iteration budget is max(200k, 2000), spent as restart cycles.
 template <class B>
 static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::size_t k, bool vectors,
-                                       std::uint64_t max_iter) {
+                                       std::uint64_t max_iter, const Tower* tower = nullptr) {
     const std::size_t nb = H.dim();
     // Bound first: the device lane builds its mirror of H here, which the cap then sees.
     CountedH<B> Hc(H);
@@ -382,7 +434,7 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     const double scale = ed::numerics::scale_or_one(H.norm_bound());
     const double tol = ed::numerics::kLockRel * scale;
 
-    auto v0 = staged_seed(be, nb, 0x51ED0B70ULL);   // same stream as the k = 1 scan
+    auto v0 = staged_start(be, nb, 0x51ED0B70ULL, tower);   // same stream as the k = 1 scan
     ed::krylov::KrylovSchurOptions o;
     o.num_eigs             = k;
     o.max_iter             = per_cycle;
@@ -391,7 +443,11 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     o.breakdown_tol        = ed::numerics::kBreakdownRel * scale;
     o.max_subspace_vectors = cycle_cap;
     o.compute_vectors      = vectors;
-    auto r = ed::krylov::krylov_schur_kernel(be, Hc, nb, v0.get(), o);
+    using Scalar = typename B::scalar_type;
+    auto r = tower
+        ? ed::krylov::krylov_schur_kernel(be, Hc, nb, v0.get(), o,
+                                          [tower](std::mt19937_64& gen, std::vector<Scalar>& v) { tower_start(*tower, gen(), v); })
+        : ed::krylov::krylov_schur_kernel(be, Hc, nb, v0.get(), o);
     v0.reset();
     std::vector<double> ev = std::move(r.eigenvalues);
     const bool conv  = r.converged;
@@ -414,6 +470,7 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
         if (have_vecs) sol.vectors.push_back(std::move(vv[order[i]]));
     }
     sol.converged = (conv || whole) && (sol.values.size() >= k || whole) && (!vectors || have_vecs);
+    sol.whole     = whole;
     sol.applies   = Hc.applies;
     return sol;
 }
@@ -541,7 +598,7 @@ BlockSolution solve_block_eigenpairs(B& be, const ed::LinearOperator& H, std::si
 // The lowest Ritz value after 40 Lanczos steps from a fixed random start: an upper bound on
 // the block's lowest level.
 template <class B>
-BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
+BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H, const Tower* tower) {
     const std::size_t n = H.dim();
     BlockEstimate est;
     ed::krylov::LanczosKernelOptionsT<typename B::scalar_type> kopts;
@@ -549,7 +606,12 @@ BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
     kopts.reorth     = ed::krylov::ReorthPolicy::None;
     kopts.keep_basis = false;
     CountedH<B> Hc(H);
-    auto v0 = staged_seed(be, n, 0xE57A7EULL);
+    auto v0 = staged_start(be, n, 0xE57A7EULL, tower);
+    if (tower && !(be.nrm2(v0.get(), n) > 0.0)) {   // no spin-S state: nothing to solve
+        est.theta = std::numeric_limits<double>::infinity();
+        est.residual = 0.0;
+        return est;
+    }
     const auto k = ed::krylov::lanczos_kernel(be, Hc, n, v0.get(), kopts);
     v0.reset();
     est.applies = Hc.applies;
@@ -605,14 +667,14 @@ struct GsAttempt {
 template <class B>
 static std::optional<GsAttempt>
 gs_lanczos(B& be, CountedH<B>& H, std::size_t n, std::size_t kept_basis_max_dim, std::uint64_t max_steps,
-           double resid_tol) {
+           double resid_tol, const Tower* tower = nullptr) {
     using UV = typename B::UniqueVec;
     using Scalar = typename B::scalar_type;
     const std::size_t per_attempt = std::min<std::size_t>(n, kLgGsMaxIter);
     std::size_t left = max_steps > 0 ? static_cast<std::size_t>(max_steps)
                                      : per_attempt * static_cast<std::size_t>(kLgGsRestarts + 1);
     const std::size_t keep_cap = gs_keep_cap<B>(n, kept_basis_max_dim, per_attempt);
-    UV seed = staged_seed(be, n, 0x51ED900DULL);
+    UV seed = staged_start(be, n, 0x51ED900DULL, tower);
     {
         const double s0 = be.nrm2(seed.get(), n);
         if (!(s0 > 0.0)) return std::nullopt;
@@ -708,10 +770,11 @@ gs_lanczos(B& be, CountedH<B>& H, std::size_t n, std::size_t kept_basis_max_dim,
 }
 
 // The certified GS eigenpair of a block above the caller's dense crossover (gs_lanczos; dense at
-// n <= 2). Certified only when ||H u - E u|| <= gs_resid_tol(H).
+// n <= 2), from the tower's start when `tower` is given. Certified only when
+// ||H u - E u|| <= gs_resid_tol(H).
 template <class B>
-GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_basis_max_dim,
-                         std::uint64_t max_iter) {
+static GsVector gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_basis_max_dim, std::uint64_t max_iter,
+                          const Tower* tower) {
     const std::size_t n = H.dim();
     if (n == 0) throw std::invalid_argument("little_group: empty GS sector");
     GsVector g;
@@ -728,7 +791,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         return g;
     }
     CountedH<B> Hc(H);
-    auto r = gs_lanczos(be, Hc, n, kept_basis_max_dim, max_iter, tol);
+    auto r = gs_lanczos(be, Hc, n, kept_basis_max_dim, max_iter, tol, tower);
     g.applies = Hc.applies;
     if (!r) return g;
     g.residual = r->residual;
@@ -739,14 +802,102 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
     return g;
 }
 
+template <class B>
+GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_basis_max_dim,
+                         std::uint64_t max_iter) {
+    return gs_vector(be, H, kept_basis_max_dim, max_iter, nullptr);
+}
+
+// One attempt of the tower lanes on `op`: k eigenpairs from the tower's starts -- the GS vector for
+// one level, Krylov-Schur with vectors for several. Not yet certified.
+template <class B>
+static BlockSolution tower_attempt(B& be, const ed::LinearOperator& op, const Tower& t, std::size_t k,
+                                   std::uint64_t max_iter) {
+    if (k > 1) return krylov_schur_lane(be, op, k, /*vectors=*/true, max_iter, &t);
+    BlockSolution s;
+    GsVector g = gs_vector(be, op, LanePolicy<B>::gs_kept_basis_max_dim, max_iter, &t);
+    s.applies = g.applies;
+    if (!g.certified) {
+        s.converged = false;
+        return s;
+    }
+    s.values.push_back(g.energy);
+    s.vectors.push_back(std::move(g.vector));
+    return s;
+}
+
+template <class B>
+BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower& t, std::size_t want, bool vectors,
+                                std::uint64_t max_iter) {
+    BlockSolution sol;
+    const std::size_t nb = H.dim();
+    // Nothing to solve: an empty block, or one without a spin-S state (known from the dims, or seen
+    // as the valence-bond start vanishing on it).
+    if (nb == 0 || t.dim == 0 || (t.dim < 0 && t.seed(0x51ED0B70ULL).empty())) {
+        sol.whole = true;
+        return sol;
+    }
+    if (nb <= 2) return solve_block_dense_tower(H, t, want, vectors);
+    const std::uint64_t states = t.dim > 0 ? static_cast<std::uint64_t>(t.dim) : nb;
+    const std::size_t k = static_cast<std::size_t>(std::min<std::uint64_t>(std::max<std::size_t>(want, 1), states));
+    const double cluster = ed::numerics::kClusterRel * ed::numerics::scale_or_one(H.norm_bound());
+    BlockSolution raw = tower_attempt(be, H, t, k, max_iter);
+    sol.applies = raw.applies;
+    TowerLevels lv = tower_filter(t, H, raw.values, std::move(raw.vectors), cluster);
+    bool whole = raw.whole || (t.dim > 0 && lv.values.size() >= states);
+    bool converged = raw.converged;
+    if (lv.ambiguous || (lv.off > 0 && lv.values.size() < k && !whole)) {
+        // An off-tower level took a tower level's place: roundoff along an off-tower state below the
+        // tower grew into the solve. Solve again with every off-tower state lifted above the band (on
+        // a complex lane: B's own when it can apply the penalty), and read the energies as H's
+        // Rayleigh quotients (the penalty's tolerance is relative to its larger bound).
+        const auto P = tower_penalty(H, t);
+        auto on_host = [&] { return tower_attempt(ed::matvec::default_cpu_backend(), *P, t, k, max_iter); };
+        BlockSolution pen;
+        if constexpr (std::is_same_v<B, ed::matvec::CpuBackend>) pen = tower_attempt(be, *P, t, k, max_iter);
+        else if constexpr (std::is_same_v<B, ed::matvec::BasicCpuBackend<double>>) pen = on_host();
+        else pen = P->has_device_kernel() ? tower_attempt(be, *P, t, k, max_iter) : on_host();
+        sol.applies += pen.applies;
+        std::vector<double> e(pen.vectors.size());
+        std::vector<Complex> h(nb);
+        for (std::size_t i = 0; i < e.size(); ++i) {
+            H.apply(pen.vectors[i].data(), h.data(), nb);
+            Complex q(0, 0);
+            for (std::size_t j = 0; j < nb; ++j) q += std::conj(pen.vectors[i][j]) * h[j];
+            e[i] = std::real(q);
+        }
+        std::vector<std::size_t> order(e.size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::sort(order.begin(), order.end(), [&e](std::size_t a, std::size_t b) { return e[a] < e[b]; });
+        std::vector<double> es;
+        std::vector<std::vector<Complex>> vs;
+        for (std::size_t i : order) {
+            es.push_back(e[i]);
+            vs.push_back(std::move(pen.vectors[i]));
+        }
+        lv = tower_filter(t, H, es, std::move(vs), cluster);
+        whole = pen.whole || (t.dim > 0 && lv.values.size() >= states);
+        converged = pen.converged;
+    }
+    const std::size_t take = std::min(k, lv.values.size());
+    sol.values.assign(lv.values.begin(), lv.values.begin() + static_cast<std::ptrdiff_t>(take));
+    if (vectors)
+        for (std::size_t i = 0; i < take; ++i) sol.vectors.push_back(std::move(lv.vectors[i]));
+    sol.whole     = whole && take == lv.values.size();
+    sol.converged = converged && !lv.ambiguous && (take >= k || sol.whole);
+    return sol;
+}
+
 #define ED_LG_LANES(B)                                                                            \
     template BlockSolution solve_block_lowest<B>(B&, const ed::LinearOperator&, std::size_t,      \
                                                  std::uint64_t);                                  \
     template BlockSolution solve_block_eigenpairs<B>(B&, const ed::LinearOperator&, std::size_t,  \
                                                      std::uint64_t);                              \
+    template BlockSolution solve_block_tower<B>(B&, const ed::LinearOperator&, const Tower&,      \
+                                                std::size_t, bool, std::uint64_t);                \
     template GsVector solve_gs_vector<B>(B&, const ed::LinearOperator&, std::size_t,              \
                                          std::uint64_t);                                          \
-    template BlockEstimate estimate_lowest<B>(B&, const ed::LinearOperator&);
+    template BlockEstimate estimate_lowest<B>(B&, const ed::LinearOperator&, const Tower*);
 ED_LG_LANES(ed::matvec::CpuBackend)
 ED_LG_LANES(ed::matvec::BasicCpuBackend<double>)
 #ifdef WITH_CUDA

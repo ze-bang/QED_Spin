@@ -125,17 +125,22 @@ std::uint64_t star_bytes(const StarBuild& sb) {
 
 // The pruning estimate of a block above the dense crossover, on the lane place() chooses for
 // it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
-// is never trusted to prune; -inf when the estimate failed). A block the transitional
+// is never trusted to prune; -inf when the estimate failed), from the tower's start under a
+// total-spin restriction (+inf when the block holds no spin-S state). A block the transitional
 // small-block rule keeps on the host is solved exactly.
 double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
     const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
     if (lane == ed::Lane::HostDense) {
+        if (bop.tower) {
+            const auto sol = solve_block_dense_tower(op, *bop.tower, 1, false);
+            return sol.values.empty() ? std::numeric_limits<double>::infinity() : sol.values.front();
+        }
         const auto sol = solve_block_dense(op, 1, false);
         return sol.values.empty() ? -std::numeric_limits<double>::infinity() : sol.values.front();
     }
-    return ed::with_backend(lane, op, [&op](auto& be) {
-        const auto e = lg_detail::estimate_lowest(be, op);
+    return ed::with_backend(lane, op, [&op, &bop](auto& be) {
+        const auto e = lg_detail::estimate_lowest(be, op, bop.tower.get());
         return e.theta - e.residual;
     });
 }
@@ -339,7 +344,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     auto solve_block = [&](const Subspace& sub, StarBuild& sb, const std::shared_ptr<BlockData>& bi,
                            Antiunitary star_tr, double context_orbit_s) {
                 const std::size_t dim = bi->tag.dim;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim),
+                                                                   /*tower_lanes=*/true);
                 if (!bop.op) return;
                 const std::uint64_t mult = bop.multiplicity;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
@@ -360,13 +366,16 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 // The same lanes on every device: dense below the crossover, else the certified
                 // Krylov lanes on the backend place() chooses. A block of one or two states is dense
                 // whatever the crossover (the Krylov lanes would solve it densely too) and counted so.
+                // A spin tower is told apart through its eigenvectors: a dense solve of one forms them.
+                const Tower* tower = bop.tower.get();
                 const bool dense = dim <= 2
-                    || dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors);
+                    || dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors || tower);
                 const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
                 const std::size_t w = static_cast<std::size_t>(want);
                 BlockSolution sol = lane == ed::Lane::HostDense
-                    ? solve_block_dense(mv, w, o.vectors)
+                    ? (tower ? solve_block_dense_tower(mv, *tower, w, o.vectors) : solve_block_dense(mv, w, o.vectors))
                     : ed::with_backend(lane, mv, [&](auto& be) {
+                          if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors);
                           return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
                       });
                 ev = std::move(sol.values);
@@ -382,9 +391,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 bool ghost_seen = false;
                 for (std::size_t i = 0; i < ev.size(); ++i)
                     if (bop.is_ghost(ev[i])) { ev.resize(i); if (o.vectors) vv.resize(i); ghost_seen = true; break; }
-                // A block that returned its whole spectrum owes nothing, however many levels were
-                // wanted from it.
-                const bool whole_block = ev.size() >= dim;
+                // A block that returned its whole spectrum (its whole spin-S tower) owes nothing, however
+                // many levels were wanted from it.
+                const bool whole_block = sol.whole || ev.size() >= dim;
                 const bool short_ = !whole_block
                                     && (!converged || (static_cast<int>(ev.size()) < want && !ghost_seen));
                 if (short_) ++res.partial_blocks;
@@ -426,8 +435,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // estimate first -- an upper bound on its lowest level -- and is solved only when that
     // estimate lies within `prune_margin` (relative) of the k-th level found so far, in order
     // of increasing estimate. A block whose 40-step estimate is still far above its true
-    // minimum could be skipped wrongly; prune = false solves every block.
-    const bool prune = o.prune && o.cut && o.per_block == 0 && s.two_S < 0;
+    // minimum could be skipped wrongly; prune = false solves every block. Under a total-spin
+    // restriction the estimate starts inside the tower (Tower), so it bounds the tower's lowest level.
+    const bool prune = o.prune && o.cut && o.per_block == 0;
     // A candidate holds its star while the stars kept fit `keep_cap` (a quarter of the RAM the job
     // may still allocate); a survivor without one walks its star again, once for all its survivors.
     struct Candidate {
@@ -456,7 +466,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                     solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load());
                     continue;
                 }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim),
+                                                                   /*tower_lanes=*/true);
+                if (!bop.op) continue;   // no state of the requested spin
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device), nullptr, bi, cx.tr, 0.0});
                 fresh.push_back(candidates.size() - 1);

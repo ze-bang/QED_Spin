@@ -913,12 +913,58 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> 
 
 /// The lowest levels of one block, ascending; with vectors, aligned with them. `converged`
 /// false: the block could not certify the requested window (the certified prefix is kept).
+/// `whole`: the values are every level the block holds (fewer than requested when it holds fewer).
 struct BlockSolution {
     std::vector<double>               values;
     std::vector<std::vector<Complex>> vectors;
     bool                              converged = true;
+    bool                              whole     = false;
     std::uint64_t                     applies   = 0;   ///< H applies of this solve
 };
+
+/// The spin-S tower of one fixed-Sz block (P6.5): its states of total spin S, which the eigs lanes
+/// solve for on the bare H. [H, S^2] = 0, so a Krylov space grown from a start inside the tower
+/// stays there up to roundoff, and roundoff grows exponentially only along an off-tower level that
+/// lies below every tower level the space has resolved (Lanczos amplifies what lies outside the
+/// spectrum it holds); the solve then finds that level. So the lanes start from valence-bond states,
+/// exactly spin S (`seed`), certify what they return through S^2 (tower_filter), and, when an
+/// off-tower level took a tower level's place, solve again with every off-tower state lifted above
+/// the band (tower_penalty). No projection runs per apply.
+struct Tower {
+    std::shared_ptr<const ed::symmetry::RepSectorData> sector;   ///< the block's basis
+    std::shared_ptr<const ed::LinearOperator>          s2;       ///< S^2 on it (LadderS2, or the S^2 carrier)
+    int              two_S = -1;
+    std::vector<int> towers;      ///< the 2S' the block holds (allowed_two_S_in_block)
+    std::int64_t     dim   = -1;  ///< its spin-S states when known (states less those at n_up + 1), else -1
+
+    [[nodiscard]] double lambda() const { return 0.25 * two_S * (two_S + 2); }
+    /// min |S'(S'+1) - S(S+1)| over the block's other towers; 0 when it holds no other.
+    [[nodiscard]] double gap() const;
+    /// The Sz = S member (n_up = N/2 + S), where S^2 - S(S+1) = S- S+ is >= 2(S + 1) off the tower.
+    [[nodiscard]] bool highest_weight() const;
+    /// A unit start inside the tower: random valence-bond states (singlet pairs, the 2S free spins
+    /// in their symmetric state) on the block, exactly spin S; empty when the block holds none.
+    [[nodiscard]] std::vector<Complex> seed(std::uint64_t s) const;
+};
+
+/// The spin-S levels among unit eigenpairs (values ascending, vectors aligned). A vector with
+/// ||(S^2 - S(S+1)) psi|| at roundoff is one; in a cluster of values within `cluster_tol` that holds
+/// another, the cluster's spin-S directions are the eigenvectors of U^dag P_S U at 1 (P_S U w, with
+/// H's Rayleigh quotient), its off-tower ones those at 0. `off` counts the off-tower directions
+/// dropped; `ambiguous`, one neither near 0 nor near 1 (mixed at O(1)): nothing certified there.
+struct TowerLevels {
+    std::vector<double>               values;
+    std::vector<std::vector<Complex>> vectors;
+    std::size_t                       off       = 0;
+    bool                              ambiguous = false;
+};
+[[nodiscard]] TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std::vector<double>& values,
+                                       std::vector<std::vector<Complex>> vectors, double cluster_tol);
+
+/// H + mu f(S^2) on the tower's block: f = S^2 - S(S+1) at the highest weight, its square elsewhere,
+/// mu lifting every off-tower state 2 s_H: above the band, so the lowest levels are the tower's.
+/// The fallback of the tower lanes. Holds H by reference.
+[[nodiscard]] std::unique_ptr<const ed::LinearOperator> tower_penalty(const ed::LinearOperator& H, const Tower& t);
 
 /// The certified lowest eigenpair of one block: `certified` when ||H u - E u|| <= gs_resid_tol(H)
 /// (a miss or an internal numerical failure leaves it false).
@@ -940,6 +986,20 @@ struct BlockEstimate {
 /// The `want` lowest levels by a dense solve on the host: LAPACK values, or Eigen with vectors.
 [[nodiscard]] BlockSolution solve_block_dense(const ed::LinearOperator& H, std::size_t want, bool vectors);
 
+/// The `want` lowest spin-S levels of a block by a dense solve of H with vectors, filtered by the
+/// tower (tower_filter); `whole` when the block holds no more.
+[[nodiscard]] BlockSolution solve_block_dense_tower(const ed::LinearOperator& H, const Tower& t, std::size_t want,
+                                                    bool vectors);
+
+/// The `want` lowest spin-S levels of a block above the dense crossover, on the bare H: the GS vector
+/// for one level, Krylov-Schur with vectors for several, from the tower's valence-bond starts; the
+/// eigenpairs are certified through S^2 and, when an off-tower level took a tower level's place,
+/// solved again on tower_penalty (on the complex lane of B's device when B is the real host lane).
+/// Vectors are returned when `vectors`. max_iter 0 keeps every default (a test seam).
+template <class B>
+[[nodiscard]] BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower& t, std::size_t want,
+                                              bool vectors, std::uint64_t max_iter = 0);
+
 /// The `want` lowest values above the dense crossover: the contiguous Paige-gated scan for one
 /// level, Krylov-Schur with locking for several. max_iter 0 keeps every default (a test seam).
 template <class B>
@@ -960,9 +1020,10 @@ template <class B>
                                        std::size_t kept_basis_max_dim = LanePolicy<B>::gs_kept_basis_max_dim,
                                        std::uint64_t max_iter = 0);
 
-/// The pruning estimate: the lowest Ritz value of 40 no-reorth Lanczos steps.
+/// The pruning estimate: the lowest Ritz value of 40 no-reorth Lanczos steps, from the tower's start
+/// when `tower` is given (theta +inf when the block holds no spin-S state: nothing to solve).
 template <class B>
-[[nodiscard]] BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H);
+[[nodiscard]] BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H, const Tower* tower = nullptr);
 
 // stars.cpp
 [[nodiscard]] StarBuild
@@ -1074,6 +1135,9 @@ public:
     /// S^2 <= (N/2)(N/2 + 1).
     [[nodiscard]] double norm_bound() const override { return bound_; }
     [[nodiscard]] std::string description() const override { return "LadderS2(S- S+ + Sz(Sz+1))"; }
+    /// The states of the sector one up spin higher (0 at n_up = N): S+ maps onto it, so the block
+    /// holds this many fewer states of spin Sz than states.
+    [[nodiscard]] std::uint64_t raised_states() const noexcept { return up_ ? up_->states() : 0; }
 
 private:
     std::shared_ptr<const ed::symmetry::RepSectorData> sec_, up_;

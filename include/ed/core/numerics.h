@@ -25,6 +25,8 @@ inline constexpr double kBreakdownRel = 64.0 * kEps;
 inline constexpr double kLockRel = 1e-10;
 /// A ground-state vector is certified when ||H u - E u|| <= this * s_H.
 inline constexpr double kGsResidRel = 1e-9;
+/// Eigenvalues closer than this * s_H are one cluster where a spin tower is told apart inside it.
+inline constexpr double kClusterRel = 1e-8;
 /// A dense block is real when max |Im H_ij| <= this * max |H_ij|.
 inline constexpr double kRealBlockRel = 32.0 * kEps;
 

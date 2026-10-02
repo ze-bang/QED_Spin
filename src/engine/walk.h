@@ -54,13 +54,15 @@ engine_options(const Spec& s, const Subspace& sub, bool group_irreps_d = false) 
     return o;
 }
 
-/// The operator one block is solved with. With a total-spin restriction it is the block's
-/// H wrapped in the Lowdin projector onto the spin-S tower (S^2 built on the same basis):
+/// The operator one block is solved with. With a total-spin restriction it is either the bare H with
+/// the block's `tower` (the eigs lanes, block_operator's `tower_lanes`; internal.h, Tower), or the
+/// block's H wrapped in the Lowdin projector onto the spin-S tower (S^2 built on the same basis):
 /// H on the tower and `ghost` on the rest, which callers drop. `multiplicity` includes the
 /// 2S + 1 members of each multiplet. A null `op` means the block holds no
 /// state of the requested spin.
 struct BlockOp {
     std::shared_ptr<const ed::LinearOperator> op;
+    std::shared_ptr<const ed::solvers::lg_detail::Tower> tower;   ///< the eigs lanes' spin-S tower (SU(2) only)
     double        ghost        = std::numeric_limits<double>::infinity();
     std::uint64_t multiplicity = 1;
     std::shared_ptr<const ed::symmetry::LowdinS2Projector> projector;   ///< onto the tower (SU(2) only)
@@ -81,7 +83,8 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const std::shared_ptr<ed::solvers::BlockData>& bi,
                               const std::shared_ptr<::Operator>& s2_carrier,
                               Device device = Device::Cpu,
-                              const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
+                              const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr,
+                              bool tower_lanes = false) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
     b.op = std::shared_ptr<const ed::LinearOperator>(bi, &block_mv(*bi));
@@ -105,31 +108,51 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         b.op.reset();                   // this flip-parity block holds no spin-S state
         return b;
     }
+    // S^2 on the block. On the host S- S+ + Sz(Sz + 1) through the sector one up spin higher (P6.5):
+    // ~N entries a row against ~N^2/4 for the S^2 carrier, which the device lane keeps (its kernel)
+    // and a sector with the spin flip needs (n_up + 1 is not its own flip image).
+    const std::shared_ptr<const ed::symmetry::RepSectorData> sec =
+        bi->gop ? bi->gsec : (bi->W ? nullptr : sb.hk->rep_data_ptr());
     std::shared_ptr<const ed::LinearOperator> s2;
     std::shared_ptr<RepSectorMatVec> s2rep;
-    if (bi->gop && !dev && sub.n_up >= 0 && !bi->gsec->has_flips()) {
-        // On the host, S^2 as S- S+ + Sz(Sz + 1) through the sector one up spin higher (P6.5): ~N
-        // entries a row against ~N^2/4 for the S^2 carrier, which the device lane keeps (its kernel).
-        s2 = std::make_shared<LadderS2>(bi->gsec);
-    } else if (bi->gop) {
-        s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, bi->gsec);
+    std::shared_ptr<const LadderS2> ladder;
+    if (sec && !dev && sub.n_up >= 0 && !sec->has_flips()) {
+        s2 = ladder = std::make_shared<LadderS2>(sec);
+    } else if (sec) {
+        s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, sec);
         s2rep->set_csr_budget(budget);
     } else {
         auto s2k = std::make_shared<RepSectorMatVec>(*s2_carrier, sb.hk->rep_data_ptr());
         s2k->set_csr_budget(budget);
-        if (bi->W) s2 = std::make_shared<ProjectedBlockOp>(s2k, bi->W);
-        else       s2 = s2rep = s2k;
+        s2 = std::make_shared<ProjectedBlockOp>(s2k, bi->W);
     }
-    auto proj = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
-    if (dev && s2rep) {                 // H and S^2 on the device: the projected apply runs there
+    if (dev && s2rep) {                 // H and S^2 on the device
         rep->enable_device(true);
         s2rep->enable_device(true);
     }
+    b.multiplicity *= static_cast<std::uint64_t>(sub.members);
+    if (tower_lanes && sec) {
+        // The eigs lanes on the bare H (Tower). At the highest weight the block holds as many spin-S
+        // states as it has states less those of the sector one up spin higher, onto which S+ maps.
+        auto t = std::make_shared<Tower>();
+        t->sector = sec;
+        t->s2     = s2;
+        t->two_S  = s.two_S;
+        t->towers = towers;
+        if (ladder && t->highest_weight())
+            t->dim = static_cast<std::int64_t>(sec->states() - ladder->raised_states());
+        if (t->dim == 0) {
+            b.op.reset();
+            return b;
+        }
+        b.tower = std::move(t);
+        return b;
+    }
+    auto proj = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
     auto wrapped = std::make_shared<ed::symmetry::CasimirProjectedOperator>(b.op, proj, 1);
     b.ghost = wrapped->ghost_shift();
     b.projector = proj;
     b.op = wrapped;
-    b.multiplicity *= static_cast<std::uint64_t>(sub.members);
     return b;
 }
 

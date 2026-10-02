@@ -34,6 +34,7 @@
 #include <ed/core/select_backend.h>
 #include "common/model_records.h"
 #include <ed/ops/casimir.h>
+#include <ed/ops/casimir_projector.h>
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
 #include <ed/ops/program.h>
@@ -1067,4 +1068,110 @@ TEST_CASE("rep sectors: S^2 as S- S+ + Sz(Sz+1) through the raised sector equals
         }
     }
     REQUIRE(checked > 0);
+}
+
+namespace {
+
+Eigen::MatrixXcd eigen_of(const Mat& A, std::size_t d) {
+    Eigen::MatrixXcd M(static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(d));
+    for (std::size_t r = 0; r < d; ++r)
+        for (std::size_t c = 0; c < d; ++c) M(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = A[r * d + c];
+    return M;
+}
+
+}  // namespace
+
+TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penalty give the spin-S spectrum",
+          "[row_walk][irrep][su2]") {
+    namespace R = ed_tests::records;
+    using namespace ed::solvers::lg_detail;
+    const Dihedral G;
+    int checked = 0, empty = 0, krylov = 0;
+    for (double J : {1.0, -1.0}) {   // an antiferromagnet, and a ferromagnet: its off-tower states lie below
+        auto H = std::make_shared<Operator>(N, 0.5f);
+        R::heisenberg(*H, ring(1), J);
+        R::heisenberg(*H, ring(2), 0.3 * J);
+        for (int two_S : {0, 2, 4}) {
+            // the highest weight n_up = N/2 + S, and the Sz sector below it (no member there for S = 0)
+            for (int n_up : {N / 2 + two_S / 2, N / 2 + two_S / 2 - 1}) {
+                const auto tab = ring_table(G.probe, n_up);
+                const auto towers = ed::symmetry::allowed_two_S_in_block(N, n_up);
+                for (const auto& ir : G.gi.irreps) {
+                    auto rd = std::make_shared<RepSectorData>(
+                        group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir)));
+                    const std::size_t d = rd->states();
+                    if (d == 0) continue;
+                    rd->build_perm_lut();
+                    rd->build_buckets();
+                    INFO("J " << J << " 2S " << two_S << " n_up " << n_up << " irrep dim " << ir.dim << " states " << d);
+                    auto ladder = std::make_shared<LadderS2>(rd);
+                    Tower t;
+                    t.sector = rd;
+                    t.s2     = ladder;
+                    t.two_S  = two_S;
+                    t.towers = towers;
+                    const double lam = t.lambda();
+                    // The reference: H's block on the eigenvectors of S^2 at S(S + 1).
+                    const RepSectorMatVec Hs(*H, std::shared_ptr<const RepSectorData>(rd));
+                    const Eigen::MatrixXcd Hd = eigen_of(columns(d, [&](const Cx* in, Cx* out) { Hs.apply(in, out, d); }), d);
+                    const Eigen::MatrixXcd S2 = eigen_of(columns(d, [&](const Cx* in, Cx* out) { ladder->apply(in, out, d); }), d);
+                    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es2(S2);
+                    std::vector<Eigen::Index> in_tower;
+                    for (Eigen::Index i = 0; i < es2.eigenvalues().size(); ++i)
+                        if (std::abs(es2.eigenvalues()(i) - lam) < 1e-8) in_tower.push_back(i);
+                    std::vector<double> ref;
+                    if (!in_tower.empty()) {
+                        Eigen::MatrixXcd Q(static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(in_tower.size()));
+                        for (std::size_t c = 0; c < in_tower.size(); ++c) Q.col(static_cast<Eigen::Index>(c)) = es2.eigenvectors().col(in_tower[c]);
+                        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> eh(Q.adjoint() * Hd * Q);
+                        for (Eigen::Index i = 0; i < eh.eigenvalues().size(); ++i) ref.push_back(eh.eigenvalues()(i));
+                    }
+                    if (t.highest_weight())
+                        CHECK(d - ladder->raised_states() == ref.size());
+                    // The start: empty exactly when the block holds no spin-S state, else a unit spin-S vector.
+                    const std::vector<Cx> v = t.seed(11);
+                    REQUIRE(v.empty() == ref.empty());
+                    if (v.empty()) { ++empty; continue; }
+                    std::vector<Cx> w(d);
+                    ladder->apply(v.data(), w.data(), d);
+                    double leak = 0.0, norm = 0.0;
+                    for (std::size_t i = 0; i < d; ++i) { leak += std::norm(w[i] - lam * v[i]); norm += std::norm(v[i]); }
+                    CHECK(std::sqrt(leak) <= 1e-12 * std::max(1.0, lam));
+                    CHECK(std::abs(norm - 1.0) <= 1e-12);
+                    // The dense tower solve filters H's eigenpairs down to exactly the reference.
+                    const BlockSolution dense = solve_block_dense_tower(Hs, t, d, true);
+                    REQUIRE(dense.values.size() == ref.size());
+                    CHECK(dense.whole);
+                    for (std::size_t i = 0; i < ref.size(); ++i) CHECK(std::abs(dense.values[i] - ref[i]) <= 1e-10);
+                    // The penalty's lowest levels are the tower's: every off-tower state is lifted above the band.
+                    const auto P = tower_penalty(Hs, t);
+                    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ep(
+                        eigen_of(columns(d, [&](const Cx* in, Cx* out) { P->apply(in, out, d); }), d));
+                    for (std::size_t i = 0; i < ref.size(); ++i)
+                        CHECK(std::abs(ep.eigenvalues()(static_cast<Eigen::Index>(i)) - ref[i]) <= 1e-9);
+                    // The Krylov tower lanes (one level, then three) on the bare H.
+                    if (d >= 3) {
+                        for (std::size_t k : {std::size_t{1}, std::size_t{3}}) {
+                            const BlockSolution kr = solve_block_tower(ed::matvec::default_cpu_backend(), Hs, t, k, true);
+                            const std::size_t want = std::min(k, ref.size());
+                            REQUIRE(kr.values.size() == want);
+                            CHECK(kr.converged);
+                            for (std::size_t i = 0; i < want; ++i) {
+                                CHECK(std::abs(kr.values[i] - ref[i]) <= 1e-9);
+                                ladder->apply(kr.vectors[i].data(), w.data(), d);
+                                double l = 0.0;
+                                for (std::size_t q = 0; q < d; ++q) l += std::norm(w[q] - lam * kr.vectors[i][q]);
+                                CHECK(std::sqrt(l) <= 1e-8 * std::max(1.0, lam));
+                            }
+                            ++krylov;
+                        }
+                    }
+                    ++checked;
+                }
+            }
+        }
+    }
+    CHECK(checked > 0);
+    CHECK(empty > 0);
+    CHECK(krylov > 0);
 }

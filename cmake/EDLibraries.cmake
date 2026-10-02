@@ -26,6 +26,7 @@ set(ED_ENGINE_SOURCES
     src/engine/blocks.cpp
     src/engine/group_sector.cpp
     src/engine/ground_state.cpp
+    src/engine/tower.cpp
 )
 if(WITH_CUDA)
     list(APPEND ED_ENGINE_SOURCES

@@ -69,8 +69,20 @@ struct KrylovSchurResultT {
 };
 using KrylovSchurResult = KrylovSchurResultT<Complex>;
 
+/// The kernel's fresh starts by default: unit-variance Gaussian entries, one normal stream across
+/// every start of a run.
+struct GaussianStart {
+    std::normal_distribution<double> nd{0.0, 1.0};
+    template <class Scalar>
+    void operator()(std::mt19937_64& gen, std::vector<Scalar>& v) {
+        for (auto& z : v) z = gaussian_entry<Scalar>(nd, gen);
+    }
+};
+
 /// Thick-restart Krylov-Schur for the lowest num_eigs eigenpairs of the Hermitian `matvec`, from
-/// `seed_local` (backend memory, dimension `local_n`).
+/// `seed_local` (backend memory, dimension `local_n`). `fresh(gen, host)` fills a host vector with
+/// each fresh start (after an invariant subspace, and the probe's): a caller whose eigenpairs live
+/// in an invariant subspace it can draw from (a spin tower) passes its own.
 ///
 /// A cycle grows a contiguous basis V to m vectors, each fully orthogonalised (CGS2) against V and
 /// against the pairs already found; the projected matrix is tridiagonal, with an arrowhead after a
@@ -82,13 +94,14 @@ using KrylovSchurResult = KrylovSchurResultT<Complex>;
 /// Then the degeneracy probe: a Krylov space from one vector holds one vector per eigenspace, so a
 /// fresh start deflated against the found pairs looks for a level the search skipped (a second
 /// copy of a degenerate eigenvalue).
-template <typename Backend, typename MatvecFn>
+template <typename Backend, typename MatvecFn, typename Fresh = GaussianStart>
 KrylovSchurResultT<typename Backend::scalar_type>
 krylov_schur_kernel(Backend&                             be,
                     MatvecFn&&                           matvec,
                     std::size_t                          local_n,
                     const typename Backend::scalar_type* seed_local,
-                    const KrylovSchurOptions&            opts)
+                    const KrylovSchurOptions&            opts,
+                    Fresh                                fresh = {})
 {
     using Scalar = typename Backend::scalar_type;
     using UniqueVec = typename ed::matvec::BasicBackend<Scalar>::UniqueVec;
@@ -224,13 +237,12 @@ krylov_schur_kernel(Backend&                             be,
         return kBudget;
     };
 
-    // Fresh Gaussian starts: the way on past an exact invariant subspace (the Ising ring: a few
-    // distinct levels, each thousands of times), and the probe's.
+    // Fresh starts (`fresh`: Gaussian by default): the way on past an exact invariant subspace (the
+    // Ising ring: a few distinct levels, each thousands of times), and the probe's.
     std::mt19937_64 fresh_gen(0xF8E5A7C3ULL);
-    std::normal_distribution<double> nd(0.0, 1.0);
     std::vector<Scalar> host(n);
     auto fresh_seed = [&](std::mt19937_64& gen) {
-        for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
+        fresh(gen, host);
         be.copy_from_host(host.data(), col(0), n);
     };
 
