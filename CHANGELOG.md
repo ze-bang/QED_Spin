@@ -48,6 +48,11 @@ Breaking changes so far:
   below ~5e-10, or above ~9e9) in one process: the device-mirror cache compared coefficients
   rounded to 1e-9, so the second solve reused the first operator's couplings. The cache now
   compares every term exactly.
+- **`eigs` keeps a multiplet at the k-th level whole.** Levels whose energies agree to
+  roundoff (the copies of one multiplet in different blocks) were ordered, and cut at the
+  k-th state, by their last bits; they are now ordered by their blocks' quantum numbers, and
+  every copy of the k-th level is returned (`levels` may hold more than k states;
+  `energies` lists exactly k). `spectrum` orders such levels the same way.
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.

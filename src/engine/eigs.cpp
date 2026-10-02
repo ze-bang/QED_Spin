@@ -10,6 +10,11 @@
 #include <ed/sectors/sectors.h>
 #include <ed/basis/bits.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <tuple>
+
 namespace ed::sectors {
 
 using namespace ed::solvers;
@@ -150,6 +155,30 @@ BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const R
            static_cast<unsigned long long>(st.applies), st.applies ? st.apply_s / static_cast<double>(st.applies) : 0.0,
            st.other_s, st.solve_s);
     return st;
+}
+
+// Energies that agree to roundoff: one level as far as order and the k-window go (the copies
+// of a multiplet in different blocks differ only in their last bits).
+bool same_energy(double a, double b) {
+    return std::abs(a - b) <= 64.0 * std::numeric_limits<double>::epsilon() * std::max(std::abs(a), std::abs(b));
+}
+
+// Ascending energy; levels whose energies agree to roundoff in the order of their blocks'
+// quantum numbers, so neither the order nor the k-window depends on the last bits of a solve.
+template <class T, class Get>
+void order_levels(std::vector<T>& v, Get level) {
+    std::stable_sort(v.begin(), v.end(), [&](const T& a, const T& b) { return level(a).energy < level(b).energy; });
+    const auto key = [&](const T& x) {
+        const Level& L = level(x);
+        return std::make_tuple(L.tag.n_up, L.tag.sz_parity, L.tag.k0, L.tag.irrep, L.mirror);
+    };
+    for (std::size_t i = 0; i < v.size();) {
+        std::size_t j = i + 1;
+        while (j < v.size() && same_energy(level(v[i]).energy, level(v[j]).energy)) ++j;
+        std::stable_sort(v.begin() + static_cast<std::ptrdiff_t>(i), v.begin() + static_cast<std::ptrdiff_t>(j),
+                         [&](const T& a, const T& b) { return key(a) < key(b); });
+        i = j;
+    }
 }
 
 std::uint64_t state_index(std::uint64_t st, int n_up) {
@@ -397,12 +426,14 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     }
 
     detail::require_some_level(s, rows.empty(), "eigs");
-    std::stable_sort(rows.begin(), rows.end(),
-                     [](const Row& a, const Row& b) { return a.level.energy < b.level.energy; });
+    order_levels(rows, [](const Row& r) -> const Level& { return r.level; });
     std::uint64_t acc = 0;
     double cut = std::numeric_limits<double>::infinity();
     for (const auto& r : rows) {
-        if (std::isfinite(cut) && !(o.window > 0.0 && r.level.energy <= cut + o.window)) break;
+        // past the k-th level: only its roundoff-equal copies (a multiplet is never split by
+        // rounding) and, with a window, every level within it
+        if (std::isfinite(cut) && !same_energy(r.level.energy, cut)
+            && !(o.window > 0.0 && r.level.energy <= cut + o.window)) break;
         res.levels.push_back(r.level);
         acc += r.level.multiplicity;
         if (o.cut && acc >= static_cast<std::uint64_t>(o.k) && !std::isfinite(cut)) cut = r.level.energy;
@@ -483,8 +514,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
             res.total_dim += L.multiplicity;
         }
     detail::require_some_level(s, res.levels.empty(), "spectrum");
-    std::stable_sort(res.levels.begin(), res.levels.end(),
-                     [](const Level& a, const Level& b) { return a.energy < b.energy; });
+    order_levels(res.levels, [](const Level& L) -> const Level& { return L; });
     return res;
 }
 

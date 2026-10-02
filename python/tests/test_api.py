@@ -939,3 +939,21 @@ def test_four_site_terms_in_the_hamiltonian():
                   vectors=True)
     with pytest.raises(NotImplementedError):   # as an observable: not until P3.3
         rv.expect([H])
+
+
+def test_a_multiplet_at_the_kth_level_comes_back_whole():
+    # Open Heisenberg chain N=10: the 5th-7th states are one triplet, spread over blocks.
+    # eigs(k=6) returns its every copy (the levels may hold more than k states), whatever
+    # the last bits of the block solves; energies still lists exactly k values.
+    n = 10
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, i + 1) for i in range(n - 1)], 1.0)
+    H = b.to_operator()
+    r = qed.eigs(H, 6)
+    E = [float(L.energy) for L in r.levels]
+    assert sum(int(L.multiplicity) for L in r.levels) == 7
+    assert all(E[i] <= E[i + 1] + 1e-12 for i in range(len(E) - 1))
+    assert len(r.energies) == 6
+    ref = np.linalg.eigvalsh(_dense(H, n))[:7]
+    np.testing.assert_allclose(sorted(e for L in r.levels for e in [float(L.energy)] * int(L.multiplicity)), ref,
+                               atol=1e-10)
