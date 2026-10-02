@@ -220,7 +220,8 @@ struct BlockStats {
     /// How H was applied: "dense" (materialised), "csr" (reduced CSR), "walk" (CSR-free gather),
     /// "gpu-gather" (device kernel on host vectors), "device" (the whole solve on the device lane).
     std::string   lane;
-    double        context_orbit_s = 0.0;  ///< the walk's abelian orbit table (shared by its blocks)
+    double        context_orbit_s = 0.0;  ///< the walk's abelian orbit table (shared by its blocks; 0 while no star
+                                          ///< has needed its momentum sector)
     double        star_orbit_s    = 0.0;  ///< the star's own group orbit table
     double        star_build_s    = 0.0;  ///< the whole star build (sector, co-group, blocks)
     double        build_s         = 0.0;  ///< CSR / device-mirror build charged to this block

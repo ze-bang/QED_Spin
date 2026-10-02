@@ -678,8 +678,17 @@ struct EngineContext {
     std::vector<int>                     residue_spec;  // per residue: its index in the caller's list
     std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
                                                         // (EXTENDED indices when flip)
-    std::shared_ptr<const ed::symmetry::OrbitTable> otab;
-    std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed-Sz: shared rank table, or null
+    /// The subspace's orbit table under A (A') and, at fixed Sz, its rank lookup: acquired by the
+    /// first star that needs its momentum sector (k_sector_table), so a walk whose stars all take
+    /// the group-sector path never builds them.
+    struct KTable {
+        std::once_flag once;
+        std::shared_ptr<const ed::symmetry::OrbitTable>       otab;
+        std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed Sz: shared rank table, or null
+        std::atomic<double> seconds{0.0};                              // to acquire both (0: not yet)
+    };
+    std::shared_ptr<KTable>              k_table = std::make_shared<KTable>();
+    int                                  n_up = -1, sz_parity = -1;   // the subspace
     ed::symmetry::CompiledGroup          cg;            // A (or A'), byte-LUT
     int                                  n_sites = 0;
     // A' = A x Z2 (global spin flip as an XOR element). Element
@@ -688,7 +697,6 @@ struct EngineContext {
     bool                                 flip_half = false;
     std::uint64_t                        flip_mask = 0;
     int                                  n_irr_raw = 0;
-    double                               t_orbit_table = 0.0;   // seconds to acquire otab (+ srl)
     const ed::ops::MaskedOperator*       terms = nullptr;       // H's canonical terms (the verdicts)
     Antiunitary                          tr = Antiunitary::None;   // the map of the stars' time-reversal fold
 
@@ -946,6 +954,9 @@ namespace lg_detail {
 // arrays as a serial filter. (group_sector.cpp)
 void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
                  ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local = nullptr);
+
+// The context's orbit table and rank lookup, acquired on the first call (context.cpp).
+[[nodiscard]] const EngineContext::KTable& k_sector_table(const EngineContext& cx);
 
 // group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, stars.cpp).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::OrbitTable>

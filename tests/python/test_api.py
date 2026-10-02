@@ -278,6 +278,20 @@ def test_time_reversal_require_refuses_an_h_without_k_or_theta():
         qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, time_reversal="require"))
 
 
+def test_a_walk_of_group_path_stars_builds_no_momentum_table():
+    # The context's orbit table (the Sz sector under the translations) is acquired by the first star
+    # that needs its momentum sector (P6.1): the Gamma star of a ring with its reflection takes the
+    # group-sector path and never does; the other momenta, with a trivial co-group, do.
+    n = 12
+    H = _ring(n)
+    T, R = _translations(n)[0], _reflection(n)
+    base = qed.Symmetry(spatial=[T, R], sz=n // 2, spin_flip="off", time_reversal="off")
+    gamma = qed.eigs(H, 2, sym=base.select(momentum={tuple(T): 0}))
+    assert gamma.block_stats and all(b["context_orbit_s"] == 0.0 for b in gamma.block_stats)
+    every = qed.eigs(H, 2, sym=base, prune=False)
+    assert any(b["context_orbit_s"] > 0.0 for b in every.block_stats)
+
+
 def test_sz_basis_vectors_are_eigenvectors_of_that_block():
     H = _ring(6)
     r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=_translations(6), point_group=False, sz=3),

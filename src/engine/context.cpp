@@ -206,9 +206,32 @@ build_k_sector(const EngineContext& cx, int k, int n_up) {
         for (std::size_t g = cx.A.size(); g < cx.nA_ext(); ++g)
             rd.flip_masks[g] = cx.flip_mask;
     }
-    if (cx.srl) rd.shared_rank = cx.srl;
-    filter_reps(*cx.otab, rd.characters, rd, cx.srl ? &rd.local_of_shared : nullptr);
+    const auto& kt = k_sector_table(cx);
+    if (kt.srl) rd.shared_rank = kt.srl;
+    filter_reps(*kt.otab, rd.characters, rd, kt.srl ? &rd.local_of_shared : nullptr);
     return rd;
+}
+
+const EngineContext::KTable& k_sector_table(const EngineContext& cx) {
+    auto& t = *cx.k_table;
+    std::call_once(t.once, [&] {
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto n = static_cast<std::uint64_t>(cx.n_sites);
+        if (cx.n_up >= 0) {
+            t.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(n, cx.n_up, cx.cg);
+            // One rank -> representative table for the whole Sz sector, shared by every momentum
+            // sector built from it: O(1) index lookups on the host, and one device copy on the GPU.
+            ed::core::combinadic::BinomialTable b(cx.n_sites);
+            if (ed::symmetry::rep_rank_table_enabled(b.at(cx.n_sites, cx.n_up)))
+                t.srl = ed::symmetry::rank_lookup_of(*t.otab, cx.n_sites, cx.n_up);   // kept with the table
+        } else if (cx.sz_parity >= 0) {
+            t.otab = ed::symmetry::acquire_orbit_table_parity_compiled(n, cx.sz_parity, cx.cg);
+        } else {
+            t.otab = ed::symmetry::acquire_orbit_table_full_compiled(n, cx.cg);
+        }
+        t.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    });
+    return t;
 }
 
 // Monomial action of residue p (index rp) on the k0 rep basis. Returns false
@@ -441,23 +464,9 @@ void make_engine_context(const ::Operator&                    op,
         ? ed::symmetry::make_flip_extended_group_from_perms(
               cx.A, static_cast<std::uint64_t>(n_sites))
         : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
-    const auto t_otab = std::chrono::steady_clock::now();
-    if (opt.n_up >= 0) {
-        cx.otab = ed::symmetry::acquire_orbit_table_fixed_sz_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.n_up, cx.cg);
-        // One rank -> representative table for the whole Sz sector, shared by every momentum
-        // sector built from it: O(1) index lookups on the host, and one device copy on the GPU.
-        ed::core::combinadic::BinomialTable b(n_sites);
-        if (ed::symmetry::rep_rank_table_enabled(b.at(n_sites, opt.n_up)))
-            cx.srl = ed::symmetry::rank_lookup_of(*cx.otab, n_sites, opt.n_up);   // kept with the table
-    } else if (opt.sz_parity >= 0) {
-        cx.otab = ed::symmetry::acquire_orbit_table_parity_compiled(
-            static_cast<std::uint64_t>(n_sites), opt.sz_parity, cx.cg);
-    } else {
-        cx.otab = ed::symmetry::acquire_orbit_table_full_compiled(
-            static_cast<std::uint64_t>(n_sites), cx.cg);
-    }
-    cx.t_orbit_table = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_otab).count();
+    // The orbit table of the subspace waits for the first star that needs its momentum sector.
+    cx.n_up      = opt.n_up;
+    cx.sz_parity = opt.sz_parity;
     build_residue_maps(cx, residue_perms);
 }
 

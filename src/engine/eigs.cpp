@@ -317,7 +317,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // Solve one block and append its rows.
     auto solve_block = [&](const Subspace& sub, StarBuild& sb,
                            const std::shared_ptr<BlockData>& bi, const EngineContext& cx) {
-                const double context_orbit_s = cx.t_orbit_table;
+                const double context_orbit_s = cx.k_table->seconds.load();   // 0: no star needed it
                 const std::size_t dim = bi->tag.dim;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 if (!bop.op) return;
