@@ -77,7 +77,8 @@ for name, code in cases.items():
             silent.append(f"sz=9 {name} killed by signal {-p.returncode}")
         elif p.returncode == 0:
             silent.append(f"sz=9 {name} returned {out}")
-        elif "ValueError" not in err and "invalid_argument" not in err and "out of range" not in err.lower():
+        elif ("ValueError" not in err and "InvalidRequest" not in err      # InvalidRequest is a ValueError
+              and "invalid_argument" not in err and "out of range" not in err.lower()):
             silent.append(f"sz=9 {name} rc={p.returncode} {err[:60]}")
     except subprocess.TimeoutExpired:
         print(f"sz=9 {name}: timed out")
