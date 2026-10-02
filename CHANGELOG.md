@@ -33,7 +33,8 @@ Breaking changes so far:
   it is, SU(2); S_tot² written as the full double sum (same-site records included) is SU(2)-
   and flip-invariant. One relative tolerance, 1e-10 of H's largest coefficient, replaces the
   detectors' mixed absolute ones. `_core.check_generators_commute` refuses a list that is not
-  a permutation of the sites.
+  a permutation of the sites. `find_symmetries` builds its interaction graph (and its memo key)
+  from the canonical terms too.
 - **`qed.Operator` has an algebra.** `A + B`, `A - B`, `-A`, `2 * A`, `A / 2`, `A @ B` (B acting
   first), `A.adjoint()`, `A.copy()`, `A.equals(B)` (the same operator however written),
   `A.is_hermitian()`, `A.terms()` (the unique canonical terms as `(coeff, ops, sites)`),

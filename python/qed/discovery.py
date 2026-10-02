@@ -14,37 +14,35 @@ from ._core import Operator  # type: ignore[attr-defined]
 
 Permutation = list[int]
 
+_OP_CODE = {"+": 0, "-": 1, "z": 2}   # Operator.terms() factors as OP_SPLUS / OP_SMINUS / OP_SZ
+
 
 def _operator_to_graph_records(
     operator: Operator,
 ) -> tuple[dict[int, tuple], list[dict[str, Any]], list[tuple]]:
     """Build (vertex_weights, edges, triples) records the
-    ``automorphism_finder`` routines consume."""
+    ``automorphism_finder`` routines consume, from H's canonical terms (``Operator.terms()``):
+    the graph does not depend on how H was written (cancelling records, same-site products,
+    either order of a bond). A term on more than three sites does not enter the graph; the
+    exact check after the search still sees it."""
     num_sites = int(operator.num_sites)
-
-    # One-body terms: each site's terms merged by operator, as a sorted tuple of
-    # (op_type, real, imag) -- every term on the site colours it, not only the last one.
     onsite: dict[int, dict[int, complex]] = {i: {} for i in range(num_sites)}
-    for op_type, site, coeff in operator.iter_one_body_terms():
-        d = onsite[int(site)]
-        d[int(op_type)] = d.get(int(op_type), 0j) + complex(coeff)
+    edges: list[dict[str, Any]] = []
+    triples: list[tuple] = []
+    for coeff, ops, sites in operator.terms():
+        c = complex(coeff)
+        codes = [_OP_CODE[o] for o in ops]
+        sites = [int(s) for s in sites]
+        if len(sites) == 1:      # every one-body term on the site colours it
+            onsite[sites[0]][codes[0]] = onsite[sites[0]].get(codes[0], 0j) + c
+        elif len(sites) == 2:
+            edges.append({"vertex1": sites[0], "vertex2": sites[1], "type1": codes[0], "type2": codes[1],
+                          "weight": (float(c.real), float(c.imag))})
+        elif len(sites) == 3:
+            triples.append((tuple(sites), tuple(codes), c))
     vertex_weights = {i: tuple(sorted((op, round(c.real, 8), round(c.imag, 8))
                                       for op, c in d.items() if abs(c) > 1e-12))
                       for i, d in onsite.items()}
-
-    # Two-body terms as edges: list of dicts.
-    edges: list[dict[str, Any]] = []
-    for op1, s1, op2, s2, coeff in operator.iter_two_body_terms():
-        c = complex(coeff)
-        edges.append({
-            "vertex1": int(s1),
-            "vertex2": int(s2),
-            "type1": int(op1),
-            "type2": int(op2),
-            "weight": (float(c.real), float(c.imag)),
-        })
-    triples = [((int(s1), int(s2), int(s3)), (int(o1), int(o2), int(o3)), complex(c))
-               for o1, s1, o2, s2, o3, s3, c in operator.iter_three_body_terms()]
     return vertex_weights, edges, triples
 
 
@@ -99,18 +97,11 @@ _FIND_SYM_MEMO_CAP = 32
 
 
 def _find_symmetries_key(operator):
-    """Content key for the find_symmetries memo, or None to skip caching (any part that cannot
-    be hashed => compute afresh, never cache wrong). Complex coefficients enter as (re, im):
-    complex numbers do not order, and a sort over them failed for every H that has two terms
-    on the same (op, site) -- nothing was ever cached for a J1-J2 or field H."""
-    def flat(t):
-        return tuple((x.real, x.imag) if isinstance(x, complex) else x for x in t)
-    try:
-        terms = tuple(sorted(flat(t) for t in operator.transform_tuples()))
-        three = tuple(sorted(flat(t) for t in operator.iter_three_body_terms()))
-        return (int(operator.num_sites), terms, three)
-    except Exception:
-        return None
+    """Content key for the find_symmetries memo: H's canonical terms (unique however H was
+    written; complex coefficients enter as (re, im))."""
+    terms = tuple((ops, tuple(int(s) for s in sites), complex(c).real, complex(c).imag)
+                  for c, ops, sites in operator.terms())
+    return (int(operator.num_sites), terms)
 
 
 # The automorphism group is enumerated only up to this order: it must stay enumerable to be split
