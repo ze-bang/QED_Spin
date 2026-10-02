@@ -68,9 +68,10 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
             throw std::invalid_argument("compile_program: the two sectors differ in flip masks");
     if (static_cast<int>(src.characters.size()) != G || static_cast<int>(tgt.characters.size()) != G)
         throw std::invalid_argument("compile_program: character tables have the wrong length");
-    if (src.n_up < 0 || tgt.n_up < 0)
-        throw std::invalid_argument("compile_program: fixed-S^z sectors required");
-    const int delta_req = tgt.n_up - src.n_up;
+    if ((src.n_up < 0) != (tgt.n_up < 0))
+        throw std::invalid_argument("compile_program: a fixed-S^z sector paired with a full or parity sector");
+    const bool fixed_sz = src.n_up >= 0;   // full / parity sectors: no S^z selection rule
+    const int delta_req = fixed_sz ? tgt.n_up - src.n_up : 0;
 
     // weights conj(lambda(g)) / |G|, lambda = chi_bra * conj(chi_ket)
     std::vector<std::complex<double>> w(static_cast<std::size_t>(G));
@@ -110,7 +111,7 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
         double scale = 0.0;
         for (const auto& t : O.terms()) scale = std::max(scale, std::abs(t.coeff));
         for (const auto& t : Ol.terms(opt.drop * scale)) {
-            if (masked_delta_set_bits(t) != delta_req) continue;   // cannot connect the sectors
+            if (fixed_sz && masked_delta_set_bits(t) != delta_req) continue;   // cannot connect them
             tree[t.flip_mask][t.cond_val].push_back(T{t.sign_mask, t.coeff, static_cast<std::uint32_t>(a)});
             ++P.terms_per_obs[a];
         }

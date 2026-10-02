@@ -524,3 +524,102 @@ TEST_CASE("device: the multi-vector walk equals single applies bit for bit", "[r
     }
 }
 #endif
+
+TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one group", "[row_walk]") {
+    std::mt19937 rng(20261004);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
+    std::uniform_int_distribution<int> pick_len(1, 4);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    auto random_op = [&] {
+        MaskedOperator O(N);
+        for (int t = 0; t < 6; ++t) {
+            std::string o;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                o.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(N, o, sites, Cx(gauss(rng), gauss(rng))));
+        }
+        return O;
+    };
+    const std::size_t D = kAll + 1;
+    // E_R^dagger O E_C
+    auto reference = [&](const Mat& Od, const RepSectorData& R, const RepSectorData& C) {
+        const std::size_t dr = R.reps.size(), dc = C.reps.size();
+        auto expanded = [&](const RepSectorData& S) {
+            std::vector<std::vector<Cx>> E(S.reps.size());
+            for (std::size_t c = 0; c < S.reps.size(); ++c) {
+                std::vector<Cx> u(S.reps.size(), Cx(0.0, 0.0));
+                u[c] = 1.0;
+                E[c] = ed::sectors::expand(S, u, -1);
+            }
+            return E;
+        };
+        const auto ER = expanded(R), EC = expanded(C);
+        Mat B(dr * dc, Cx(0.0, 0.0));
+        for (std::size_t c = 0; c < dc; ++c) {
+            std::vector<Cx> OE(D, Cx(0.0, 0.0));
+            for (std::size_t t = 0; t < D; ++t)
+                for (std::size_t s = 0; s < D; ++s)
+                    if (EC[c][s] != Cx(0.0, 0.0)) OE[t] += Od[t * D + s] * EC[c][s];
+            for (std::size_t r = 0; r < dr; ++r) {
+                Cx acc(0.0, 0.0);
+                for (std::size_t t = 0; t < D; ++t) acc += std::conj(ER[r][t]) * OE[t];
+                B[r * dc + c] = acc;
+            }
+        }
+        return B;
+    };
+    auto by_columns = [&](std::size_t dr, std::size_t dc, const std::function<void(const Cx*, Cx*)>& apply) {
+        Mat M(dr * dc);
+        std::vector<Cx> e(dc), y(dr);
+        for (std::size_t c = 0; c < dc; ++c) {
+            std::fill(e.begin(), e.end(), Cx(0.0, 0.0));
+            e[c] = 1.0;
+            apply(e.data(), y.data());
+            for (std::size_t r = 0; r < dr; ++r) M[r * dc + c] = y[r];
+        }
+        return M;
+    };
+    struct Pair { bool flip; int kR, nR, kC, nC; };
+    const Pair pairs[] = {{false, 0, 4, 0, 4}, {false, 1, 4, 3, 4}, {false, 1, 3, 1, 4}, {false, 2, 4, 5, 3},
+                          {false, 3, -1, 0, -1}, {false, 6, -1, 6, -1}, {true, 0, 4, 1, 4}, {true, 5, -1, 2, -1}};
+    int checked = 0;
+    for (int trial = 0; trial < 4; ++trial) {
+        const MaskedOperator O = random_op();
+        const Mat Od = O.to_dense();
+        const double tol = 1e-12 * std::max(1.0, max_abs(Od));
+        for (const Pair& pr : pairs) {
+            const auto G = ring_group(false, pr.flip);
+            const auto chis = characters(G, false, pr.flip);
+            const RepSectorData R = make_sector(G, chis[static_cast<std::size_t>(pr.kR)], pr.nR);
+            const RepSectorData C = make_sector(G, chis[static_cast<std::size_t>(pr.kC)], pr.nC);
+            if (R.reps.empty() || C.reps.empty()) continue;
+            INFO("trial " << trial << " flip " << pr.flip << " rows (" << pr.kR << ", " << pr.nR << ") cols ("
+                 << pr.kC << ", " << pr.nC << ")");
+            const auto P = ed::ops::compile_program({O.dagger()}, R, C);   // (O_lambda)^dagger, ket R, bra C
+            const auto polR = R.make_policy(), polC = C.make_policy();
+            const std::size_t dr = R.reps.size(), dc = C.reps.size();
+            const Mat ref = reference(Od, R, C);
+            const Mat G1 = by_columns(dr, dc, [&](const Cx* in, Cx* out) {
+                ed::matvec::cross_gather(P.view(), polR, polC, false, dr, in, out);
+            });
+            CHECK(max_diff(G1, ref) <= tol);
+            const auto csr = ed::matvec::build_cross_csr(P.view(), polR, polC, false, dr);
+            const Mat C1 = by_columns(dr, dc, [&](const Cx* in, Cx* out) { csr.spmv(in, out); });
+            CHECK(max_diff(C1, ref) <= tol);
+            ++checked;
+        }
+        // one sector with itself: the diagonal shortcut
+        const auto G = ring_group(false, false);
+        const RepSectorData S = make_sector(G, characters(G, false, false)[2], 4);
+        const auto P = ed::ops::compile_program({O.dagger()}, S, S);
+        const auto pol = S.make_policy();
+        const std::size_t d = S.reps.size();
+        const Mat M = by_columns(d, d, [&](const Cx* in, Cx* out) { ed::matvec::cross_gather(P.view(), pol, pol, true, d, in, out); });
+        CHECK(max_diff(M, reference(Od, S, S)) <= tol);
+    }
+    CHECK(checked >= 24);
+}

@@ -97,8 +97,9 @@ struct CompileOptions {
 
 /// Compile `ops` for matrix elements <bra|O|ket> with ket in sector `src` and bra in
 /// sector `tgt`. Both sectors must come from the same group (identical group_size,
-/// n_sites, perms_flat and flip_masks). Terms whose change of the set-bit count does not
-/// match tgt.n_up - src.n_up cannot connect the sectors and are dropped.
+/// n_sites, perms_flat and flip_masks). Between fixed-S^z sectors, terms whose change of the
+/// set-bit count does not match tgt.n_up - src.n_up cannot connect them and are dropped; two
+/// full or parity sectors (n_up = -1) keep every term.
 [[nodiscard]] MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
                                             const ed::symmetry::RepSectorData& src,
                                             const ed::symmetry::RepSectorData& tgt,
