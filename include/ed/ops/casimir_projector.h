@@ -382,7 +382,10 @@ private:
             inv = 1.0 / nw;
             for (std::uint64_t i = 0; i < n; ++i) v[i] = w[i] * inv;
         }
-        return 2.0 * rho + 1.0;
+        // Above the band by at least H's bound s_H >= ||H|| (relative: s H keeps its ghost s times
+        // over); 1 for an H that vanishes on the block.
+        const double g = 2.0 * rho + h_->norm_bound();
+        return g > 0.0 ? g : 1.0;
     }
 
     std::shared_ptr<const ed::LinearOperator> h_;

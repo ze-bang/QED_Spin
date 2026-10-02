@@ -232,8 +232,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
     if (s.spin_flip == 1 && !ed::ops::flip_invariant(H.canonical()))
         throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");
-    if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(H.canonical()))
-        throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
+    if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(H.canonical())
+        && !ed::ops::theta_invariant(H.canonical()))
+        throw ed::InvalidRequest("dynamics: time_reversal='require', but H is invariant under neither complex "
+                                 "conjugation K nor time reversal Theta");
     const Spec u = unfolded(s);
     // Under total_spin with an SU(2)-symmetric H a level stands for a whole multiplet, solved at
     // its Sz = S member; in a uniform field every member is a level of its own (subspaces()

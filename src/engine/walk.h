@@ -60,7 +60,8 @@ struct BlockOp {
     std::uint64_t multiplicity = 1;
     std::shared_ptr<const ed::symmetry::LowdinS2Projector> projector;   ///< onto the tower (SU(2) only)
     [[nodiscard]] bool is_ghost(double e) const {
-        return std::isfinite(ghost) && e > ghost - 1e-6 * std::max(1.0, std::abs(ghost));
+        // scale-free: relative to the ghost level, which lies at least s_H above the band
+        return std::isfinite(ghost) && e > ghost - 1e-6 * std::abs(ghost);
     }
 };
 
