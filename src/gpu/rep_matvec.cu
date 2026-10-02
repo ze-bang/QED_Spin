@@ -255,7 +255,7 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     }
 
     // Device combinadic rank() reads a Pascal triangle from constant memory.
-    ed::gpu::combinadic::detail::upload_pascal();
+    ed::gpu::combinadic::upload_pascal_shared();
 
     // Reverse lookup: when the host sector carries the two-level lookup,
     // upload the small per-sector remap and co-own ONE shared rank table per

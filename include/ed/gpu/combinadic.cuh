@@ -88,12 +88,6 @@ std::uint64_t unrank_to_state(std::uint64_t rank, int n_bits, int k) {
     return state;
 }
 
-namespace detail {
-// Short name used by the representative sector mirror; forwards to the
-// shared Pascal-table upload.
-inline void upload_pascal() { upload_pascal_shared(); }
-}  // namespace detail
-
 }  // namespace ed::gpu::combinadic
 
 #endif  // WITH_CUDA

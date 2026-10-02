@@ -14,8 +14,8 @@ run builds and tests inside jobs; `scripts/gate/` submits the whole gate as SLUR
 the build, the C++ unit tests, pytest, the grid, the golden suite and the examples. A
 change is ready when every stage of the gate reports 0.
 
-`CMakePresets.json` has one preset, `ci-linux`, which the GitHub CI uses. Local LAPACKE and
-BLAS-shim locations can be set with `-DED_LAPACKE_ROOT=` and `-DED_BLAS_SHIM_DIR=`.
+`CMakePresets.json` has one preset, `ci-linux`, which the GitHub CI uses. `-DBLAS_PROFILE=` picks
+the BLAS / LAPACK provider (`AUTO`, `FLEXIBLAS`, `OPENBLAS`, `MKL`; `cmake/EDBlas.cmake`).
 
 ## Style
 
