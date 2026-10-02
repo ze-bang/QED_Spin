@@ -15,7 +15,13 @@ second run and walks (slower). Same seed -> same spectrum; CONFIRMED when the bu
 >= 2x slower with matching results. Each run takes the fastest of three calls.
 
 (Restated after P3.3: the first version forced a refusal with a tiny budget and timed the walk
-against the CSR, which measures the walk, not the budget rule.)"""
+against the CSR, which measures the walk, not the budget rule.)
+
+RESTATED 2026-10-02: the children run on one OpenMP thread. The cross-sector CSR budget is shared by
+the sectors building at once (csr_policy.h concurrent_sector_builders): T>0 dynamics solves its
+small sectors in a pool of T threads, so a budget of three merged CSRs admits none of them when
+T > 3 -- which measures the sharing rule, not the claim (gate 62545019 failed both; at T = 4 they read
+ratios 1.7-2.3, jobs 62546238/62546239)."""
 import json, math, os, subprocess, sys, time
 
 N, NUP, NQ = 18, 9, 3
@@ -43,7 +49,7 @@ print("RESULT_JSON:" + json.dumps({"t": min(ts), "S": [float(x) for x in r.S[0]]
 
 
 def run(budget):
-    env = dict(os.environ)
+    env = dict(os.environ, OMP_NUM_THREADS="1")
     env.pop("ED_XSEC_CSR_BUDGET_GIB", None)
     if budget is not None:
         env["ED_XSEC_CSR_BUDGET_GIB"] = str(budget)
