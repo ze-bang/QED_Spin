@@ -501,22 +501,18 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         for (const auto& x : j.reaches) sh.dim_target = std::max<std::uint64_t>(sh.dim_target, x.t->rd->reps.size());
         return sh;
     };
-    auto collect = [&](const Job& j, auto&& kernel) {
+    // A source's sums from its one kernel call: Z, and each reach's S added to its probe's.
+    auto collect = [&](const Job& j, const ed::observables::FtlmDynamicsResult& r) {
         Source src;
         src.S.assign(P, {});
         for (auto& sp : src.S)
             for (double T : d.temperatures) sp[T].assign(nW, Complex(0, 0));
-        bool any = false;
-        for (const auto& x : j.reaches) {
-            auto r = kernel(&x);
-            if (!any) { src.Z = r.Z; src.emin = r.E_min; any = true; }
-            auto& sp = src.S[x.probe];
+        src.Z = r.Z;
+        src.emin = r.E_min;
+        for (std::size_t q = 0; q < j.reaches.size(); ++q) {
+            auto& sp = src.S[j.reaches[q].probe];
             for (double T : d.temperatures)
-                for (std::size_t w = 0; w < nW; ++w) sp[T][w] += Complex(r.S_real.at(T)[w], r.S_imag.at(T)[w]);
-        }
-        if (!any) {
-            auto r = kernel(nullptr);
-            src.Z = r.Z; src.emin = r.E_min;
+                for (std::size_t w = 0; w < nW; ++w) sp[T][w] += r.S[q].at(T)[w];
         }
         return src;
     };
@@ -526,72 +522,70 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         const ed::LinearOperator& Hs = *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
         auto& be = ed::matvec::default_cpu_backend();
-        return collect(j, [&](const Job::Reach* x) {
-            if (!x) {
-                auto zero = [](const Complex*, Complex* o, std::size_t nn) { std::fill(o, o + nn, Complex(0, 0)); };
-                return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, zero, dim_src, dim_src,
-                                                             d.temperatures, d.omega, fo);
+        // Each reach's A and B (one operator for an autocorrelation), alive through the kernel call.
+        std::vector<std::unique_ptr<CrossSectorMatVec>> ops;
+        std::vector<ed::observables::FtlmDynamicsTarget> tg;
+        for (const auto& x : j.reaches) {
+            ops.push_back(std::make_unique<CrossSectorMatVec>(x.A, j.src->rd, x.t->rd));
+            const CrossSectorMatVec* a = ops.back().get();
+            const CrossSectorMatVec* b = a;
+            if (x.B != x.A) {
+                ops.push_back(std::make_unique<CrossSectorMatVec>(x.B, j.src->rd, x.t->rd));
+                b = ops.back().get();
             }
-            const Target* t = x->t;
-            const CrossSectorMatVec a(x->A, j.src->rd, t->rd);
-            std::optional<CrossSectorMatVec> b;
-            if (x->B != x->A) b.emplace(x->B, j.src->rd, t->rd);
-            auto H_dst = [t](const Complex* in, Complex* o, std::size_t nn) { t->H->apply(in, o, nn); };
-            auto A_ap  = [&a](const Complex* in, Complex* o, std::size_t nn) { a.apply(in, o, nn); };
-            auto B_ap  = [&a, &b](const Complex* in, Complex* o, std::size_t nn) { (b ? *b : a).apply(in, o, nn); };
-            return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, A_ap, B_ap, dim_src, t->rd->reps.size(),
-                                                         d.temperatures, d.omega, fo);
-        });
+            ed::observables::FtlmDynamicsTarget t;
+            t.dim = x.t->rd->reps.size();
+            t.H = [tp = x.t](const Complex* in, Complex* o, std::size_t nn) { tp->H->apply(in, o, nn); };
+            t.A = [a](const Complex* in, Complex* o, std::size_t nn) { a->apply(in, o, nn); };
+            t.B = [b](const Complex* in, Complex* o, std::size_t nn) { b->apply(in, o, nn); };
+            tg.push_back(std::move(t));
+        }
+        return collect(j, ed::observables::ftlm_dynamics_kernel(be, H_src, dim_src, tg, d.temperatures, d.omega, fo));
     };
-    // The same estimator with both Krylov bases, H and O on the device.
+    // The same estimator with both Krylov bases, H, A and B on the device.
     auto run_device = [&](const Job& j) {
 #ifdef WITH_CUDA
-        const auto fo = options(j);
+        auto fo = options(j);
         const std::size_t dim_src = j.src->rd->reps.size();
         ed::matvec::CudaBackend cbe;
         j.src->H->enable_device(true);
         const auto H_src = j.src->H->bind_cuda();
-        // Samples in lockstep (one multi-vector launch per H apply) when both H have a
-        // multi-vector kernel: as many as fit in 90% of the free device memory (at most 8).
-        const ed::LinearOperator& src_op = *j.src->H;
-        auto batched = [&](const ed::LinearOperator& dst_op, std::size_t dim_dst) {
-            auto f = fo;
-            auto ms = src_op.bind_cuda_multi();
-            auto md = dst_op.bind_cuda_multi();
-            if (!ms || !md) return f;
-            std::size_t width = std::min<std::size_t>(8, d.samples);
-            if (!ed::core::mem_guard_off()) {
-                const auto free = ed::core::available_device_bytes(/*fresh=*/true);
-                if (!free) return f;
-                ed::core::Shape sh;
-                sh.dim = dim_src; sh.dim_target = dim_dst; sh.krylov = d.krylov; sh.device = true;
-                for (; width > 1; --width) {
-                    sh.width = width;
-                    if (static_cast<double>(ed::core::footprint(ed::core::Path::DynamicsFtlm, sh).device)
-                        <= 0.9 * static_cast<double>(*free)) break;
-                }
+        std::vector<ed::observables::FtlmDynamicsTarget> tg;
+        std::size_t dim_dst = dim_src;                 // the zero-target run when nothing is reached
+        for (const auto& x : j.reaches) {
+            x.t->H->enable_device(true);
+            ed::observables::FtlmDynamicsTarget t;
+            t.dim = x.t->rd->reps.size();
+            t.H = x.t->H->bind_cuda();
+            t.A = ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *x.t->rd, *x.A);
+            t.B = x.B == x.A ? t.A : ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *x.t->rd, *x.B);
+            t.batch = x.t->H->bind_cuda_multi();
+            dim_dst = std::max(dim_dst, t.dim);
+            tg.push_back(std::move(t));
+        }
+        // Samples in lockstep (one multi-vector launch per H apply) when every H has a multi-vector
+        // kernel: as many as fit in 90% of the free device memory (at most 8).
+        auto ms = j.src->H->bind_cuda_multi();
+        const bool multi = ms && std::all_of(tg.begin(), tg.end(), [](const auto& t) { return bool(t.batch); });
+        std::size_t width = multi ? std::min<std::size_t>(8, d.samples) : 1;
+        if (width > 1 && !ed::core::mem_guard_off()) {
+            const auto free = ed::core::available_device_bytes(/*fresh=*/true);
+            if (!free) width = 1;
+            ed::core::Shape sh;
+            sh.dim = dim_src; sh.dim_target = dim_dst; sh.krylov = d.krylov; sh.device = true;
+            for (; free && width > 1; --width) {
+                sh.width = width;
+                if (static_cast<double>(ed::core::footprint(ed::core::Path::DynamicsFtlm, sh).device)
+                    <= 0.9 * static_cast<double>(*free)) break;
             }
-            if (width < 2) return f;
-            f.batch_src   = std::move(ms);
-            f.batch_dst   = std::move(md);
-            f.batch_width = width;
-            return f;
-        };
-        return collect(j, [&](const Job::Reach* x) {
-            if (!x) {
-                auto zero = [&cbe](const Complex*, Complex* o, std::size_t nn) { cbe.fill_zero(o, nn); };
-                return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, zero, dim_src, dim_src,
-                                                             d.temperatures, d.omega, batched(src_op, dim_src));
-            }
-            const Target* t = x->t;
-            const std::size_t dim_dst = t->rd->reps.size();
-            t->H->enable_device(true);
-            const auto H_dst = t->H->bind_cuda();
-            const auto A_ap = ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *x->A);
-            const auto B_ap = x->B == x->A ? A_ap : ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *x->B);
-            return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, A_ap, B_ap, dim_src, dim_dst,
-                                                         d.temperatures, d.omega, batched(*t->H, dim_dst));
-        });
+        }
+        if (width >= 2) {
+            fo.batch_src   = std::move(ms);
+            fo.batch_width = width;
+        } else {
+            for (auto& t : tg) t.batch = nullptr;
+        }
+        return collect(j, ed::observables::ftlm_dynamics_kernel(cbe, H_src, dim_src, tg, d.temperatures, d.omega, fo));
 #else
         return run(j);
 #endif

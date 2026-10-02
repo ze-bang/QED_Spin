@@ -65,69 +65,60 @@ struct FtlmCrossIrrepOptions {
     /// the start projected onto a spin tower, the levels outside it carry only roundoff weight
     /// (ed::thermal::FtlmOptions::min_weight).
     double      min_weight       = 0.0;
-    /// Device multi-vector source and target H (LinearOperator::bind_cuda_multi): on a CUDA run
-    /// up to `batch_width` samples advance in lockstep and share each H apply. O must then be
-    /// safe to apply from several threads at once.
-    std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src, batch_dst;
+    /// Device multi-vector source H (LinearOperator::bind_cuda_multi; each target carries its own,
+    /// FtlmDynamicsTarget::batch): on a CUDA run up to `batch_width` samples advance in lockstep
+    /// and share each H apply. A and B must then be safe to apply from several threads at once.
+    std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src;
     std::size_t batch_width      = 8;
 };
 
-/// One sector's UN-normalised FTLM cross-irrep accumulators. Keyed
-/// by temperature; the caller aggregates across sectors.
-struct FtlmCrossIrrepSectorResult {
-    /// Per-temperature numerators: sum_r sum_i exp(-beta(E_i-E_min)) c_i^2 S_i(omega)
-    /// Length equals ``omega_grid.size()``. Multiplied by dim_src on
-    /// return so the cross-sector aggregator can sum directly.
-    std::map<double, std::vector<double>>  S_real;
-    std::map<double, std::vector<double>>  S_imag;
-    /// Per-temperature denominators (the sector's partition function
-    /// times dim_src / R). Same dim_src multiplication as ``S_*``.
-    std::map<double, double>               Z;
-    /// Source-sector dimension (used to multiply S/Z; reported for
-    /// debugging).
-    std::size_t                            dim_src       = 0;
-    /// Target-sector dimension.
-    std::size_t                            dim_dst       = 0;
-    /// Number of samples actually processed (after rejecting samples
-    /// whose Lanczos failed).
-    std::size_t                            samples_done  = 0;
-    /// Energy reference used for the thermal exponent's numerical
-    /// stability shift (= min Ritz energy across all samples in this
-    /// sector). Reported so the caller can sanity-check the per-
-    /// sector recombination.
-    double                                 E_min         = 0.0;
+/// One target sector of a source: H there, A and B from the source as rows of it (callables over
+/// backend pointers), and on a device the multi-vector H that lets samples advance in lockstep.
+struct FtlmDynamicsTarget {
+    std::size_t dim = 0;
+    std::function<void(const Complex*, Complex*, std::size_t)> H, A, B;
+    std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch;
 };
 
+/// One source sector's UN-normalised FTLM accumulators (times dim_src, or trace_dim): Z per
+/// temperature and S per target and temperature, about the common reference E_min (the lowest
+/// weighted source Ritz value over the samples). The caller sums S and Z over source sectors.
+struct FtlmDynamicsResult {
+    std::map<double, double>                            Z;
+    std::vector<std::map<double, std::vector<Complex>>> S;   ///< per target
+    double                                              E_min = 0.0;
+    std::size_t                                         samples_done = 0;
+};
 
-template <class Backend, class HSrc, class HDst, class AApply, class BApply>
-FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&& H_dst, AApply&& A_apply,
-                                                BApply&& B_apply,
-                                                std::size_t dim_src, std::size_t dim_dst,
-                                                const std::vector<double>& temperatures,
-                                                const std::vector<double>& omega,
-                                                const FtlmCrossIrrepOptions& opts) {
-    if (dim_src == 0 || dim_dst == 0) throw std::invalid_argument("ftlm_dynamics_kernel: empty sector");
+/// The estimator above for every target of one source at once: each sample's source Lanczos
+/// (its Ritz data and Z) is formed once and serves every target -- the targets a probe reaches,
+/// over every probe (audit P5-dynamics-06/08). No target: Z alone (a source every probe
+/// annihilates still weighs in the partition function).
+template <class Backend, class HSrc>
+FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t dim_src,
+                                        const std::vector<FtlmDynamicsTarget>& targets,
+                                        const std::vector<double>& temperatures,
+                                        const std::vector<double>& omega,
+                                        const FtlmCrossIrrepOptions& opts) {
+    if (dim_src == 0) throw std::invalid_argument("ftlm_dynamics_kernel: empty source sector");
+    for (const auto& t : targets)
+        if (t.dim == 0) throw std::invalid_argument("ftlm_dynamics_kernel: empty target sector");
     if (temperatures.empty() || omega.empty() || opts.num_samples == 0)
         throw std::invalid_argument("ftlm_dynamics_kernel: no temperatures, frequencies or samples");
     constexpr double kInvPi = 0.3183098861837907;
-    const std::size_t nW = omega.size();
+    const std::size_t nW = omega.size(), nT = temperatures.size(), nt = targets.size();
     const double eta = opts.broadening;
-
-    FtlmCrossIrrepSectorResult R;
-    R.dim_src = dim_src;
-    R.dim_dst = dim_dst;
-    for (double T : temperatures) { R.S_real[T].assign(nW, 0.0); R.S_imag[T].assign(nW, 0.0); R.Z[T] = 0.0; }
-    double E_min = std::numeric_limits<double>::infinity();
     const std::uint64_t base_seed = ed::thermal::resolve_base_seed(opts.random_seed);
 
-    // One sample: the source Ritz data and, when O reaches the target, the per-source-Ritz
-    // spectral rows s_i(w). Samples are independent and are combined below in sample order.
+    // One sample, reduced against its own reference smin (its lowest weighted source Ritz value):
+    // Z_s[T] and, per target, S_s[target][T][w]. Samples are combined below in sample order.
     struct Sample {
-        enum class Kind { Skip, ZOnly, Full } kind = Kind::Skip;
-        std::vector<double> ritz, c;                             // source Ritz values, first components
-        std::vector<double> s_re, s_im;                          // [i * nW + w]
+        bool ok = false;
+        double smin = 0.0;
+        std::vector<double> Z;                                   // [T]
+        std::vector<std::vector<Complex>> S;                     // [target][T * nW + w]
     };
-    auto sample = [&](auto& bk, auto&& Hs, auto&& Hd, std::size_t s) {
+    auto sample = [&](auto& bk, auto&& Hs, auto&& Hds, std::size_t s) {
         Sample out;
         auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n) {
             ed::krylov::LanczosKernelOptions lo;
@@ -151,78 +142,106 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         auto r = bk.make_zero_vector(dim_src);
         bk.copy_from_host(r_host.data(), r.get(), dim_src);
 
+        // ---- the source: Ritz values e_i, first components c_i, the reference ---------------
         auto kh = lanczos(Hs, r.get(), dim_src);
         if (kh.alpha.empty() || kh.basis.size() < kh.alpha.size()) return out;
         const std::size_t mH = kh.alpha.size();
         ed::krylov::TridiagEig th = ed::krylov::tridiag_eig(kh.alpha, kh.beta, mH, /*vectors=*/true);
         const std::vector<double> VH = std::move(th.vectors);   // VH[i * mH + a]
-        out.ritz = std::move(th.values);
-        out.kind = Sample::Kind::ZOnly;
-        out.c.resize(mH);
+        const std::vector<double> ritz = std::move(th.values);
+        std::vector<double> c(mH);
         for (std::size_t i = 0; i < mH; ++i) {
-            out.c[i] = VH[i * mH];
-            if (out.c[i] * out.c[i] < opts.min_weight) out.c[i] = 0.0;   // a roundoff copy: no weight
+            c[i] = VH[i * mH];
+            if (c[i] * c[i] < opts.min_weight) c[i] = 0.0;      // a roundoff copy: no weight
         }
-
-        auto phi = bk.make_zero_vector(dim_dst);
-        B_apply(r.get(), phi.get(), dim_dst);
-        const double nphi = bk.nrm2(phi.get(), dim_dst);
-        // scale-free: unit-vector norm
-        if (nphi < 1e-14) return out;                             // O annihilates |r>: no spectral weight
-        bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
-
-        auto ks = lanczos(Hd, phi.get(), dim_dst);
-        if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) return out;
-        const std::size_t mS = ks.alpha.size();
-        ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
-        const std::vector<double> ritzS = std::move(ts.values);
-        const std::vector<double> VS = std::move(ts.vectors);   // VS[j * mS + b]
-
-        // W[a + b mH] = <O v_a | w_b>, one row a at a time: O v_a into one target-sized scratch
-        // vector, then its overlaps with the target basis (dot_many gives <w_b | O v_a>). Holding
-        // O V_H and a copy of the target basis for one GEMM cost 2 krylov target vectors more.
-        std::vector<Complex> W(mH * mS);
-        {
-            auto ov = bk.make_zero_vector(dim_dst);
-            std::vector<const Complex*> wb(mS);
-            for (std::size_t b = 0; b < mS; ++b) wb[b] = ks.basis[b].get();
-            std::vector<Complex> row(mS);
-            for (std::size_t a = 0; a < mH; ++a) {
-                bk.fill_zero(ov.get(), dim_dst);
-                A_apply(kh.basis[a].get(), ov.get(), dim_dst);
-                bk.dot_many(wb.data(), mS, ov.get(), dim_dst, row.data());
-                for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
-            }
-        }
-
-        std::vector<Complex> Tm(mH * mS, Complex(0, 0));         // Tm[i mS + b] = sum_a VH[i,a] W[a,b]
+        // The reference: the lowest source Ritz value with weight (a dropped copy would underflow the rest).
+        out.smin = std::numeric_limits<double>::infinity();
         for (std::size_t i = 0; i < mH; ++i)
-            for (std::size_t b = 0; b < mS; ++b) {
-                Complex acc(0, 0);
-                for (std::size_t a = 0; a < mH; ++a) acc += VH[i * mH + a] * W[a + b * mH];
-                Tm[i * mS + b] = acc;
+            if (c[i] != 0.0) out.smin = std::min(out.smin, ritz[i]);
+        if (!std::isfinite(out.smin)) out.smin = *std::min_element(ritz.begin(), ritz.end());
+        std::vector<double> wt(nT * mH);                         // e^{-beta (e_i - smin)}
+        out.Z.assign(nT, 0.0);
+        for (std::size_t it = 0; it < nT; ++it) {
+            const double beta = 1.0 / temperatures[it];
+            for (std::size_t i = 0; i < mH; ++i) {
+                wt[it * mH + i] = std::exp(-beta * (ritz[i] - out.smin));
+                out.Z[it] += c[i] * c[i] * wt[it * mH + i];
             }
-        // Per-source-Ritz rows s_i(w) = sum_j w_ij L_eta(w - E_ij), w_ij = c_i Obar_ij |O r| VS[j,0].
-        out.s_re.assign(mH * nW, 0.0);
-        out.s_im.assign(mH * nW, 0.0);
-        #pragma omp parallel for schedule(static)
-        for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(mH); ++ii) {
-            const std::size_t i = static_cast<std::size_t>(ii);
-            for (std::size_t j = 0; j < mS; ++j) {
-                Complex obar(0, 0);
-                for (std::size_t b = 0; b < mS; ++b) obar += Tm[i * mS + b] * VS[j * mS + b];
-                const Complex w_ij = out.c[i] * obar * (nphi * VS[j * mS]);
-                if (std::abs(w_ij) < 1e-300) continue;
-                const double E_ij = ritzS[j] - out.ritz[i];
-                for (std::size_t iw = 0; iw < nW; ++iw) {
-                    const double d = omega[iw] - E_ij;
-                    const double lor = (eta * kInvPi) / (d * d + eta * eta);
-                    out.s_re[i * nW + iw] += w_ij.real() * lor;
-                    out.s_im[i * nW + iw] += w_ij.imag() * lor;
+        }
+        out.ok = true;
+        out.S.assign(nt, std::vector<Complex>(nT * nW, Complex(0, 0)));
+
+        // ---- each target: the resolvent from B|r>, A on the source basis -------------------
+        for (std::size_t tt = 0; tt < nt; ++tt) {
+            const FtlmDynamicsTarget& tg = targets[tt];
+            const std::size_t dim_dst = tg.dim;
+            auto phi = bk.make_zero_vector(dim_dst);
+            tg.B(r.get(), phi.get(), dim_dst);
+            const double nphi = bk.nrm2(phi.get(), dim_dst);
+            // scale-free: unit-vector norm
+            if (nphi < 1e-14) continue;                               // B annihilates |r>: no spectral weight here
+            bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
+            auto ks = lanczos(Hds[tt], phi.get(), dim_dst);
+            if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) continue;
+            const std::size_t mS = ks.alpha.size();
+            ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
+            const std::vector<double> ritzS = std::move(ts.values);
+            const std::vector<double> VS = std::move(ts.vectors);   // VS[j * mS + b]
+
+            // W[a + b mH] = <A v_a | w_b>, one row a at a time: A v_a into one target-sized scratch
+            // vector, then its overlaps with the target basis (dot_many gives <w_b | A v_a>).
+            std::vector<Complex> W(mH * mS);
+            {
+                auto ov = bk.make_zero_vector(dim_dst);
+                std::vector<const Complex*> wb(mS);
+                for (std::size_t b = 0; b < mS; ++b) wb[b] = ks.basis[b].get();
+                std::vector<Complex> row(mS);
+                for (std::size_t a = 0; a < mH; ++a) {
+                    bk.fill_zero(ov.get(), dim_dst);
+                    tg.A(kh.basis[a].get(), ov.get(), dim_dst);
+                    bk.dot_many(wb.data(), mS, ov.get(), dim_dst, row.data());
+                    for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
                 }
             }
+            std::vector<Complex> Tm(mH * mS, Complex(0, 0));     // Tm[i mS + b] = sum_a VH[i,a] W[a,b]
+            for (std::size_t i = 0; i < mH; ++i)
+                for (std::size_t b = 0; b < mS; ++b) {
+                    Complex acc(0, 0);
+                    for (std::size_t a = 0; a < mH; ++a) acc += VH[i * mH + a] * W[a + b * mH];
+                    Tm[i * mS + b] = acc;
+                }
+            // S_s[T][w] = sum_i e^{-beta (e_i - smin)} sum_j w_ij L_eta(w - (lambda_j - e_i)),
+            // w_ij = c_i <A psi_i|chi_j> |B r| VS[j,0]: one source Ritz row s_i(w) at a time.
+            auto& St = out.S[tt];
+            #pragma omp parallel
+            {
+                std::vector<Complex> si(nW), acc(nT * nW, Complex(0, 0));
+                #pragma omp for schedule(static)
+                for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(mH); ++ii) {
+                    const std::size_t i = static_cast<std::size_t>(ii);
+                    if (c[i] == 0.0) continue;
+                    std::fill(si.begin(), si.end(), Complex(0, 0));
+                    for (std::size_t j = 0; j < mS; ++j) {
+                        Complex obar(0, 0);
+                        for (std::size_t b = 0; b < mS; ++b) obar += Tm[i * mS + b] * VS[j * mS + b];
+                        const Complex w_ij = c[i] * obar * (nphi * VS[j * mS]);
+                        if (std::abs(w_ij) < 1e-300) continue;
+                        const double E_ij = ritzS[j] - ritz[i];
+                        for (std::size_t iw = 0; iw < nW; ++iw) {
+                            const double d = omega[iw] - E_ij;
+                            si[iw] += w_ij * ((eta * kInvPi) / (d * d + eta * eta));
+                        }
+                    }
+                    for (std::size_t it = 0; it < nT; ++it) {
+                        const double wi = wt[it * mH + i];
+                        if (wi < 1e-300) continue;
+                        for (std::size_t iw = 0; iw < nW; ++iw) acc[it * nW + iw] += wi * si[iw];
+                    }
+                }
+                #pragma omp critical(ftlm_dynamics_rows)
+                for (std::size_t q = 0; q < nT * nW; ++q) St[q] += acc[q];
+            }
         }
-        out.kind = Sample::Kind::Full;
         return out;
     };
 
@@ -231,72 +250,62 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
 #ifdef WITH_CUDA
     if constexpr (std::is_same_v<std::decay_t<Backend>, ed::matvec::CudaBackend>) {
         // Up to batch_width samples in lockstep, each on its own thread and backend, sharing every
-        // source and target H apply (see MatvecBatcher); O is applied per sample.
-        if (opts.batch_src && opts.batch_dst && opts.batch_width > 1 && opts.num_samples > 1) {
+        // source and target H apply (see MatvecBatcher: the waiting calls run grouped by operator);
+        // A and B are applied per sample.
+        const bool all_batch = std::all_of(targets.begin(), targets.end(), [](const auto& t) { return bool(t.batch); });
+        if (opts.batch_src && all_batch && opts.batch_width > 1 && opts.num_samples > 1) {
             batched = true;
             for (std::size_t s0 = 0; s0 < opts.num_samples; s0 += opts.batch_width) {
                 const std::size_t k = std::min(opts.batch_width, opts.num_samples - s0);
                 ed::matvec::MatvecBatcher b;
                 const auto Hs = b.wrap(opts.batch_src);
-                const auto Hd = b.wrap(opts.batch_dst);
+                std::vector<ed::matvec::MatvecBatcher::Single> Hds;
+                for (const auto& t : targets) Hds.push_back(b.wrap(t.batch));
                 b.run(k, [&](std::size_t i) {
                     ed::matvec::CudaBackend bk;
-                    samples[s0 + i] = sample(bk, Hs, Hd, s0 + i);
+                    samples[s0 + i] = sample(bk, Hs, Hds, s0 + i);
                 });
             }
         }
     }
 #endif
-    if (!batched)
-        for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(be, H_src, H_dst, s);
+    if (!batched) {
+        std::vector<std::function<void(const Complex*, Complex*, std::size_t)>> Hds;
+        for (const auto& t : targets) Hds.push_back(t.H);
+        for (std::size_t s = 0; s < opts.num_samples; ++s) samples[s] = sample(be, H_src, Hds, s);
+    }
 
+    // ---- the samples about the common reference, in sample order ---------------------------
+    FtlmDynamicsResult R;
+    R.S.assign(nt, {});
+    double E_min = std::numeric_limits<double>::infinity();
+    for (const Sample& smp : samples)
+        if (smp.ok) E_min = std::min(E_min, smp.smin);
+    for (std::size_t it = 0; it < nT; ++it) {
+        const double T = temperatures[it];
+        R.Z[T] = 0.0;
+        for (auto& St : R.S) St[T].assign(nW, Complex(0, 0));
+    }
     for (const Sample& smp : samples) {
-        if (smp.kind == Sample::Kind::Skip) continue;
-        const std::size_t mH = smp.ritz.size();
-        // The reference: the lowest source Ritz value with weight (a dropped copy would underflow the rest).
-        double smin = std::numeric_limits<double>::infinity();
-        for (std::size_t i = 0; i < mH; ++i)
-            if (smp.c[i] != 0.0) smin = std::min(smin, smp.ritz[i]);
-        if (!std::isfinite(smin)) smin = *std::min_element(smp.ritz.begin(), smp.ritz.end());
-        if (smin < E_min) {
-            if (std::isfinite(E_min))
-                for (double T : temperatures) {
-                    const double f = std::exp(-(1.0 / T) * (E_min - smin));
-                    for (auto& v : R.S_real[T]) v *= f;
-                    for (auto& v : R.S_imag[T]) v *= f;
-                    R.Z[T] *= f;
-                }
-            E_min = smin;
-        }
-        for (double T : temperatures) {
-            const double beta = 1.0 / T;
-            double z = 0.0;
-            for (std::size_t i = 0; i < mH; ++i) z += smp.c[i] * smp.c[i] * std::exp(-beta * (smp.ritz[i] - E_min));
-            R.Z[T] += z;
-        }
-        if (smp.kind == Sample::Kind::Full)
-            for (double T : temperatures) {
-                const double beta = 1.0 / T;
-                auto& Rr = R.S_real[T];
-                auto& Rq = R.S_imag[T];
-                for (std::size_t i = 0; i < mH; ++i) {
-                    const double wt = std::exp(-beta * (smp.ritz[i] - E_min));
-                    if (wt < 1e-300) continue;
-                    for (std::size_t iw = 0; iw < nW; ++iw) {
-                        Rr[iw] += wt * smp.s_re[i * nW + iw];
-                        Rq[iw] += wt * smp.s_im[i * nW + iw];
-                    }
-                }
+        if (!smp.ok) continue;
+        for (std::size_t it = 0; it < nT; ++it) {
+            const double T = temperatures[it];
+            const double f = std::exp(-(1.0 / T) * (smp.smin - E_min));
+            R.Z[T] += f * smp.Z[it];
+            for (std::size_t tt = 0; tt < nt; ++tt) {
+                auto& St = R.S[tt][T];
+                for (std::size_t iw = 0; iw < nW; ++iw) St[iw] += f * smp.S[tt][it * nW + iw];
             }
+        }
         R.samples_done++;
     }
     if (R.samples_done > 0) {
         const std::size_t tr = opts.trace_dim ? opts.trace_dim : dim_src;
         const double scale = static_cast<double>(tr) / static_cast<double>(R.samples_done);
         for (double T : temperatures) {
-            for (auto& v : R.S_real[T]) v *= scale;
-            for (auto& v : R.S_imag[T]) v *= scale;
             R.Z[T] *= scale;
+            for (auto& St : R.S)
+                for (auto& v : St[T]) v *= scale;
         }
     }
     R.E_min = std::isfinite(E_min) ? E_min : 0.0;
