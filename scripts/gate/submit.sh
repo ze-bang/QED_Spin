@@ -40,12 +40,12 @@ selected() {   # is the stage $1 one of the requested ones?
     return 1
 }
 join() { local IFS=,; echo "$*"; }
-# One array per kind; the regress_* and grid_* entries get 20 minutes, the rest 10.
+# One array per kind; the regress_*, grid_* and fuzz_* entries get 20 minutes, the rest 10.
 short=() long=() gpu=()
 for i in "${!CPU_TASKS[@]}"; do
     name="${CPU_TASKS[$i]%%|*}"
     selected "${name}" || continue
-    if [[ "${name}" == regress_* || "${name}" == grid_* ]]; then long+=("$i"); else short+=("$i"); fi
+    if [[ "${name}" == regress_* || "${name}" == grid_* || "${name}" == fuzz_* ]]; then long+=("$i"); else short+=("$i"); fi
 done
 for i in "${!GPU_TASKS[@]}"; do
     selected "${GPU_TASKS[$i]%%|*}" && gpu+=("$i")

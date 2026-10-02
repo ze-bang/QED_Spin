@@ -1,0 +1,86 @@
+{
+ "comment": "Accepted known failures of tests/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
+ "accepted": [
+  {
+   "name": "tr_fold_vectors_short",
+   "ledger": "F-C-1",
+   "why": "time reversal merges k with -k but tag.tr_folded stays false, so multiplet() cannot build the conjugate partner and vectors() returns fewer than min(k, dim) vectors (cluster C01-pyapi-01)",
+   "match": {"task.kind": ["vectors"], "status": ["wrong"], "extra.tr_engaged": [true],
+             "extra.mult_deficit": {"nonempty": true}, "extra.passes_with": {"contains": "time_reversal=off"}}
+  },
+  {
+   "name": "tr_fold_expect",
+   "ledger": "F-DE-2",
+   "why": "expect() of a TR-odd or non-real observable ignores the conjugate partner of a TR-merged star (cluster C01-pyapi-01)",
+   "match": {"task.kind": ["expect"], "status": ["wrong"], "extra.tr_engaged": [true],
+             "extra.passes_with": {"contains": "time_reversal=off"}}
+  },
+  {
+   "name": "tr_fold_thermal_observables",
+   "ledger": "F-DE-2",
+   "why": "thermal <O>(T) of a TR-odd or non-real observable ignores the conjugate partner of a TR-merged star (cluster C01-pyapi-01)",
+   "match": {"task.kind": ["th_obs"], "status": ["wrong"], "content.real": [true],
+             "request.time_reversal": ["auto", "require"], "extra.passes_with": {"contains": "time_reversal=off"}}
+  },
+  {
+   "name": "flip_require_total_spin",
+   "ledger": "C04-engine-core-04",
+   "why": "spin_flip='require' raises 'the subspace is not flip-invariant' under total_spin S > 0 although H is flip-symmetric",
+   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
+             "request.total_spin": {"absent": false},
+             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
+  },
+  {
+   "name": "flip_require_fixed_sz",
+   "ledger": "C04-engine-core-04",
+   "why": "spin_flip='require' raises 'the subspace is not flip-invariant' for an explicit sz (n_up != N/2) although H is flip-symmetric",
+   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
+             "request.sz": {"re": "^[0-9]+$"},
+             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
+  },
+  {
+   "name": "flip_require_parity_odd_n",
+   "ledger": "C04-engine-core-04",
+   "why": "spin_flip='require' with sz='even'/'odd' and odd N: each half maps to the other under the flip, so every sector is a mirror-1 n_up != N/2 subspace and the engine refuses (the same engine_options downgrade gap)",
+   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
+             "request.sz": ["even", "odd"], "model.N": [5, 7, 9, 11],
+             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
+  },
+  {
+   "name": "oftlm_total_spin_refused",
+   "ledger": "K1-sym-composition-05",
+   "why": "OFTLM (exact_states > 0) is refused under total_spin",
+   "match": {"task.kind": ["th_oftlm"], "status": ["refused"], "device": ["cpu"], "request.total_spin": {"absent": false},
+             "message": {"re": "exact_states \\(OFTLM\\) cannot be restricted to one spin tower"}}
+  },
+  {
+   "name": "total_spin_noninvariant_observable",
+   "ledger": "K3-model-scale-06",
+   "why": "under total_spin, expect() and thermal(observables=) refuse a non-SU(2)-invariant operator instead of returning its multiplet / thermal average",
+   "match": {"task.kind": ["expect", "th_obs"], "status": ["refused"], "request.total_spin": {"absent": false},
+             "message": {"re": "with a total-spin restriction every (operator|observable) must be"}}
+  },
+  {
+   "name": "total_spin_tower_count",
+   "ledger": "K1-sym-composition-03",
+   "why": "FTLM / mTPQ tower sampling under total_spin matches the Sz = S and Sz = S + 1 blocks by engine irrep index; with a point group whose co-group collapses in one sector the multiplet count is wrong and thermal raises",
+   "match": {"task.kind": ["th_ftlm", "th_mtpq", "th_obs"], "status": ["crash"], "extra.error_class": ["RuntimeError"],
+             "request.total_spin": {"absent": false},
+             "message": {"re": "thermal: (the blocks hold [0-9]+ spin-[0-9]+/2 multiplets, expected [0-9]+|a block is larger at Sz = S \\+ 1 than at Sz = S)"}}
+  },
+  {
+   "name": "gpu_w_block_parity_or_full_space",
+   "ledger": "K1-sym-composition-02",
+   "why": "parity / full-space runs put every point-group star through the isotypic W path, which has no device kernel; device='gpu' refuses the block",
+   "match": {"device": ["gpu"], "status": ["refused"], "extra.error_class": ["DeviceUnsupported"],
+             "message": {"re": "n_up -1 \\(dim [0-9]+\\) is an isotypic \\(W\\) block, which has no device kernel"}}
+  },
+  {
+   "name": "gpu_w_block_fixed_n_up",
+   "ledger": "K1-sym-composition-02",
+   "why": "at fixed n_up a star with irreps of dimension > 1 (or a declined group path) goes to the isotypic W path, which has no device kernel (the K1-sym-composition-02 claim); P6.3 retires the W path (d-dimensional group sectors) for every n_up, which removes these too",
+   "match": {"device": ["gpu"], "status": ["refused"], "extra.error_class": ["DeviceUnsupported"],
+             "message": {"re": "n_up [0-9]+ \\(dim [0-9]+\\) is an isotypic \\(W\\) block, which has no device kernel"}}
+  }
+ ]
+}

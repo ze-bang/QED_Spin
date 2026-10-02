@@ -47,3 +47,16 @@ if [ "${V}" = cuda ]; then
       GPU_TASKS+=("regress_gpu_${k}|QED_REGRESS_SHARD=${k}/3 ${REGRESS} -m 'regress and gpu and not perf and not info'")
   done
 fi
+# Differential fuzzer (tests/fuzz): fixed seeds of 150 cases against the dense reference.
+# tests/fuzz/known.json names the accepted failures (open ledger bugs only); --strict fails on
+# any other non-pass and on a stale entry. Worst case ~515 s per shard; submit.sh gives fuzz_*
+# entries the 20-minute limit.
+FUZZ="python -u tests/fuzz/fuzz.py --cases 150 --out logs/gate/\${GATE_ID}/fuzz --budget-seconds 480 --case-timeout 120 --strict"
+for k in 1 2 3 4; do
+    CPU_TASKS+=("fuzz_cpu_s${k}|CUDA_VISIBLE_DEVICES= ${FUZZ} --seed ${k} --device cpu")
+done
+if [ "${V}" = cuda ]; then
+  for k in 1 2; do
+      GPU_TASKS+=("fuzz_gpu_s${k}|${FUZZ} --seed ${k} --device gpu")
+  done
+fi
