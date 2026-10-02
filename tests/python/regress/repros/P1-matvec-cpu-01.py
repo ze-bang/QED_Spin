@@ -22,6 +22,9 @@ still runs on the isotypic W path, whose block costs far more than a group secto
 target (P6.3): a 2-dim block within 2.5x the A1 block's time. Now: tA = only_irrep=[a], tE = only_irrep=[e]
 (each with its own setup), the A energy still checked on both sides of the old split.
 CONFIRMED when tE > 2.5 tA; NOT_REPRODUCED when tE <= 2.5 tA.
+
+RESTATED 2026-10-02 (P6.7 gate 39d45991, cpu variant 62612918): the blocks take a few seconds, so one
+call's hiccup read 9.4x where reruns read 0.4-1.3x. tA and tE are each the fastest of three calls.
 """
 import json
 import os
@@ -83,9 +86,9 @@ def main():
             print(f"REPRO: INCONCLUSIVE Gamma star lacks a 1-dim or 2-dim block: {disc['levels']} declined={declined}")
             return
         a, e = one[0], two[0]
-        rA, errA = run([a["irrep"]], 0.0)
+        rA = min((run([a["irrep"]], 0.0)[0] for _ in range(3)), key=lambda r: r["t"])
         rAE, errAE = run([a["irrep"], e["irrep"]], 0.0)
-        rE, _ = run([e["irrep"]], 0.0)
+        rE = min((run([e["irrep"]], 0.0)[0] for _ in range(3)), key=lambda r: r["t"])
     except Exception as ex:
         print(f"REPRO: INCONCLUSIVE {type(ex).__name__}: {ex}")
         return
