@@ -450,8 +450,9 @@ private:
 // -----------------------------------------------------------------------------
 // An operator from one sector to another of the same group (sector_rows.h cross rows): rows of
 // the target from the program of (O_lambda)^dagger -- compile_program({O.dagger()}, tgt, src) --
-// each target looked up in the source. Its merged CSR when the exact upper bound fits
-// ED_XSEC_CSR_BUDGET_GIB (built on the first apply), else the row walk per apply.
+// each target looked up in the source. The first apply walks the rows; from the second on, the merged
+// CSR when the exact upper bound fits ED_XSEC_CSR_BUDGET_GIB (built then), else the walk again. A
+// single apply (a T = 0 continued fraction's start) never pays for the CSR (audit P5-dynamics-02).
 // -----------------------------------------------------------------------------
 class CrossSectorMatVec {
 public:
@@ -473,9 +474,14 @@ public:
     /// out (target) = O in (source).
     void apply(const Complex* in, Complex* out, std::size_t n_out) const {
         if (n_out != rows()) throw std::invalid_argument("CrossSectorMatVec: output length != target dim");
-        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
-        if (csr_) csr_->spmv(in, out);
-        else ed::matvec::cross_gather(rows_->view(), tgt_pol_, src_pol_, same_, rows(), in, out);
+        if (applies_.fetch_add(1, std::memory_order_relaxed) > 0) {   // the first apply never reads csr_
+            std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+            if (csr_) {
+                csr_->spmv(in, out);
+                return;
+            }
+        }
+        ed::matvec::cross_gather(rows_->view(), tgt_pol_, src_pol_, same_, rows(), in, out);
     }
 
 private:
@@ -500,6 +506,7 @@ private:
     std::shared_ptr<const ed::symmetry::RepSectorData> src_, tgt_;
     ed::matvec::basis::RepSymmetryBasisPolicy          src_pol_, tgt_pol_;
     bool                                               same_;
+    mutable std::atomic<std::uint64_t>                 applies_{0};
     mutable std::once_flag                             csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
 };

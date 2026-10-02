@@ -63,6 +63,28 @@ std::set<int> n_up_shifts(const ed::ops::MaskedOperator& O) {
     return out;
 }
 
+// The phase c of a covariant operator, img = U X U^dagger = c X (|c| = 1), from the overlap of the
+// canonical coefficients; nullopt when img is not a multiple of X.
+std::optional<Complex> covariance(const ed::ops::MaskedOperator& X, const ed::ops::MaskedOperator& img) {
+    using Key = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t>;
+    std::map<Key, Complex> x;
+    double n2 = 0.0;
+    for (const auto& t : X.terms()) {
+        x[{t.cond_mask, t.cond_val, t.flip_mask, t.sign_mask}] = t.coeff;
+        n2 += std::norm(t.coeff);
+    }
+    if (n2 == 0.0) return Complex(1, 0);
+    Complex dot(0, 0);
+    for (const auto& t : img.terms()) {
+        const auto it = x.find({t.cond_mask, t.cond_val, t.flip_mask, t.sign_mask});
+        if (it != x.end()) dot += std::conj(it->second) * t.coeff;
+    }
+    const Complex c = dot / n2;
+    // scale-free: a phase of unit modulus
+    if (std::abs(std::abs(c) - 1.0) > 1e-9 || !img.equals(X.scaled(c))) return std::nullopt;
+    return c;
+}
+
 // The part of O that can connect two Sz-parity halves: compile_program keeps every term
 // between full or parity sectors, so the terms that change the parity otherwise go here.
 ed::ops::MaskedOperator connecting_part(const ed::ops::MaskedOperator& O, const Subspace& src, const Subspace& tgt) {
@@ -480,11 +502,18 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     const std::size_t nT = d.temperatures.size(), nW = d.omega.size();
     const auto t_all = std::chrono::steady_clock::now();
     const std::uint64_t seed0 = d.seed ? d.seed : std::random_device{}();
+    // What a source sector counts for in one probe's sums: the weight of its Z and of its S (zero:
+    // the probe does not use it -- its symmetries count the source through another one).
+    struct Use {
+        double  z = 0.0;
+        Complex s = Complex(0, 0);
+    };
     // One source sector's sums: S per probe and temperature, Z per temperature.
     struct Source {
         std::vector<std::map<double, std::vector<Complex>>> S;
         std::map<double, double> Z;
         double emin = 0.0;
+        std::vector<Use> use;    // per probe
     };
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
@@ -493,8 +522,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     // multiplet at every such Sz, so its tower dimension is its dimension at Sz = S less that of
     // the same momentum at Sz = S + 1 (one more up spin).
     struct Job {
-        std::size_t id = 0;                     // its index over the whole call: seeds its samples
+        std::uint64_t key = 0;                  // the source's identity (Sz, parity, momentum): seeds its samples
         const Target* src = nullptr; Subspace sub;
+        std::vector<Use> use;                   // per probe
         // Each target sector a probe reaches: A and B as rows of it (the same program for an
         // autocorrelation).
         struct Reach {
@@ -520,6 +550,99 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         }
         s2c = detail::s2_carrier_for(u, n_sites);
     }
+    // The momenta of the source sectors: each one's raw index (its seed key) and, with residues, how
+    // they move them (irrep_map).
+    EngineContext pcx;
+    {
+        LittleGroupOptions o;
+        o.n_up = source_subs.front().n_up;
+        o.sz_parity = o.n_up >= 0 ? -1 : source_subs.front().sz_parity;
+        o.spin_flip = 0;
+        o.time_reversal = 0;
+        bool tr_on = false;
+        make_engine_context(H, A, s.residues, n_sites, o, pcx, tr_on);
+    }
+    auto momentum_index = [&](const ed::symmetry::RepSectorData& rd) -> int {
+        for (int k = 0; k < pcx.n_irr_raw; ++k) {
+            const auto& c = pcx.giA.irreps[static_cast<std::size_t>(k)].character;
+            bool same = c.size() == rd.characters.size();
+            for (std::size_t a = 0; same && a < c.size(); ++a)
+                // scale-free: unit-modulus characters (group data, not energies)
+                same = std::abs(c[a] - rd.characters[a]) <= 1e-9;
+            if (same) return k;
+        }
+        throw std::logic_error("dynamics: a source sector has no momentum of the abelian group");
+    };
+    // Sources related by a symmetry U of H contribute alike up to a factor: when U A U^dagger = c_A A
+    // and U B U^dagger = c_B B, the source U k gives the same Z and conj(c_A) c_B times the S of k
+    // (audit P5-dynamics-07). Each probe folds by the symmetries it follows, so a probe's result does not
+    // depend on the other probes of the call; a source runs when some probe uses it.
+    using ed::ops::MaskedOperator;
+    auto factor = [&](std::size_t p, const auto& image) -> std::optional<Complex> {
+        const auto ca = covariance(*pr[p].Ac, image(*pr[p].Ac));
+        const auto cb = pr[p].cross ? covariance(*pr[p].Bc, image(*pr[p].Bc)) : ca;
+        if (!ca || !cb) return std::nullopt;
+        return std::conj(*ca) * *cb;
+    };
+    // The spin flip maps source n_up onto N - n_up: a probe that follows it uses only n_up <= N/2,
+    // those below N/2 standing for their mirror too. It needs every source subspace a fixed Sz whose
+    // mirror is a source too.
+    bool flip_ok = s.two_S < 0 && s.spin_flip != 0 && ed::ops::flip_invariant(H.canonical());
+    if (flip_ok) {
+        std::set<int> ns;
+        for (const Subspace& x : source_subs) ns.insert(x.n_up);
+        for (int n : ns) flip_ok = flip_ok && n >= 0 && ns.count(n_sites - n) > 0;
+    }
+    // The point group maps momentum k onto p k in the same subspace: a probe uses one momentum of each
+    // orbit under the residues it follows with factor 1, counted once per member. A momentum
+    // selection need not be a union of orbits: it folds none.
+    const bool pg_ok = s.two_S < 0 && !s.residues.empty() && u.only_momentum.empty();
+    std::vector<std::optional<Complex>> mirror(P);           // per probe: the flip mirror's factor
+    std::vector<std::vector<int>> korbit(P);                  // per probe: the orbit root of each momentum
+    std::vector<std::vector<std::uint64_t>> ksize(P);         // per probe: the size of each root's orbit
+    for (std::size_t p = 0; p < P; ++p) {
+        if (flip_ok) mirror[p] = factor(p, [](const MaskedOperator& X) { return X.image(MaskedOperator::Map::F); });
+        if (!pg_ok) continue;
+        auto& ko = korbit[p];
+        ko.resize(static_cast<std::size_t>(pcx.n_irr_raw));
+        std::iota(ko.begin(), ko.end(), 0);
+        auto root = [&ko](int k) {
+            while (ko[static_cast<std::size_t>(k)] != k) k = ko[static_cast<std::size_t>(k)];
+            return k;
+        };
+        for (std::size_t r = 0; r < pcx.residues.size(); ++r) {
+            const int* perm = pcx.residues[r].data();
+            const auto f = factor(p, [perm](const MaskedOperator& X) { return X.image(perm, 0); });
+            // scale-free: a product of phases
+            if (!f || std::abs(*f - Complex(1, 0)) > 1e-9) continue;
+            for (int k = 0; k < pcx.n_irr_raw; ++k) {
+                const int a = root(k), b = root(pcx.irrep_map[r][static_cast<std::size_t>(k)]);
+                if (a != b) ko[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
+            }
+        }
+        ksize[p].assign(static_cast<std::size_t>(pcx.n_irr_raw), 0);
+        for (int k = 0; k < pcx.n_irr_raw; ++k) ++ksize[p][static_cast<std::size_t>(ko[static_cast<std::size_t>(k)] = root(k))];
+    }
+    // What source (sub, momentum k) counts for in each probe's sums.
+    auto uses = [&](const Subspace& sub, int k) {
+        std::vector<Use> out(P);
+        for (std::size_t p = 0; p < P; ++p) {
+            double w = 1.0;
+            if (!korbit[p].empty()) {
+                if (korbit[p][static_cast<std::size_t>(k)] != k) continue;   // another momentum of its orbit
+                w = static_cast<double>(ksize[p][static_cast<std::size_t>(k)]);
+            }
+            if (mirror[p] && 2 * sub.n_up > n_sites) continue;               // its flip mirror stands for it
+            if (mirror[p] && 2 * sub.n_up < n_sites) out[p] = {2.0 * w, (Complex(1, 0) + *mirror[p]) * w};
+            else                                     out[p] = {w, Complex(w, 0)};
+        }
+        return out;
+    };
+    // When every probe follows the flip, the subspaces above N/2 hold no source.
+    if (std::all_of(mirror.begin(), mirror.end(), [](const auto& m) { return m.has_value(); }))
+        source_subs.erase(std::remove_if(source_subs.begin(), source_subs.end(),
+                                         [n_sites](const Subspace& x) { return 2 * x.n_up > n_sites; }),
+                          source_subs.end());
     // A source's spin-S states, by Burnside (tower_dimension).
     auto tower_dim_of = [&](const Target& src) -> std::uint64_t {
         return static_cast<std::uint64_t>(tower_dimension(*src.rd, s.two_S));
@@ -546,7 +669,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         fo.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         fo.num_samples = d.samples;
         fo.broadening  = d.eta;
-        fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (j.id + 1);
+        fo.random_seed = ed::thermal::block_seed(seed0, j.key);
         if (const auto p = j.tower) {
             fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
             fo.trace_dim      = j.tower_dim;
@@ -571,6 +694,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             for (double T : d.temperatures) sp[T].assign(nW, Complex(0, 0));
         src.Z = r.Z;
         src.emin = r.E_min;
+        src.use = j.use;
         for (std::size_t q = 0; q < j.reaches.size(); ++q) {
             auto& sp = src.S[j.reaches[q].probe];
             for (double T : d.temperatures)
@@ -662,9 +786,14 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         std::vector<Job> jobs;
         for (const Target& src : sectors_of(sub)) {
             if (!selected(u, *src.rd)) continue;
+            const int k = momentum_index(*src.rd);
             Job j;
+            j.use = uses(sub, k);
+            if (std::all_of(j.use.begin(), j.use.end(), [](const Use& x) { return x.z == 0.0; })) continue;
             j.src = &src;
             j.sub = sub;
+            j.key = (static_cast<std::uint64_t>(sub.n_up + 1) * 3 + static_cast<std::uint64_t>(sub.sz_parity + 1))
+                        * static_cast<std::uint64_t>(pcx.n_irr_raw) + static_cast<std::uint64_t>(k);
             if (s.two_S >= 0) {
                 j.tower_dim = tower_dim_of(src);
                 if (j.tower_dim == 0) continue;
@@ -678,8 +807,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
                     s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
             }
+            // The targets each probe reaches (none for a probe that counts this source through another).
             for (std::size_t p = 0; p < P; ++p)
-                for (const Subspace& tsub : probe_targets(p, sub)) {
+                for (const Subspace& tsub : (j.use[p].z == 0.0 ? std::vector<Subspace>{} : probe_targets(p, sub))) {
                     const auto& ts = sectors_of(tsub);
                     const auto Bt = connecting_part(*pr[p].Bc, sub, tsub);
                     const auto At = pr[p].cross ? connecting_part(*pr[p].Ac, sub, tsub) : Bt;
@@ -694,7 +824,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     }
                     phase["compile O"] += clock_since(t_pr);
                 }
-            j.id = n_jobs++;
+            ++n_jobs;
             jobs.push_back(std::move(j));
         }
 
@@ -793,15 +923,16 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         const double T = d.temperatures[it], beta = 1.0 / T;
         double ref = std::numeric_limits<double>::infinity();
         for (const auto& s2 : sources) ref = std::min(ref, s2.emin);
-        double Z = 0.0;
+        std::vector<double> Z(P, 0.0);   // per probe: over the sources it uses
         for (const auto& s2 : sources) {
             const double w = std::exp(-beta * (s2.emin - ref));
-            Z += w * s2.Z.at(T);
-            for (std::size_t p = 0; p < P; ++p)
-                for (std::size_t i = 0; i < nW; ++i) out.S[p][it][i] += w * s2.S[p].at(T)[i];
+            for (std::size_t p = 0; p < P; ++p) {
+                Z[p] += s2.use[p].z * w * s2.Z.at(T);
+                for (std::size_t i = 0; i < nW; ++i) out.S[p][it][i] += s2.use[p].s * w * s2.S[p].at(T)[i];
+            }
         }
         for (std::size_t p = 0; p < P; ++p)
-            for (auto& x : out.S[p][it]) x /= Z;
+            for (auto& x : out.S[p][it]) x /= Z[p];
     }
     report();
     return out;

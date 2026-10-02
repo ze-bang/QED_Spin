@@ -892,6 +892,47 @@ def test_t0_ground_manifold_is_solved_on_the_folded_blocks(probe):
     np.testing.assert_allclose(folded.S[0], _lehmann_t0(H, O, n, omega, 0.1), atol=1e-8 * scale)
 
 
+def _lehmann_finite_t(H, O, n, omega, eta, T):
+    E, V = np.linalg.eigh(_dense(H, n))
+    M = V.conj().T @ _dense(O, n) @ V                     # <a|O|b>
+    w = np.exp(-(E - E[0]) / T)
+    poles = (E[:, None] - E[None, :]).ravel()             # E_a - E_b, the source b
+    weights = (np.abs(M) ** 2 * w[None, :]).ravel() / w.sum()
+    om = np.asarray(omega)[:, None]
+    return (weights[None, :] * eta / math.pi / ((om - poles[None, :]) ** 2 + eta ** 2)).sum(axis=1)
+
+
+def test_finite_t_dynamics_folds_the_symmetric_sources():
+    # P6.7 (audit P5-dynamics-07): sources related by a symmetry of H that every probe follows
+    # contribute alike, so only one of each runs. The spin flip (S^z_q is flip odd): n_up > N/2 mirror
+    # n_up < N/2. The reflection: k and -k for S^z_pi, which it maps to itself, not for S^z_{2pi/3},
+    # which it maps to S^z_{-2pi/3}. Fewer source solves, the same estimator (mapped samples): every
+    # run samples the exact Lehmann sum. S^+_q is not flip covariant: the flip folds nothing for it.
+    n = 6
+    H = _ring(n, 0.3)
+    omega = np.linspace(-1.5, 4.0, 56)
+    trans = _translations(n)
+    kw = dict(eta=0.25, T=[1.5], krylov=64, samples=300, seed=11)
+
+    def run(O, **sym):
+        r = qed.dynamics(H, O, omega, sym=qed.Symmetry(**sym), **kw)
+        return r, sum(r.placement.values())
+
+    for q, reflection_folds in ((2 * math.pi / 3, False), (math.pi, True)):
+        O = _sz_q(n, q)
+        plain, n_plain = run(O, spatial=trans, point_group=False, spin_flip="off")
+        flip, n_flip = run(O, spatial=trans, point_group=False)
+        point, n_point = run(O, spatial=[trans[0], _reflection(n)])
+        assert n_flip < n_plain
+        assert (n_point < n_flip) == reflection_folds
+        ref = _lehmann_finite_t(H, O, n, omega, 0.25, 1.5)
+        for r in (plain, flip, point):
+            assert np.abs(r.S[0] - ref).sum() <= 0.1 * np.abs(ref).sum()
+    Op = _s_plus_q(n, math.pi)
+    assert run(Op, spatial=trans, point_group=False)[1] == run(Op, spatial=trans, point_group=False,
+                                                               spin_flip="off")[1]
+
+
 def _ring_in_field(n, h=0.1):
     b = qed.input.HamiltonianBuilder(n)
     b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=1.0)

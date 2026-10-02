@@ -42,6 +42,16 @@ namespace ed::thermal {
     return std::mt19937(static_cast<std::mt19937::result_type>(z));
 }
 
+// The base seed of one block of a call (a dynamics source sector) from the call's base seed and the
+// block's identity `key`: splitmix64 of base + phi * (key + 1). A block then draws the same samples
+// whichever other blocks the call holds and in whatever order it runs them.
+[[nodiscard]] inline std::uint64_t block_seed(std::uint64_t base_seed, std::uint64_t key) {
+    std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (key + 1);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
 // The stream of a run's auxiliary draw (mTPQ's spectral-bound start): the one before sample 0,
 // so it never coincides with a sample's.
 inline constexpr std::uint64_t kAuxStream = ~std::uint64_t{0};
