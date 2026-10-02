@@ -139,7 +139,7 @@ public:
         const Eigen::MatrixXcd Hb = materialize(mv);
         const std::size_t nb = static_cast<std::size_t>(Hb.rows());
         packed_.offset.push_back(packed_.data.size());
-        packed_.block_dim.push_back(static_cast<int>(nb));
+        packed_.block_dim.push_back(ed::core::checked_narrow<int>(nb, "dense batch block"));
         packed_.block_irrep_dim.push_back(1);
         packed_.data.insert(packed_.data.end(), Hb.data(), Hb.data() + nb * nb);   // column-major
         queued_.push_back(id);

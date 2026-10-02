@@ -80,6 +80,14 @@ Breaking changes so far:
   device batch by memory; the orbit-table registry has a byte budget. A refused working set
   raises `ResourceLimit`; `ED_MEM_GUARD_OFF` lifts every check; the cgroup headroom counts
   reclaimable page cache as free.
+- **Integer widths.** Sampled blocks past 2^31 - 1 states draw their seeds with 64-bit indices
+  (FTLM and mTPQ refused them; finite-T dynamics could over-read). A dense eigensolve past what
+  the linked LAPACK addresses (46340 with 32-bit indices) raises `Unsupported` before the matrix
+  is built, and the dense crossovers stay below it. Index tables that hold int32 (the rank
+  tables, the point-group monomials) are built only where they fit, the reduced CSR only below
+  2^32 states, and the BLAS GEMMs check their dimensions; a dimension is narrowed only through
+  `ed::core::checked_narrow`, and a build-stage lint (`scripts/check_int_narrowing.sh`) keeps it so.
+  C++: `oftlm_cpu` applies H with a `std::size_t` length.
 - **Host Krylov results repeat bit for bit** at a fixed seed and thread count: the BLAS-1 sums
   add per-thread partials in thread order (they combined in arrival order, so T = 0 dynamics
   differed run to run in the 11th digit).

@@ -91,6 +91,8 @@ enum class SymMatvecRepr : int {
 /// walk, never OOMs.
 [[nodiscard]] inline bool sector_csr_within_budget(
         std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
+    // The CSR stores 32-bit column indices: a sector of 2^32 or more states takes the walk.
+    if (dim >= (std::uint64_t{1} << 32)) return false;
     const std::uint64_t est_bytes =
         dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
         + (dim + 1) * 8u /* row ptr */;

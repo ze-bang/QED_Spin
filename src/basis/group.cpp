@@ -36,7 +36,7 @@ generate_group(const std::vector<Permutation>& generators) {
     }
     const std::size_t n = generators.front().size();
     for (const auto& g : generators) {
-        validate(g, static_cast<int>(n));
+        validate(g, static_cast<int>(n));   // narrow-ok: a site count
     }
 
     std::set<Permutation> seen;

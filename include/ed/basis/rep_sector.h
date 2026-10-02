@@ -30,6 +30,7 @@
 #include <complex>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -85,6 +86,8 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
                         int n_sites, int n_up)
 {
     if (n_up < 0 || n_sites <= 0) return nullptr;
+    // The table holds int32 indices: past INT32_MAX representatives the lookups binary-search.
+    if (shared_reps.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) return nullptr;
     auto srl = std::make_shared<SharedRankLookup>();
     static std::atomic<std::uint64_t> next_uid{1};
     srl->uid     = next_uid.fetch_add(1);
@@ -195,6 +198,8 @@ struct RepSectorData {
     void build_rank_table() {
         if (has_rank_table()) return;
         if (n_sites <= 0 || reps.empty()) return;
+        // int32 indices: past INT32_MAX representatives the lookups binary-search.
+        if (reps.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) return;
         if (n_up < 0) {
             // Full-space / parity / flip-extended sectors: the rank of
             // a state over the full 2^N enumeration is the state

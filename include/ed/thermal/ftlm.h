@@ -125,7 +125,7 @@ struct OftlmOptions {
 };
 
 /// OFTLM on one block on the host (src/engine/oftlm.cpp). apply_H: out = H in, length N.
-Curves oftlm_cpu(const std::function<void(const std::complex<double>*, std::complex<double>*, int)>& apply_H,
+Curves oftlm_cpu(const std::function<void(const std::complex<double>*, std::complex<double>*, std::size_t)>& apply_H,
                  std::uint64_t N, const OftlmOptions& opts);
 
 namespace detail {
@@ -272,13 +272,6 @@ FtlmResult ftlm_kernel(const Backend& backend,
     // verbatim, and every sample draws from its own ``sample_engine``.
     const std::uint64_t base_seed = resolve_base_seed(opts.random_seed);
 
-    // The BLAS normalisation of a transformed seed takes int.
-    if (local_n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::invalid_argument(
-            "ftlm_kernel: local_n exceeds the int range of the host "
-            "random-vector draw");
-    }
-    const int n_int = static_cast<int>(local_n);
 
     // One sample: its Ritz data and thermodynamics, and each observable in its Ritz basis.
     // Samples are independent; they are combined below in sample order, however they were run.
@@ -301,16 +294,13 @@ FtlmResult ftlm_kernel(const Backend& backend,
         // Lowdin total-spin), then renormalise the same way.
         if (opts.seed_transform) {
             opts.seed_transform(v0_host.data(), local_n);
-            const double v0_nrm = cblas_dznrm2(n_int, v0_host.data(), 1);
-            if (!(v0_nrm > 0.0)) {
+            if (!(normalize_host(v0_host.data(), local_n) > 0.0)) {
                 throw std::runtime_error(
                     "ftlm_kernel: zero-norm random start vector for sample "
                     + std::to_string(s)
                     + " (the seed transform annihilated it -- the "
                       "targeted subspace has no weight in this block)");
             }
-            const Complex scale(1.0 / v0_nrm, 0.0);
-            cblas_zscal(n_int, &scale, v0_host.data(), 1);
         }
 
         auto d_v0 = be.make_zero_vector(local_n);

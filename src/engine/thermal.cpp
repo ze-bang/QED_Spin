@@ -84,7 +84,8 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     ed::BlockRequest req;
     req.task  = oftlm ? ed::Task::Oftlm : ed::Task::Sampled;
     req.dim   = n;
-    req.dense = n > 0 && n <= t.dense_max_dim && !tower && obs.empty();
+    req.dense = n > 0 && n <= std::min<std::uint64_t>(t.dense_max_dim, ed::core::lapack_max_dense_n()) && !tower
+                && obs.empty();
     req.device_kernel = op.has_device_kernel()
                         && std::all_of(obs.begin(), obs.end(), [](const auto& A) { return A->has_device_kernel(); });
     req.verb  = "thermal";
@@ -122,9 +123,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         c = ed::thermal::exact_curves(solve_block_full(op), beta);   // the engine's dense solve
     } else if (oftlm) {
         auto host_mv = op.bind_cpu();
-        auto apply_H = [&host_mv](const Complex* in, Complex* out, int m) {
-            host_mv(in, out, static_cast<std::size_t>(m));
-        };
+        auto apply_H = [&host_mv](const Complex* in, Complex* out, std::size_t m) { host_mv(in, out, m); };
         ed::thermal::OftlmOptions ko;
         ko.num_samples = t.samples;
         ko.krylov_dim  = t.krylov;

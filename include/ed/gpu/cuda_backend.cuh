@@ -119,7 +119,7 @@ public:
                 " exceeds the 32-bit cuBLAS count limit (2^31 - 1); "
                 "split the operation or use a 64-bit BLAS path.");
         }
-        return static_cast<int>(n);
+        return static_cast<int>(n);   // narrow-ok: checked above
     }
 
     /// Construct a CudaBackend on the *current* CUDA device. Set the
@@ -474,12 +474,12 @@ public:
             cublasZgemm(handle_,
                 cuda_backend_detail::to_cublas_op(opA),
                 cuda_backend_detail::to_cublas_op(opB),
-                static_cast<int>(m), as_blas_int(n), static_cast<int>(k),
+                as_blas_int(m), as_blas_int(n), as_blas_int(k),
                 &a,
-                reinterpret_cast<const cuDoubleComplex*>(A), static_cast<int>(lda),
-                reinterpret_cast<const cuDoubleComplex*>(B), static_cast<int>(ldb),
+                reinterpret_cast<const cuDoubleComplex*>(A), as_blas_int(lda),
+                reinterpret_cast<const cuDoubleComplex*>(B), as_blas_int(ldb),
                 &b,
-                reinterpret_cast<cuDoubleComplex*>(C), static_cast<int>(ldc)),
+                reinterpret_cast<cuDoubleComplex*>(C), as_blas_int(ldc)),
             "cublasZgemm");
     }
 

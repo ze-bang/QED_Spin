@@ -651,6 +651,28 @@ TEST_CASE("dense: solve_block_dense and solve_block_full", "[dense]") {
     }
 }
 
+TEST_CASE("dense: a block past the LAPACK index range is refused before it is built", "[dense]") {
+    // 32-bit LAPACK addresses n x n only up to n = 46340 (C10-krylov-01: silently wrong spectra).
+    if (ed::core::lapack_max_dense_n() > 46340) { SUCCEED("64-bit LAPACK"); return; }
+    struct Huge final : ed::LinearOperator {
+        std::size_t dim() const override { return 46341; }
+        void apply(const Complex*, Complex*, std::size_t) const override {
+            throw std::logic_error("a refused block was applied");
+        }
+    } huge;
+    REQUIRE_THROWS_AS(lg::solve_block_full(huge), ed::Unsupported);
+    // The dense crossovers stay below the limit: such a block takes the Krylov lanes.
+    REQUIRE(lg::lowest_dense_floor(1, 1000000, false) == 46340);
+    REQUIRE(lg::lowest_dense_floor(1, 100, true) == 100);
+}
+
+TEST_CASE("narrowing: checked_narrow throws instead of wrapping", "[dense]") {
+    REQUIRE(ed::core::checked_narrow<int>(std::uint64_t{2147483647}, "x") == 2147483647);
+    REQUIRE_THROWS_AS(ed::core::checked_narrow<int>(std::uint64_t{2147483648}, "x"), ed::ResourceLimit);
+    REQUIRE_THROWS_AS(ed::core::checked_narrow<std::uint32_t>(-1, "x"), ed::ResourceLimit);
+    REQUIRE(ed::core::checked_narrow<std::int32_t>(-5LL, "x") == -5);
+}
+
 // -----------------------------------------------------------------------------
 // [linear_operator]: the one operator interface.
 // -----------------------------------------------------------------------------

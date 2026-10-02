@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -28,6 +30,7 @@
 #  include <omp.h>
 #endif
 
+#include <ed/core/errors.h>
 #include <ed/core/lapack.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/memory_space.h>
@@ -304,9 +307,14 @@ public:
               Complex beta,
               Complex* C, std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
+        // cblas takes int: a dimension past it would wrap into a call BLAS skips or misreads.
+        for (const std::size_t d : {m, n, k, lda, ldb, ldc})
+            if (d > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                throw ed::ResourceLimit("CpuBackend::gemm: a dimension of " + std::to_string(d)
+                                        + " exceeds the 32-bit BLAS index range");
         const CBLAS_TRANSPOSE tA = trans_(opA);
         const CBLAS_TRANSPOSE tB = trans_(opB);
-        cblas_zgemm(CblasColMajor, tA, tB,
+        cblas_zgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
                     static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
                     &alpha, A, static_cast<int>(lda),
                             B, static_cast<int>(ldb),

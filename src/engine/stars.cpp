@@ -369,6 +369,11 @@ build_star_blocks(const ::Operator&         op,
     // loop below already knows this; it just never kept it, which left the
     // published character table's columns unidentifiable.
     std::vector<int> M_res;
+    // The monomials index representatives with int: a sector past INT32_MAX of them would wrap.
+    if (rdr.reps.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw ed::ResourceLimit("little_group: a momentum sector of " + std::to_string(rdr.reps.size())
+                                + " representatives is beyond the point-group (W) path's 32-bit indices; "
+                                "use point_group=False or select one-dimensional irreps");
     {
         Monomial ident;
         ident.to.resize(rdr.reps.size());

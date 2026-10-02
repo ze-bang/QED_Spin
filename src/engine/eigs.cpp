@@ -304,7 +304,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 const std::uint64_t need = o.per_block > 0
                     ? static_cast<std::uint64_t>(o.per_block)
                     : (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
-                const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));
+                const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));   // narrow-ok: at most k
                 const ed::LinearOperator& mv = *bop.op;
                 bool converged = true;
                 std::vector<double> ev;

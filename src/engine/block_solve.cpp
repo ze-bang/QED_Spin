@@ -32,8 +32,19 @@ namespace lg_detail {
 // (real momenta under time reversal) take the ~2x cheaper dsyevd real path.
 // The Eigen matrix is column-major ==
 // LAPACK_COL_MAJOR, so the complex solve runs in place on its storage.
+// A block beyond what LAPACK can address (core/lapack.h) is refused before it is materialised.
+static void require_lapack_dense(std::uint64_t n) {
+    if (n > ed::core::lapack_max_dense_n())
+        throw ed::Unsupported("a dense eigensolve of a block of " + std::to_string(n) + " states is beyond the "
+                              "linked LAPACK (32-bit indices address at most "
+                              + std::to_string(ed::core::lapack_max_dense_n()) + " x "
+                              + std::to_string(ed::core::lapack_max_dense_n()) + "); split the block "
+                              "with more symmetry, or use eigs / thermal(method='ftlm')");
+}
+
 [[nodiscard]] std::vector<double>
 dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
+    require_lapack_dense(static_cast<std::uint64_t>(Hb.rows()));
     const lapack_int n = static_cast<lapack_int>(Hb.rows());
     std::vector<double> w(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return w;
@@ -67,6 +78,7 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
 
 [[nodiscard]] std::vector<double>
 dense_block_eigenvalues(const ed::LinearOperator& mv) {
+    require_lapack_dense(mv.dim());
     Eigen::MatrixXcd Hb = materialize(mv);
     return dense_eigenvalues_inplace(Hb);
 }
@@ -86,7 +98,9 @@ solve_block_full(const ed::LinearOperator& mv) {
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim, bool vectors) {
     // An explicit crossover (EigsOptions::dense_max_dim >= 0) is the caller's: 0 sends
     // every block above dimension 2 to Krylov, a large value solves exactly.
-    if (dense_max_dim >= 0) return static_cast<std::uint64_t>(dense_max_dim);
+    // It is clamped to what LAPACK can address: a larger block takes the Krylov lanes.
+    if (dense_max_dim >= 0)
+        return std::min<std::uint64_t>(static_cast<std::uint64_t>(dense_max_dim), ed::core::lapack_max_dense_n());
     // Automatic: sized by the eigenvalue-scan iteration cap max(40k, 400).
     const std::uint64_t max_iter_cap =
         std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
@@ -104,7 +118,7 @@ solve_block_full(const ed::LinearOperator& mv) {
     // The floor grows with k (160 k), while Krylov-Schur needs only ~2k + 60 vectors: the automatic
     // floor never exceeds kAutoDenseCeiling, nor the largest block whose dense working set
     // (core/footprint.h) fits in half the RAM the job may still allocate.
-    std::uint64_t floor_ = std::min<std::uint64_t>(4u * max_iter_cap, kAutoDenseCeiling);
+    std::uint64_t floor_ = std::min<std::uint64_t>(4u * max_iter_cap, kAutoDenseCeiling);   // < lapack_max_dense_n
     const std::uint64_t avail = ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
     if (avail > 0) {
         ed::core::Shape one;

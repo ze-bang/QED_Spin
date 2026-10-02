@@ -212,6 +212,7 @@ build_k_sector(const EngineContext& cx, int k, int n_up) {
             cx.otab->stabilizer_of(i), rd.characters);
         // scale-free: squared norm of a projected unit vector
         if (nsq <= 1e-12) continue;
+        // narrow-ok: a shared rank table exists only for at most INT32_MAX representatives
         if (cx.srl) rd.local_of_shared[i] = static_cast<std::int32_t>(rd.reps.size());
         rd.reps.push_back(cx.otab->reps[i]);
         rd.inv_norms.push_back(1.0 / std::sqrt(nsq));

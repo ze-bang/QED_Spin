@@ -12,6 +12,7 @@
 #include <ed/core/lapack.h>
 #include <ed/core/errors.h>
 
+#include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
@@ -45,22 +46,35 @@ namespace ed::thermal {
 // so it never coincides with a sample's.
 inline constexpr std::uint64_t kAuxStream = ~std::uint64_t{0};
 
+// Scale a host vector to unit norm; returns the norm it had (0: left as it was). dznrm2 + zscal
+// up to 2^31 - 1 entries (the 32-bit BLAS index; the draws of every block that size stay
+// bit-identical), a 64-bit loop above.
+inline double normalize_host(std::complex<double>* v, std::size_t n) {
+    double norm = 0.0;
+    if (n <= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        norm = cblas_dznrm2(static_cast<int>(n), v, 1);   // narrow-ok: n <= INT_MAX here
+        if (!(norm > 0.0)) return 0.0;
+        const std::complex<double> s(1.0 / norm, 0.0);
+        cblas_zscal(static_cast<int>(n), &s, v, 1);       // narrow-ok: n <= INT_MAX here
+        return norm;
+    }
+    double n2 = 0.0;
+    for (std::size_t i = 0; i < n; ++i) n2 += std::norm(v[i]);
+    norm = std::sqrt(n2);
+    if (!(norm > 0.0)) return 0.0;
+    const double inv = 1.0 / norm;
+    for (std::size_t i = 0; i < n; ++i) v[i] *= inv;
+    return norm;
+}
+
 // A unit vector of n i.i.d. standard complex Gaussians (real and imaginary parts N(0, 1), drawn
-// as Complex(nd(gen), nd(gen)) from a fresh distribution), normalised with dznrm2 + zscal: an
+// as Complex(nd(gen), nd(gen)) from a fresh distribution), normalised by normalize_host: an
 // isotropic draw on the complex unit sphere, the Hutchinson / Jaklic-Prelovsek trace estimator.
 [[nodiscard]] inline std::vector<std::complex<double>> gaussian_vector(std::size_t n, std::mt19937& gen) {
-    if (n > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        throw ed::ResourceLimit("random start vector of dimension " + std::to_string(n)
-                                + " exceeds the 32-bit BLAS index range");
-    const int N = static_cast<int>(n);
     std::normal_distribution<double> ndist(0.0, 1.0);
     std::vector<std::complex<double>> v(n);
-    for (int i = 0; i < N; i++) {
-        v[i] = std::complex<double>(ndist(gen), ndist(gen));
-    }
-    const double norm = cblas_dznrm2(N, v.data(), 1);
-    const std::complex<double> scale_factor(1.0 / norm, 0.0);
-    cblas_zscal(N, &scale_factor, v.data(), 1);
+    for (std::size_t i = 0; i < n; ++i) v[i] = std::complex<double>(ndist(gen), ndist(gen));
+    (void)normalize_host(v.data(), n);
     return v;
 }
 

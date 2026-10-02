@@ -45,13 +45,13 @@ double norm2(const ComplexVector& v) {
 // Lanczos tridiagonal (and optionally the Krylov basis) of apply_H from v0 on
 // the default CPU backend.
 ed::krylov::LanczosKernelResult run_lanczos(
-    const std::function<void(const Complex*, Complex*, int)>& apply_H,
+    const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
     const ComplexVector& v0,
     std::uint64_t N,
     const ed::krylov::LanczosKernelOptions& opts)
 {
     auto matvec = [&apply_H](const Complex* in, Complex* out, std::size_t n) {
-        apply_H(in, out, static_cast<int>(n));
+        apply_H(in, out, n);
     };
     return ed::krylov::lanczos_kernel(
         ed::matvec::default_cpu_backend(), matvec,
@@ -61,7 +61,7 @@ ed::krylov::LanczosKernelResult run_lanczos(
 }  // namespace
 
 Curves oftlm_cpu(
-    const std::function<void(const Complex*, Complex*, int)>& apply_H,
+    const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
     std::uint64_t          N,
     const OftlmOptions&    opts)
 {
