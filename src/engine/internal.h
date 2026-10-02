@@ -387,11 +387,7 @@ public:
     /// Seconds spent building the representation apply() engaged (reduced CSR or device mirror).
     [[nodiscard]] double build_seconds() const noexcept { return csr_build_s_ + gpu_build_s_; }
     [[nodiscard]] std::uint64_t csr_nnz() const noexcept { return csr_ ? csr_->nnz() : 0; }
-    [[nodiscard]] std::uint64_t csr_bytes() const noexcept {
-        if (!csr_) return 0;
-        return csr_->row_ptr.size() * sizeof(std::uint64_t) + csr_->col_idx.size() * sizeof(std::uint32_t)
-             + csr_->val.size() * sizeof(Complex);
-    }
+    [[nodiscard]] std::uint64_t csr_bytes() const noexcept { return csr_ ? csr_->bytes() : 0; }
     /// The representation host applies use: "csr", "gpu-gather" (device kernel, host
     /// vectors), "walk" (CSR-free gather), or "none" before the first apply.
     [[nodiscard]] const char* lane() const noexcept {
@@ -632,7 +628,7 @@ dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
         for (std::size_t r = 0; r < dk; ++r)
             for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e)
                 H(static_cast<Eigen::Index>(r),
-                  static_cast<Eigen::Index>(csr.col_idx[e])) = csr.val[e];
+                  static_cast<Eigen::Index>(csr.col_idx[e])) = csr.value(e);
         return H;
     }
     // Projected: A[c1,c2] = sum_{r,j} conj(W[r,c1]) H_k[r,j] W[j,c2]. Index the
@@ -648,7 +644,7 @@ dense_block(const RepSectorMatVec& hk, const SparseColumns* W) {
         if (touch[r].empty()) continue;
         for (std::uint64_t e = csr.row_ptr[r]; e < csr.row_ptr[r + 1]; ++e) {
             const std::size_t j = csr.col_idx[e];
-            const Complex v = csr.val[e];
+            const Complex v = csr.value(e);
             for (const auto& [c1, w1] : touch[r])
                 for (const auto& [c2, w2] : touch[j])
                     A(c1, c2) += std::conj(w1) * v * w2;

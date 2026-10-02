@@ -36,7 +36,13 @@ template <class Scalar>
 struct ReducedSymmetryCsr {
     NumaVector<std::uint64_t> row_ptr;    // size dim+1
     NumaVector<std::uint32_t> col_idx;    // size nnz
-    NumaVector<Scalar>        val;        // size nnz
+    /// The values: in `val`, or -- when the matrix holds few distinct values, as a symmetry sector
+    /// of a clean lattice does -- as ids into `dict` (uint8 up to 256 values, else uint16), the
+    /// same bits: 5-6 bytes an entry instead of 20.
+    NumaVector<Scalar>        val;        // size nnz, or empty
+    NumaVector<std::uint8_t>  id8;        // size nnz, or empty
+    NumaVector<std::uint16_t> id16;       // size nnz, or empty
+    std::vector<Scalar>       dict;
     std::uint64_t             dim = 0;
 
     // Size the arrays for the prefix-summed row_ptr and first-touch them row by row in spmv's static partition.
@@ -51,11 +57,29 @@ struct ReducedSymmetryCsr {
         }
     }
 
-    [[nodiscard]] std::uint64_t nnz() const noexcept { return val.size(); }
+    [[nodiscard]] std::uint64_t nnz() const noexcept { return col_idx.size(); }
     [[nodiscard]] bool          built() const noexcept { return dim > 0 && !row_ptr.empty(); }
+    [[nodiscard]] bool          dictionary() const noexcept { return !dict.empty(); }
+    /// Entry e's value, whichever way it is stored.
+    [[nodiscard]] Scalar value(std::uint64_t e) const noexcept {
+        return !id8.empty() ? dict[id8[e]] : !id16.empty() ? dict[id16[e]] : val[e];
+    }
+    [[nodiscard]] std::uint64_t bytes() const noexcept {
+        return row_ptr.size() * sizeof(std::uint64_t) + col_idx.size() * sizeof(std::uint32_t)
+               + val.size() * sizeof(Scalar) + id8.size() + id16.size() * sizeof(std::uint16_t)
+               + dict.size() * sizeof(Scalar);
+    }
 
     // out = A * in   (A is the FULL reduced sector matrix, diagonal included).
     inline void spmv(const Scalar* __restrict__ in, Scalar* __restrict__ out) const {
+        if (!id8.empty()) spmv_with([this](std::uint64_t e) { return dict[id8[e]]; }, in, out);
+        else if (!id16.empty()) spmv_with([this](std::uint64_t e) { return dict[id16[e]]; }, in, out);
+        else spmv_with([this](std::uint64_t e) { return val[e]; }, in, out);
+    }
+
+private:
+    template <class Value>
+    inline void spmv_with(Value value, const Scalar* __restrict__ in, Scalar* __restrict__ out) const {
 #ifdef _OPENMP
         const std::uint64_t par = static_cast<std::uint64_t>(omp_get_max_threads()) * 1024ULL;
 #else
@@ -66,7 +90,7 @@ struct ReducedSymmetryCsr {
             const std::uint64_t r = static_cast<std::uint64_t>(ir);
             Scalar acc = Scalar(0);
             const std::uint64_t e0 = row_ptr[r], e1 = row_ptr[r + 1];
-            for (std::uint64_t e = e0; e < e1; ++e) acc += val[e] * in[col_idx[e]];
+            for (std::uint64_t e = e0; e < e1; ++e) acc += value(e) * in[col_idx[e]];
             out[r] = acc;
         }
     }

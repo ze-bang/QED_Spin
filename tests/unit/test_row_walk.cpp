@@ -446,8 +446,9 @@ ed::matvec::ReducedSymmetryCsr<Cx> two_pass_csr(const ed::ops::ProgramView<Cx>& 
 }
 
 TEST_CASE("rep sectors: the one-pass CSR is the two-pass CSR bit for bit", "[row_walk]") {
-    // P6.1 step 3 builds each row once into per-chunk slabs and copies them into place; the arrays
-    // must be the ones the two-pass build made, at any thread count.
+    // P6.1 steps 3 and 6 build each row once into per-chunk slabs of (column, value id) and keep the
+    // values in a dictionary; the entries must be the ones the two-pass build made, at any thread
+    // count, and these clean models must engage the dictionary.
     int sectors = 0;
     for (const auto& m : zoo()) {
         const MaskedOperator& h = m.H->canonical();
@@ -478,12 +479,57 @@ TEST_CASE("rep sectors: the one-pass CSR is the two-pass CSR bit for bit", "[row
                         INFO("threads " << threads);
                         CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
                         CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
-                        CHECK(std::memcmp(csr.val.data(), ref.val.data(), ref.val.size() * sizeof(Cx)) == 0);
+                        CHECK(csr.dictionary());
+                        bool same_bits = true;
+                        for (std::uint64_t e = 0; e < ref.nnz() && same_bits; ++e) {
+                            const Cx a = csr.value(e), b = ref.val[e];
+                            same_bits = std::memcmp(&a, &b, sizeof(Cx)) == 0;
+                        }
+                        CHECK(same_bits);
+                        CHECK(csr.bytes() < ref.bytes());
                     }
                 }
         }
     }
     CHECK(sectors >= 12);
+}
+
+TEST_CASE("rep sectors: too many distinct values fall back to full values, bit for bit", "[row_walk]") {
+    // Disordered couplings make every diagonal entry distinct: the Sz = 0 sector of a 20-site ring
+    // (184756 states) holds more values than one dictionary (65536), and the build computes the rows
+    // twice into full values -- the two-pass CSR exactly.
+    const int n = 20;
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> J(0.5, 1.5);
+    MaskedOperator h(n);
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        const double jxy = J(rng), jz = J(rng);
+        h.add(MaskedOperator::product(n, "+-", {i, j}, Cx(0.5 * jxy, 0.0)));
+        h.add(MaskedOperator::product(n, "-+", {i, j}, Cx(0.5 * jxy, 0.0)));
+        h.add(MaskedOperator::product(n, "zz", {i, j}, Cx(jz, 0.0)));
+    }
+    RepSectorData rd;                       // the plain Sz sector: the trivial group
+    rd.n_sites = n;
+    rd.group_size = 1;
+    rd.n_up = n / 2;
+    rd.characters = {Cx(1.0, 0.0)};
+    for (int i = 0; i < n; ++i) rd.perms_flat.push_back(i);
+    for (std::uint64_t s = 0; s < (std::uint64_t{1} << n); ++s)
+        if (__builtin_popcountll(s) == n / 2) {
+            rd.reps.push_back(s);
+            rd.inv_norms.push_back(1.0);
+        }
+    rd.build_perm_lut();
+    const auto P = ed::ops::compile_program({h.dagger()}, rd, rd);
+    const auto pol = rd.make_policy();
+    const std::uint64_t d = rd.reps.size();
+    const auto ref = two_pass_csr(P.view(), pol, d);
+    const auto csr = ed::matvec::build_sector_csr(P.view(), pol, d);
+    CHECK_FALSE(csr.dictionary());
+    CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
+    CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
+    CHECK(std::memcmp(csr.val.data(), ref.val.data(), ref.val.size() * sizeof(Cx)) == 0);
 }
 
 TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly", "[row_walk]") {

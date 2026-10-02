@@ -24,8 +24,11 @@
 #include <ed/ops/row_walk.h>
 
 #include <algorithm>
+#include <atomic>
 #include <complex>
 #include <cstdint>
+#include <cstring>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -97,11 +100,36 @@ inline void cross_row(const ed::ops::ProgramView<SectorComplex>& P, const RowPol
 }
 }  // namespace detail
 
-/// O from the column sector to the row sector as a CSR (columns ascending within a row), in one
-/// pass over the rows: chunks of rows go to threads dynamically (a row's cost varies with its
-/// connections), each chunk keeps its merged rows in a slab, the row lengths give row_ptr, and
-/// each slab is copied into the first-touched arrays and freed. The same arrays as computing every
-/// row twice (count, then fill), at about twice the CSR's memory while the slabs are copied.
+/// The exact bits of a value, as a dictionary key.
+struct ValueBits {
+    std::uint64_t re, im;
+    bool operator==(const ValueBits& o) const noexcept { return re == o.re && im == o.im; }
+};
+struct ValueBitsHash {
+    std::size_t operator()(const ValueBits& k) const noexcept {
+        return static_cast<std::size_t>(k.re * 0x9E3779B97F4A7C15ULL ^ (k.im + 0x7F4A7C159E3779B9ULL + (k.re << 6)));
+    }
+};
+inline ValueBits bits_of(const SectorComplex& v) noexcept {
+    ValueBits k{};
+    const double re = v.real(), im = v.imag();
+    std::memcpy(&k.re, &re, sizeof re);
+    std::memcpy(&k.im, &im, sizeof im);
+    return k;
+}
+
+/// The most distinct values a CSR keeps in a dictionary (uint16 ids).
+inline constexpr std::size_t kCsrDictMax = 65536;
+
+/// O from the column sector to the row sector as a CSR (columns ascending within a row), its values
+/// in a dictionary (reduced_csr.h) when it holds at most kCsrDictMax distinct ones -- a symmetry
+/// sector of a clean lattice holds hundreds. One pass over the rows: chunks of rows go to threads
+/// dynamically, each keeping its merged rows as (column, chunk-local value id) with the chunk's own
+/// values; the row lengths give row_ptr; the chunks' values merge into one dictionary in chunk
+/// order; each chunk is copied into the first-touched arrays and freed. The build peaks near 14
+/// bytes an entry. Too many values for one dictionary (disordered couplings) and the rows are
+/// computed twice instead (count, then fill) into full values, which never holds more than the
+/// CSR. Either way the entries are those of the two-pass build bit for bit.
 template <class RowPolicy, class ColPolicy>
 inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramView<SectorComplex>& P,
                                                          const RowPolicy& rowp, const ColPolicy& colp, bool same,
@@ -118,35 +146,104 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     const std::uint64_t q = dim / n_chunks, rem = dim % n_chunks;
     const auto first_row = [q, rem](std::uint64_t c) { return c * q + std::min(c, rem); };
     struct Slab {
-        std::vector<std::uint32_t> col;
-        std::vector<SectorComplex> val;
+        std::vector<std::uint32_t> col, id;   // per entry: column, chunk-local value id
+        std::vector<SectorComplex> values;    // the chunk's distinct values, by local id
+        std::unordered_map<ValueBits, std::uint32_t, ValueBitsHash> index;
     };
     std::vector<Slab> slabs(static_cast<std::size_t>(n_chunks));
+    std::atomic<bool> overflow{false};
     #pragma omp parallel
     {
         std::vector<std::pair<std::uint64_t, SectorComplex>> row;
         #pragma omp for schedule(dynamic, 1)
         for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
+            if (overflow.load(std::memory_order_relaxed)) continue;
             Slab& slab = slabs[static_cast<std::size_t>(c)];
             for (std::uint64_t r = first_row(static_cast<std::uint64_t>(c)); r < first_row(static_cast<std::uint64_t>(c) + 1);
                  ++r) {
                 detail::cross_row(P, rowp, colp, same, r, row);
                 csr.row_ptr[r + 1] = row.size();
                 for (const auto& [j, v] : row) {
+                    const auto [it, fresh] = slab.index.try_emplace(bits_of(v), static_cast<std::uint32_t>(slab.values.size()));
+                    if (fresh) slab.values.push_back(v);
                     slab.col.push_back(static_cast<std::uint32_t>(j));
-                    slab.val.push_back(v);
+                    slab.id.push_back(it->second);
+                }
+                if (slab.values.size() > kCsrDictMax) {
+                    overflow.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+            slab.index = {};
+        }
+    }
+    // One dictionary for the whole matrix, numbered in chunk order.
+    std::vector<std::vector<std::uint32_t>> to_global(static_cast<std::size_t>(n_chunks));
+    if (!overflow) {
+        std::unordered_map<ValueBits, std::uint32_t, ValueBitsHash> global;
+        for (std::size_t c = 0; c < slabs.size() && csr.dict.size() <= kCsrDictMax; ++c)
+            for (const auto& v : slabs[c].values) {
+                const auto [it, fresh] = global.try_emplace(bits_of(v), static_cast<std::uint32_t>(csr.dict.size()));
+                if (fresh) csr.dict.push_back(v);
+                to_global[c].push_back(it->second);
+            }
+    }
+    if (overflow || csr.dict.size() > kCsrDictMax) {
+        slabs.clear();
+        slabs.shrink_to_fit();
+        csr.dict.clear();
+        #pragma omp parallel
+        {
+            std::vector<std::pair<std::uint64_t, SectorComplex>> row;
+            #pragma omp for schedule(dynamic, 256)
+            for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+                detail::cross_row(P, rowp, colp, same, static_cast<std::uint64_t>(ir), row);
+                csr.row_ptr[static_cast<std::size_t>(ir) + 1] = row.size();
+            }
+        }
+        for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
+        csr.allocate_first_touch();
+        #pragma omp parallel
+        {
+            std::vector<std::pair<std::uint64_t, SectorComplex>> row;
+            #pragma omp for schedule(dynamic, 256)
+            for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+                detail::cross_row(P, rowp, colp, same, static_cast<std::uint64_t>(ir), row);
+                std::uint64_t e = csr.row_ptr[static_cast<std::size_t>(ir)];
+                for (const auto& [j, v] : row) {
+                    csr.col_idx[e] = static_cast<std::uint32_t>(j);
+                    csr.val[e] = v;
+                    ++e;
                 }
             }
         }
+        return csr;
     }
     for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
-    csr.allocate_first_touch();
+    const std::uint64_t nnz = csr.row_ptr[dim];
+    const bool narrow = csr.dict.size() <= 256;
+    csr.col_idx.resize(nnz);
+    if (narrow) csr.id8.resize(nnz);
+    else        csr.id16.resize(nnz);
+    // first touch in spmv's static row partition
+    #pragma omp parallel for schedule(static) if(dim > (1ULL << 16))
+    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir)
+        for (std::uint64_t e = csr.row_ptr[static_cast<std::uint64_t>(ir)]; e < csr.row_ptr[static_cast<std::uint64_t>(ir) + 1];
+             ++e) {
+            csr.col_idx[e] = 0;
+            if (narrow) csr.id8[e] = 0;
+            else        csr.id16[e] = 0;
+        }
     #pragma omp parallel for schedule(dynamic, 1)
     for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
         Slab& slab = slabs[static_cast<std::size_t>(c)];
+        const auto& map = to_global[static_cast<std::size_t>(c)];
         const std::uint64_t e0 = csr.row_ptr[first_row(static_cast<std::uint64_t>(c))];
         std::copy(slab.col.begin(), slab.col.end(), csr.col_idx.begin() + static_cast<std::ptrdiff_t>(e0));
-        std::copy(slab.val.begin(), slab.val.end(), csr.val.begin() + static_cast<std::ptrdiff_t>(e0));
+        for (std::size_t i = 0; i < slab.id.size(); ++i) {
+            if (narrow) csr.id8[e0 + i] = static_cast<std::uint8_t>(map[slab.id[i]]);
+            else        csr.id16[e0 + i] = static_cast<std::uint16_t>(map[slab.id[i]]);
+        }
         slab = Slab{};
     }
     return csr;
