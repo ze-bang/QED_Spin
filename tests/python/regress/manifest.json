@@ -124,7 +124,7 @@
   {"id":"L6-silent-12","rep":"L6-silent-12","sev":"medium","axis":"robustness","status":"fixed","dev":"gpu","seconds":120},
   {"id":"P1-matvec-cpu-01","rep":"P1-matvec-cpu-01","sev":"high","axis":"performance","status":"perf","dev":"cpu","seconds":200},
   {"id":"P1-matvec-cpu-02","rep":"P1-matvec-cpu-02","sev":"high","axis":"performance","status":"perf","dev":"cpu","seconds":120},
-  {"id":"P1-matvec-cpu-03","rep":"P1-matvec-cpu-03","sev":"high","axis":"performance","status":"perf","dev":"cpu","seconds":240},
+  {"id":"P1-matvec-cpu-03","rep":"P1-matvec-cpu-03","sev":"high","axis":"performance","status":"perf","dev":"cpu","seconds":600},
   {"id":"P1-matvec-cpu-04","rep":"P1-matvec-cpu-04","sev":"high","axis":"performance","status":"info","dev":"cpu","seconds":240},
   {"id":"P2-gpu-01","rep":"P2-gpu-01","sev":"high","axis":"performance","status":"info","dev":"gpu","seconds":240},
   {"id":"P2-gpu-02","rep":"P2-gpu-02","sev":"high","axis":"performance","status":"perf","dev":"gpu","seconds":180},

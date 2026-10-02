@@ -37,7 +37,7 @@ PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply ([\d
 
 
 def run(vec):
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1")
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
     p = subprocess.run([sys.executable, "-c", CHILD, "1" if vec else "0"], capture_output=True, text=True,
                        env=env, timeout=280)
     res = None

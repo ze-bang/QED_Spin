@@ -1,76 +1,86 @@
 # AUDIT-ID: P1-matvec-cpu-03
 # DEVICE: cpu
-# SECONDS: 240
+# SECONDS: 600
 """Claim: the reduced-CSR decision (sector_csr_within_budget, include/ed/planner/sym_matvec_policy_hook.h:94-107)
 compares the CSR size against a fixed 8 GiB (env ED_SYM_SECTOR_CSR_BUDGET_GIB only), never against the RAM the job
 has, and a declined block runs every apply on the gather walk, which is many times slower than the CSR SpMV.
 
-The 8 GiB constant itself is read from the code. This script measures what a decline costs: the same block
-(J1-J2 ring N=26, n_up=13, translations + spin flip, k0=0, ~2e5 states, CSR ~0.1-0.4 GB) solved by qed.eigs(k=1)
-once with the default budget (CSR engages, ED_SYM_PROFILE confirms) and once with the budget set below the
-estimate (forced onto the walk, exactly what the default does for a block whose CSR exceeds 8 GiB).
-CONFIRMED when the walk run is > 2x slower with identical E0."""
+The audit's form timed one block twice, with the default budget and with ED_SYM_SECTOR_CSR_BUDGET_GIB=1e-9
+(forced onto the walk): CONFIRMED when the walk was > 2x slower. That stays CONFIRMED after any budget fix.
+
+RESTATED 2026-10-02 (P6 groundwork; now include/ed/matvec/csr_policy.h): a block whose CSR needs a little
+more than 8 GiB must take the CSR by default when the job has the memory (plan P6.1: 0.55 x the available RAM
+less the Krylov working set). J1-J2-J3 chain N=32, n_up=16, k=0, one spin-flip half (~9.4e6 states, ~49
+entries per row -> about 10 GiB); a 3-step FTLM sample on it, the default budget, ED_SYM_PROFILE reporting
+whether the CSR engaged. INCONCLUSIVE below 32 GiB of free memory (the fixed budget would then decline
+rightly); CONFIRMED when the CSR is declined; NOT_REPRODUCED when it engages."""
 import json
 import os
 import subprocess
 import sys
 
-N = 26
+N = 32
 CHILD = r"""
-import sys, time, json
+import sys, json
 import qed
-from grid.models import chain
 N = int(sys.argv[1])
-m = chain(N, J2=0.35)
-H = m.operator()
-T = list(m.translations[0])
+b = qed.input.HamiltonianBuilder(N)
+for d, J in ((1, 1.0), (2, 0.35), (3, 0.2)):
+    b.heisenberg([(i, (i + d) % N) for i in range(N)], J=J)
+H = b.to_operator()
+T = [(i + 1) % N for i in range(N)]
 sym = qed.Symmetry(spatial=[T], sz=N // 2, spin_flip="auto", time_reversal="off",
                    point_group=False).select(k0=[0])
-t = time.time()
-r = qed.eigs(H, 1, sym=sym)
-dt = time.time() - t
-print("RESULT " + json.dumps({"t": dt, "E": [float(x) for x in r.energies]}), flush=True)
+r = qed.thermal(H, [1.0], method="ftlm", samples=1, krylov=3, seed=1, sym=sym)
+print("RESULT " + json.dumps({"blocks": int(r.blocks)}), flush=True)
 """
 
 
-def run(budget):
-    env = dict(os.environ)
-    env["ED_SYM_PROFILE"] = "1"
-    env.pop("ED_SYM_REDUCED_CSR", None)
-    if budget is None:
-        env.pop("ED_SYM_SECTOR_CSR_BUDGET_GIB", None)
-    else:
-        env["ED_SYM_SECTOR_CSR_BUDGET_GIB"] = budget
-    p = subprocess.run([sys.executable, "-c", CHILD, str(N)], env=env, capture_output=True, text=True,
-                       timeout=280)
-    res = None
-    for line in p.stdout.splitlines():
-        if line.startswith("RESULT "):
-            res = json.loads(line[7:])
-    engaged = "reduced CSR engaged" in p.stderr
-    return p.returncode, res, engaged, p.stderr[-400:]
+def free_gib():
+    """Memory this job may still use: memory.max - memory.current of the nearest cgroup (v2) on the way up
+    that sets a limit (a Slurm task's own cgroup says "max"; the job's holds the limit), else MemAvailable."""
+    try:
+        with open("/proc/self/cgroup") as f:
+            path = f.read().strip().split("::")[-1]
+        while path not in ("", "/"):
+            base = "/sys/fs/cgroup" + path
+            try:
+                with open(base + "/memory.max") as f:
+                    mx = f.read().strip()
+                with open(base + "/memory.current") as f:
+                    cur = int(f.read())
+            except OSError:
+                mx = "max"
+            if mx != "max":
+                return (int(mx) - cur) / 2 ** 30
+            path = os.path.dirname(path)
+    except (OSError, ValueError):
+        pass
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 2 ** 20
+    return 0.0
 
 
+free = free_gib()
+env = dict(os.environ, ED_SYM_PROFILE="1")
+for k in ("ED_SYM_REDUCED_CSR", "ED_SYM_SECTOR_CSR_BUDGET_GIB", "ED_MEM_GUARD_OFF"):
+    env.pop(k, None)
 try:
-    rc1, csr, eng1, err1 = run(None)
-    rc2, walk, eng2, err2 = run("1e-9")
+    p = subprocess.run([sys.executable, "-c", CHILD, str(N)], env=env, capture_output=True, text=True, timeout=560)
 except subprocess.TimeoutExpired as e:
     print(f"REPRO: INCONCLUSIVE child timed out ({e})")
     raise SystemExit(0)
-
-if csr is None or walk is None or not csr["E"] or not walk["E"]:
-    print(f"REPRO: INCONCLUSIVE child failed rc={rc1},{rc2} err1={err1!r} err2={err2!r}")
-    raise SystemExit(0)
-
-dE = abs(csr["E"][0] - walk["E"][0])
-ratio = walk["t"] / max(csr["t"], 1e-9)
-print(f"default budget: t={csr['t']:.2f}s CSR engaged={eng1} E0={csr['E'][0]:.12f}")
-print(f"budget below estimate: t={walk['t']:.2f}s CSR engaged={eng2} E0={walk['E'][0]:.12f}")
-print(f"walk/CSR wall-time ratio for the whole eigs call = {ratio:.1f}x, |dE0|={dE:.1e}")
-if eng1 and not eng2 and ratio > 2.0 and dE < 1e-8:
-    print(f"REPRO: CONFIRMED a CSR-declined block (what the fixed 8 GiB default does above 8 GiB regardless of "
-          f"job RAM) runs {ratio:.1f}x slower end-to-end at N={N}, same E0 (|dE|={dE:.1e})")
-elif not eng1:
-    print("REPRO: INCONCLUSIVE CSR did not engage under the default budget for the control run")
+res = next((json.loads(l[7:]) for l in p.stdout.splitlines() if l.startswith("RESULT ")), None)
+engaged = [l for l in p.stderr.splitlines() if "reduced CSR engaged" in l]
+print(f"free memory {free:.1f} GiB; child rc={p.returncode}; CSR lines: {engaged[:2]}")
+if res is None:
+    print(f"REPRO: INCONCLUSIVE child failed: {p.stderr[-600:]!r}")
+elif free < 32:
+    print(f"REPRO: INCONCLUSIVE only {free:.1f} GiB free; a ~10 GiB CSR is rightly declined below ~32 GiB")
+elif engaged:
+    print(f"REPRO: NOT_REPRODUCED the ~10 GiB CSR engaged under the default budget with {free:.1f} GiB free")
 else:
-    print(f"REPRO: NOT_REPRODUCED walk/CSR ratio {ratio:.2f}x (engaged default={eng1}, forced={eng2}), dE={dE:.1e}")
+    print(f"REPRO: CONFIRMED the default budget declined a ~10 GiB CSR (the walk runs every apply) although "
+          f"{free:.1f} GiB are free")

@@ -37,7 +37,7 @@ print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": 
 '''
 PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply ([\d.]+)%")
 try:
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1")
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
     p = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, env=env, timeout=280)
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:200]}")

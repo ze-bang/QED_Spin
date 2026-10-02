@@ -6,7 +6,11 @@ H apply also runs a Lowdin projection of degree (#towers - 1) with S^2 (~N^2/4 e
 serial vector passes: per-step cost is tens of H applies. Test: 22-site Heisenberg ring, no spatial
 symmetry, lowest level; total_spin=0 (one flip block of ~3.5e5) vs the plain Sz=0 sector (two flip
 blocks of the same size). Same E0 expected; claim confirmed if the total_spin run is >= 5x slower
-for eigs and for a short FTLM."""
+for eigs and for a short FTLM.
+
+RESTATED 2026-10-02 (P6 groundwork): the >= 5x thresholds sat above the audit's own 4.9x (eigs), so the
+script read NOT_REPRODUCED while the cost stood. Plan target (P6.5): eigs and FTLM with total_spin within
+1.2x of the plain sector. CONFIRMED when either slowdown exceeds 1.2x."""
 import time
 import numpy as np
 import qed
@@ -30,5 +34,5 @@ except Exception as ex:
 dE = abs(out["plain"][0] - out["su2"][0])
 re = out["su2"][1] / max(out["plain"][1], 1e-9)
 rf = out["su2"][2] / max(out["plain"][2], 1e-9)
-tag = "CONFIRMED" if (re >= 5 and rf >= 5) else ("INCONCLUSIVE" if dE > 1e-8 else "NOT_REPRODUCED")
+tag = "INCONCLUSIVE" if dE > 1e-8 else ("CONFIRMED" if (re > 1.2 or rf > 1.2) else "NOT_REPRODUCED")
 print(f"REPRO: {tag} eigs slowdown {re:.1f}x, ftlm slowdown {rf:.1f}x (plain solves twice the blocks), |dE0| {dE:.1e}")

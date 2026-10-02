@@ -34,7 +34,7 @@ PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = .*? check 
 
 
 def run(N, nup, dev, vec):
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1")
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
     p = subprocess.run([sys.executable, "-c", CHILD, str(N), str(nup), dev, "1" if vec else "0"],
                        capture_output=True, text=True, env=env, timeout=250)
     res = None

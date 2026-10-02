@@ -15,6 +15,13 @@ Test (5x5 triangular torus, N=25, Heisenberg, n_up=12, translations + C6v given 
   (tAE - tE) is the cost of the SAME 1-dim block when it rides the W path (setup is shared and cancels).
 CONFIRMED when the decline is logged with all irreps wanted, the A-energy agrees between the two paths
 (1e-8), and (tAE - tE) >= 3 * tA (tA includes its own setup, so this is conservative).
+
+RESTATED 2026-10-02 (P6 groundwork). P1.2 put every 1-dim irrep on the group-sector path whatever else is
+wanted (no decline since 8258057), so the form above can no longer see the claim that remains: a 2-dim irrep
+still runs on the isotypic W path, whose block costs far more than a group sector of the same star. Plan
+target (P6.3): a 2-dim block within 2.5x the A1 block's time. Now: tA = only_irrep=[a], tE = only_irrep=[e]
+(each with its own setup), the A energy still checked on both sides of the old split.
+CONFIRMED when tE > 2.5 tA; NOT_REPRODUCED when tE <= 2.5 tA.
 """
 import json
 import os
@@ -82,23 +89,17 @@ def main():
     except Exception as ex:
         print(f"REPRO: INCONCLUSIVE {type(ex).__name__}: {ex}")
         return
-    group_used = "group-sector path" in errA and "two-dimensional irrep is wanted" not in errA
-    eA_g = min(l["E"] for l in rA["levels"] if l["irrep"] == a["irrep"])
-    eA_w = min(l["E"] for l in rAE["levels"] if l["irrep"] == a["irrep"])
-    w_cost = rAE["t"] - rE["t"]
-    prof = [ln for ln in errAE.splitlines() if "projected block" in ln]
+    eA_1 = min(l["E"] for l in rA["levels"] if l["irrep"] == a["irrep"])
+    eA_2 = min(l["E"] for l in rAE["levels"] if l["irrep"] == a["irrep"])
     print("discovery levels:", disc["levels"])
-    print("W-path profile lines:", prof[:4])
-    print(f"tA(group)={rA['t']:.2f}s tAE={rAE['t']:.2f}s tE={rE['t']:.2f}s  A-on-W={w_cost:.2f}s")
-    key = (f"declined_all_irreps={declined} group_path_when_A_alone={group_used} A_block_dim={a['block_dim']} "
-           f"A_via_W={w_cost:.2f}s A_via_group={rA['t']:.2f}s ratio={w_cost / max(rA['t'], 1e-9):.1f}x "
-           f"|dE_A|={abs(eA_g - eA_w):.1e}")
-    if abs(eA_g - eA_w) > 1e-8:
-        print(f"REPRO: INCONCLUSIVE energies differ between paths {key}")
-    elif declined and group_used and w_cost >= 3 * rA["t"]:
-        print(f"REPRO: CONFIRMED {key}")
-    elif declined:
-        print(f"REPRO: CONFIRMED (path only; slowdown below 3x on this size) {key}")
+    print(f"tA={rA['t']:.2f}s tE={rE['t']:.2f}s tAE={rAE['t']:.2f}s")
+    ratio = rE["t"] / max(rA["t"], 1e-9)
+    key = (f"A block dim {a['block_dim']} E block dim {e['block_dim']} tE/tA = {ratio:.1f}x (target <= 2.5x) "
+           f"declined_all_irreps={declined} |dE_A|={abs(eA_1 - eA_2):.1e}")
+    if abs(eA_1 - eA_2) > 1e-8:
+        print(f"REPRO: INCONCLUSIVE the A energy differs between runs {key}")
+    elif ratio > 2.5:
+        print(f"REPRO: CONFIRMED the 2-dim block costs {key}")
     else:
         print(f"REPRO: NOT_REPRODUCED {key}")
 
