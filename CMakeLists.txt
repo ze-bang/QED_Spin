@@ -202,6 +202,9 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp)
     ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp)
     target_include_directories(test_rep_matrix_elements PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # engine/options.h
+    # The symmetry verdicts on the canonical terms (invariance.h) against the dense truth and the
+    # record-level detectors they replace.
+    ed_add_test(test_invariance                 tests/unit/test_invariance.cpp)
 
     # -------------------------------------------------------------------------
     # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU

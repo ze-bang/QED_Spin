@@ -165,7 +165,10 @@ C++ API (installed headers; nothing in Python changes):
   `rep_matrix_elements`: matrix elements of any operator between symmetry sectors, on the
   host or the device). `MaskedOperator` also has `-`, `commutator`, `equals`, `delta_up` and
   the global maps `image(Map::K | F | Dz | Theta)` (conjugation, Πσˣ, Πσᶻ, time reversal
-  Π(iσʸ)K); which bit value is up is one constant, `ed::ops::kSetBitIsDown`. Nothing in the verbs
+  Π(iσʸ)K); which bit value is up is one constant, `ed::ops::kSetBitIsDown`. `invariance.h`
+  gives the symmetry verdicts on the canonical terms (`masked(op)` reads an `Operator`'s records):
+  `commutes_with_permutation`, `flip_invariant`, `conjugation_invariant`, `hermitian`,
+  `sz_content`, `su2_invariant`, each relative to H's largest coefficient. Nothing in the verbs
   uses them yet.
 - **Build.** One static library, `qed_engine` (`QED::qed_engine` when installed), replaces
   `ed_parallel`, `ed_core`, `ed_matvec`, `ed_dssf`, `ed_symmetry`, `ed_input`,

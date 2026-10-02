@@ -48,16 +48,20 @@ public:
     ///   Theta  time reversal prod_i (i sigma^y_i) K (every S^a -> -S^a).
     enum class Map { K, F, Dz, Theta };
     [[nodiscard]] MaskedOperator image(Map g) const;
+    /// equals(dagger(), tol).
     [[nodiscard]] bool is_hermitian(double tol = 1e-12) const;
     /// Net change of the number of set bits (down spins) if uniform over all terms,
     /// else throws: an operator that changes S^z by different amounts is two operators.
     [[nodiscard]] int delta_set_bits() const;
     /// Net change of the number of UP spins, if uniform (throws otherwise).
     [[nodiscard]] int delta_up() const { return kSetBitIsDown ? -delta_set_bits() : delta_set_bits(); }
-    /// Same coefficients as `o`, each within rtol * max(1, the largest |coefficient| of either).
+    /// Same coefficients as `o`, each within rtol * the largest |coefficient| of either (so the
+    /// verdict does not depend on the overall scale; two empty operators are equal).
     [[nodiscard]] bool equals(const MaskedOperator& o, double rtol = 1e-12) const;
     /// Canonical terms (merged, coefficients above `drop`).
     [[nodiscard]] std::vector<MaskedTerm> terms(double drop = 0.0) const;
+    /// The largest |coefficient| (0 for an empty operator).
+    [[nodiscard]] double max_abs() const;
     /// Dense matrix M[t * 2^n + s] = <t|O|s> (tests only; n <= 12).
     [[nodiscard]] std::vector<Complex> to_dense() const;
 

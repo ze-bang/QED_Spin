@@ -193,11 +193,15 @@ MaskedOperator MaskedOperator::image(Map g) const {
     return r;
 }
 
+double MaskedOperator::max_abs() const {
+    double m = 0.0;
+    for (const auto& [k, c] : t_) m = std::max(m, std::abs(c));
+    return m;
+}
+
 bool MaskedOperator::equals(const MaskedOperator& o, double rtol) const {
     if (o.n_ != n_) return false;
-    double scale = 1.0;
-    for (const auto& [k, c] : t_) scale = std::max(scale, std::abs(c));
-    for (const auto& [k, c] : o.t_) scale = std::max(scale, std::abs(c));
+    const double scale = std::max(max_abs(), o.max_abs());
     for (const auto& [k, c] : t_) {
         const auto it = o.t_.find(k);
         if (std::abs(c - (it == o.t_.end() ? Complex(0.0, 0.0) : it->second)) > rtol * scale) return false;
@@ -207,19 +211,7 @@ bool MaskedOperator::equals(const MaskedOperator& o, double rtol) const {
     return true;
 }
 
-bool MaskedOperator::is_hermitian(double tol) const {
-    const MaskedOperator d = dagger();
-    double scale = 1.0;
-    for (const auto& [k, c] : t_) scale = std::max(scale, std::abs(c));
-    for (const auto& [k, c] : t_) {
-        const auto it = d.t_.find(k);
-        if (std::abs(c - (it == d.t_.end() ? Complex(0.0, 0.0) : it->second)) > tol * scale)
-            return false;
-    }
-    for (const auto& [k, c] : d.t_)
-        if (t_.find(k) == t_.end() && std::abs(c) > tol * scale) return false;
-    return true;
-}
+bool MaskedOperator::is_hermitian(double tol) const { return equals(dagger(), tol); }
 
 int MaskedOperator::delta_set_bits() const {
     bool first = true;
