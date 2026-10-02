@@ -24,8 +24,14 @@ MaskedOperator::MaskedOperator(int n_sites) : n_(n_sites) {
 
 void MaskedOperator::add_canonical(std::uint64_t flip, std::uint64_t val,
                                    std::uint64_t sign, Complex c) {
+    accumulate(Key{flip, val, sign}, c);
+}
+
+void MaskedOperator::accumulate(const Key& k, Complex c) {
     if (c == Complex(0.0, 0.0)) return;
-    t_[Key{flip, val, sign}] += c;
+    const auto it = t_.try_emplace(k, 0.0).first;
+    it->second += c;
+    if (it->second == Complex(0.0, 0.0)) t_.erase(it);   // exact cancellation: no term
 }
 
 void MaskedOperator::add_term(const MaskedTerm& in) {
@@ -77,16 +83,19 @@ MaskedOperator MaskedOperator::product(int n_sites, const std::string& ops,
         if (i < 0 || i >= n_sites)
             throw std::invalid_argument("MaskedOperator::product: site out of range");
         const std::uint64_t b = 1ULL << i;
+        const std::uint64_t up = up_bits(b), dn = down_bits(b);
+        // Z = (-1)^bit is +1 on a clear bit: S^z = Z / 2 when a clear bit is up.
+        const double zsign = kSetBitIsDown ? 1.0 : -1.0;
         MaskedOperator f(n_sites);
         switch (ops[k]) {
-            case '+': f.add_term({b, b, b, 0, 1.0}); break;           // S+: down -> up
-            case '-': f.add_term({b, 0, b, 0, 1.0}); break;           // S-: up -> down
-            case 'z': f.add_term({0, 0, 0, b, 0.5}); break;           // S^z = Z / 2
-            case 'x': f.add_term({b, b, b, 0, 0.5}); f.add_term({b, 0, b, 0, 0.5}); break;
-            case 'y': f.add_term({b, b, b, 0, Complex(0.0, -0.5)});   // (S+ - S-) / 2i
-                      f.add_term({b, 0, b, 0, Complex(0.0, 0.5)}); break;
-            case 'u': f.add_term({b, 0, 0, 0, 1.0}); break;           // |up><up|
-            case 'd': f.add_term({b, b, 0, 0, 1.0}); break;           // |dn><dn|
+            case '+': f.add_term({b, dn, b, 0, 1.0}); break;          // S+: down -> up
+            case '-': f.add_term({b, up, b, 0, 1.0}); break;          // S-: up -> down
+            case 'z': f.add_term({0, 0, 0, b, zsign * 0.5}); break;   // S^z = +-Z / 2
+            case 'x': f.add_term({b, dn, b, 0, 0.5}); f.add_term({b, up, b, 0, 0.5}); break;
+            case 'y': f.add_term({b, dn, b, 0, Complex(0.0, -0.5)});  // (S+ - S-) / 2i
+                      f.add_term({b, up, b, 0, Complex(0.0, 0.5)}); break;
+            case 'u': f.add_term({b, up, 0, 0, 1.0}); break;          // |up><up|
+            case 'd': f.add_term({b, dn, 0, 0, 1.0}); break;          // |dn><dn|
             case 'I': f.add_canonical(0, 0, 0, 1.0); break;
             default:
                 throw std::invalid_argument(std::string("MaskedOperator::product: unknown op '")
@@ -99,7 +108,8 @@ MaskedOperator MaskedOperator::product(int n_sites, const std::string& ops,
 
 MaskedOperator& MaskedOperator::add(const MaskedOperator& o, Complex scale) {
     if (o.n_ != n_) throw std::invalid_argument("MaskedOperator::add: n_sites differ");
-    for (const auto& [k, c] : o.t_) t_[k] += scale * c;
+    if (&o == this) { *this = o.scaled(1.0 + scale); return *this; }
+    for (const auto& [k, c] : o.t_) accumulate(k, scale * c);
     return *this;
 }
 
@@ -109,9 +119,19 @@ MaskedOperator MaskedOperator::operator+(const MaskedOperator& o) const {
     return r;
 }
 
+MaskedOperator MaskedOperator::operator-(const MaskedOperator& o) const {
+    MaskedOperator r = *this;
+    r.add(o, -1.0);
+    return r;
+}
+
+MaskedOperator MaskedOperator::operator-() const { return scaled(-1.0); }
+
+MaskedOperator commutator(const MaskedOperator& a, const MaskedOperator& b) { return a * b - b * a; }
+
 MaskedOperator MaskedOperator::scaled(Complex s) const {
     MaskedOperator r(n_);
-    for (const auto& [k, c] : t_) r.t_[k] = s * c;
+    for (const auto& [k, c] : t_) r.accumulate(k, s * c);
     return r;
 }
 
@@ -152,6 +172,39 @@ MaskedOperator MaskedOperator::image(const int* perm, std::uint64_t m) const {
         r.add_canonical(Fp, Vp, Sp, (popc(m & Sp) & 1) ? -c : c);
     }
     return r;
+}
+
+MaskedOperator MaskedOperator::image(Map g) const {
+    // Per term T = c (-1)^{s.S} |s^F><s| on (s & F) == V:
+    //   F:  the condition sees the flipped bits, V ^= F, and (-1)^{s.S} gains (-1)^{|S|};
+    //   Dz: (-1)^{popc(s) + popc(s ^ F)} = (-1)^{|F|} (the global sign of either convention cancels);
+    //   K:  c -> c*;   Theta = (prod i sigma^y) K = Dz F K: all three.
+    MaskedOperator r(n_);
+    for (const auto& [k, c] : t_) {
+        const auto [F, V, S] = k;
+        const bool flip = g == Map::F || g == Map::Theta;
+        int parity = 0;
+        if (flip) parity += popc(S);
+        if (g == Map::Dz || g == Map::Theta) parity += popc(F);
+        Complex v = (g == Map::K || g == Map::Theta) ? std::conj(c) : c;
+        if (parity & 1) v = -v;
+        r.add_canonical(F, flip ? (V ^ F) : V, S, v);
+    }
+    return r;
+}
+
+bool MaskedOperator::equals(const MaskedOperator& o, double rtol) const {
+    if (o.n_ != n_) return false;
+    double scale = 1.0;
+    for (const auto& [k, c] : t_) scale = std::max(scale, std::abs(c));
+    for (const auto& [k, c] : o.t_) scale = std::max(scale, std::abs(c));
+    for (const auto& [k, c] : t_) {
+        const auto it = o.t_.find(k);
+        if (std::abs(c - (it == o.t_.end() ? Complex(0.0, 0.0) : it->second)) > rtol * scale) return false;
+    }
+    for (const auto& [k, c] : o.t_)
+        if (t_.find(k) == t_.end() && std::abs(c) > rtol * scale) return false;
+    return true;
 }
 
 bool MaskedOperator::is_hermitian(double tol) const {

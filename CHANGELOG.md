@@ -163,7 +163,10 @@ C++ API (installed headers; nothing in Python changes):
   condition, a flip, a sign and a coefficient), `algebra.h` (`MaskedOperator`: exact products,
   sums, adjoints and group images of spin-1/2 operators) and `program.h` (`compile_program`,
   `rep_matrix_elements`: matrix elements of any operator between symmetry sectors, on the
-  host or the device). Nothing in the verbs uses them yet.
+  host or the device). `MaskedOperator` also has `-`, `commutator`, `equals`, `delta_up` and
+  the global maps `image(Map::K | F | Dz | Theta)` (conjugation, Πσˣ, Πσᶻ, time reversal
+  Π(iσʸ)K); which bit value is up is one constant, `ed::ops::kSetBitIsDown`. Nothing in the verbs
+  uses them yet.
 - **Build.** One static library, `qed_engine` (`QED::qed_engine` when installed), replaces
   `ed_parallel`, `ed_core`, `ed_matvec`, `ed_dssf`, `ed_symmetry`, `ed_input`,
   `ed_solvers_cpu` and `ed_solvers_gpu`; it carries the include path, `WITH_CUDA` and the link

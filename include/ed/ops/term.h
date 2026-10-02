@@ -32,6 +32,14 @@
 
 namespace ed::ops {
 
+/// The engine's basis convention: a SET bit is a DOWN spin (term_gate_math.h). The operator
+/// algebra reads it only through up_bits / down_bits (P3.4 flips it here).
+inline constexpr bool kSetBitIsDown = true;
+
+/// The value bit pattern `b` takes on its sites when they are all up / all down.
+ED_OPS_HD std::uint64_t up_bits(std::uint64_t b)   { return kSetBitIsDown ? 0 : b; }
+ED_OPS_HD std::uint64_t down_bits(std::uint64_t b) { return kSetBitIsDown ? b : 0; }
+
 struct MaskedTerm {
     std::uint64_t cond_mask{0};   ///< bits whose value the term requires
     std::uint64_t cond_val{0};    ///< required values on cond_mask

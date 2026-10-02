@@ -30,19 +30,32 @@ public:
 
     [[nodiscard]] int n_sites() const noexcept { return n_; }
     [[nodiscard]] std::size_t size() const noexcept { return t_.size(); }
-    [[nodiscard]] bool empty() const noexcept { return t_.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return t_.empty(); }   ///< no nonzero term
 
     MaskedOperator& add(const MaskedOperator& o, Complex scale = 1.0);
     [[nodiscard]] MaskedOperator operator+(const MaskedOperator& o) const;
+    [[nodiscard]] MaskedOperator operator-(const MaskedOperator& o) const;
+    [[nodiscard]] MaskedOperator operator-() const;
     [[nodiscard]] MaskedOperator operator*(const MaskedOperator& o) const;  ///< this * o (o first)
     [[nodiscard]] MaskedOperator scaled(Complex s) const;
     [[nodiscard]] MaskedOperator dagger() const;
     /// U_g O U_g^dagger for the element (perm in the apply_perm convention, flip mask m).
     [[nodiscard]] MaskedOperator image(const int* perm, std::uint64_t flip_xor) const;
+    /// The global maps of a spin-1/2 model, each as g O g^-1:
+    ///   K      complex conjugation in the S^z basis (coefficients conjugated);
+    ///   F      the global spin flip prod_i sigma^x_i (F O F = image(identity, all bits));
+    ///   Dz     prod_i sigma^z_i, a pi rotation about z (S+- -> -S+-);
+    ///   Theta  time reversal prod_i (i sigma^y_i) K (every S^a -> -S^a).
+    enum class Map { K, F, Dz, Theta };
+    [[nodiscard]] MaskedOperator image(Map g) const;
     [[nodiscard]] bool is_hermitian(double tol = 1e-12) const;
     /// Net change of the number of set bits (down spins) if uniform over all terms,
     /// else throws: an operator that changes S^z by different amounts is two operators.
     [[nodiscard]] int delta_set_bits() const;
+    /// Net change of the number of UP spins, if uniform (throws otherwise).
+    [[nodiscard]] int delta_up() const { return kSetBitIsDown ? -delta_set_bits() : delta_set_bits(); }
+    /// Same coefficients as `o`, each within rtol * max(1, the largest |coefficient| of either).
+    [[nodiscard]] bool equals(const MaskedOperator& o, double rtol = 1e-12) const;
     /// Canonical terms (merged, coefficients above `drop`).
     [[nodiscard]] std::vector<MaskedTerm> terms(double drop = 0.0) const;
     /// Dense matrix M[t * 2^n + s] = <t|O|s> (tests only; n <= 12).
@@ -58,6 +71,10 @@ private:
     int n_;
     std::map<Key, Complex> t_;
     void add_canonical(std::uint64_t flip, std::uint64_t val, std::uint64_t sign, Complex c);
+    void accumulate(const Key& k, Complex c);   ///< t_[k] += c, erasing an exact zero
 };
+
+/// [a, b] = a b - b a.
+[[nodiscard]] MaskedOperator commutator(const MaskedOperator& a, const MaskedOperator& b);
 
 }  // namespace ed::ops

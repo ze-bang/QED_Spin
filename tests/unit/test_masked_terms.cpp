@@ -1,14 +1,16 @@
 // =============================================================================
 // tests/unit/test_masked_terms.cpp
 //
-// MaskedOperator (include/ed/observables/masked_program.h) against dense matrices
-// built independently here from 2x2 single-site matrices in the engine convention
-// (bit 0 = up, bit 1 = down; S+ |dn> = |up>):
+// MaskedOperator (include/ed/ops/algebra.h) against dense matrices built independently
+// here from 2x2 single-site matrices in the (up, down) basis; which bit value is up follows
+// the engine convention (kSetBitIsDown, term.h; S+ |dn> = |up>):
 //   1. every single-site op character, embedded on a small chain;
 //   2. random products of up to 6 factors, repeated sites included (spin-1/2 algebra);
 //   3. dagger() == conjugate transpose;
 //   4. image(perm, xor) == U O U^dagger with U|s> = |P(s) ^ m>, P in the apply_perm convention;
-//   5. is_hermitian() and delta_set_bits().
+//   5. is_hermitian(), delta_set_bits() and delta_up();
+//   6. -, commutator, equals, and the global maps K, F, Dz, Theta against U O U^dagger
+//      (U O* U^dagger for the antiunitary ones) with U a product of 2x2 matrices.
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -31,6 +33,9 @@ namespace {
 
 using M2 = std::array<Cx, 4>;   // m[t * 2 + s] = <t|m|s>, t,s in {0 = up, 1 = down}
 
+// (up, down) index of a bit value and back (an involution).
+int ud(int bit) { return ed::ops::kSetBitIsDown ? bit : 1 - bit; }
+
 M2 single(char op) {
     const Cx i(0.0, 1.0);
     switch (op) {
@@ -50,10 +55,10 @@ std::vector<Cx> embed(int n, int site, const M2& m) {
     std::vector<Cx> M(dim * dim, 0.0);
     for (std::uint64_t s = 0; s < dim; ++s)
         for (int tb = 0; tb < 2; ++tb) {
-            const int sb = static_cast<int>((s >> site) & 1ULL);
+            const int sb = ud(static_cast<int>((s >> site) & 1ULL));
             const Cx v = m[static_cast<std::size_t>(tb * 2 + sb)];
             if (v == Cx(0.0)) continue;
-            const std::uint64_t t = (s & ~(1ULL << site)) | (static_cast<std::uint64_t>(tb) << site);
+            const std::uint64_t t = (s & ~(1ULL << site)) | (static_cast<std::uint64_t>(ud(tb)) << site);
             M[t * dim + s] += v;
         }
     return M;
@@ -141,16 +146,106 @@ TEST_CASE("random products, adjoints, images, hermiticity", "[masked]") {
         // hermiticity of O + O^dagger, and delta_set_bits of a pure ladder string
         REQUIRE((O + O.dagger()).is_hermitian());
     }
-    // a non-Hermitian single term is detected; S^z changes are counted in set bits (down spins)
+    // a non-Hermitian single term is detected; S^z changes in up spins and in set bits
     const auto sp = MaskedOperator::product(n, "+", {0}, 1.0);
     CHECK_FALSE(sp.is_hermitian());
-    CHECK(sp.delta_set_bits() == -1);                                  // S+ removes a down spin
-    CHECK(MaskedOperator::product(n, "-", {2}, 1.0).delta_set_bits() == 1);
-    CHECK(MaskedOperator::product(n, "+-+-", {0, 1, 2, 3}, 1.0).delta_set_bits() == 0);
+    CHECK(sp.delta_up() == 1);
+    CHECK(sp.delta_set_bits() == (ed::ops::kSetBitIsDown ? -1 : 1));
+    CHECK(MaskedOperator::product(n, "-", {2}, 1.0).delta_up() == -1);
+    CHECK(MaskedOperator::product(n, "+-+-", {0, 1, 2, 3}, 1.0).delta_up() == 0);
+    CHECK_THROWS(MaskedOperator::product(n, "x", {0}, 1.0).delta_up());
     // spin-1/2 identities: S+ S+ = 0, S+ S- = |up><up|, (2 S^z)^2 = 1
     CHECK(MaskedOperator::product(n, "++", {1, 1}, 1.0).terms(1e-15).empty());
     CHECK(maxdiff(MaskedOperator::product(n, "+-", {1, 1}, 1.0).to_dense(),
                   MaskedOperator::product(n, "u", {1}, 1.0).to_dense()) < 1e-14);
     CHECK(maxdiff(MaskedOperator::product(n, "zz", {4, 4}, 4.0).to_dense(),
                   MaskedOperator::product(n, "I", {0}, 1.0).to_dense()) < 1e-14);
+}
+
+TEST_CASE("commutators, equality and the global maps K, F, Dz, Theta", "[masked]") {
+    using Map = MaskedOperator::Map;
+    const int n = 4;
+    const std::uint64_t dim = 1ULL << n;
+    auto global = [&](const M2& m) {             // prod_i m_i
+        std::vector<Cx> U(dim * dim, 0.0);
+        for (std::uint64_t s = 0; s < dim; ++s) U[s * dim + s] = 1.0;
+        for (int i = 0; i < n; ++i) U = matmul(U, embed(n, i, m), dim);
+        return U;
+    };
+    const auto UF = global({0, 1, 1, 0});        // sigma^x
+    const auto UD = global({1, 0, 0, -1});       // sigma^z
+    const auto UT = global({0, 1, -1, 0});       // i sigma^y: <up|.|dn> = 1, <dn|.|up> = -1
+    const std::vector<Cx> UI = global({1, 0, 0, 1});
+    auto conjugate = [&](const std::vector<Cx>& U, std::vector<Cx> D, bool antiunitary) {
+        if (antiunitary) for (auto& x : D) x = std::conj(x);   // (U K) O (U K)^-1 = U O* U^dagger
+        std::vector<Cx> Ud(dim * dim);
+        for (std::uint64_t i = 0; i < dim; ++i)
+            for (std::uint64_t j = 0; j < dim; ++j) Ud[j * dim + i] = std::conj(U[i * dim + j]);
+        return matmul(matmul(U, D, dim), Ud, dim);
+    };
+    auto lin = [&](const std::vector<Cx>& A, Cx a, const std::vector<Cx>& B, Cx b) {
+        std::vector<Cx> C(A.size());
+        for (std::size_t i = 0; i < A.size(); ++i) C[i] = a * A[i] + b * B[i];
+        return C;
+    };
+    std::vector<int> identity(static_cast<std::size_t>(n));
+    std::iota(identity.begin(), identity.end(), 0);
+
+    std::mt19937 rng(20261001);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1);
+    std::uniform_int_distribution<int> pick_site(0, n - 1);
+    std::uniform_int_distribution<int> pick_len(1, 4);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    auto random_op = [&] {
+        MaskedOperator O(n);
+        for (int t = 0; t < 3; ++t) {
+            const int K = pick_len(rng);
+            std::string ops;
+            std::vector<int> sites;
+            for (int k = 0; k < K; ++k) {
+                ops.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(n, ops, sites, Cx(gauss(rng), gauss(rng))));
+        }
+        return O;
+    };
+    for (int trial = 0; trial < 100; ++trial) {
+        const auto A = random_op(), B = random_op();
+        const auto DA = A.to_dense(), DB = B.to_dense();
+        REQUIRE(maxdiff((A - B).to_dense(), lin(DA, 1.0, DB, -1.0)) < 1e-12);
+        REQUIRE(maxdiff((-A).to_dense(), lin(DA, -1.0, DA, 0.0)) < 1e-12);
+        REQUIRE(maxdiff(ed::ops::commutator(A, B).to_dense(),
+                        lin(matmul(DA, DB, dim), 1.0, matmul(DB, DA, dim), -1.0)) < 1e-12);
+
+        REQUIRE(maxdiff(A.image(Map::K).to_dense(), conjugate(UI, DA, true)) < 1e-12);
+        REQUIRE(maxdiff(A.image(Map::F).to_dense(), conjugate(UF, DA, false)) < 1e-12);
+        REQUIRE(maxdiff(A.image(Map::Dz).to_dense(), conjugate(UD, DA, false)) < 1e-12);
+        REQUIRE(maxdiff(A.image(Map::Theta).to_dense(), conjugate(UT, DA, true)) < 1e-12);
+        REQUIRE(A.image(Map::F).equals(A.image(identity.data(), dim - 1)));
+        REQUIRE(A.image(Map::Theta).equals(A.image(Map::K).image(Map::F).image(Map::Dz)));
+        REQUIRE(A.image(Map::Theta).image(Map::Theta).equals(A));   // Theta^2 = (-1)^N commutes out
+
+        REQUIRE(A.equals(A + A.scaled(1e-14)));
+        if (!A.terms(1e-9).empty()) REQUIRE_FALSE(A.equals(A.scaled(1.5)));
+    }
+
+    const Cx i(0.0, 1.0);
+    auto P = [&](const char* ops, std::vector<int> sites, Cx c = 1.0) {
+        return MaskedOperator::product(n, ops, sites, c);
+    };
+    CHECK(ed::ops::commutator(P("x", {0}), P("y", {0})).equals(P("z", {0}, i)));   // [Sx, Sy] = i Sz
+    CHECK(ed::ops::commutator(P("z", {1}), P("+", {1})).equals(P("+", {1})));       // [Sz, S+] = S+
+    CHECK(ed::ops::commutator(P("x", {0}), P("y", {1})).empty());
+    for (const char* a : {"x", "y", "z"}) {
+        CHECK(P(a, {2}).image(Map::Theta).equals(-P(a, {2})));                     // Theta S^a = -S^a
+        CHECK(P(a, {2}).image(Map::F).equals(std::string(a) == "x" ? P(a, {2}) : -P(a, {2})));
+    }
+    CHECK(P("+", {3}).image(Map::Dz).equals(-P("+", {3})));
+    CHECK(P("z", {3}).image(Map::Dz).equals(P("z", {3})));
+    CHECK(P("y", {0}).image(Map::K).equals(-P("y", {0})));
+    const auto heis = P("xx", {0, 1}) + P("yy", {0, 1}) + P("zz", {0, 1});
+    for (Map g : {Map::K, Map::F, Map::Dz, Map::Theta}) CHECK(heis.image(g).equals(heis));
+    CHECK_FALSE(P("z", {0}).equals(MaskedOperator::product(n + 1, "z", {0}, 1.0)));
 }
