@@ -35,7 +35,9 @@
 //     same growing basis pointer set on every CGS2 pass within a Lanczos
 //     step, so the staging copy is cached with a pointer-fingerprint and
 //     incrementally extended (only the new column is staged per
-//     Lanczos iteration).
+//     Lanczos iteration). Freeing a vector drops it, and every column
+//     staged after it, from the cache: the pool hands freed addresses
+//     out again, and a new vector at a staged address is not the old one.
 //   * Fused `axpby` via `cublasZgeam` -- one launch instead of a
 //     `scale` + `axpy` pair.
 // =============================================================================
@@ -252,6 +254,7 @@ public:
     }
     void deallocate(Complex* p) const noexcept override {
         if (!p) return;
+        forget_staged_(p);
         // Noexcept path: ignore errors. The pool/non-pool branch must
         // match the path taken in `allocate`; we track this implicitly
         // by `pool_available_` being a const-ish field (set once in the
@@ -571,6 +574,13 @@ private:
         }
         staging_fingerprint_.assign(basis, basis + num_basis);
         staging_n_ = n;
+    }
+
+    // A freed vector's address can come back from the pool for a new vector: its staged column,
+    // and every column staged after it, no longer mirror anything (the prefix before it does).
+    void forget_staged_(const Complex* p) const noexcept {
+        const auto it = std::find(staging_fingerprint_.begin(), staging_fingerprint_.end(), p);
+        staging_fingerprint_.erase(it, staging_fingerprint_.end());
     }
 };
 

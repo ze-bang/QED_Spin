@@ -237,6 +237,37 @@ TEST_CASE("matvec::CudaBackend batched dot_many matches the sequential reference
     }
 }
 
+TEST_CASE("matvec::CudaBackend restages a vector the pool reissued at a staged address",
+          "[cuda-backend][batched-primitives]") {
+    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+
+    // A one-vector basis is staged by dot_many and freed, and a new vector of the same size is
+    // allocated: the pool usually returns the same address. dot_many must read the NEW vector,
+    // not the staged copy of the old one (FTLM samples with a one-dimensional Krylov basis read
+    // the previous sample's vector: audit L3-concurrency-11).
+    ed::matvec::CudaBackend cuda;
+    constexpr std::size_t n = 512;
+    std::vector<Complex> h_v(n, Complex(1.0, 0.0));
+    auto d_v = cuda.make_zero_vector(n);
+    cuda.copy_from_host(h_v.data(), d_v.get(), n);
+    int reused = 0;
+    const Complex* last = nullptr;
+    for (int it = 0; it < 8; ++it) {
+        const double c = it + 1.0;
+        std::vector<Complex> h_b(n, Complex(c, 0.0));
+        auto d_b = cuda.make_zero_vector(n);
+        if (d_b.get() == last) ++reused;
+        last = d_b.get();
+        cuda.copy_from_host(h_b.data(), d_b.get(), n);
+        const Complex* basis[1] = {d_b.get()};
+        Complex got;
+        cuda.dot_many(basis, 1, d_v.get(), n, &got);
+        INFO("iteration " << it << " got " << got);
+        REQUIRE(std::abs(got - Complex(c * n, 0.0)) < 1e-12 * c * n);
+    }
+    if (reused == 0) WARN("the pool never reissued an address: the stale-staging case was not exercised");
+}
+
 TEST_CASE("matvec::CudaBackend batched axpy_many matches the sequential reference",
           "[cuda-backend][batched-primitives][phase1]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
