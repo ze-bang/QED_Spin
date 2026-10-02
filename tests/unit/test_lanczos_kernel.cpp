@@ -15,6 +15,7 @@
 
 #include "common/catch2_harness.h"
 
+#include <ed/krylov/krylov_schur.h>
 #include <ed/krylov/lanczos.h>
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/cpu_backend.h>
@@ -568,4 +569,70 @@ TEST_CASE("tridiag_ends matches tridiag_eig at the ends of the spectrum", "[kryl
     std::vector<double> alpha{0.1, 0.2, std::nan("")}, beta{0.0, 0.5, 0.5, 0.5};
     CHECK_THROWS_AS(ed::krylov::tridiag_ends(alpha, beta, 3, 1), ed::ConvergenceError);
     CHECK(ed::krylov::tridiag_ends(alpha, beta, 0, 1).values.empty());
+}
+
+// The real host backend (P6.4): Lanczos and Krylov-Schur on a real symmetric matrix through
+// BasicCpuBackend<double> agree with the complex backend on the same matrix and with the dense
+// spectrum.
+TEST_CASE("BasicCpuBackend<double> runs the Krylov kernels on a real symmetric matrix", "[krylov][real]") {
+    const std::size_t n = 300;
+    std::mt19937_64 rng(0x5EA1ull);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(n));
+    for (std::size_t i = 0; i < n; ++i)              // banded, sparse-ish, symmetric
+        for (std::size_t j = i; j < std::min(n, i + 6); ++j) {
+            const double a = dist(rng);
+            A(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = a;
+            A(static_cast<Eigen::Index>(j), static_cast<Eigen::Index>(i)) = a;
+        }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(A);
+    const Eigen::MatrixXcd Ac = A.cast<std::complex<double>>();
+
+    ed::matvec::BasicCpuBackend<double> rb;
+    ed::matvec::CpuBackend cb;
+    auto apply_r = [&](const double* in, double* out, std::size_t m) {
+        Eigen::Map<Eigen::VectorXd>(out, static_cast<Eigen::Index>(m)) =
+            A * Eigen::Map<const Eigen::VectorXd>(in, static_cast<Eigen::Index>(m));
+    };
+    auto apply_c = [&](const std::complex<double>* in, std::complex<double>* out, std::size_t m) {
+        Eigen::Map<Eigen::VectorXcd>(out, static_cast<Eigen::Index>(m)) =
+            Ac * Eigen::Map<const Eigen::VectorXcd>(in, static_cast<Eigen::Index>(m));
+    };
+    std::vector<double> v0(n);
+    for (auto& x : v0) x = dist(rng);
+    std::vector<std::complex<double>> v0c(v0.begin(), v0.end());
+
+    // Lanczos, full reorthogonalisation: the same tridiagonal on both backends.
+    ed::krylov::LanczosKernelOptionsT<double> ro;
+    ro.max_iter = 80;
+    ed::krylov::LanczosKernelOptions co;
+    co.max_iter = 80;
+    const auto lr = ed::krylov::lanczos_kernel(rb, apply_r, n, v0.data(), ro);
+    const auto lc = ed::krylov::lanczos_kernel(cb, apply_c, n, v0c.data(), co);
+    REQUIRE(lr.alpha.size() == lc.alpha.size());
+    for (std::size_t j = 0; j < lr.alpha.size(); ++j) REQUIRE(std::abs(lr.alpha[j] - lc.alpha[j]) < 1e-12);
+    const auto tr = ed::krylov::tridiag_eig(lr.alpha, lr.beta, lr.alpha.size(), false);
+    REQUIRE(std::abs(tr.values[0] - es.eigenvalues()(0)) < 1e-10);
+
+    // Krylov-Schur, the 5 lowest pairs with vectors.
+    ed::krylov::KrylovSchurOptions ko;
+    ko.num_eigs = 5;
+    ko.max_iter = 200;
+    ko.tolerance = 1e-10;
+    ko.compute_vectors = true;
+    const auto kr = ed::krylov::krylov_schur_kernel(rb, apply_r, n, v0.data(), ko);
+    const auto kc = ed::krylov::krylov_schur_kernel(cb, apply_c, n, v0c.data(), ko);
+    REQUIRE(kr.converged);
+    REQUIRE(kr.eigenvalues.size() == 5);
+    std::vector<double> er = kr.eigenvalues, ec = kc.eigenvalues;
+    std::sort(er.begin(), er.end());
+    std::sort(ec.begin(), ec.end());
+    for (std::size_t i = 0; i < 5; ++i) {
+        REQUIRE(std::abs(er[i] - es.eigenvalues()(static_cast<Eigen::Index>(i))) < 1e-9);
+        REQUIRE(std::abs(er[i] - ec[i]) < 1e-9);
+    }
+    for (std::size_t i = 0; i < kr.eigenvectors.size(); ++i) {
+        const Eigen::Map<const Eigen::VectorXd> x(kr.eigenvectors[i].get(), static_cast<Eigen::Index>(n));
+        REQUIRE((A * x - kr.eigenvalues[i] * x).norm() < 1e-8);
+    }
 }

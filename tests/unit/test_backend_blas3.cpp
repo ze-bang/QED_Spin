@@ -210,3 +210,53 @@ TEST_CASE("CpuBackend dot_many, axpy_many and copy match naive loops", "[backend
         REQUIRE(z == v);
     }
 }
+
+TEST_CASE("BasicCpuBackend<double>: level-1, batched and gemm match naive loops", "[backend-blas3][cpu][real]") {
+    ed::matvec::BasicCpuBackend<double> be;
+    std::mt19937_64 rng(0x7EA1ull);
+    std::uniform_real_distribution<double> uni(-1.0, 1.0);
+    auto rnd = [&](std::size_t m) { std::vector<double> v(m); for (auto& x : v) x = uni(rng); return v; };
+    for (const std::size_t n : {std::size_t{1}, std::size_t{2049}, std::size_t{70001}}) {
+        INFO("n " << n);
+        const auto x = rnd(n), z = rnd(n);
+        auto y = rnd(n);
+        double d = 0.0, s2 = 0.0;
+        for (std::size_t i = 0; i < n; ++i) { d += x[i] * y[i]; s2 += x[i] * x[i]; }
+        REQUIRE(std::abs(be.dot(x.data(), y.data(), n) - d) <= 1e-12 * std::max(1.0, std::abs(d)));
+        REQUIRE(std::abs(be.nrm2(x.data(), n) - std::sqrt(s2)) <= 1e-12 * std::sqrt(s2));
+        auto y2 = y;
+        const double ad = be.axpy_dot(0.7, x.data(), y2.data(), z.data(), n);
+        double ref = 0.0;
+        for (std::size_t i = 0; i < n; ++i) { REQUIRE(y2[i] == y[i] + 0.7 * x[i]); ref += z[i] * y2[i]; }
+        REQUIRE(std::abs(ad - ref) <= 1e-12 * std::max(1.0, std::abs(ref)));
+        const std::size_t M = 5;
+        std::vector<std::vector<double>> basis;
+        std::vector<const double*> ptrs;
+        for (std::size_t k = 0; k < M; ++k) { basis.push_back(rnd(n)); ptrs.push_back(basis.back().data()); }
+        std::vector<double> c(M), a{0.5, -1.0, 0.25, 2.0, -0.75};
+        be.dot_many(ptrs.data(), M, y.data(), n, c.data());
+        auto w = y, w_ref = y;
+        be.axpy_many(a.data(), ptrs.data(), M, w.data(), n);
+        for (std::size_t k = 0; k < M; ++k) {
+            double r = 0.0;
+            for (std::size_t i = 0; i < n; ++i) r += basis[k][i] * y[i];
+            REQUIRE(std::abs(c[k] - r) <= 1e-12 * std::max(1.0, std::abs(r)) + 1e-13 * static_cast<double>(n));
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            double acc = w_ref[i];
+            for (std::size_t k = 0; k < M; ++k) acc += a[k] * basis[k][i];
+            REQUIRE(std::abs(w[i] - acc) < 1e-13);
+        }
+    }
+    // dgemm, with the transpose: C = A^T B.
+    const std::size_t m = 4, n = 5, k = 6;
+    const auto A = rnd(k * m), B = rnd(k * n);
+    std::vector<double> C(m * n, 0.0);
+    be.gemm('T', 'N', m, n, k, 1.0, A.data(), k, B.data(), k, 0.0, C.data(), m);
+    for (std::size_t i = 0; i < m; ++i)
+        for (std::size_t j = 0; j < n; ++j) {
+            double r = 0.0;
+            for (std::size_t l = 0; l < k; ++l) r += A[i * k + l] * B[j * k + l];
+            REQUIRE(std::abs(C[j * m + i] - r) < 1e-13);
+        }
+}

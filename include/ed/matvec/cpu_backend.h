@@ -24,6 +24,7 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #ifdef _OPENMP
@@ -63,38 +64,40 @@ template <class T, class F>
     return total;
 }
 
-// The host backend for vectors of Scalar. Only std::complex<double> is defined (below);
-// P6.4 adds the double one for real blocks.
+// The host backend for vectors of Scalar: std::complex<double>, and double for real blocks (P6.4).
+// One body; the complex arithmetic is written out on (re, im) pairs so the compiler vectorises it
+// and the real instantiation is the same loops without the imaginary parts.
 template <class Scalar>
-class BasicCpuBackend;
+class BasicCpuBackend : public BasicBackend<Scalar> {
+    static_assert(std::is_same_v<Scalar, double> || std::is_same_v<Scalar, Complex>,
+                  "BasicCpuBackend: Scalar is double or std::complex<double>");
+    static constexpr bool kComplex = std::is_same_v<Scalar, Complex>;
 
-template <>
-class BasicCpuBackend<Complex> : public BasicBackend<Complex> {
 public:
     [[nodiscard]] MemorySpace memory_space() const override {
         return MemorySpace::Host;
     }
     [[nodiscard]] std::string description() const override {
-        return "CpuBackend(OpenMP)";
+        return kComplex ? "CpuBackend(OpenMP)" : "CpuBackend<double>(OpenMP)";
     }
 
     // 64-byte aligned alloc keeps level-1 BLAS happy on AVX-512 nodes.
-    [[nodiscard]] Complex* allocate(std::size_t n) const override {
+    [[nodiscard]] Scalar* allocate(std::size_t n) const override {
         if (n == 0) return nullptr;
         void* p = nullptr;
 #if defined(_ISOC11_SOURCE) || defined(__APPLE__) || defined(_WIN32)
         p = std::aligned_alloc(
-            64, ((n * sizeof(Complex) + 63) / 64) * 64);
+            64, ((n * sizeof(Scalar) + 63) / 64) * 64);
 #else
-        if (posix_memalign(&p, 64, n * sizeof(Complex)) != 0) p = nullptr;
+        if (posix_memalign(&p, 64, n * sizeof(Scalar)) != 0) p = nullptr;
 #endif
         if (!p) throw std::bad_alloc{};
-        return static_cast<Complex*>(p);
+        return static_cast<Scalar*>(p);
     }
-    void deallocate(Complex* p) const noexcept override {
+    void deallocate(Scalar* p) const noexcept override {
         std::free(p);
     }
-    void fill_zero(Complex* p, std::size_t n) const override {
+    void fill_zero(Scalar* p, std::size_t n) const override {
         if (n == 0 || !p) return;
         // Parallel first touch so Krylov vectors are distributed
         // across NUMA nodes with the same static chunking the BLAS-1 and
@@ -102,13 +105,13 @@ public:
         // calling thread's node).
         #pragma omp parallel for schedule(static) if(n > 65536)
         for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            p[i] = Complex{0.0, 0.0};
+            p[i] = Scalar{};
         }
     }
-    void copy(const Complex* src, Complex* dst, std::size_t n) const override {
+    void copy(const Scalar* src, Scalar* dst, std::size_t n) const override {
         if (n == 0) return;
         if (n <= 65536) {
-            std::memcpy(dst, src, n * sizeof(Complex));
+            std::memcpy(dst, src, n * sizeof(Scalar));
             return;
         }
         // In parallel, with the static split the kernels use (a serial memcpy of a 3e7-state
@@ -122,14 +125,14 @@ public:
             const std::size_t t = 0, nt = 1;
 #endif
             const std::size_t i0 = n * t / nt, i1 = n * (t + 1) / nt;
-            if (i1 > i0) std::memcpy(dst + i0, src + i0, (i1 - i0) * sizeof(Complex));
+            if (i1 > i0) std::memcpy(dst + i0, src + i0, (i1 - i0) * sizeof(Scalar));
         }
     }
-    void copy_from_host(const Complex* host_src, Complex* dst,
+    void copy_from_host(const Scalar* host_src, Scalar* dst,
                         std::size_t n) const override {
         copy(host_src, dst, n);
     }
-    void copy_to_host(const Complex* src, Complex* host_dst,
+    void copy_to_host(const Scalar* src, Scalar* host_dst,
                       std::size_t n) const override {
         copy(src, host_dst, n);
     }
@@ -139,7 +142,7 @@ public:
     // These kernels stream at memory bandwidth, which BLAS would not
     // improve, and their static chunking matches fill_zero's first touch.
     // -----------------------------------------------------------------
-    void axpy(Complex alpha, const Complex* x, Complex* y,
+    void axpy(Scalar alpha, const Scalar* x, Scalar* y,
               std::size_t n) const override {
         if (n == 0) return;
         #pragma omp parallel for schedule(static) if(n > 8192)
@@ -147,32 +150,40 @@ public:
             y[i] += alpha * x[i];
         }
     }
-    void scale(Complex alpha, Complex* x, std::size_t n) const override {
+    void scale(Scalar alpha, Scalar* x, std::size_t n) const override {
         if (n == 0) return;
         #pragma omp parallel for schedule(static) if(n > 8192)
         for (long long i = 0; i < static_cast<long long>(n); ++i) {
             x[i] *= alpha;
         }
     }
-    [[nodiscard]] Complex dot(const Complex* x, const Complex* y,
-                              std::size_t n) const override {
-        if (n == 0) return Complex{0.0, 0.0};
-        return ordered_sum<Complex>(n, [&](std::size_t i) {
-            const Complex xc = std::conj(x[i]);
-            const Complex y_  = y[i];
-            return Complex(xc.real() * y_.real() - xc.imag() * y_.imag(),
-                           xc.real() * y_.imag() + xc.imag() * y_.real());
+    [[nodiscard]] Scalar dot(const Scalar* x, const Scalar* y,
+                             std::size_t n) const override {
+        if (n == 0) return Scalar{};
+        return ordered_sum<Scalar>(n, [&](std::size_t i) -> Scalar {
+            if constexpr (kComplex) {
+                const Complex xc = std::conj(x[i]);
+                const Complex y_  = y[i];
+                return Complex(xc.real() * y_.real() - xc.imag() * y_.imag(),
+                               xc.real() * y_.imag() + xc.imag() * y_.real());
+            } else {
+                return x[i] * y[i];
+            }
         });
     }
-    [[nodiscard]] double nrm2(const Complex* x, std::size_t n) const override {
+    [[nodiscard]] double nrm2(const Scalar* x, std::size_t n) const override {
         if (n == 0) return 0.0;
         return std::sqrt(ordered_sum<double>(n, [&](std::size_t i) {
-            const Complex v = x[i];
-            return v.real() * v.real() + v.imag() * v.imag();
+            if constexpr (kComplex) {
+                const Complex v = x[i];
+                return v.real() * v.real() + v.imag() * v.imag();
+            } else {
+                return x[i] * x[i];
+            }
         }));
     }
-    void axpby(Complex alpha, const Complex* x,
-               Complex beta,  Complex* y, std::size_t n) const override {
+    void axpby(Scalar alpha, const Scalar* x,
+               Scalar beta,  Scalar* y, std::size_t n) const override {
         if (n == 0) return;
         #pragma omp parallel for schedule(static) if(n > 8192)
         for (long long i = 0; i < static_cast<long long>(n); ++i) {
@@ -184,36 +195,46 @@ public:
     // Fused Lanczos primitives: single streaming pass.
     // `axpy_dot_local` / `axpy_nrm2sq_local` are the local pieces.
     // ----------------------------------------------------------------
-    [[nodiscard]] Complex axpy_dot_local(Complex alpha, const Complex* x, Complex* y,
-                                         const Complex* z, std::size_t n) const {
-        if (n == 0) return Complex{0.0, 0.0};
-        const double ar = alpha.real(), ai = alpha.imag();
-        return ordered_sum<Complex>(n, [&](std::size_t i) {
-            const Complex xi = x[i];
-            const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
-            const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
-            y[i] = Complex(yr, yi);
-            const Complex zi = z[i];
-            return Complex(zi.real() * yr + zi.imag() * yi, zi.real() * yi - zi.imag() * yr);
+    [[nodiscard]] Scalar axpy_dot_local(Scalar alpha, const Scalar* x, Scalar* y,
+                                        const Scalar* z, std::size_t n) const {
+        if (n == 0) return Scalar{};
+        return ordered_sum<Scalar>(n, [&](std::size_t i) -> Scalar {
+            if constexpr (kComplex) {
+                const double ar = alpha.real(), ai = alpha.imag();
+                const Complex xi = x[i];
+                const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
+                const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
+                y[i] = Complex(yr, yi);
+                const Complex zi = z[i];
+                return Complex(zi.real() * yr + zi.imag() * yi, zi.real() * yi - zi.imag() * yr);
+            } else {
+                y[i] += alpha * x[i];
+                return z[i] * y[i];
+            }
         });
     }
-    [[nodiscard]] double axpy_nrm2sq_local(Complex alpha, const Complex* x, Complex* y,
+    [[nodiscard]] double axpy_nrm2sq_local(Scalar alpha, const Scalar* x, Scalar* y,
                                            std::size_t n) const {
         if (n == 0) return 0.0;
-        const double ar = alpha.real(), ai = alpha.imag();
         return ordered_sum<double>(n, [&](std::size_t i) {
-            const Complex xi = x[i];
-            const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
-            const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
-            y[i] = Complex(yr, yi);
-            return yr * yr + yi * yi;
+            if constexpr (kComplex) {
+                const double ar = alpha.real(), ai = alpha.imag();
+                const Complex xi = x[i];
+                const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
+                const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
+                y[i] = Complex(yr, yi);
+                return yr * yr + yi * yi;
+            } else {
+                y[i] += alpha * x[i];
+                return y[i] * y[i];
+            }
         });
     }
-    [[nodiscard]] Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
-                                   const Complex* z, std::size_t n) const override {
+    [[nodiscard]] Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y,
+                                  const Scalar* z, std::size_t n) const override {
         return axpy_dot_local(alpha, x, y, z, n);
     }
-    [[nodiscard]] double axpy_nrm2(Complex alpha, const Complex* x, Complex* y,
+    [[nodiscard]] double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y,
                                    std::size_t n) const override {
         return std::sqrt(axpy_nrm2sq_local(alpha, x, y, n));
     }
@@ -230,16 +251,16 @@ public:
     //
     // axpy_many: v += sum_k alphas[k] basis[k], each element accumulated in k order.
     // ----------------------------------------------------------------
-    static constexpr std::size_t kManyChunk = 2048;   // 32 KiB of v
+    static constexpr std::size_t kManyChunk = 2048;   // 32 KiB of complex v
 
-    void dot_many(const Complex* const* basis,
-                  std::size_t           num_basis,
-                  const Complex*        v,
-                  std::size_t           n,
-                  Complex*              coeffs_out) const override {
+    void dot_many(const Scalar* const* basis,
+                  std::size_t          num_basis,
+                  const Scalar*        v,
+                  std::size_t          n,
+                  Scalar*              coeffs_out) const override {
         if (num_basis == 0) return;
         if (n == 0) {
-            for (std::size_t k = 0; k < num_basis; ++k) coeffs_out[k] = {0, 0};
+            for (std::size_t k = 0; k < num_basis; ++k) coeffs_out[k] = Scalar{};
             return;
         }
 
@@ -281,17 +302,24 @@ public:
                 const std::size_t len = std::min(kManyChunk, n - i0);
                 const double* x = reinterpret_cast<const double*>(v + i0);
                 for (std::size_t k = 0; k < num_basis; ++k) {
-                    // <basis[k], v> = sum_i conj(b_i) v_i = sum_i (br vr + bi vi) + i (br vi - bi vr)
                     const double* b = reinterpret_cast<const double*>(basis[k] + i0);
-                    double sr = 0.0, si = 0.0;
-                    #pragma omp simd reduction(+ : sr, si)
-                    for (std::size_t i = 0; i < len; ++i) {
-                        const double br = b[2 * i], bi = b[2 * i + 1], vr = x[2 * i], vi = x[2 * i + 1];
-                        sr += br * vr + bi * vi;
-                        si += br * vi - bi * vr;
+                    if constexpr (kComplex) {
+                        // <b, v> = sum_i conj(b_i) v_i = sum_i (br vr + bi vi) + i (br vi - bi vr)
+                        double sr = 0.0, si = 0.0;
+                        #pragma omp simd reduction(+ : sr, si)
+                        for (std::size_t i = 0; i < len; ++i) {
+                            const double br = b[2 * i], bi = b[2 * i + 1], vr = x[2 * i], vi = x[2 * i + 1];
+                            sr += br * vr + bi * vi;
+                            si += br * vi - bi * vr;
+                        }
+                        re[k] += sr;
+                        im[k] += si;
+                    } else {
+                        double s = 0.0;
+                        #pragma omp simd reduction(+ : s)
+                        for (std::size_t i = 0; i < len; ++i) s += b[i] * x[i];
+                        re[k] += s;
                     }
-                    re[k] += sr;
-                    im[k] += si;
                 }
             }
         }
@@ -302,15 +330,16 @@ public:
                 r += partial_re[t * num_basis + k];
                 i += partial_im[t * num_basis + k];
             }
-            coeffs_out[k] = Complex(r, i);
+            if constexpr (kComplex) coeffs_out[k] = Complex(r, i);
+            else                    coeffs_out[k] = r;
         }
     }
 
-    void axpy_many(const Complex*        alphas,
-                   const Complex* const* basis,
-                   std::size_t           num_basis,
-                   Complex*              v,
-                   std::size_t           n) const override {
+    void axpy_many(const Scalar*        alphas,
+                   const Scalar* const* basis,
+                   std::size_t          num_basis,
+                   Scalar*              v,
+                   std::size_t          n) const override {
         if (num_basis == 0 || n == 0) return;
         const long long chunks = static_cast<long long>((n + kManyChunk - 1) / kManyChunk);
         #pragma omp parallel for schedule(static) if(n > 8192)
@@ -319,13 +348,19 @@ public:
             const std::size_t len = std::min(kManyChunk, n - i0);
             double* y = reinterpret_cast<double*>(v + i0);
             for (std::size_t k = 0; k < num_basis; ++k) {
-                const double ar = alphas[k].real(), ai = alphas[k].imag();
                 const double* b = reinterpret_cast<const double*>(basis[k] + i0);
-                #pragma omp simd
-                for (std::size_t i = 0; i < len; ++i) {
-                    const double br = b[2 * i], bi = b[2 * i + 1];
-                    y[2 * i]     += ar * br - ai * bi;
-                    y[2 * i + 1] += ar * bi + ai * br;
+                if constexpr (kComplex) {
+                    const double ar = alphas[k].real(), ai = alphas[k].imag();
+                    #pragma omp simd
+                    for (std::size_t i = 0; i < len; ++i) {
+                        const double br = b[2 * i], bi = b[2 * i + 1];
+                        y[2 * i]     += ar * br - ai * bi;
+                        y[2 * i + 1] += ar * bi + ai * br;
+                    }
+                } else {
+                    const double a = alphas[k];
+                    #pragma omp simd
+                    for (std::size_t i = 0; i < len; ++i) y[i] += a * b[i];
                 }
             }
         }
@@ -336,11 +371,11 @@ public:
     // -----------------------------------------------------------------
     void gemm(char opA, char opB,
               std::size_t m, std::size_t n, std::size_t k,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              const Complex* B, std::size_t ldb,
-              Complex beta,
-              Complex* C, std::size_t ldc) const override {
+              Scalar alpha,
+              const Scalar* A, std::size_t lda,
+              const Scalar* B, std::size_t ldb,
+              Scalar beta,
+              Scalar* C, std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
         // cblas takes int: a dimension past it would wrap into a call BLAS skips or misreads.
         for (const std::size_t d : {m, n, k, lda, ldb, ldc})
@@ -349,11 +384,19 @@ public:
                                         + " exceeds the 32-bit BLAS index range");
         const CBLAS_TRANSPOSE tA = trans_(opA);
         const CBLAS_TRANSPOSE tB = trans_(opB);
-        cblas_zgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
-                    static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                    &alpha, A, static_cast<int>(lda),
-                            B, static_cast<int>(ldb),
-                    &beta,  C, static_cast<int>(ldc));
+        if constexpr (kComplex) {
+            cblas_zgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
+                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                        &alpha, A, static_cast<int>(lda),
+                                B, static_cast<int>(ldb),
+                        &beta,  C, static_cast<int>(ldc));
+        } else {
+            cblas_dgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
+                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                        alpha, A, static_cast<int>(lda),
+                               B, static_cast<int>(ldb),
+                        beta,  C, static_cast<int>(ldc));
+        }
     }
 
 private:
@@ -361,14 +404,13 @@ private:
         switch (op) {
             case 'N': case 'n': return CblasNoTrans;
             case 'T': case 't': return CblasTrans;
-            case 'C': case 'c': case 'H': case 'h': return CblasConjTrans;
+            case 'C': case 'c': case 'H': case 'h': return CblasConjTrans;   // dgemm: the transpose
             default:
                 throw std::invalid_argument(
                     std::string("CpuBackend: invalid trans op '") + op + "'");
         }
     }
 
-private:
     // Persistent per-thread accumulation scratch for `dot_many`. Sized
     // lazily on first call, grow-only across the lifetime of this backend. See
     // the comment block in `dot_many` for the concurrency contract.
