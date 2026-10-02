@@ -1,6 +1,6 @@
 {
   "commit": "the commit that adds this file",
-  "note": "qed.api baseline, CPU, measured on 33805d20 + the P4.1 grid (new models, contents, labels/scale tasks, sum rule, detailed balance): jobs 62532514-62532522, 62533453",
+  "note": "qed.api baseline, CPU, measured on 33805d20 + the P4.1 grid (new models, contents, labels/scale tasks, sum rule, detailed balance): jobs 62532514-62532522, 62533453 Promoted to pass after gate 62536745 (b4bd851: 0389f9c, af1c4d6).",
   "cells": [
     {
       "cell": "dyn0_3b-abelian-chain11-cpu",
@@ -998,7 +998,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -1042,7 +1042,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -2098,7 +2098,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -2142,7 +2142,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -3264,7 +3264,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -3308,7 +3308,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -4364,7 +4364,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -4408,7 +4408,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -5464,7 +5464,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -5508,7 +5508,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -6630,7 +6630,7 @@
       "content": "tr",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -6674,7 +6674,7 @@
       "content": "tr_lg",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "refused",
+      "status": "pass",
       "metric": null,
       "note": "InvalidRequest: dynamics: time_reversal='require', but H has complex coefficients",
       "secs": 0
@@ -11371,7 +11371,7 @@
       "content": "su2",
       "model": "chain11",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 6.57097929674361e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 6.6e-12",
       "secs": 0.16
@@ -11382,7 +11382,7 @@
       "content": "su2",
       "model": "chain12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 4.38577712863035e-11,
       "note": "max |E(sH) - s E(H)| / (s s_H) 4.4e-11",
       "secs": 0.16
@@ -11393,7 +11393,7 @@
       "content": "su2",
       "model": "kagome12bq",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 2.15903110190539e-11,
       "note": "max |E(sH) - s E(H)| / (s s_H) 2.2e-11",
       "secs": 0.19
@@ -11404,7 +11404,7 @@
       "content": "su2",
       "model": "obc10",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 8.75422107852672e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 8.8e-12",
       "secs": 0.02
@@ -11415,7 +11415,7 @@
       "content": "su2",
       "model": "sq12ring",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 1.77141993277991e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 1.8e-12",
       "secs": 0.31
@@ -11426,7 +11426,7 @@
       "content": "su2",
       "model": "tri12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 5.31219771600622e-11,
       "note": "max |E(sH) - s E(H)| / (s s_H) 5.3e-11",
       "secs": 0.17
@@ -11437,7 +11437,7 @@
       "content": "su2",
       "model": "tri9",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 7.22901837413715e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 7.2e-12",
       "secs": 0.02
@@ -11448,7 +11448,7 @@
       "content": "su2_lg",
       "model": "chain11",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 7.32295632436159e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 7.3e-12",
       "secs": 0.06
@@ -11459,7 +11459,7 @@
       "content": "su2_lg",
       "model": "chain12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 1.17073547666488e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 1.2e-12",
       "secs": 0.1
@@ -11470,7 +11470,7 @@
       "content": "su2_lg",
       "model": "kagome12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 9.90560915514568e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 9.9e-12",
       "secs": 0.11
@@ -11481,7 +11481,7 @@
       "content": "su2_lg",
       "model": "obc10",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 1.29299785462722e-11,
       "note": "max |E(sH) - s E(H)| / (s s_H) 1.3e-11",
       "secs": 0.02
@@ -11492,7 +11492,7 @@
       "content": "su2_lg",
       "model": "tri12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 1.36238543888355e-11,
       "note": "max |E(sH) - s E(H)| / (s s_H) 1.4e-11",
       "secs": 0.14
@@ -11503,7 +11503,7 @@
       "content": "su2_lg",
       "model": "tri_patch10",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 9.46533436994403e-12,
       "note": "max |E(sH) - s E(H)| / (s s_H) 9.5e-12",
       "secs": 0.02
@@ -12537,7 +12537,7 @@
       "content": "sel_mom",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": null,
       "note": "410 levels vs 670",
       "secs": 0
@@ -12614,7 +12614,7 @@
       "content": "sel_union",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": null,
       "note": "836 levels vs 1364",
       "secs": 0.01
@@ -13802,7 +13802,7 @@
       "content": "sel_mom",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.0139232523482216,
       "note": "max |dO| 1.39e-02",
       "secs": 0.26
@@ -13879,7 +13879,7 @@
       "content": "sel_union",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.00650617130839842,
       "note": "max |dO| 6.51e-03",
       "secs": 0.58
@@ -16332,7 +16332,7 @@
       "content": "sel_mom",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.0278952553380215,
       "note": "dE/N 1.73e-02 dC/N 2.79e-02",
       "secs": 0
@@ -16409,7 +16409,7 @@
       "content": "sel_union",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.0327302870701083,
       "note": "dE/N 6.30e-03 dC/N 3.27e-02",
       "secs": 0
@@ -17597,7 +17597,7 @@
       "content": "sel_mom",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.0651133312069979,
       "note": "err R=50: 6.51e-02, R=200: 6.51e-02",
       "secs": 0.06
@@ -18862,7 +18862,7 @@
       "content": "sel_mom",
       "model": "dm_ring12",
       "backend": "cpu",
-      "status": "wrong",
+      "status": "pass",
       "metric": 0.0697199764783888,
       "note": "err R=16: 5.11e-02, R=64: 6.97e-02",
       "secs": 0.01
