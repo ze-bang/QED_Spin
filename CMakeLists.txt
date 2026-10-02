@@ -159,7 +159,7 @@ if(BUILD_ED_TESTS)
     # The available-memory probe honours the job's cgroup limit (Krylov basis caps).
     ed_add_test(test_mem_guard                  tests/unit/test_mem_guard.cpp)
 
-    # Lattice generators + HamiltonianBuilder.
+    # Lattice generators.
     ed_add_test(test_input_library              tests/unit/test_input_library.cpp)
     # Symmetry engine: compiled byte-LUT group action bit-identity
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp)
@@ -175,10 +175,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp)
-    ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp)
-    target_compile_definitions(test_dssf_operator_spec PRIVATE
-        ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"
-    )
 
     # Lock down the programmatic symmetry DSL (ed::sym::Permutation
     # algebra + generate_group closure).

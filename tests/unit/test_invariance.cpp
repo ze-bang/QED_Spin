@@ -17,7 +17,7 @@
 #include "common/catch2_harness.h"
 
 #include <ed/core/errors.h>
-#include <ed/input/hamiltonian_builder.h>
+#include "common/model_records.h"
 #include <ed/input/lattice.h>
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
@@ -63,34 +63,30 @@ void cartesian_bond(Operator& H, std::uint64_t i, std::uint64_t j, double J) {
 }
 
 std::vector<Model> zoo() {
-    using ed::input::HamiltonianBuilder;
+    namespace R = ed_tests::records;
     std::vector<Model> z;
     const auto bonds = ring();
     auto built = [&](const std::string& name, auto&& fill) {
-        HamiltonianBuilder b(N);
-        fill(b);
-        z.push_back({name, b.to_operator()});
+        auto H = records();
+        fill(*H);
+        z.push_back({name, H});
     };
-    built("heisenberg", [&](HamiltonianBuilder& b) { b.heisenberg(bonds, 1.0); });
-    built("xxz", [&](HamiltonianBuilder& b) { b.xxz(bonds, 1.0, 0.5); });
-    built("xyz", [&](HamiltonianBuilder& b) { b.xyz(bonds, 1.0, 0.7, 0.4); });
-    built("heisenberg+zeeman_z", [&](HamiltonianBuilder& b) { b.heisenberg(bonds, 1.0).zeeman({0.0, 0.0, 0.3}); });
-    built("heisenberg+zeeman_x", [&](HamiltonianBuilder& b) { b.heisenberg(bonds, 1.0).zeeman({0.3, 0.0, 0.0}); });
-    built("heisenberg+zeeman_y", [&](HamiltonianBuilder& b) { b.heisenberg(bonds, 1.0).zeeman({0.0, 0.3, 0.0}); });
-    built("tfim", [&](HamiltonianBuilder& b) { b.transverse_field_ising(bonds, 1.0, 0.7); });
-    built("heisenberg+dm_x", [&](HamiltonianBuilder& b) {
-        b.heisenberg(bonds, 1.0).dm(bonds, std::vector<std::array<double, 3>>(bonds.size(), {0.3, 0.0, 0.0}));
-    });
+    built("heisenberg", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); });
+    built("xxz", [&](Operator& H) { R::xxz(H, bonds, 1.0, 0.5); });
+    built("xyz", [&](Operator& H) { R::xyz(H, bonds, 1.0, 0.7, 0.4); });
+    built("heisenberg+zeeman_z", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.0, 0.0, 0.3); });
+    built("heisenberg+zeeman_x", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.3, 0.0, 0.0); });
+    built("heisenberg+zeeman_y", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.0, 0.3, 0.0); });
+    built("tfim", [&](Operator& H) { R::transverse_field_ising(H, bonds, 1.0, 0.7); });
+    built("heisenberg+dm_x", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::dm(H, bonds, 0.3, 0.0, 0.0); });
     // D_z conserves S^z, but the builder writes it with S+S+ / S-S- records that cancel.
-    built("heisenberg+dm_z", [&](HamiltonianBuilder& b) {
-        b.heisenberg(bonds, 1.0).dm(bonds, std::vector<std::array<double, 3>>(bonds.size(), {0.0, 0.0, 0.3}));
-    });
+    built("heisenberg+dm_z", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::dm(H, bonds, 0.0, 0.0, 0.3); });
     {
         const auto hc = ed::input::lattice::honeycomb(2, 2, true);
         std::vector<std::pair<std::size_t, std::size_t>> hb;
         std::vector<int> axis;
         for (const auto& bd : hc.nn_bonds) { hb.emplace_back(bd.i, bd.j); axis.push_back(bd.bond_type % 3); }
-        built("kitaev_honeycomb", [&](HamiltonianBuilder& b) { b.kitaev(hb, axis, 1.0); });
+        built("kitaev_honeycomb", [&](Operator& H) { R::kitaev(H, hb, axis, 1.0); });
     }
     {   // the Heisenberg ring in Cartesian form: U(1) and SU(2), which the records hide
         auto H = records();
@@ -108,9 +104,8 @@ std::vector<Model> zoo() {
         z.push_back({"s_tot_squared", H});
     }
     {   // Heisenberg plus the scalar chirality S_a.(S_b x S_c) on consecutive triples
-        HamiltonianBuilder b(N);
-        b.heisenberg(bonds, 1.0);
-        auto H = b.to_operator();
+        auto H = records();
+        R::heisenberg(*H, bonds, 1.0);
         const int pattern[6][3] = {{0, 1, 2}, {2, 0, 1}, {1, 2, 0}, {1, 0, 2}, {2, 1, 0}, {0, 2, 1}};
         for (std::uint64_t a = 0; a < N; ++a) {
             const std::uint64_t s[3] = {a, (a + 1) % N, (a + 2) % N};

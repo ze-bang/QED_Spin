@@ -13,9 +13,7 @@ set(ED_ENGINE_SOURCES
     src/ops/program.cpp
     src/basis/group.cpp
     src/basis/irreps.cpp
-    src/dssf/operator_spec.cpp
     src/input/lattice.cpp
-    src/input/hamiltonian_builder.cpp
     src/engine/oftlm.cpp
     src/engine/context.cpp
     src/engine/block_solve.cpp

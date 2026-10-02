@@ -82,6 +82,18 @@ Breaking changes so far:
   component), `sublattice_filter` becomes `sublattice` (one index), and `single_obs_only` is
   the only behaviour. Names carry the one component (`Sz_q_...`, `Sp_q_...`); `sublattice`
   emits each sublattice once.
+- **`qed.input.HamiltonianBuilder` and `qed.dssf` are Python** (on `qed.Operator`): the same
+  methods, arguments, records and names. New: `ring_exchange(plaquettes, K)` works (it raised):
+  K (P + P^-1) with P the cyclic exchange of the four spins; `ss_ss(pairs, K)` adds
+  K (S_i.S_j)(S_k.S_l) per pair of bonds (its Hermitian part when they share a site). A bond
+  method refused for one bond now adds none of them (it kept the bonds before it). `qed.dssf`
+  refuses what it used to misread: a Q that is not a 3-vector, a component outside 0..2, a
+  `unit_cell_size` of 0 or a `sublattice` not below it, and a positions file that does not list
+  exactly `num_sites` sites of x y z (missing sites sat at the origin, two-column lines were
+  skipped); `sublattice` in the xyz basis builds the Cartesian component (it built S+). A
+  negative or non-integer site raises TypeError. The C++ `ed::input::HamiltonianBuilder`
+  (`<ed/input/hamiltonian_builder.h>`) and `ed::dssf` (`<ed/dssf/operator_spec.h>`,
+  `<ed/ops/operator_builders.h>`, `<ed/ops/operator_types_detail.h>`) are gone.
 - **Removed:**
   - `Operator.conserves_sz`;
   - `qed.lattice` (`TriangularSupercell` and its label helpers);

@@ -30,7 +30,7 @@
 
 #include <ed/basis/rep_sector.h>
 #include <ed/core/select_backend.h>
-#include <ed/input/hamiltonian_builder.h>
+#include "common/model_records.h"
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
 #include <ed/ops/program.h>
@@ -108,22 +108,18 @@ MaskedOperator translation_symmetrised(const MaskedOperator& R) {
 }
 
 std::vector<Model> zoo() {
-    using ed::input::HamiltonianBuilder;
+    namespace R = ed_tests::records;
     std::vector<Model> z;
     auto built = [&](const std::string& name, bool u1, bool flip, bool dih, auto&& fill) {
-        HamiltonianBuilder b(N);
-        fill(b);
-        z.push_back({name, b.to_operator(), u1, flip, dih});
+        auto H = std::make_shared<Operator>(N, 0.5f);
+        fill(*H);
+        z.push_back({name, H, u1, flip, dih});
     };
-    built("j1j2", true, true, true, [](HamiltonianBuilder& b) { b.heisenberg(ring(1), 1.0).heisenberg(ring(2), 0.35); });
-    built("xxz+hx", false, true, true, [](HamiltonianBuilder& b) { b.xxz(ring(1), 1.0, 0.6).zeeman({0.4, 0.0, 0.0}); });
-    built("xyz", false, true, true, [](HamiltonianBuilder& b) { b.xyz(ring(1), 1.0, 0.7, 0.4); });
-    built("dm_z", true, false, false, [](HamiltonianBuilder& b) {
-        b.heisenberg(ring(1), 1.0).dm(ring(1), std::vector<std::array<double, 3>>(N, {0.0, 0.0, 0.3}));
-    });
-    built("dm_x", false, false, false, [](HamiltonianBuilder& b) {
-        b.heisenberg(ring(1), 1.0).dm(ring(1), std::vector<std::array<double, 3>>(N, {0.3, 0.0, 0.0}));
-    });
+    built("j1j2", true, true, true, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::heisenberg(H, ring(2), 0.35); });
+    built("xxz+hx", false, true, true, [](Operator& H) { R::xxz(H, ring(1), 1.0, 0.6); R::zeeman(H, 0.4, 0.0, 0.0); });
+    built("xyz", false, true, true, [](Operator& H) { R::xyz(H, ring(1), 1.0, 0.7, 0.4); });
+    built("dm_z", true, false, false, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::dm(H, ring(1), 0.0, 0.0, 0.3); });
+    built("dm_x", false, false, false, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::dm(H, ring(1), 0.3, 0.0, 0.0); });
     {   // the Cartesian Heisenberg ring: S+S+ / S-S- records that cancel
         auto H = std::make_shared<Operator>(N, 0.5f);
         const double q = 0.25;
@@ -137,9 +133,8 @@ std::vector<Model> zoo() {
         z.push_back({"heisenberg_cartesian", H, true, true, true});
     }
     {   // J1 + the scalar chirality on consecutive triples (complex, three-body)
-        HamiltonianBuilder b(N);
-        b.heisenberg(ring(1), 1.0);
-        auto H = b.to_operator();
+        auto H = std::make_shared<Operator>(N, 0.5f);
+        ed_tests::records::heisenberg(*H, ring(1), 1.0);
         const int pattern[6][3] = {{0, 1, 2}, {2, 0, 1}, {1, 2, 0}, {1, 0, 2}, {2, 1, 0}, {0, 2, 1}};
         for (std::uint64_t a = 0; a < N; ++a) {
             const std::uint64_t s[3] = {a, (a + 1) % N, (a + 2) % N};

@@ -3,9 +3,9 @@
 //
 //   * Operator: the spin-1/2 Hamiltonian / observable builder (terms,
 //     apply, and the term iterators symmetry discovery reads);
-//   * input (input.cpp): lattices and the Hamiltonian DSL;
+//   * input (input.cpp): the lattices (the builder and qed.dssf are Python);
 //   * sectors (sectors.cpp): the symmetry-sector verbs behind qed._verbs;
-//   * dssf, symmetry: observable assembly and site-permutation helpers;
+//   * symmetry: site-permutation helpers;
 //   * the environment registry (env_*) and build / device probes;
 //   * the log bridge (log_*) behind qed.set_log_level, and the translation of the
 //     ed:: error types (ed/core/errors.h) into qed.errors.
@@ -24,7 +24,6 @@
 #include <ed/core/errors.h>
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
-#include <ed/dssf/operator_spec.h>
 #include <ed/ops/algebra.h>
 #include <ed/ops/invariance.h>
 #include <ed/basis/group.h>
@@ -271,10 +270,8 @@ PYBIND11_MODULE(_core, m) {
     m.attr("OP_SMINUS") = py::int_(1);
     m.attr("OP_SZ")     = py::int_(2);
 
-    // Standalone ed_input C++ library bindings (lattice generators +
-    // HamiltonianBuilder + low-level file writers). Mounted under
-    // `qed._core.input`; re-exported as `qed.input` from
-    // the Python facade.
+    // The ed::input lattice generators, mounted under `qed._core.input` and re-exported as
+    // `qed.input` with the Python HamiltonianBuilder.
     bind_input(m);
 
 
@@ -496,98 +493,6 @@ PYBIND11_MODULE(_core, m) {
           "Per permutation: [H, U_g] = 0, compared on H's canonical terms (exact, no matvec)?");
 
     bind_sectors(m);
-
-    // ed::dssf -- structure-factor observable assembly.
-    auto m_dssf = m.def_submodule("dssf",
-        "Bindings for the ed::dssf C++ library: assemble the momentum-resolved spin "
-        "operators of DSSF/SSSF evaluations, one per (Q, component).");
-
-    py::class_<ed::dssf::OperatorSpec>(m_dssf, "OperatorSpec", R"pbdoc(
-        Parameter object for ``build_observables``.
-
-        Mirrors the C++ ``ed::dssf::OperatorSpec`` 1:1; see
-        ``include/ed/dssf/operator_spec.h`` for the field-by-field
-        documentation. Construct the spec, set the fields you care about,
-        then pass it to :func:`build_observables`.
-    )pbdoc")
-        .def(py::init<>())
-        .def_readwrite("operator_type",     &ed::dssf::OperatorSpec::operator_type)
-        .def_readwrite("basis",             &ed::dssf::OperatorSpec::basis)
-        .def_readwrite("components",        &ed::dssf::OperatorSpec::components)
-        .def_readwrite("momentum_points",   &ed::dssf::OperatorSpec::momentum_points)
-        .def_readwrite("polarization",      &ed::dssf::OperatorSpec::polarization)
-        .def_readwrite("theta",             &ed::dssf::OperatorSpec::theta)
-        .def_readwrite("unit_cell_size",    &ed::dssf::OperatorSpec::unit_cell_size)
-        .def_readwrite("num_sites",         &ed::dssf::OperatorSpec::num_sites)
-        .def_readwrite("positions_file",    &ed::dssf::OperatorSpec::positions_file)
-        .def_readwrite("sublattice",        &ed::dssf::OperatorSpec::sublattice)
-        .def("__repr__", [](const ed::dssf::OperatorSpec& s) {
-            return "<qed.dssf.OperatorSpec operator_type='" +
-                   s.operator_type + "' basis='" + s.basis +
-                   "' num_sites=" + std::to_string(s.num_sites) +
-                   " momenta=" + std::to_string(s.momentum_points.size()) +
-                   " components=" + std::to_string(s.components.size()) +
-                   ">";
-        });
-
-    py::class_<ed::dssf::Observables>(m_dssf, "Observables", R"pbdoc(
-        Result of :func:`build_observables`: two parallel lists of equal length,
-
-        - ``operators`` (list[Operator]): one operator per (Q, component), to pass
-          to :func:`qed.dynamics` or :func:`qed.expect`;
-        - ``names`` (list[str]): the byte-stable name of each.
-    )pbdoc")
-        .def_readonly("operators", &ed::dssf::Observables::operators)
-        .def_readonly("names", &ed::dssf::Observables::names)
-        .def("__len__", [](const ed::dssf::Observables& o) {
-            return o.names.size();
-        });
-
-    m_dssf.def("build_observables",
-        &ed::dssf::build_observables,
-        py::arg("spec"),
-        R"pbdoc(
-        Build the DSSF/SSSF observables requested by ``spec``.
-
-        The single source of DSSF/SSSF observable names and ordering.
-
-        Returns
-        -------
-        Observables
-            Parallel lists of operators / names. Length is the number of
-            observables the builder emitted (operator_type x momentum_points x
-            components x sublattices; two per entry for the transverse types).
-
-        Raises
-        ------
-        ValueError
-            On unrecognized ``operator_type`` or shape-mismatched inputs
-            (see ``ed::dssf::build_observables`` documentation).
-        )pbdoc");
-
-    m_dssf.def("compute_transverse_bases",
-        [](const std::vector<double>& Q,
-           const std::vector<double>& polarization) {
-            const auto [e1, e2] = ed::dssf::compute_transverse_bases(Q, polarization);
-            return py::make_tuple(
-                std::vector<double>{e1[0], e1[1], e1[2]},
-                std::vector<double>{e2[0], e2[1], e2[2]});
-        },
-        py::arg("Q"), py::arg("polarization"),
-        R"pbdoc(
-        Compute the (e1, e2) basis used for transverse-component DSSF
-        operators at one momentum point.
-
-        - ``e1`` is the polarization vector itself (observables named ``..._NSF``).
-        - ``e2 = normalize(Q × polarization)`` (observables named ``..._SF``), with
-          a fallback to ``{y, polarization}`` or ``{x, polarization}`` when ``Q``
-          is parallel to ``polarization``.
-
-        Returns
-        -------
-        (e1, e2) : tuple[list[float], list[float]]
-            Two unit 3-vectors.
-        )pbdoc");
 
     // ed::sym -- programmatic site-permutation symmetry DSL.
     auto m_sym = m.def_submodule("symmetry",

@@ -59,31 +59,6 @@ struct Plaquette {
     int plaquette_type = 0;
 };
 
-// Building blocks that the Hamiltonian builder accumulates.
-struct OneBodyTerm {
-    Op op;
-    std::size_t site;
-    Complex coeff;
-};
-
-struct TwoBodyTerm {
-    Op op_i;
-    std::size_t site_i;
-    Op op_j;
-    std::size_t site_j;
-    Complex coeff;
-};
-
-struct ThreeBodyTerm {
-    Op op_i;
-    std::size_t site_i;
-    Op op_j;
-    std::size_t site_j;
-    Op op_k;
-    std::size_t site_k;
-    Complex coeff;
-};
-
 // 3D Cartesian site position.
 using Position = std::array<double, 3>;
 
