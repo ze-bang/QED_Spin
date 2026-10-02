@@ -167,7 +167,8 @@ TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std:
     const std::size_t n = t.s2->dim();
     const double lam = t.lambda();
     // ||(S^2 - S(S+1)) psi|| >= gap ||off-tower part of psi||: below this a vector is in the tower to
-    // roundoff. scale-free: a fraction of the unit vector's norm, in units of the tower gap
+    // roundoff.
+    // scale-free: a fraction of the unit vector's norm, in units of the tower gap
     const double clean = 1e-8 * gap;
     std::vector<double> leak(m);
     std::vector<Complex> r(n);
