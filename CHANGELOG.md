@@ -60,6 +60,12 @@ Breaking changes so far:
   removes. A block that cannot certify all N_V samples the rest and adds an
   `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
   `exact_vectors`) in place of `num_exact` and `exact_krylov`.
+- **Abelian characters are exact.** An abelian group's characters are built in closed form
+  (integer phases modulo the group's exponent), not from a random |A| x |A| eigensolve, which
+  failed for groups of ~10^3 elements (ten or more local Z2 swaps). The order of the abelian
+  irreps -- the engine's k indices, as reported on levels and taken by `Symmetry.select(k0=)` --
+  changed: the trivial character is first. Sampled results that seed per block or per source
+  follow the new order, and so does the order of exactly degenerate levels from different blocks.
 - **Memory: one working-set estimate** (`<ed/core/footprint.h>`) behind every guard and planner.
   FTLM without observables is charged its five vectors, not `krylov + 4` (blocks that fit were
   refused); GPU FTLM / mTPQ run as many samples in lockstep as fit (they ran 8 wide, and ran out of
