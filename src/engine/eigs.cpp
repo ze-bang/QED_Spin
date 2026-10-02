@@ -221,7 +221,12 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
     const bool flip_sym = ed::ops::flip_invariant(h);
     if (s.spin_flip == 1 && !flip_sym)
         throw std::invalid_argument("sectors: spin_flip='require', but H is not spin-flip symmetric");
-    const bool fold = flip_sym && s.spin_flip != 0;
+    // The Sz -> -Sz pairing of subspaces: the spin flip, or -- for an H that is not real, where K
+    // does not fold inside a sector -- time reversal Theta (which also takes k to -k).
+    const bool fold  = flip_sym && s.spin_flip != 0;
+    const bool theta = !fold && s.time_reversal != 0 && !ed::ops::conjugation_invariant(h)
+                       && ed::ops::theta_invariant(h);
+    const bool pairs = fold || theta;
 
     std::vector<Subspace> out;
     if (s.two_S >= 0) {
@@ -260,22 +265,23 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
         if (s.n_up >= 0) {
             out.push_back({s.n_up, -1, 1});
         } else {
-            // sz_parity keeps the sectors whose up-spin count n has that parity. The flip pairs n with
-            // N - n, which has the same parity only when N is even: otherwise no sector is folded.
-            // Of a mirror pair the Sz >= 0 member (n >= N - n) is solved.
-            const bool pair = fold && (s.sz_parity < 0 || n_sites % 2 == 0);
+            // sz_parity keeps the sectors whose up-spin count n has that parity. The flip (or Theta)
+            // pairs n with N - n, which has the same parity only when N is even: otherwise no sector
+            // is folded. Of a mirror pair the Sz >= 0 member (n >= N - n) is solved.
+            const bool pair = pairs && (s.sz_parity < 0 || n_sites % 2 == 0);
             for (int n = 0; n <= n_sites; ++n) {
                 if (s.sz_parity >= 0 && n % 2 != s.sz_parity) continue;
                 const int m = n_sites - n;
                 if (pair && m > n) continue;                       // solved as its mirror
-                out.push_back({n, -1, (pair && m != n) ? 2 : 1});
+                const bool mirrored = pair && m != n;
+                out.push_back({n, -1, mirrored ? 2 : 1, 1, mirrored && theta});
             }
         }
     } else {
         if (s.sz_parity >= 0) {
             out.push_back({-1, s.sz_parity, 1});
-        } else if (fold && n_sites % 2 == 1) {
-            out.push_back({-1, 0, 2});                             // flip exchanges the halves
+        } else if (pairs && n_sites % 2 == 1) {
+            out.push_back({-1, 0, 2, 1, theta});                   // the flip (Theta) exchanges the halves
         } else {
             out.push_back({-1, 0, 1});
             out.push_back({-1, 1, 1});
@@ -309,7 +315,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     // Solve one block and append its rows.
     auto solve_block = [&](const Subspace& sub, StarBuild& sb,
-                           const std::shared_ptr<BlockData>& bi, double context_orbit_s) {
+                           const std::shared_ptr<BlockData>& bi, const EngineContext& cx) {
+                const double context_orbit_s = cx.t_orbit_table;
                 const std::size_t dim = bi->tag.dim;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 if (!bop.op) return;
@@ -369,6 +376,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                     L.energy       = ev[i];
                     L.tag          = bi->tag;
                     L.mirror       = sub.mirror;
+                    L.fold         = detail::fold_of(cx, sub, bi->tag);
                     L.multiplicity = mult;
                     detail::label(L, sb);
                     if (o.vectors) {
@@ -406,14 +414,14 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
-            res.tr_engaged   = res.tr_engaged || tr_on;
+            detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
                 if (s.two_S < 0)
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
-                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.t_orbit_table); continue; }
+                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device)});
@@ -451,7 +459,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         detail::walk(H, n_sites, star, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks)
                 if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip)
-                    solve_block(sub, sb, bi, cx.t_orbit_table);
+                    solve_block(sub, sb, bi, cx);
         });
     }
 
@@ -519,13 +527,14 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
-            res.tr_engaged   = res.tr_engaged || tr_on;
+            detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
                 detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
                 if (!bop.op) continue;
                 Level L;
                 L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
+                L.fold = detail::fold_of(cx, sub, bi->tag);
                 detail::label(L, sb);
                 const std::size_t id = batch.add(*bop.op);
                 bop.op.reset();                    // keep only the ghost filter past the star
@@ -607,8 +616,14 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
         throw ed::EmptySelection("multiplet: the level has no component in the Sz sector n_up = "
                                  + std::to_string(n_up));
     const std::uint64_t mask = (n_sites >= 64) ? ~std::uint64_t{0} : ((std::uint64_t{1} << n_sites) - 1);
-    // Start from the vector itself, its flip image when the caller asked for the mirror sector,
-    // or its tower member at the asked Sz.
+    // Time reversal Theta = prod_i (i sigma^y_i) K: Theta (c |s>) = (-1)^{n_down(s)} conj(c) |s ^ mask>.
+    const bool theta_fold   = level.fold == Antiunitary::Theta;
+    const bool theta_mirror = theta_fold && level.mirror == 2 && !level.tag.tr_folded;
+    const auto theta_sign = [n_sites](std::uint64_t st) {
+        return (n_sites - __builtin_popcountll(st)) % 2 == 0 ? 1.0 : -1.0;
+    };
+    // Start from the vector itself, its flip (or Theta) image when the caller asked for the mirror
+    // sector, or its tower member at the asked Sz.
     std::vector<Complex> seed;
     if (lowered) {
         seed = expand(*v.basis, v.amplitudes, sector_nup);
@@ -629,7 +644,8 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
         const auto own_states = sz_states(n_sites, sector_nup);
         seed.assign(binomial(n_sites, n_up), Complex(0, 0));
         for (std::size_t i = 0; i < own.size(); ++i)
-            seed[state_index(own_states[i] ^ mask, n_up)] = own[i];
+            seed[state_index(own_states[i] ^ mask, n_up)] =
+                theta_mirror ? theta_sign(own_states[i]) * std::conj(own[i]) : own[i];
     }
     const std::uint64_t dim = seed.size();
     // How many vectors: the level's multiplicity, or fewer when the caller wants fewer. They are
@@ -659,7 +675,17 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
             return y;
         });
     }
-    if (level.tag.tr_folded)
+    // Theta inside a basis it maps to itself (the full space, or Sz = 0).
+    const Op theta_op = [&](const std::vector<Complex>& x) {
+        std::vector<Complex> y(dim);
+        #pragma omp parallel for schedule(static) if(dim > 8192)
+        for (std::uint64_t i = 0; i < dim; ++i)
+            y[state_index(state_at(i) ^ mask, n_up)] = theta_sign(state_at(i)) * std::conj(x[i]);
+        return y;
+    };
+    if (level.tag.tr_folded && theta_fold)
+        ops.push_back(theta_op);
+    else if (level.tag.tr_folded)
         ops.push_back([](const std::vector<Complex>& x) {
             std::vector<Complex> y(x.size());
             for (std::size_t i = 0; i < x.size(); ++i) y[i] = std::conj(x[i]);
@@ -676,7 +702,9 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
             return y;
         });
     const bool flip_inside = n_up < 0 || 2 * n_up == n_sites;
-    if (flip_inside && (level.mirror == 2 || level.tag.flip_parity >= 0)) {
+    if (flip_inside && theta_mirror) {
+        ops.push_back(theta_op);
+    } else if (flip_inside && (level.mirror == 2 || level.tag.flip_parity >= 0)) {
         ops.push_back([&](const std::vector<Complex>& x) {
             std::vector<Complex> y(dim);
             #pragma omp parallel for schedule(static) if(dim > 8192)

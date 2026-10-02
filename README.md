@@ -49,7 +49,9 @@ and uses everything H has:
 - **Spatial**: any group of site permutations that commute with H, either found by graph
   automorphism (`pynauty`) or given as generators. The abelian part gives momenta; the
   point group gives little groups, with one- and higher-dimensional irreps.
-- **Spin flip** and **time reversal**.
+- **Spin flip** and **time reversal**: complex conjugation K for a real H, else the
+  antiunitary Theta = prod_i (i sigma^y_i) K (Dzyaloshinskii-Moriya, Kitaev-Gamma and other
+  models with complex couplings), which pairs (Sz, k) with (-Sz, -k); Kramers pairs for odd N.
 
 `auto()` does not use total spin. `Symmetry(total_spin=S)` is an explicit restriction to the
 spin-S multiplets (one tower), for an H that is SU(2) symmetric, including with a scalar

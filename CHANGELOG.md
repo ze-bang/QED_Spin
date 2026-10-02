@@ -72,6 +72,14 @@ Breaking changes so far:
   solved in its own Sz sector (multiplicity 1, `sz` picks a member), and observables enter as
   they are. C++: `Subspace::members`, `ed::ops::su2_field`, `OftlmOptions::seed_transform` /
   `trace_dim`.
+- **Time reversal is K or Theta.** For an H that is not real, `time_reversal` uses
+  Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a) when H has it: it pairs (Sz, k) with (-Sz,
+  -k) and, at Sz = 0, folds k with -k (up to 2x fewer blocks; Kramers pairs for odd N). Such
+  models (DM, Kitaev-Gamma) were refused under `time_reversal="require"` and never folded.
+  `EigResult.time_reversal` / `SpectrumResult.time_reversal` (`"K"`, `"theta"` or None)
+  replace the C++ `tr_engaged`, and `Level.fold` names each level's pairing; `vectors()`,
+  `expect` and thermal observables build or average the Theta image. Saved results carry
+  `level_fold`.
 - **Fixed: spin-tower counts under a point group.** Sampled thermal under `total_spin` matched a
   block's Sz = S and Sz = S + 1 dimensions by engine irrep index, which differs where the
   co-group acts as a scalar on one sector: it raised ("55 multiplets, expected 54"), or with a

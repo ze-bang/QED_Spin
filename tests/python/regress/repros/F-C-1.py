@@ -73,7 +73,7 @@ def check(tag, H, Hd, sym, k, ref, problems, info):
     lv = [(round(L.energy, 6), int(L.multiplicity), bool(L.tr_folded), int(L.star_size)) for L in r.levels]
     vs = r.vectors()
     want = min(k, len(ref))
-    info.append(f"{tag}: levels (E,mult,tr_folded,star)={lv} tr_engaged={bool(r._raw.tr_engaged)} "
+    info.append(f"{tag}: levels (E,mult,tr_folded,star)={lv} time_reversal={r._raw.time_reversal} "
                 f"vectors={len(vs)} want={want}")
     if len(vs) != want:
         problems.append(f"{tag}: {len(vs)} vectors for k={k} (restriction dim {len(ref)}, want {want})")

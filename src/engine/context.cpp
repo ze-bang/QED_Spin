@@ -57,22 +57,25 @@ resolve_flip_engagement(const ed::ops::MaskedOperator& h,
     return fe;
 }
 
-// TR folding engages when H is real in the computational basis
-// (then H_{conj(k)} = conj(H_k) -- isospectral, so conjugate momenta fold
-// into one star; and inside a REAL-character star, conjugate little-group
-// irreps sigma/sigma* carry identical spectra).
-[[nodiscard]] bool
-resolve_tr_engagement(const ed::ops::MaskedOperator& h,
-                      const LittleGroupOptions& opt)
+// The time-reversal fold of stars: an antiunitary A with A H A^-1 = H maps the sector (k, sigma)
+// to (-k, sigma*) with the same spectrum, so conjugate momenta fold into one star, and inside a
+// self-conjugate star sigma and sigma* carry identical spectra. A = K when H is real in the S^z
+// basis. Otherwise time reversal Theta, which maps Sz to -Sz: it folds stars only in a subspace it
+// maps to itself (Sz = 0, a parity half for even N, the full space) and not beside the flip half
+// (Theta F Theta^-1 = (-1)^N F); elsewhere subspaces() pairs Sz with -Sz by it.
+[[nodiscard]] Antiunitary
+resolve_tr_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions& opt, int n_sites,
+                      bool flip_half)
 {
-    if (opt.time_reversal == 0) return false;
-    const bool h_real = ed::ops::conjugation_invariant(h);
-    if (opt.time_reversal == 1 && !h_real)
+    if (opt.time_reversal == 0) return Antiunitary::None;
+    if (ed::ops::conjugation_invariant(h)) return Antiunitary::K;
+    const bool theta = ed::ops::theta_invariant(h);
+    if (opt.time_reversal == 1 && !theta)
         throw ed::InvalidRequest(
-            "little_group: time_reversal='require' but the Hamiltonian has "
-            "complex coefficients (no antiunitary K with [H, K] = 0 in the "
-            "computational basis).");
-    return h_real;
+            "little_group: time_reversal='require', but H is invariant under neither complex "
+            "conjugation K in the S^z basis nor time reversal Theta = prod_i (i sigma^y_i) K.");
+    const bool closed = opt.n_up >= 0 ? 2 * opt.n_up == n_sites : (opt.sz_parity < 0 || n_sites % 2 == 0);
+    return theta && closed && !flip_half ? Antiunitary::Theta : Antiunitary::None;
 }
 
 // chi_k -> chi_{k*} with chi_{k*}(a) == conj(chi_k(a)) for all a, on the
@@ -442,8 +445,9 @@ void make_engine_context(const ::Operator&                    op,
     cx.flip_half = fe.engaged;
     cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
 
-    // Antiunitary K folding (real H only).
-    tr_on = resolve_tr_engagement(h, opt);
+    // The antiunitary fold of stars (K or Theta).
+    cx.tr = resolve_tr_engagement(h, opt, n_sites, cx.flip_half);
+    tr_on = cx.tr != Antiunitary::None;
 
     cx.cg = cx.flip_half
         ? ed::symmetry::make_flip_extended_group_from_perms(

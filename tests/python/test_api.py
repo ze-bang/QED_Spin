@@ -197,6 +197,79 @@ def test_total_spin_in_a_uniform_field():
     np.testing.assert_allclose(a.S, b.S, atol=1e-9)
 
 
+def _dm_ring(n, D=0.3):
+    b = qed.input.HamiltonianBuilder(n)
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b.heisenberg(bonds, J=1.0)
+    b.dm(bonds, [[0.0, 0.0, D]] * n)
+    return b.to_operator()
+
+
+@pytest.mark.parametrize("n", [8, 7])
+def test_time_reversal_theta_folds_an_h_that_is_not_real(n):
+    # Heisenberg + D_z on a ring is not real, so complex conjugation K is no symmetry; time reversal
+    # Theta = prod_i (i sigma^y_i) K is (every S^a -> -S^a), and pairs (Sz, k) with (-Sz, -k) (audit
+    # C02-discovery-09). Folding by it changes no energy, vector or average; for odd N every level
+    # is a Kramers pair.
+    H, T = _dm_ring(n), _translations(n)[0]
+    on = qed.Symmetry(spatial=[T], point_group=False)
+    off = qed.Symmetry(spatial=[T], point_group=False, time_reversal="off")
+    a, b = qed.spectrum(H, sym=on), qed.spectrum(H, sym=off)
+    assert (a.time_reversal, b.time_reversal) == ("theta", None)
+    np.testing.assert_allclose(a.energies, b.energies, atol=1e-10)
+    assert len(a.levels) < len(b.levels) and any(L.fold == "theta" for L in a.levels)
+    if n % 2:
+        assert all(L.multiplicity % 2 == 0 for L in a.levels)       # Kramers pairs
+    qed.eigs(H, 1, sym=qed.Symmetry(spatial=[T], point_group=False, time_reversal="require"))
+    # vectors: orthonormal eigenvectors, the Theta images in Sz sector N - n_up included
+    M, k = _dense(H, n), 10
+    r = qed.eigs(H, k, sym=on, vectors=True)
+    V = np.column_stack(r.vectors())
+    np.testing.assert_allclose(V.conj().T @ V, np.eye(V.shape[1]), atol=1e-10)
+    E = np.real(np.einsum("ij,ij->j", V.conj(), M @ V))
+    np.testing.assert_allclose(M @ V, V * E, atol=1e-9)
+    np.testing.assert_allclose(np.sort(E), r.energies[:V.shape[1]], atol=1e-10)
+    # averages: per energy, sum of multiplicity x <O> is Tr(P_E O), folded or not; O breaks Theta
+    # (S^z_0), is not Hermitian (S^+_0 S^-_1) or keeps it (S_0.S_2)
+    Os = [qed.Operator(n) for _ in range(3)]
+    Os[0].add_one_body(qed.OP_SZ, 0, 1.0)
+    Os[1].add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 1.0)
+    Os[2].add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 2, 1.0)
+    Os[2].add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 2, 0.5)
+    Os[2].add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 2, 0.5)
+
+    def traces(sym):
+        x = qed.expect(H, Os, 1 << n, sym=sym)
+        out = {}
+        for e, m, v in zip(x.energies, x.multiplicities, x.values):
+            key = round(float(e), 7)
+            out[key] = out.get(key, 0) + m * np.asarray(v)
+        return out
+    ta, tb = traces(on), traces(off)
+    assert ta.keys() == tb.keys()
+    for key in ta:
+        np.testing.assert_allclose(ta[key], tb[key], atol=1e-9)
+    Ts = [0.5, 2.0]
+    tha = qed.thermal(H, Ts, method="exact", sym=on, observables=Os)
+    thb = qed.thermal(H, Ts, method="exact", sym=off, observables=Os)
+    np.testing.assert_allclose(tha.lnZ, thb.lnZ, rtol=1e-12)
+    np.testing.assert_allclose(tha.O, thb.O, atol=1e-10)
+
+
+def test_time_reversal_require_refuses_an_h_without_k_or_theta():
+    # a scalar chirality S_i.(S_j x S_k) = (i/2) sum_cyc S^z_i (S^+_j S^-_k - S^-_j S^+_k) is odd under
+    # Theta and not real
+    n, chi = 6, 0.2
+    H = _ring(n)
+    for i in range(n):
+        t = (i, (i + 1) % n, (i + 2) % n)
+        for a, b, c in (t, t[1:] + t[:1], t[2:] + t[:2]):
+            H.add_three_body(qed.OP_SZ, a, qed.OP_SPLUS, b, qed.OP_SMINUS, c, 0.5j * chi)
+            H.add_three_body(qed.OP_SZ, a, qed.OP_SMINUS, b, qed.OP_SPLUS, c, -0.5j * chi)
+    with pytest.raises(qed.errors.InvalidRequest, match="time_reversal=.require."):
+        qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, time_reversal="require"))
+
+
 def test_sz_basis_vectors_are_eigenvectors_of_that_block():
     H = _ring(6)
     r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=_translations(6), point_group=False, sz=3),
@@ -1323,10 +1396,12 @@ def test_every_refusal_is_a_qed_error():
     for i in range(n):
         field_x.add_one_body(qed.OP_SPLUS, i, 0.1)
         field_x.add_one_body(qed.OP_SMINUS, i, 0.1)
+    # a flux (a D_z term: not real, Theta-even) in a uniform field (Theta-odd): neither K nor Theta
     flux = qed.Operator(n)
     for i in range(n):
         flux.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5j)
         flux.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, -0.5j)
+        flux.add_one_body(qed.OP_SZ, i, 0.1)
     for H_, sym in ((H + field_x, qed.Symmetry(spatial=None, sz=3)),            # no U(1)
                     (H + field_x, qed.Symmetry(spatial=None, sz="even")),        # no Sz parity
                     (H + field_x, qed.Symmetry(spatial=None, total_spin=0)),     # no SU(2)

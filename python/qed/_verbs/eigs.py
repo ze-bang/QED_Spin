@@ -29,6 +29,9 @@ class EigResult(Labelled):
     (``device_krylov``, ``device_dense``, ``host_krylov``, ``host_dense``). Under
     ``device="gpu"`` no Krylov solve runs on the host: a block that cannot run on the device
     raises :class:`qed.errors.DeviceUnsupported`; small blocks may be solved densely there.
+    ``time_reversal``: the antiunitary map that folded levels -- ``"K"`` (complex conjugation,
+    a real H), ``"theta"`` (time reversal, an H that is not real) -- or None; each level's
+    ``fold`` names its own.
     """
 
     energies: np.ndarray
@@ -44,6 +47,7 @@ class EigResult(Labelled):
     diagnostics: list = field(default_factory=list)
     block_stats: list = field(default_factory=list)
     placement: dict = field(default_factory=dict)
+    time_reversal: Optional[str] = None
 
     @_log.replays
     def vectors(self, basis: str = "full", n_up: Optional[int] = None) -> list:
@@ -129,7 +133,7 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
                      _raw=raw, _spec=spec, _n_sites=int(raw.n_sites),
                      diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
                      block_stats=list(raw.block_stats),
-                     placement=dict(raw.placement))
+                     placement=dict(raw.placement), time_reversal=raw.time_reversal)
 
 
 def load_eigs(path) -> "EigResult":
@@ -146,4 +150,5 @@ def load_eigs(path) -> "EigResult":
     raw, spec = _core.sectors.eigs_from_arrays(d)
     return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
                      symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),
-                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(raw.n_sites))
+                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(raw.n_sites),
+                     time_reversal=raw.time_reversal)

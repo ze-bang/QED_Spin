@@ -32,27 +32,30 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
     detail::Averager avg(s, n_sites, s.two_S >= 0 && !r.levels.empty() && detail::members(r.levels.front()) > 1);
     const std::size_t n_ops = ops.size();
     std::vector<std::vector<Complex>> out(r.levels.size(), std::vector<Complex>(n_ops));
-    struct Group { std::vector<std::size_t> levels; bool folded = false; };
+    // A level paired by an antiunitary map A (a time-reversal-folded star, a Theta mirror) also
+    // averages <A v|O|A v> = conj(<v|A^-1 O A|v>); one basis has one such map.
+    struct Group { std::vector<std::size_t> levels; Antiunitary image = Antiunitary::None; };
     std::map<std::tuple<const void*, bool, int>, Group> groups;
     using detail::Keep;
     for (std::size_t li = 0; li < r.levels.size(); ++li) {
         const Level& L = r.levels[li];
         if (L.vector < 0) throw std::invalid_argument("expect: a level has no vector (solve with vectors)");
         const BlockVector& v = r.vectors[static_cast<std::size_t>(L.vector)];
-        const bool flip = L.mirror == 2 || L.tag.flip_parity >= 0 || v.basis->has_flips();
+        const bool flip = (L.mirror == 2 && !detail::theta_mirror(L)) || L.tag.flip_parity >= 0
+                          || v.basis->has_flips();
         const Keep keep = v.basis->n_up >= 0 ? Keep::Zero : (L.tag.sz_parity >= 0 ? Keep::Even : Keep::All);
         Group& g = groups[{v.basis.get(), flip, static_cast<int>(keep)}];
         g.levels.push_back(li);
-        g.folded = g.folded || L.tag.tr_folded;
+        if (L.fold != Antiunitary::None) g.image = L.fold;
     }
     for (const auto& [key, g] : groups) {
         const auto& basis = *r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis;
         const bool flip = std::get<1>(key);
         const auto keep = static_cast<Keep>(std::get<2>(key));
         std::vector<ed::ops::MaskedOperator> avgs;
-        for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, false));
-        if (g.folded)
-            for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, true));
+        for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep));
+        if (g.image != Antiunitary::None)
+            for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, g.image));
         ed::ops::CompileOptions copt;
         copt.project = false;   // already invariant under the sector's group
         const auto prog = ed::ops::compile_program(avgs, basis, basis, copt);
@@ -69,7 +72,7 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
             const Level& L = r.levels[g.levels[i]];
             for (std::size_t o = 0; o < n_ops; ++o) {
                 const Complex a = me[i * width + o];
-                out[g.levels[i]][o] = L.tag.tr_folded ? 0.5 * (a + std::conj(me[i * width + n_ops + o])) : a;
+                out[g.levels[i]][o] = L.fold != Antiunitary::None ? 0.5 * (a + std::conj(me[i * width + n_ops + o])) : a;
             }
         }
     }

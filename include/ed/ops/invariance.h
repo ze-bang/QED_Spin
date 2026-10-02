@@ -85,6 +85,12 @@ enum class SzKeep { All, Zero, Even };
     return invariant(H, H.image(MaskedOperator::Map::K), rtol);
 }
 
+/// Theta H Theta^-1 = H for time reversal Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a):
+/// it pairs Sz with -Sz and k with -k, with conjugated amplitudes.
+[[nodiscard]] inline bool theta_invariant(const MaskedOperator& H, double rtol = kInvarianceRtol) {
+    return invariant(H, H.image(MaskedOperator::Map::Theta), rtol);
+}
+
 /// H^dagger = H. A non-finite coefficient (NaN, inf) is never Hermitian: the tolerance test
 /// cannot compare it.
 [[nodiscard]] inline bool hermitian(const MaskedOperator& H, double rtol = kInvarianceRtol) {

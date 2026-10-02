@@ -108,6 +108,27 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     return b;
 }
 
+/// The antiunitary pairing of a block's levels: its star fold's map (K or Theta), or Theta when the
+/// subspace's mirror is the time-reversal image.
+inline Antiunitary fold_of(const ed::solvers::lg_detail::EngineContext& cx, const Subspace& sub,
+                           const ed::solvers::LittleGroupBlockTag& tag) {
+    if (tag.tr_folded) return cx.tr;
+    return sub.mirror == 2 && sub.theta ? Antiunitary::Theta : Antiunitary::None;
+}
+
+/// Records in a result which antiunitary map folded anything: the stars' (cx.tr), or Theta for a
+/// subspace mirrored by it.
+inline void note_time_reversal(Antiunitary& seen, const ed::solvers::lg_detail::EngineContext& cx,
+                               const Subspace& sub) {
+    if (cx.tr != Antiunitary::None) seen = cx.tr;
+    else if (sub.mirror == 2 && sub.theta) seen = Antiunitary::Theta;
+}
+
+/// Whether a level's mirror is its Theta image (else the spin flip's, when it has one).
+inline bool theta_mirror(const Level& L) {
+    return L.mirror == 2 && L.fold == Antiunitary::Theta && !L.tag.tr_folded;
+}
+
 /// The S^z members a level stands for: 2S + 1 for a whole SU(2) multiplet solved at its Sz = S
 /// member, else 1 (H in a uniform field: every member is a level of its own).
 inline std::uint64_t members(const Level& L) {
@@ -251,8 +272,9 @@ inline std::vector<Perm> close_group(const std::vector<Perm>& gens, int n) {
 using Keep = ed::ops::SzKeep;
 
 /// O averaged over the symmetry group of a Spec (and the spin flip), without the terms whose
-/// S^z change `keep` excludes, conjugated (K) for a time-reversed partner; built once per
-/// (operator, flip, keep, conj), as canonical terms (average) or as the row program a sector
+/// S^z change `keep` excludes, mapped by the antiunitary `image` (K or Theta: A O A^-1, for a
+/// partner A|v>, <A v|O|A v> = conj <v|A^-1 O A|v>); built once per
+/// (operator, flip, keep, image), as canonical terms (average) or as the row program a sector
 /// matvec walks (program). An operator averaged over the symmetries a block uses is block
 /// diagonal and has the same trace against any function of H over an ensemble those
 /// symmetries preserve.
@@ -267,26 +289,29 @@ public:
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);
     }
-    const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep, bool conj) {
-        auto& slot = averages_[{&O, flip, static_cast<int>(keep), conj}];
+    const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep,
+                                           Antiunitary image = Antiunitary::None) {
+        auto& slot = averages_[{&O, flip, static_cast<int>(keep), static_cast<int>(image)}];
         if (!slot) {
             const ed::ops::MaskedOperator src = su2_ ? ed::ops::su2_scalar_part(O.canonical()) : O.canonical();
             ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(src, keep), G_, flip);
-            if (conj) a = a.image(ed::ops::MaskedOperator::Map::K);
+            using Map = ed::ops::MaskedOperator::Map;
+            if (image != Antiunitary::None) a = a.image(image == Antiunitary::Theta ? Map::Theta : Map::K);
             slot = std::make_shared<const ed::ops::MaskedOperator>(std::move(a));
         }
         return *slot;
     }
-    std::shared_ptr<const ed::ops::MaskedProgram> program(const ::Operator& O, bool flip, Keep keep, bool conj) {
-        auto& slot = programs_[{&O, flip, static_cast<int>(keep), conj}];
+    std::shared_ptr<const ed::ops::MaskedProgram> program(const ::Operator& O, bool flip, Keep keep,
+                                                          Antiunitary image = Antiunitary::None) {
+        auto& slot = programs_[{&O, flip, static_cast<int>(keep), static_cast<int>(image)}];
         if (!slot)
             slot = std::make_shared<const ed::ops::MaskedProgram>(
-                ed::ops::compile_operator(average(O, flip, keep, conj).dagger()));
+                ed::ops::compile_operator(average(O, flip, keep, image).dagger()));
         return slot;
     }
 
 private:
-    using Key = std::tuple<const ::Operator*, bool, int, bool>;
+    using Key = std::tuple<const ::Operator*, bool, int, int>;
     bool su2_ = false;
     std::vector<Perm> G_;
     std::map<Key, std::shared_ptr<const ed::ops::MaskedOperator>> averages_;
@@ -412,7 +437,10 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
     bool tr_on = false;
     make_engine_context(H, abelian_or_identity(s, n_sites), s.residues, n_sites, opt, cx, tr_on);
     // A co-group character names sigma alone; time reversal would fold sigma* into its block.
-    if (!s.only_irrep_chars.empty()) tr_on = false;
+    if (!s.only_irrep_chars.empty()) {
+        tr_on = false;
+        cx.tr = ed::solvers::Antiunitary::None;
+    }
     const std::set<int> only(s.only_k0.begin(), s.only_k0.end());
     auto momentum_of = [&](int k_ext) -> const std::vector<Complex>& {
         return cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;

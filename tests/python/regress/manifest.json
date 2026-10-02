@@ -9,7 +9,7 @@
   {"id":"C02-discovery-05","rep":"C02-discovery-05","sev":"high","axis":"performance","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C02-discovery-06","rep":"C02-discovery-06","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C02-discovery-07","rep":"C02-discovery-07","sev":"high","axis":"robustness","status":"fixed","dev":"cpu","seconds":60},
-  {"id":"C02-discovery-09","rep":"C02-discovery-09","sev":"medium","axis":"capability","status":"open","dev":"cpu","seconds":60},
+  {"id":"C02-discovery-09","rep":"C02-discovery-09","sev":"medium","axis":"capability","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C02-discovery-10","rep":"C02-discovery-10","sev":"low","axis":"performance","status":"perf","dev":"cpu","seconds":60},
   {"id":"C02-discovery-11","rep":"C02-discovery-11","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C03-bindings-02","rep":"C03-bindings-02","sev":"medium","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},

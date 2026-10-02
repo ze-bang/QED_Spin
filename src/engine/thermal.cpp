@@ -319,7 +319,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     std::size_t n_blocks = 0;
     for (const Subspace& sub : subs) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
-        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
+        n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
                 std::uint64_t tower_dim = 0;
@@ -338,16 +338,20 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 const auto& mv = *bop.op;
                 BlockThermo b;
                 std::vector<std::shared_ptr<const ed::LinearOperator>> obs;
-                const bool folded = bi->tag.tr_folded;
+                // A block paired by an antiunitary map (its star's time-reversal fold, a Theta
+                // mirror) averages each <O> with the conjugate of its image's.
+                const Antiunitary image = detail::fold_of(cx, sub, bi->tag);
+                const bool folded = image != Antiunitary::None;
                 if (n_obs > 0) {
                     const auto& basis = bi->gop ? *bi->gsec : *sb.hk->rep_data_ptr();
-                    const bool flip = sub.mirror == 2 || bi->tag.flip_parity >= 0 || basis.has_flips();
+                    const bool flip = (sub.mirror == 2 && !sub.theta) || bi->tag.flip_parity >= 0 || basis.has_flips();
                     using detail::Keep;
                     const Keep keep = sub.n_up >= 0 ? Keep::Zero : (sub.sz_parity >= 0 ? Keep::Even : Keep::All);
                     for (const ::Operator* O : t.observables)
                         for (bool conj : {false, true}) {
                             if (conj && !folded) break;
-                            obs.push_back(detail::block_observable(avg->program(*O, flip, keep, conj), sb, bi,
+                            const Antiunitary a = conj ? image : Antiunitary::None;
+                            obs.push_back(detail::block_observable(avg->program(*O, flip, keep, a), sb, bi,
                                                                    t.device != Device::Cpu));
                         }
                 }

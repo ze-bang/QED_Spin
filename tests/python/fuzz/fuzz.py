@@ -516,6 +516,12 @@ def verify_content(m):
     u1 = bool(np.all(pop[r] == pop[c]))
     parity = bool(np.all((pop[r] - pop[c]) % 2 == 0))
     real = bool(np.all(np.abs(v.imag) < 1e-12))
+    # time reversal Theta = prod_i (i sigma^y_i) K: <s'^m|Theta H Theta^-1|s^m> = sign(s') sign(s) conj(H_s's),
+    # sign(s) = (-1)^(down spins of s), m = all bits
+    import scipy.sparse as sp
+    sgn = np.where((N - pop) % 2 == 0, 1.0, -1.0)
+    Ht = sp.coo_matrix((sgn[r] * sgn[c] * np.conj(v), (r ^ (dim - 1), c ^ (dim - 1))), shape=(dim, dim)).tocsr()
+    theta = _spmax(Ht - H) < 1e-10
     flip = _commutes_states(H, np.arange(dim, dtype=np.int64) ^ (dim - 1))
     su2 = su2_field = False
     if u1:
@@ -528,7 +534,7 @@ def verify_content(m):
     trans = bool(m["trans"]) and all(_commutes_states(H, perm_states(T, N)) for T in m["trans"])
     point = [list(map(int, P)) for P in m["point"] if _commutes_states(H, perm_states(P, N))]
     return {"N": N, "hermitian": bool(herm), "u1": u1, "parity": parity, "real": real, "flip": bool(flip),
-            "su2": bool(su2), "su2_field": bool(su2_field), "trans": trans, "point": point,
+            "su2": bool(su2), "su2_field": bool(su2_field), "theta": bool(theta), "trans": trans, "point": point,
             "s_H": float(sum(abs(c) for c, _ in m["terms"]))}
 
 
@@ -672,7 +678,7 @@ def gen_invalid(rng, model, content):
              "load_format1": 0.3, "nonfinite_H": 0.3}
     if not content["flip"]:
         kinds["flip_require"] = 2
-    if not content["real"]:
+    if not content["real"] and not content["theta"]:   # time reversal is K or Theta
         kinds["tr_require"] = 2
     if not content["su2_field"]:            # total_spin also takes SU(2) in a uniform field
         kinds["su2_on_non_su2"] = 2
@@ -1445,7 +1451,7 @@ def t_vectors(ctx):
                                              **ctx.eigs_kw()))
     r = qcall(ctx.qed.eigs, ctx.H, k, sym=sym, vectors=True, device=ctx.device, **ctx.eigs_kw())
     vs = qcall(r.vectors)
-    extra = dict(levels=len(r.levels), tr_engaged=bool(getattr(r._raw, "tr_engaged", False)),
+    extra = dict(levels=len(r.levels), time_reversal=r.time_reversal,
                  tr_folded=any(bool(getattr(L, "tr_folded", False)) for L in r.levels), **result_extra(ctx, r))
     problems = []
 
@@ -1532,7 +1538,7 @@ def t_expect(ctx):
                                              **ctx.eigs_kw()))
     r = qcall(ctx.qed.expect, ctx.H, ops, k, sym=sym, device=ctx.device, **ctx.eigs_kw())
     rows = [(float(e), int(m_), np.asarray(v)) for e, m_, v in zip(r.energies, r.multiplicities, r.values)]
-    extra = dict(levels=len(rows), tr_engaged=bool(getattr(r.eigs._raw, "tr_engaged", False)),
+    extra = dict(levels=len(rows), time_reversal=r.eigs.time_reversal,
                  **result_extra(ctx, r.eigs))
 
     def check(R):

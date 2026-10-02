@@ -138,7 +138,7 @@ the expected outcome (should a lane appear, the host comparison takes over).
 A failing (`wrong`, `refused`, `crash`) case is rerun with one toggle changed at a time
 (`time_reversal="off"`, `point_group=False`, `spin_flip="off"`); `extra.passes_with` lists those
 that make it pass. `extra.mult_deficit` lists levels whose full-basis multiplet has fewer vectors
-than the level's multiplicity; `extra.tr_engaged` says whether time reversal folded any block.
+than the level's multiplicity; `extra.time_reversal` names the antiunitary map ("K", "theta") that folded any block.
 Refusals carry `extra.error_class` and `extra.qed_error`.
 
 ## Conventions accepted as alternatives (reported in the message)

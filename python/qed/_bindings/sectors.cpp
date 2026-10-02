@@ -53,15 +53,21 @@ std::vector<T> vec(const py::dict& d, const char* key) {
     return std::vector<T>(a.data(), a.data() + a.size());
 }
 
+py::object antiunitary_name(sec::Antiunitary a) {
+    if (a == sec::Antiunitary::K) return py::str("K");
+    if (a == sec::Antiunitary::Theta) return py::str("theta");
+    return py::none();
+}
+
 py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
     py::dict d;
     const std::size_t nl = r.levels.size();
     std::vector<double> energy(nl);
-    std::vector<std::int64_t> mirror(nl), mult(nl), vector(nl), tag(nl * 11);
+    std::vector<std::int64_t> mirror(nl), fold(nl), mult(nl), vector(nl), tag(nl * 11);
     for (std::size_t i = 0; i < nl; ++i) {
         const auto& L = r.levels[i];
         const auto& t = L.tag;
-        energy[i] = L.energy; mirror[i] = L.mirror;
+        energy[i] = L.energy; mirror[i] = L.mirror; fold[i] = static_cast<std::int64_t>(L.fold);
         mult[i] = static_cast<std::int64_t>(L.multiplicity); vector[i] = L.vector;
         const std::int64_t row[11] = {t.n_up, t.sz_parity, t.k0, t.k_raw, t.flip_parity, t.irrep,
                                       t.irrep_dim, t.star_size, t.tr_folded ? 1 : 0,
@@ -69,7 +75,7 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
                                       static_cast<std::int64_t>(t.multiplicity)};
         std::copy(row, row + 11, tag.begin() + static_cast<std::ptrdiff_t>(11 * i));
     }
-    d["level_energy"] = arr(energy); d["level_mirror"] = arr(mirror);
+    d["level_energy"] = arr(energy); d["level_mirror"] = arr(mirror); d["level_fold"] = arr(fold);
     d["level_multiplicity"] = arr(mult); d["level_vector"] = arr(vector); d["level_tag"] = arr(tag);
     // Physical labels, ragged per level: momentum characters, co-group (residue, character).
     std::vector<std::int64_t> moff{0}, ioff{0}, ielem;
@@ -118,7 +124,7 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
                                                       s.time_reversal, s.two_S, r.n_sites});
     d["result_scalars"] = arr(std::vector<std::int64_t>{
         static_cast<std::int64_t>(r.total_dim), static_cast<std::int64_t>(r.partial_blocks),
-        r.complete ? 1 : 0, r.flip_engaged ? 1 : 0, r.tr_engaged ? 1 : 0,
+        r.complete ? 1 : 0, r.flip_engaged ? 1 : 0, static_cast<std::int64_t>(r.time_reversal),
         static_cast<std::int64_t>(r.device_blocks), static_cast<std::int64_t>(r.pruned_blocks)});
     return d;
 }
@@ -165,7 +171,18 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         L.tag.irrep_dim = static_cast<int>(t[6]); L.tag.star_size = static_cast<int>(t[7]);
         L.tag.tr_folded = t[8] != 0; L.tag.dim = static_cast<std::uint64_t>(t[9]);
         L.tag.multiplicity = static_cast<std::uint64_t>(t[10]);
+        L.fold = L.tag.tr_folded ? sec::Antiunitary::K : sec::Antiunitary::None;   // files without level_fold
         r.levels.push_back(L);
+    }
+    // 0 none, 1 K, 2 Theta: the antiunitary pairing of each level.
+    auto antiunitary = [&fail](std::int64_t a, const char* what) {
+        if (a < 0 || a > 2) fail(std::string(what) + " names no antiunitary map");
+        return static_cast<sec::Antiunitary>(a);
+    };
+    if (d.contains("level_fold")) {
+        const auto fold = vec<std::int64_t>(d, "level_fold");
+        if (fold.size() != energy.size()) fail("the level arrays differ in length");
+        for (std::size_t i = 0; i < fold.size(); ++i) r.levels[i].fold = antiunitary(fold[i], "level_fold");
     }
     if (d.contains("level_momentum")) {
         const auto mchi = vec<std::complex<double>>(d, "level_momentum");
@@ -228,7 +245,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
             fail("level_vector names a vector that is not in the file");
     const auto sc = vec<std::int64_t>(d, "result_scalars");
     r.total_dim = static_cast<std::uint64_t>(sc.at(0)); r.partial_blocks = static_cast<std::size_t>(sc.at(1));
-    r.complete = sc.at(2) != 0; r.flip_engaged = sc.at(3) != 0; r.tr_engaged = sc.at(4) != 0;
+    r.complete = sc.at(2) != 0; r.flip_engaged = sc.at(3) != 0;
+    r.time_reversal = antiunitary(sc.at(4), "result_scalars");
     r.device_blocks = static_cast<std::size_t>(sc.at(5)); r.pruned_blocks = static_cast<std::size_t>(sc.at(6));
 
     sec::Spec s;
@@ -328,6 +346,10 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("irrep_dim", [](const sec::Level& l) { return l.tag.irrep_dim; })
         .def_property_readonly("star_size", [](const sec::Level& l) { return l.tag.star_size; })
         .def_property_readonly("tr_folded", [](const sec::Level& l) { return l.tag.tr_folded; })
+        .def_property_readonly("fold", [](const sec::Level& l) { return antiunitary_name(l.fold); },
+                               "The antiunitary map pairing the level with states its block does not hold: "
+                               "'K' (complex conjugation), 'theta' (time reversal; also the map of a mirror "
+                               "in Sz sector N - n_up), or None.")
         .def_property_readonly("block_dim", [](const sec::Level& l) { return l.tag.dim; })
         .def("__repr__", [](const sec::Level& l) {
             return "Level(E=" + std::to_string(l.energy) + ", mult=" + std::to_string(l.multiplicity)
@@ -339,7 +361,8 @@ void bind_sectors(py::module_& m) {
         .def_readonly("levels", &sec::EigsResult::levels)
         .def_readonly("n_sites", &sec::EigsResult::n_sites)
         .def_readonly("complete", &sec::EigsResult::complete)
-        .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
+        .def_property_readonly("time_reversal", [](const sec::EigsResult& r) { return antiunitary_name(r.time_reversal); },
+                               "The antiunitary map that folded any level: 'K', 'theta' or None.")
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
         .def_property_readonly("placement", [](const sec::EigsResult& r) { return placement_to_py(r.placement); })
         .def_readonly("pruned_blocks", &sec::EigsResult::pruned_blocks)
@@ -379,6 +402,7 @@ void bind_sectors(py::module_& m) {
     py::class_<sec::SpectrumResult>(s, "SpectrumResult")
         .def_readonly("levels", &sec::SpectrumResult::levels)
         .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
+        .def_property_readonly("time_reversal", [](const sec::SpectrumResult& r) { return antiunitary_name(r.time_reversal); })
         .def_property_readonly("placement", [](const sec::SpectrumResult& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::SpectrumResult::diagnostics)
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });

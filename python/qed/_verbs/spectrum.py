@@ -17,7 +17,7 @@ class SpectrumResult(Labelled):
     entry per block eigenvalue with the block's quantum numbers and multiplicity.
     ``device_blocks``: blocks diagonalised on a GPU; ``placement``: the dense solves on the
     device and on the host (see :class:`EigResult`). ``diagnostics``: (code, message) pairs
-    for fallbacks the run took."""
+    for fallbacks the run took. ``time_reversal``: as in :class:`EigResult`."""
 
     energies: np.ndarray
     levels: list
@@ -27,6 +27,7 @@ class SpectrumResult(Labelled):
     _n_sites: int = 0
     diagnostics: list = field(default_factory=list)
     placement: dict = field(default_factory=dict)
+    time_reversal: Optional[str] = None
 
 
 @_log.replays
@@ -42,4 +43,4 @@ def spectrum(H, *, sym: Optional[Symmetry] = None, device: str = "cpu") -> Spect
                           device_blocks=int(raw.device_blocks), symmetry=sym,
                           _spec=spec, _n_sites=int(H.num_sites),
                           diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
-                          placement=dict(raw.placement))
+                          placement=dict(raw.placement), time_reversal=raw.time_reversal)

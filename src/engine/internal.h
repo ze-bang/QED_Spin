@@ -690,6 +690,7 @@ struct EngineContext {
     int                                  n_irr_raw = 0;
     double                               t_orbit_table = 0.0;   // seconds to acquire otab (+ srl)
     const ed::ops::MaskedOperator*       terms = nullptr;       // H's canonical terms (the verdicts)
+    Antiunitary                          tr = Antiunitary::None;   // the map of the stars' time-reversal fold
 
     [[nodiscard]] std::size_t nA_ext() const noexcept {
         return A.size() * (flip_half ? 2u : 1u);
