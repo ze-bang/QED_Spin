@@ -81,6 +81,11 @@ Breaking changes so far:
   replace the C++ `tr_engaged`, and `Level.fold` names each level's pairing; `vectors()`,
   `expect` and thermal observables build or average the Theta image. Saved results carry
   `level_fold`.
+- **The reduced-CSR budget follows the job.** Unset, `ED_SYM_SECTOR_CSR_BUDGET_GIB` is no longer 8 GiB:
+  a block's reduced CSRs (H, S^2 and its observables together) may take 0.55 of the RAM the job may
+  still allocate, less what its solver will hold. A block that needs more than 8 GiB now takes the
+  CSR when the memory is there (it ran the walk, several times slower per apply). Set, the variable
+  stays an absolute cap; `ED_MEM_GUARD_OFF` lifts the cap.
 - **Fixed: spin-tower counts under a point group.** Sampled thermal under `total_spin` matched a
   block's Sz = S and Sz = S + 1 dimensions by engine irrep index, which differs where the
   co-group acts as a scalar on one sector: it raised ("55 multiplets, expected 54"), or with a

@@ -216,6 +216,9 @@ public:
     /// Let the verbs run this sector on a CUDA device (the device rep-gather kernel over the
     /// same RepSectorData); it also permits the host-pointer gather. Off unless a caller asks.
     void enable_device(bool on) noexcept { device_ok_ = on; }
+    /// The block budget its reduced CSR takes from (csr_policy.h CsrBudget), set before the first
+    /// apply; without one it asks the default rule.
+    void set_csr_budget(std::shared_ptr<ed::planner::CsrBudget> b) noexcept { budget_ = std::move(b); }
     [[nodiscard]] bool has_device_kernel() const override {
 #ifdef WITH_CUDA
         return device_ok_;
@@ -292,18 +295,23 @@ private:
         const std::uint64_t dim = rd_->reps.size();
         if (dim == 0 || dim >= (std::uint64_t{1} << 32)) return;
         const std::uint64_t terms_per_row = 1 + offdiag_terms_;   // the diagonal, then one per term
-        if (!ed::planner::sector_csr_within_budget(dim, terms_per_row)) {
+        // The block's budget when the verb gave one, else the default rule.
+        const std::uint64_t room = budget_ ? budget_->left() : ed::planner::block_csr_budget_bytes();
+        std::uint64_t est = ed::planner::csr_estimate_bytes(dim, terms_per_row);
+        if (est > room) {
             // The bound puts every term on every row; most terms vanish on most states
             // (a J1-J2 chain fills about a quarter), so measure the fill before declining.
             const double fill = ed::matvec::sampled_sector_row_length(rows_->view(), pol_, dim);
             const auto per_row = static_cast<std::uint64_t>(std::ceil(1.1 * fill)) + 1;
-            if (per_row >= terms_per_row || !ed::planner::sector_csr_within_budget(dim, per_row))
-                return;
+            est = ed::planner::csr_estimate_bytes(dim, per_row);
+            if (per_row >= terms_per_row || est > room) return;
         }
+        if (budget_ && !budget_->take(est)) return;   // another operator of the block took it first
         const auto t0 = std::chrono::steady_clock::now();
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
             reduced_csr());
         csr_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (budget_) budget_->give(est - std::min(est, csr_bytes()));   // the estimate was an upper bound
         if (ed::env::flag("ED_SYM_PROFILE", false)) {
             ED_LOG(Info,
                          "[sym_profile] little-group block dim=%llu: "
@@ -363,6 +371,7 @@ private:
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
     bool                                           force_gpu_ = false;
     bool                                           device_ok_ = false;
+    std::shared_ptr<ed::planner::CsrBudget>        budget_;      // the block's, or null: the default rule
     // Per-operator counters (relaxed: applies may run concurrently).
     mutable std::atomic<std::uint64_t>             applies_{0};
     mutable std::atomic<std::uint64_t>             apply_ns_{0};

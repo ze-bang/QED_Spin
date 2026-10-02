@@ -314,12 +314,20 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     std::vector<BlockEnd> ends;
 
     const auto s2c = detail::s2_carrier_for(s, n_sites);
+    // A block's reduced CSRs share what its solver leaves: k = 1 runs the basis-free scan or a
+    // two-pass ground state (about 6 vectors), more levels a Krylov-Schur cycle at the kernels'
+    // floor of 2k + 20 (the cycle shrinks to the memory, never below k + 8).
+    auto budget_for = [&](std::size_t dim) {
+        const std::size_t k = std::max<std::size_t>(o.per_block > 0 ? static_cast<std::size_t>(o.per_block)
+                                                                    : static_cast<std::size_t>(o.k), 1);
+        return detail::block_budget(16ull * dim * (k == 1 ? 6u : 3u * k + 30u));
+    };
     // Solve one block and append its rows.
     auto solve_block = [&](const Subspace& sub, StarBuild& sb,
                            const std::shared_ptr<BlockData>& bi, const EngineContext& cx) {
                 const double context_orbit_s = cx.k_table->seconds.load();   // 0: no star needed it
                 const std::size_t dim = bi->tag.dim;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 if (!bop.op) return;
                 const std::uint64_t mult = bop.multiplicity;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
@@ -423,7 +431,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
                 if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx); continue; }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device)});
             }

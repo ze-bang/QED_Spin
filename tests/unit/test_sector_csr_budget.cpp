@@ -14,8 +14,10 @@
 
 #include "common/catch2_harness.h"
 
+#include <ed/core/memory.h>
 #include <ed/matvec/csr_policy.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -99,4 +101,39 @@ TEST_CASE("sector_csr_within_budget: the knob is an AGGREGATE across concurrent 
     }
     REQUIRE(admitted_small == want);
 #endif
+}
+
+TEST_CASE("block_csr_budget_bytes: unset, the budget follows the RAM the job may still allocate",
+          "[planner][csr_budget]") {
+    // P6.1 (audit P1-matvec-cpu-03): a fixed 8 GiB ignored the job's memory.
+    EnvGuard g(nullptr);
+    const char* off = std::getenv("ED_MEM_GUARD_OFF");
+    if (off != nullptr) ::unsetenv("ED_MEM_GUARD_OFF");
+    const std::uint64_t avail = ed::core::available_ram_bytes();
+    if (avail == 0) {
+        REQUIRE(ed::planner::block_csr_budget_bytes() == (std::uint64_t{8} << 30));
+    } else {
+        const double b0 = static_cast<double>(ed::planner::block_csr_budget_bytes());
+        // the RAM moves a little between the two reads: 5%
+        REQUIRE(std::abs(b0 - 0.55 * static_cast<double>(avail)) <= 0.05 * 0.55 * static_cast<double>(avail));
+        const std::uint64_t ws = avail / 4;
+        const double b1 = static_cast<double>(ed::planner::block_csr_budget_bytes(ws));
+        REQUIRE(std::abs(b1 - (0.55 * static_cast<double>(avail) - static_cast<double>(ws)))
+                <= 0.05 * 0.55 * static_cast<double>(avail));
+        REQUIRE(ed::planner::block_csr_budget_bytes(avail) == 0);   // a working set larger than the share
+    }
+    ::setenv("ED_MEM_GUARD_OFF", "1", 1);
+    REQUIRE(ed::planner::block_csr_budget_bytes(~std::uint64_t{0} / 2) == ~std::uint64_t{0});
+    if (off != nullptr) ::setenv("ED_MEM_GUARD_OFF", off, 1);
+    else ::unsetenv("ED_MEM_GUARD_OFF");
+}
+
+TEST_CASE("CsrBudget: one block's operators share it", "[planner][csr_budget]") {
+    ed::planner::CsrBudget b(100);
+    REQUIRE(b.take(60));
+    REQUIRE_FALSE(b.take(50));     // H took 60; S^2 does not fit
+    REQUIRE(b.take(40));
+    REQUIRE(b.left() == 0);
+    b.give(25);                    // a build used less than its estimate
+    REQUIRE(b.left() == 25);
 }

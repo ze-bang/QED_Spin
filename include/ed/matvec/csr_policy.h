@@ -14,9 +14,12 @@
 // =============================================================================
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <ed/core/config.h>
+#include <ed/core/memory.h>
 
 #ifdef _OPENMP
 #  include <omp.h>
@@ -73,34 +76,67 @@ enum class SymMatvecRepr : int {
     return 1u;
 }
 
-/// ONE budget decision for materializing a reduced sector matrix, shared by
-/// the abelian CpuMatVecBackend and the little-group engine's
-/// RepSectorMatVec; keep a single definition so the two lanes cannot drift.
-/// The estimate is an UPPER BOUND: each off-diagonal term
-/// contributes at most one entry per source row; the budget knob is
-/// ``ED_SYM_SECTOR_CSR_BUDGET_GIB`` (default 8, read per call so tests can
-/// toggle without restart). An over-budget sector falls back to the CSR-free
-/// walk on its own -- frontier sectors (N=36 half filling: hundreds of GB)
-/// need no env var.
-///
-/// The budget is an AGGREGATE, not per-sector: it is divided by the number of
-/// concurrent sector builders, so when blocks are solved inside an outer
-/// parallel loop the TOTAL in-flight CSR footprint stays under the knob
-/// regardless of thread count (a per-sector check would let N threads each
-/// allocate the full budget). An over-budget sector degrades to the CSR-free
-/// walk, never OOMs.
+/// The bytes of a reduced sector CSR of `dim` rows with at most `per_row` entries a row.
+[[nodiscard]] inline std::uint64_t csr_estimate_bytes(std::uint64_t dim, std::uint64_t per_row) noexcept {
+    return dim * per_row * (16u /* complex value */ + 4u /* col idx */) + (dim + 1) * 8u /* row ptr */;
+}
+
+/// The bytes the reduced CSRs built around this call may take, ONE rule for every lane:
+///   ED_SYM_SECTOR_CSR_BUDGET_GIB when set -- an absolute cap (0 admits nothing);
+///   else 0.55 of the RAM the job may still allocate, less `working_set` (what the block's solver
+///   will hold beside the CSR: footprint.h), which follows the job's memory instead of a fixed
+///   8 GiB (audit P1-matvec-cpu-03); unlimited under ED_MEM_GUARD_OFF; 8 GiB when the RAM cannot
+///   be read.
+/// Either way it is an AGGREGATE, divided by the number of concurrent sector builders: blocks
+/// solved inside an outer parallel loop keep the TOTAL in-flight CSR footprint under it (a
+/// per-sector check would let N threads each allocate the whole budget).
+[[nodiscard]] inline std::uint64_t block_csr_budget_bytes(std::uint64_t working_set = 0) noexcept {
+    constexpr double GiB = 1073741824.0;
+    double bytes = 0.0;
+    const double knob = ed::env::real("ED_SYM_SECTOR_CSR_BUDGET_GIB", std::nan(""));
+    if (!std::isnan(knob)) {
+        bytes = std::max(0.0, knob) * GiB;
+    } else if (ed::core::mem_guard_off()) {
+        return ~std::uint64_t{0};
+    } else if (const std::uint64_t avail = ed::core::available_ram_bytes(); avail > 0) {
+        bytes = std::max(0.0, 0.55 * static_cast<double>(avail) - static_cast<double>(working_set));
+    } else {
+        bytes = 8.0 * GiB;
+    }
+    return static_cast<std::uint64_t>(bytes / static_cast<double>(concurrent_sector_builders()));
+}
+
+/// ONE budget decision for materializing a reduced sector matrix without a block budget (below),
+/// shared by every lane. The estimate is an UPPER BOUND: each off-diagonal term contributes at most
+/// one entry per source row. An over-budget sector falls back to the CSR-free walk on its own --
+/// frontier sectors (N=36 half filling: hundreds of GB) need no env var.
 [[nodiscard]] inline bool sector_csr_within_budget(
         std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
     // The CSR stores 32-bit column indices: a sector of 2^32 or more states takes the walk.
     if (dim >= (std::uint64_t{1} << 32)) return false;
-    const std::uint64_t est_bytes =
-        dim * terms_per_row * (16u /* complex value */ + 4u /* col idx */)
-        + (dim + 1) * 8u /* row ptr */;
-    // 0 (or less) admits nothing: every sector takes the CSR-free walk.
-    double budget_gib = std::max(0.0, ed::env::real("ED_SYM_SECTOR_CSR_BUDGET_GIB", 8.0));
-    budget_gib /= static_cast<double>(concurrent_sector_builders());
-    return static_cast<double>(est_bytes)
-           <= budget_gib * static_cast<double>(1ULL << 30);
+    return csr_estimate_bytes(dim, terms_per_row) <= block_csr_budget_bytes();
 }
+
+/// The bytes the reduced CSRs of ONE block's operators may hold together: the verb sizes it with
+/// block_csr_budget_bytes(working set of the block's solver) before the solver allocates anything,
+/// and each operator's lazy build takes its estimate from it -- H first, then S^2, then the
+/// observables; an operator whose CSR no longer fits runs the walk.
+class CsrBudget {
+public:
+    explicit CsrBudget(std::uint64_t bytes) noexcept : left_(bytes) {}
+    /// Take `bytes` if they are left.
+    [[nodiscard]] bool take(std::uint64_t bytes) noexcept {
+        std::uint64_t cur = left_.load();
+        while (cur >= bytes)
+            if (left_.compare_exchange_weak(cur, cur - bytes)) return true;
+        return false;
+    }
+    /// Return what a build took but did not use.
+    void give(std::uint64_t bytes) noexcept { left_.fetch_add(bytes); }
+    [[nodiscard]] std::uint64_t left() const noexcept { return left_.load(); }
+
+private:
+    std::atomic<std::uint64_t> left_;
+};
 
 }  // namespace ed::planner

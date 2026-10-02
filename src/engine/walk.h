@@ -64,15 +64,28 @@ struct BlockOp {
     }
 };
 
+/// The block budget of a block's reduced CSRs (csr_policy.h): block_csr_budget_bytes less the
+/// `working_set` its solver will hold, sized now -- before the solver allocates anything.
+inline std::shared_ptr<ed::planner::CsrBudget> block_budget(std::uint64_t working_set) {
+    return std::make_shared<ed::planner::CsrBudget>(ed::planner::block_csr_budget_bytes(working_set));
+}
+
 inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const ed::solvers::lg_detail::StarBuild& sb,
                               const std::shared_ptr<ed::solvers::BlockData>& bi,
                               const std::shared_ptr<::Operator>& s2_carrier,
-                              Device device = Device::Cpu) {
+                              Device device = Device::Cpu,
+                              const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
     b.op = std::shared_ptr<const ed::LinearOperator>(bi, &block_mv(*bi));
     b.multiplicity = bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
+    // H's reduced CSR first, then S^2's, from the block's budget (a W block's H is the star's
+    // k-sector operator).
+    if (budget) {
+        if (bi->gop) bi->gop->set_csr_budget(budget);
+        else if (sb.hk) sb.hk->set_csr_budget(budget);
+    }
     // Group and momentum sectors have a device kernel; the isotypic sandwich does not.
     RepSectorMatVec* rep = bi->gop ? bi->gop.get() : (bi->W ? nullptr : sb.hk.get());
     const bool dev = rep && device != Device::Cpu;
@@ -84,8 +97,10 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     std::shared_ptr<RepSectorMatVec> s2rep;
     if (bi->gop) {
         s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, bi->gsec);
+        s2rep->set_csr_budget(budget);
     } else {
         auto s2k = std::make_shared<RepSectorMatVec>(*s2_carrier, sb.hk->rep_data_ptr());
+        s2k->set_csr_budget(budget);
         if (bi->W) s2 = std::make_shared<ProjectedBlockOp>(s2k, bi->W);
         else       s2 = s2rep = s2k;
     }
@@ -319,12 +334,15 @@ private:
 };
 
 /// A block-diagonal (averaged) operator, given by its row program, restricted to block `bi` of
-/// star `sb`, in the basis the block's H acts on; with `device` it may bind to a CUDA backend.
+/// star `sb`, in the basis the block's H acts on; with `device` it may bind to a CUDA backend. Its
+/// reduced CSR takes from the block's `budget` after H's.
 inline std::shared_ptr<const ed::LinearOperator>
 block_observable(const std::shared_ptr<const ed::ops::MaskedProgram>& A, const ed::solvers::lg_detail::StarBuild& sb,
-                 const std::shared_ptr<ed::solvers::BlockData>& bi, bool device) {
+                 const std::shared_ptr<ed::solvers::BlockData>& bi, bool device,
+                 const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
     using namespace ed::solvers::lg_detail;
     auto rep = std::make_shared<RepSectorMatVec>(A, bi->gop ? bi->gsec : sb.hk->rep_data_ptr());
+    rep->set_csr_budget(budget);
     if (bi->W) return std::make_shared<ProjectedBlockOp>(rep, bi->W);
     if (device) rep->enable_device(true);
     return rep;

@@ -333,7 +333,18 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     tower_dim = at - above;
                     if (tower_dim == 0) continue;
                 }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device);
+                // A sampled block's reduced CSRs (H, S^2, observables) share what its kernel leaves.
+                std::shared_ptr<ed::planner::CsrBudget> budget;
+                if (t.method != ThermalSpec::Method::Exact) {
+                    ed::core::Shape shape;
+                    shape.dim    = bi->tag.dim;
+                    shape.krylov = std::max<std::size_t>(t.krylov, 4);
+                    shape.tower  = tower_sampling;
+                    const auto path = t.method == ThermalSpec::Method::mTPQ ? ed::core::Path::Mtpq
+                                      : n_obs > 0 ? ed::core::Path::FtlmSampleKept : ed::core::Path::FtlmSample;
+                    budget = detail::block_budget(ed::core::footprint(path, shape).host);
+                }
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device, budget);
                 if (!bop.op) continue;
                 const auto& mv = *bop.op;
                 BlockThermo b;
@@ -352,7 +363,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                             if (conj && !folded) break;
                             const Antiunitary a = conj ? image : Antiunitary::None;
                             obs.push_back(detail::block_observable(avg->program(*O, flip, keep, a), sb, bi,
-                                                                   t.device != Device::Cpu));
+                                                                   t.device != Device::Cpu, budget));
                         }
                 }
                 if (t.method == ThermalSpec::Method::Exact && n_obs > 0) {
