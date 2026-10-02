@@ -25,6 +25,7 @@ set(ED_ENGINE_SOURCES
     src/engine/validate.cpp
     src/engine/group_sector.cpp
     src/engine/ground_state.cpp
+    src/engine/members.cpp
     src/engine/tower.cpp
 )
 if(WITH_CUDA)

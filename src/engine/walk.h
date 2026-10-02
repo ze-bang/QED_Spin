@@ -581,4 +581,41 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
     return n_blocks;
 }
 
+// ---- A level's multiplet in momentum sectors (members.cpp) --------------------------
+
+/// The momentum sectors of one subspace under the abelian group A, each built on its first request
+/// from the subspace's one orbit table.
+class MomentumSectors {
+public:
+    MomentumSectors(const ::Operator& H, const std::vector<Perm>& A, int n_sites, const Subspace& sub);
+    /// The sector of momentum chi (characters over A), or null when no momentum has them.
+    [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> of(const std::vector<Complex>& chi);
+
+private:
+    ed::solvers::lg_detail::EngineContext cx_;
+    std::map<int, std::shared_ptr<const ed::symmetry::RepSectorData>> built_;
+};
+
+/// One member of a level's multiplet: a unit vector of a momentum sector of A, in its subspace.
+struct Member {
+    Subspace    sub;
+    BlockVector v;
+};
+
+/// The momentum sectors a call's members land in, per subspace (n_up, sz_parity).
+struct MemberSectors {
+    const ::Operator&  H;
+    std::vector<Perm>  A;
+    int                n_sites = 0;
+    std::map<std::pair<int, int>, std::unique_ptr<MomentumSectors>> by_sub;
+};
+
+/// The degenerate multiplet of level L (of a walk under Spec s) from its vector v, as `count`
+/// orthonormal unit vectors of momentum sectors of A: the closure of v under the residues, L's
+/// antiunitary fold and its flip / Theta mirror (multiplet()'s operations). Each member is gathered
+/// at its sector's representatives from v's amplitudes, so no vector of the whole Sz sector is
+/// formed. Throws std::logic_error when the closure does not hold `count` states.
+[[nodiscard]] std::vector<Member>
+members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s, MemberSectors& ms);
+
 }  // namespace ed::sectors::detail

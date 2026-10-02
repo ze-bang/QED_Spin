@@ -10,6 +10,7 @@
 //   [lanes]   the Backend-templated block lanes (scan, Krylov-Schur, GS vector, estimate)
 //             on toy blocks against Eigen; [lanes][cuda] the same lanes on CudaBackend.
 //   [dense]   solve_block_full and solve_block_dense.
+//   [members] a level's multiplet gathered into momentum sectors (members_of) against multiplet().
 //   [linear_operator] bind<Backend>, has_device_kernel; a host-only operator refuses
 //             bind_cuda.
 // =============================================================================
@@ -24,6 +25,7 @@
 #include <ed/core/select_backend.h>
 #include <ed/sectors/thermal.h>
 #include <ed/ops/casimir_projector.h>
+#include <ed/parallel/thread_budget.h>
 
 #include <algorithm>
 #include <cmath>
@@ -769,3 +771,123 @@ TEST_CASE("dense: the host DenseBatch solves its queue concurrently, as single s
     }
 }
 
+// -----------------------------------------------------------------------------
+// [members]: a level's multiplet gathered into momentum sectors (walk.h members_of), which dynamics
+// uses for the ground manifold of the folded solve. Every member must be an eigenvector of H in its
+// momentum sector, the members must number the level's multiplicity, and in each Sz sector they must
+// span what multiplet() builds in the computational basis.
+// -----------------------------------------------------------------------------
+namespace {
+
+constexpr int kL = 4;   // the 4 x 4 square torus
+
+int site(int x, int y) { return ((x % kL + kL) % kL) + kL * ((y % kL + kL) % kL); }
+
+ed::sectors::Perm square_map(int a, int b, int c, int d, int tx, int ty) {   // (x, y) -> (a x + b y + tx, c x + d y + ty)
+    ed::sectors::Perm p(kL * kL);
+    for (int y = 0; y < kL; ++y)
+        for (int x = 0; x < kL; ++x) p[static_cast<std::size_t>(site(x, y))] = site(a * x + b * y + tx, c * x + d * y + ty);
+    return p;
+}
+
+std::shared_ptr<Operator> square_j1j2(double J2) {
+    auto H = std::make_shared<Operator>(static_cast<std::uint64_t>(kL * kL), 0.5f);
+    auto bond = [&](int i, int j, double J) {
+        const auto a = static_cast<std::uint64_t>(i), b = static_cast<std::uint64_t>(j);
+        H->addTwoBodyTerm(2, a, 2, b, Complex(J, 0));
+        H->addTwoBodyTerm(0, a, 1, b, Complex(0.5 * J, 0));
+        H->addTwoBodyTerm(1, a, 0, b, Complex(0.5 * J, 0));
+    };
+    for (int y = 0; y < kL; ++y)
+        for (int x = 0; x < kL; ++x) {
+            bond(site(x, y), site(x + 1, y), 1.0);
+            bond(site(x, y), site(x, y + 1), 1.0);
+            bond(site(x, y), site(x + 1, y + 1), J2);
+            bond(site(x, y), site(x + 1, y - 1), J2);
+        }
+    return H;
+}
+
+}  // namespace
+
+TEST_CASE("members: a level's multiplet in momentum sectors", "[members]") {
+    // One thread: the full-basis multiplet() check runs thousands of short parallel loops, which under
+    // ctest's oversubscription (-j cores x cores threads) cost minutes for a test of a second.
+    ed::parallel::ThreadBudgetScope one_thread(1);
+    auto H = square_j1j2(0.5);
+    const int N = kL * kL;
+    ed::sectors::Spec s;
+    for (int ty = 0; ty < kL; ++ty)
+        for (int tx = 0; tx < kL; ++tx) s.abelian.push_back(square_map(1, 0, 0, 1, tx, ty));
+    using ed::sectors::Perm;
+    const Perm c4 = square_map(0, -1, 1, 0, 0, 0), c2 = square_map(-1, 0, 0, -1, 0, 0), c4i = square_map(0, 1, -1, 0, 0, 0);
+    const Perm sx = square_map(1, 0, 0, -1, 0, 0), sy = square_map(-1, 0, 0, 1, 0, 0);
+    const Perm sd = square_map(0, 1, 1, 0, 0, 0), sa = square_map(0, -1, -1, 0, 0, 0);
+    struct Case { const char* name; std::vector<Perm> residues; int n_up; };
+    // C4v: real irreps, two-dimensional E at Gamma and M. C4 alone: complex irreps, folded by K.
+    // n_up = 8: the flip-projected half filling; n_up = -1: every Sz, n_up and N - n_up mirrored.
+    const Case cases[] = {{"C4v, n_up 8", {c4, c2, c4i, sx, sy, sd, sa}, N / 2},
+                          {"C4, n_up 7", {c4, c2, c4i}, N / 2 - 1},
+                          {"C4v, every Sz", {c4, c2, c4i, sx, sy, sd, sa}, -1}};
+    for (const Case& c : cases) {
+        INFO(c.name);
+        ed::sectors::Spec sc = s;
+        sc.residues = c.residues;
+        sc.n_up = c.n_up;
+        ed::sectors::EigsOptions eo;
+        eo.k = 40;
+        eo.vectors = true;
+        const auto r = ed::sectors::eigs(*H, sc, eo);
+        ed::sectors::detail::MemberSectors ms{*H, s.abelian, N, {}};
+        bool saw_d2 = false, saw_star = false, saw_mirror = false, saw_fold = false;
+        for (const auto& L : r.levels) {
+            const auto& v = r.vectors[static_cast<std::size_t>(L.vector)];
+            const std::uint64_t count = L.tag.multiplicity * static_cast<std::uint64_t>(L.mirror);
+            INFO("level E " << L.energy << " k0 " << L.tag.k0 << " irrep " << L.tag.irrep << " d " << L.tag.irrep_dim
+                 << " star " << L.tag.star_size << " mirror " << L.mirror << " tr_folded " << L.tag.tr_folded);
+            const auto members = ed::sectors::detail::members_of(L, v, count, sc, ms);
+            REQUIRE(members.size() == count);
+            saw_d2 = saw_d2 || L.tag.irrep_dim == 2;
+            saw_star = saw_star || L.tag.star_size > 1;
+            saw_mirror = saw_mirror || L.mirror == 2;
+            saw_fold = saw_fold || L.tag.tr_folded;
+            for (std::size_t i = 0; i < members.size(); ++i) {
+                const auto& m = members[i];
+                REQUIRE(m.v.basis->group_size == static_cast<int>(s.abelian.size()));
+                lg::RepSectorMatVec Hm(*H, m.v.basis);
+                REQUIRE(residual(Hm, L.energy, m.v.amplitudes) <= 1e-9);
+                for (std::size_t j = 0; j < i; ++j) {
+                    if (members[j].v.basis != m.v.basis) continue;
+                    Complex dot(0, 0);
+                    for (std::size_t a = 0; a < m.v.amplitudes.size(); ++a)
+                        dot += std::conj(members[j].v.amplitudes[a]) * m.v.amplitudes[a];
+                    REQUIRE(std::abs(dot) <= 1e-10);
+                }
+            }
+            // Per Sz sector, the same span as multiplet() in the computational basis: the overlap matrix
+            // of the two orthonormal sets is unitary.
+            std::set<int> sz;
+            for (const auto& m : members) sz.insert(m.sub.n_up);
+            for (int n_up : sz) {
+                std::vector<std::vector<Complex>> a;
+                for (const auto& m : members)
+                    if (m.sub.n_up == n_up) a.push_back(ed::sectors::expand(*m.v.basis, m.v.amplitudes, n_up));
+                const auto b = ed::sectors::multiplet(sc, N, L, v, n_up);
+                REQUIRE(a.size() == b.size());
+                Eigen::MatrixXcd G(static_cast<Eigen::Index>(a.size()), static_cast<Eigen::Index>(b.size()));
+                for (std::size_t i = 0; i < a.size(); ++i)
+                    for (std::size_t j = 0; j < b.size(); ++j) {
+                        Complex dot(0, 0);
+                        for (std::size_t x = 0; x < a[i].size(); ++x) dot += std::conj(a[i][x]) * b[j][x];
+                        G(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = dot;
+                    }
+                const Eigen::MatrixXcd I = Eigen::MatrixXcd::Identity(G.cols(), G.cols());
+                REQUIRE((G.adjoint() * G - I).norm() <= 1e-9);
+            }
+        }
+        // The cases reach every kind of member: a two-dimensional irrep, a star, a mirror, a K fold.
+        if (c.residues.size() == 7 && c.n_up == N / 2) REQUIRE((saw_d2 && saw_star));
+        if (c.residues.size() == 3) REQUIRE(saw_fold);
+        if (c.n_up < 0) REQUIRE(saw_mirror);
+    }
+}

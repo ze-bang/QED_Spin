@@ -864,6 +864,34 @@ def test_dynamics_selects_its_source_by_momentum():
                      sym=qed.Symmetry(spatial=[list(T)], point_group=False, spin_flip="require"))
 
 
+def _s_plus_q(n, q):
+    O = qed.Operator(n)
+    for j in range(n):
+        O.add_one_body(qed.OP_SPLUS, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
+    return O
+
+
+@pytest.mark.parametrize("probe", ["zz", "pm"])
+def test_t0_ground_manifold_is_solved_on_the_folded_blocks(probe):
+    # P6.7 (audit P5-dynamics-01): the T = 0 ground manifold is solved on the point-group, flip and
+    # time-reversal blocks, and each level is expanded into momentum sectors. The odd ring's ground
+    # state is a spin-1/2 doublet at +-k: four states over two Sz sectors and two momenta, members of
+    # one folded level. The result is the momentum-sector solve's and the dense Lehmann sum's.
+    n = 9
+    H = _ring(n)
+    q = 2 * math.pi * 2 / n
+    O = _sz_q(n, q) if probe == "zz" else _s_plus_q(n, q)
+    omega = np.linspace(-0.5, 4.0, 91)
+    kw = dict(eta=0.1, krylov=300)
+    folded = qed.dynamics(H, O, omega, **kw)
+    plain = qed.dynamics(H, O, omega, sym=qed.Symmetry(spatial=_translations(n), point_group=False,
+                                                        spin_flip="off", time_reversal="off"), **kw)
+    assert folded.ground_manifold == plain.ground_manifold == 4
+    scale = np.abs(plain.S).max()
+    np.testing.assert_allclose(folded.S, plain.S, atol=1e-10 * scale)
+    np.testing.assert_allclose(folded.S[0], _lehmann_t0(H, O, n, omega, 0.1), atol=1e-8 * scale)
+
+
 def _ring_in_field(n, h=0.1):
     b = qed.input.HamiltonianBuilder(n)
     b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=1.0)
@@ -1670,7 +1698,7 @@ def test_dynamics_probe_axes(T):
         np.testing.assert_allclose(full[i, i].real, one[i], rtol=1e-10, atol=1e-12)
     if T is None:   # at T > 0 the sampled trace is Hermitian only on average
         np.testing.assert_allclose(full[1, 0], np.conj(full[0, 1]), atol=1e-10 * np.abs(full).max())
-    pairs =qed.dynamics(H, [A, B], omega, [B, A], **kw).S
+    pairs = qed.dynamics(H, [A, B], omega, [B, A], **kw).S
     np.testing.assert_allclose(pairs[0], full[0, 1], atol=1e-12)
     np.testing.assert_allclose(pairs[1], full[1, 0], atol=1e-12)
     with pytest.raises(qed.errors.InvalidRequest):

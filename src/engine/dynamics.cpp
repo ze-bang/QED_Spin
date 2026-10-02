@@ -32,10 +32,11 @@ using namespace ed::solvers::lg_detail;
 
 namespace {
 
-// Momentum sectors only: O is not invariant under the point group, time reversal or
-// the flip, so none of them may fold sectors together. A momentum selection restricts the
-// source states (the targets are wherever O leads); the selections that name point-group
-// blocks have nothing to select among momentum sectors.
+// The probes' sectors: momentum sectors only. O is not invariant under the point group, time
+// reversal or the flip, so none of them may fold the targets or the T > 0 sources together (the
+// T = 0 ground manifold is solved folded and expanded, folded_ground_manifold). A momentum
+// selection restricts the source states (the targets are wherever O leads); the selections that
+// name point-group blocks have nothing to select among momentum sectors.
 Spec unfolded(const Spec& s) {
     if (!s.only_k0.empty() || !s.only_irrep.empty() || !s.only_irrep_chars.empty())
         throw ed::Unsupported("dynamics: the source states are selected by Sz and momentum only; k0, irrep "
@@ -120,7 +121,8 @@ std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std
     return out;
 }
 
-// The ground manifold: every level within `tol` of E0, with vectors. A vector-free, pruned
+// The ground manifold on the momentum sectors (a momentum selection, device='gpu'): every level
+// within `tol` of E0, with vectors. A vector-free, pruned
 // k = 1 solve with a `tol` window finds the blocks at E0 (a block whose Lanczos estimate is
 // far above E0 is never solved); only those are then solved with vectors, deeper until a
 // level above the window shows up, which catches degeneracies inside a block.
@@ -156,6 +158,57 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
             if (exhausted || r.levels.back().energy > e0 + tol) {
                 for (const auto& R : r.levels)
                     if (R.energy <= e0 + tol) out.emplace_back(R, r.vectors[static_cast<std::size_t>(R.vector)]);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+// The ground manifold on the caller's folded Spec s (point group, flip, time reversal), each level
+// expanded into its whole multiplet in momentum sectors of A (members_of): the eigensolves run on
+// the irrep blocks instead of whole momentum sectors (audit P5-dynamics-01). As above, a pruned k = 1
+// solve finds the blocks at E0 and each is then solved alone, deeper until a level above the window
+// shows up. A block selection drops a Theta fold, so a level's fold, mirror and multiplicity come
+// from the first solve.
+std::vector<detail::Member>
+folded_ground_manifold(const ::Operator& H, int n_sites, const Spec& s, const std::vector<Perm>& A, double tol,
+                       Device device, int dense_max_dim, bool prune, double& e0, Placement& placement) {
+    EigsOptions eo;
+    eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim; eo.prune = prune;
+    const EigsResult first = eigs(H, s, eo);
+    placement += first.placement;
+    eo.vectors = true;
+    if (first.levels.empty())        // eigs raises for a selection; nothing else leaves it empty
+        throw ed::EmptySelection("dynamics: the requested sectors hold no state");
+    e0 = first.levels.front().energy;
+    detail::MemberSectors ms{H, A, n_sites, {}};
+    std::vector<detail::Member> out;
+    std::set<std::tuple<int, int, int, int>> done;
+    for (const auto& L : first.levels) {
+        if (L.energy > e0 + tol) break;
+        if (!done.insert({L.tag.n_up, L.tag.sz_parity, L.tag.k0, L.tag.irrep}).second) continue;
+        Spec one = s;
+        one.n_up = L.tag.n_up;
+        one.sz_parity = L.tag.n_up >= 0 ? -1 : L.tag.sz_parity;
+        one.only_k0 = {L.tag.k0};
+        one.only_irrep.clear();
+        if (L.tag.irrep >= 0) one.only_irrep = {L.tag.irrep};
+        const std::uint64_t count = L.tag.multiplicity * static_cast<std::uint64_t>(L.mirror);
+        for (int pb = 2;; pb *= 2) {
+            EigsOptions deep = eo;
+            deep.per_block = pb;
+            deep.cut       = false;
+            deep.window    = 0.0;
+            const EigsResult r = eigs(H, one, deep);
+            placement += r.placement;
+            const bool exhausted = static_cast<int>(r.levels.size()) < pb;
+            if (exhausted || r.levels.back().energy > e0 + tol) {
+                for (const auto& R : r.levels) {
+                    if (R.energy > e0 + tol) continue;
+                    auto m = detail::members_of(L, r.vectors[static_cast<std::size_t>(R.vector)], count, s, ms);
+                    out.insert(out.end(), std::make_move_iterator(m.begin()), std::make_move_iterator(m.end()));
+                }
                 break;
             }
         }
@@ -293,14 +346,24 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         auto t_gm = std::chrono::steady_clock::now();
         // The window is relative to H's scale: s * H keeps the same manifold.
         const double window = d.degeneracy_tol * ed::numerics::scale_or_one(H.norm_bound());
-        const auto manifold = ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0,
-                                              out.placement);
+        // On the folded Spec, unless a momentum selection names momentum sectors, or device='gpu'
+        // would meet a block of an irrep of dimension > 1, which has no device kernel yet (plan P7.5).
+        std::vector<std::pair<BlockVector, int>> ground;   // (vector, Sz parity of its subspace)
+        if (s.only_momentum.empty() && d.device != Device::Gpu) {
+            for (auto& m : folded_ground_manifold(H, n_sites, s, A, window, d.device, d.dense_max_dim, d.prune,
+                                                  out.e0, out.placement))
+                ground.push_back({std::move(m.v), m.sub.sz_parity});
+        } else {
+            for (auto& [L, v] : ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0,
+                                                out.placement))
+                ground.push_back({std::move(v), L.tag.sz_parity});
+        }
         // With whole multiplets the solve returns the Sz = S member of each; the other members
         // follow by total S- (normalised), each in the same momentum sector one Sz lower.
         std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)
         const auto s_minus = total_s_minus(n_sites);
-        for (const auto& [L, v] : manifold) {
-            states.push_back({v, L.tag.sz_parity});
+        for (auto& [v0, parity] : ground) {
+            states.push_back({std::move(v0), parity});
             for (int m = 0; whole && m < s.two_S; ++m) {
                 const BlockVector& x = states.back().first;
                 std::shared_ptr<const ed::symmetry::RepSectorData> below;
