@@ -9,6 +9,8 @@ set(ED_ENGINE_SOURCES
     src/parallel/numa.cpp
     src/parallel/thread_budget.cpp
     src/matvec/cpu_backend_instantiations.cpp
+    src/ops/algebra.cpp
+    src/ops/program.cpp
     src/basis/group.cpp
     src/basis/irreps.cpp
     src/dssf/operator_spec.cpp
@@ -33,6 +35,7 @@ if(WITH_CUDA)
         src/gpu/little_group.cu
         src/gpu/rep_matvec.cu
         src/gpu/device_csr.cu
+        src/gpu/rep_matrix_elements.cu
     )
 else()
     list(APPEND ED_ENGINE_SOURCES src/gpu/rep_matvec_stub.cpp)   # throwing stubs

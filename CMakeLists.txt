@@ -197,6 +197,12 @@ if(BUILD_ED_TESTS)
     # algebra + generate_group closure).
     ed_add_test(test_symmetry_dsl               tests/unit/test_symmetry_dsl.cpp)
 
+    # The operator algebra (masked terms: products, adjoints, images against dense matrices) and
+    # the compiled programs swept in symmetry sectors (against the full-space expansion).
+    ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp)
+    ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp)
+    target_include_directories(test_rep_matrix_elements PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # engine/options.h
+
     # -------------------------------------------------------------------------
     # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU
     # builds skip compilation entirely. The TEST_CASEs themselves SKIP at
