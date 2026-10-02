@@ -23,6 +23,8 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 using Cx = std::complex<double>;
@@ -248,4 +250,102 @@ TEST_CASE("commutators, equality and the global maps K, F, Dz, Theta", "[masked]
     const auto heis = P("xx", {0, 1}) + P("yy", {0, 1}) + P("zz", {0, 1});
     for (Map g : {Map::K, Map::F, Map::Dz, Map::Theta}) CHECK(heis.image(g).equals(heis));
     CHECK_FALSE(P("z", {0}).equals(MaskedOperator::product(n + 1, "z", {0}, 1.0)));
+}
+
+namespace {
+
+// <t|O|s> of a sum of products by acting with the single-site matrices on each |s>, the
+// rightmost factor first: the Kronecker reference without dim^3 matrix products.
+using Product = std::tuple<std::string, std::vector<int>, Cx>;
+std::vector<Cx> dense_by_action(int n, const std::vector<Product>& prods) {
+    const std::uint64_t dim = 1ULL << n;
+    std::vector<Cx> M(dim * dim, 0.0);
+    for (std::uint64_t s = 0; s < dim; ++s)
+        for (const auto& [ops, sites, c] : prods) {
+            std::vector<std::pair<std::uint64_t, Cx>> v{{s, c}};
+            for (std::size_t k = ops.size(); k-- > 0;) {
+                const M2 m = single(ops[k]);
+                const int site = sites[k];
+                std::vector<std::pair<std::uint64_t, Cx>> w;
+                for (const auto& [st, a] : v) {
+                    const int sb = ud(static_cast<int>((st >> site) & 1ULL));
+                    for (int tb = 0; tb < 2; ++tb) {
+                        const Cx x = m[static_cast<std::size_t>(tb * 2 + sb)];
+                        if (x == Cx(0.0)) continue;
+                        w.emplace_back((st & ~(1ULL << site)) | (static_cast<std::uint64_t>(ud(tb)) << site), a * x);
+                    }
+                }
+                v = std::move(w);
+            }
+            for (const auto& [t, a] : v) M[t * dim + s] += a;
+        }
+    return M;
+}
+
+}  // namespace
+
+TEST_CASE("2000 random operators match the Kronecker reference", "[masked]") {
+    // N = 2..10, sums of 1-3 products of 1-4 factors over + - z x y u d I with repeated sites.
+    std::mt19937 rng(20261002);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1);
+    std::uniform_int_distribution<int> pick_len(1, 4), pick_terms(1, 3);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    for (int trial = 0; trial < 2000; ++trial) {
+        const int n = 2 + trial % 9;
+        std::uniform_int_distribution<int> pick_site(0, n - 1);
+        std::vector<Product> prods;
+        MaskedOperator O(n);
+        for (int t = pick_terms(rng); t > 0; --t) {
+            std::string ops;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                ops.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            const Cx c(gauss(rng), gauss(rng));
+            prods.emplace_back(ops, sites, c);
+            O.add(MaskedOperator::product(n, ops, sites, c));
+        }
+        INFO("trial " << trial << " n " << n << " first ops " << std::get<0>(prods[0]));
+        REQUIRE(maxdiff(O.to_dense(), dense_by_action(n, prods)) < 1e-13);
+    }
+}
+
+TEST_CASE("the algebra laws hold exactly on the canonical keys", "[masked]") {
+    // Dyadic coefficients (k / 4) keep every sum and product exact, so the laws must hold bit
+    // for bit: equals(..., 0.0).
+    const int n = 5;
+    std::mt19937 rng(20261008);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1);
+    std::uniform_int_distribution<int> pick_site(0, n - 1), pick_len(1, 3), pick_k(-8, 8);
+    auto dyadic = [&] { return Cx(pick_k(rng) / 4.0, pick_k(rng) / 4.0); };
+    auto random_op = [&] {
+        MaskedOperator O(n);
+        for (int t = 0; t < 3; ++t) {
+            std::string ops;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                ops.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(n, ops, sites, dyadic()));
+        }
+        return O;
+    };
+    for (int trial = 0; trial < 200; ++trial) {
+        const auto A = random_op(), B = random_op(), C = random_op();
+        const Cx a = dyadic();
+        INFO("trial " << trial);
+        REQUIRE((A + B).equals(B + A, 0.0));
+        REQUIRE(((A + B) + C).equals(A + (B + C), 0.0));
+        REQUIRE(((A * B) * C).equals(A * (B * C), 0.0));
+        REQUIRE((A * (B + C)).equals(A * B + A * C, 0.0));
+        REQUIRE(((A + B) * C).equals(A * C + B * C, 0.0));
+        REQUIRE((A * B).dagger().equals(B.dagger() * A.dagger(), 0.0));
+        REQUIRE(A.dagger().dagger().equals(A, 0.0));
+        REQUIRE((A - A).empty());
+        REQUIRE((A.scaled(a) * B).equals((A * B).scaled(a), 0.0));
+    }
 }
