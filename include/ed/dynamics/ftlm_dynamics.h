@@ -120,10 +120,16 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
     };
     auto sample = [&](auto& bk, auto&& Hs, auto&& Hds, std::size_t s) {
         Sample out;
+        // Local DGKS3 reorthogonalisation in a sector much larger than the Krylov depth: there the
+        // O(m^2 n) full pass was most of a sample's work and buys nothing measurable (chain24, T = 1,
+        // krylov 80: the weight moves by 8e-7 against a seed-to-seed spread of 4e-4; chain12 errors
+        // against the dense Lehmann sum agree to 4 digits; jobs 62586014/62586016). A sector the run
+        // can exhaust keeps full CGS2, which stops cleanly at its invariant subspace (audit P5-dynamics-05).
         auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n) {
             ed::krylov::LanczosKernelOptions lo;
             lo.max_iter   = std::min(n, opts.krylov_dim);
-            lo.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+            lo.reorth     = n > 4 * opts.krylov_dim ? ed::krylov::ReorthPolicy::LocalDGKS3
+                                                    : ed::krylov::ReorthPolicy::FullCGS2;
             lo.keep_basis = true;
             if (opts.breakdown_tol > 0.0) lo.breakdown_tol = opts.breakdown_tol;
             auto mv = [&H](const Complex* in, Complex* o, std::size_t nn) { H(in, o, nn); };
