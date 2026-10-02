@@ -260,8 +260,10 @@ expand(const ed::symmetry::RepSectorData& rd, const std::vector<Complex>& u, int
 /// the span of the expanded vector under the abelian group, the residues, complex
 /// conjugation when the level is time-reversal folded, and the global flip when the
 /// basis holds both flip partners. Orthonormal; at most the level's multiplicity
-/// vectors (fewer in an Sz sector, which holds only part of a flip-mirrored multiplet).
+/// vectors (fewer in an Sz sector, which holds only part of a flip-mirrored multiplet), and at
+/// most `max_vectors` when that is > 0 (the first ones of the same orthonormal sequence).
 [[nodiscard]] std::vector<std::vector<Complex>>
-multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, int n_up);
+multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, int n_up,
+          std::size_t max_vectors = 0);
 
 }  // namespace ed::sectors

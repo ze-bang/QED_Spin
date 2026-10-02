@@ -11,6 +11,9 @@ auto symmetry). qed.eigs(H, 1, vectors=True).vectors() returns 1 vector, while t
 makes (r._raw.multiplet(spec, 0, -1)) returns m full-space vectors. Each of those is checked
 to be an eigenvector of an independent dense Kronecker-product H (Rayleigh residual), so the
 extra work is real eigenvector construction, not empty padding.
+Restated (P4.7): multiplet() now takes max_vectors and vectors() passes what it still needs; the
+claim stands while the engine cannot build fewer than the whole multiplet, i.e. while
+multiplet(spec, 0, -1, 1) is refused or still returns all m vectors.
 """
 import signal
 import numpy as np
@@ -48,6 +51,10 @@ try:
     m = int(r.levels[0].multiplicity)
     vs_api = r.vectors()
     raw = r._raw.multiplet(r._spec, 0, -1)
+    try:
+        raw1 = r._raw.multiplet(r._spec, 0, -1, 1)
+    except TypeError:
+        raw1 = None                      # no 'how many' argument
 except Exception as e:  # noqa: BLE001
     print(f"REPRO: INCONCLUSIVE eigs/vectors raised {type(e).__name__}: {str(e)[:200]}")
     raise SystemExit(0)
@@ -65,8 +72,11 @@ ok_eig = max(resid) < 1e-8
 print(f"E0 engine {r.energies[0]:.12f}  dense {E0_ref:.12f}; level multiplicity {m}")
 print(f"vectors() returned {len(vs_api)}; engine multiplet() built {len(raw)} vectors of length {len(raw[0])}; "
       f"max residual {max(resid):.2e}")
-if len(vs_api) == 1 and len(raw) == m and m > 1 and ok_eig:
+n1 = None if raw1 is None else len(raw1)
+print(f"multiplet(max_vectors=1) built {n1}")
+if len(vs_api) == 1 and len(raw) == m and m > 1 and ok_eig and (raw1 is None or len(raw1) == m):
     print(f"REPRO: CONFIRMED k=1 vectors() returns 1 vector but the engine builds all {len(raw)} "
-          f"multiplet vectors of dim 2^{N} (all eigenvectors, max resid {max(resid):.1e})")
+          f"multiplet vectors of dim 2^{N} (all eigenvectors, max resid {max(resid):.1e}); max_vectors=1 -> {n1}")
 else:
-    print(f"REPRO: NOT_REPRODUCED api={len(vs_api)} raw={len(raw)} m={m} max_resid={max(resid):.1e}")
+    print(f"REPRO: NOT_REPRODUCED api={len(vs_api)} raw={len(raw)} m={m} max_vectors=1 -> {n1} "
+          f"max_resid={max(resid):.1e}")

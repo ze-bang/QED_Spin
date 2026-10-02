@@ -22,7 +22,7 @@
   {"id":"C04-engine-core-01","rep":"C04-engine-core-01","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":90},
   {"id":"C04-engine-core-03","rep":"C04-engine-core-03","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C04-engine-core-04","rep":"C04-engine-core-04","sev":"low","axis":"robustness","status":"open","dev":"cpu","seconds":30},
-  {"id":"C05-engine-tasks-01","rep":"C05-engine-tasks-01","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":60},
+  {"id":"C05-engine-tasks-01","rep":"C05-engine-tasks-01","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C06-symmetry-core-01","rep":"C06-symmetry-core-01","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C06-symmetry-core-02","rep":"C04-engine-core-01","sev":"medium","axis":"correctness","status":"open","dev":"cpu","seconds":60},
   {"id":"C06-symmetry-core-03","rep":"C06-symmetry-core-03","sev":"low","axis":"robustness","status":"info","dev":"cpu","seconds":290},

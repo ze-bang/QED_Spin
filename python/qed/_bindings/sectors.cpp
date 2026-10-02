@@ -347,19 +347,22 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
                                "Per solved block: dim, lane, phase seconds, nnz, applies (one dict each).")
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
-        .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up) {
+        .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up,
+                             std::size_t max_vectors) {
                  const auto& L = r.levels.at(static_cast<std::size_t>(level));
                  if (L.vector < 0) throw std::invalid_argument("multiplet: the level carries no vector");
                  std::vector<std::vector<std::complex<double>>> vs;
                  {
                      py::gil_scoped_release nogil;
-                     vs = sec::multiplet(spec, r.n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up);
+                     vs = sec::multiplet(spec, r.n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up,
+                                         max_vectors);
                  }
                  py::list out;
                  for (auto& v : vs) out.append(to_array(std::move(v)));
                  return out;
-             }, py::arg("spec"), py::arg("level"), py::arg("n_up") = -1,
-             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space).")
+             }, py::arg("spec"), py::arg("level"), py::arg("n_up") = -1, py::arg("max_vectors") = 0,
+             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space); "
+             "at most max_vectors of its vectors when that is > 0.")
         .def("expect", [](const sec::EigsResult& r, const sec::Spec& spec,
                           const std::vector<const ::Operator*>& ops) {
                  py::gil_scoped_release nogil;

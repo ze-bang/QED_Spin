@@ -65,7 +65,7 @@ class EigResult(Labelled):
             if len(out) >= self.k:
                 break
             try:
-                vs = self._raw.multiplet(self._spec, i, want)
+                vs = self._raw.multiplet(self._spec, i, want, self.k - len(out))
             except EmptySelection:
                 continue                     # no component in this Sz sector; anything else raises
             out.extend(vs[: self.k - len(out)])

@@ -618,6 +618,26 @@ def test_a_multiplet_expands_to_every_sz_member():
             np.testing.assert_allclose(Hd @ v, float(lvl.energy) * v, atol=1e-9)
 
 
+def test_a_multiplet_builds_only_the_vectors_asked_for():
+    # vectors() asks the engine for what it still needs: k = 1 on a degenerate level builds one
+    # vector, the first of the same orthonormal sequence (audit C05-engine-tasks-01: it built the
+    # whole multiplet and kept one).
+    n = 9
+    H = _ring(n)
+    r = qed.eigs(H, 1, vectors=True)
+    m = int(r.levels[0].multiplicity)
+    assert m > 1
+    whole = r._raw.multiplet(r._spec, 0, -1)
+    first = r._raw.multiplet(r._spec, 0, -1, 1)
+    assert len(whole) == m and len(first) == 1
+    np.testing.assert_allclose(first[0], whole[0], atol=1e-14)
+    vs = r.vectors()
+    assert len(vs) == 1
+    Hd = _dense(H, n)
+    v = np.asarray(vs[0], complex)
+    np.testing.assert_allclose(Hd @ v, float(r.energies[0]) * v, atol=1e-9)
+
+
 def test_sz_basis_vectors_under_total_spin():
     # Audits C01-pyapi-09 / C03-bindings-09: under total_spin = 1 the levels are solved at Sz = +1;
     # vectors(basis='sz') gives the tower members at Sz = 0 and -1 as well (they were empty), a
