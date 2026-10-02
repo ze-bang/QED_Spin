@@ -17,18 +17,35 @@ class Missing(Exception):
     """The API has no route for the cell."""
 
 
+# Selection contents (sel_*) depend on H (a coset element, a level's engine labels): the test
+# resolves them once per model and registers (Symmetry, oracle selection) here.
+RESOLVED: dict = {}
+
+
+def register(m, content, sym, sel):
+    RESOLVED[(m.name, content)] = (sym, sel)
+
+
+def _spin(m):
+    return 0.0 if m.N % 2 == 0 else 0.5
+
+
 def selection(m, content):
     """Which part of the dense spectrum the cell's answer lives in."""
+    if (m.name, content) in RESOLVED:
+        return RESOLVED[(m.name, content)][1]
     if content == "sz_one":
         return ("n_up", m.N // 2)
-    if content == "parity":
+    if content in ("parity", "parity_lg"):
         return ("parity", 0)
-    if content == "su2":
-        return ("S", 0.0 if m.N % 2 == 0 else 0.5)
+    if content in ("su2", "su2_lg"):
+        return ("S", _spin(m))
     return None
 
 
 def _sym(m, content):
+    if (m.name, content) in RESOLVED:
+        return RESOLVED[(m.name, content)][0]
     gens = m.generator_set()
     if content == "none":
         return Symmetry.none()
@@ -47,7 +64,19 @@ def _sym(m, content):
     if content == "lg":
         return Symmetry(spatial="auto")
     if content == "su2":
-        return Symmetry(spatial=None, total_spin=0.0 if m.N % 2 == 0 else 0.5)
+        return Symmetry(spatial=None, total_spin=_spin(m))
+    if content == "su2_lg":
+        return Symmetry(spatial="auto", total_spin=_spin(m))
+    if content == "tr_lg":
+        return Symmetry(spatial="auto", time_reversal="require")
+    if content == "flip_lg":
+        return Symmetry(spatial="auto", spin_flip="require")
+    if content == "parity_lg":
+        return Symmetry(spatial="auto", sz="even")
+    if content == "raw_spacegroup":
+        return Symmetry(spatial=[list(g) for g in m.space_group()])
+    if content == "all":
+        return Symmetry.auto()
     raise Missing(f"content {content!r} is not in the sector-resolved API yet")
 
 
@@ -78,11 +107,12 @@ def _on_device(device, r):
 
 
 def eigs(m, H, content, device, k):
+    """(sorted energies, the EigResult) -- its levels carry the multiplicities."""
     # GPU cells solve every block (prune=False), so the device path is what they measure.
     r = _eigs(H, k, sym=_sym(m, content), device=device, prune=_prune(device),
               dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
-    return np.sort(r.energies)
+    return np.sort(r.energies), r
 
 
 def vectors(m, H, content, device, k):
@@ -90,6 +120,15 @@ def vectors(m, H, content, device, k):
               dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
     return r.energies, r.vectors(basis="full")
+
+
+def labelled(m, H, content, device, k):
+    """The EigResult with vectors: [(level, its multiplet in the full basis, seed first)], the
+    result (for momentum(), irrep_characters() and the resolved groups)."""
+    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=_prune(device),
+              dense_max_dim=_dense_max_dim(device))
+    _on_device(device, r)
+    return [(L, r._raw.multiplet(r._spec, i, -1)) for i, L in enumerate(r.levels)], r
 
 
 def spectrum(m, H, content, device):
