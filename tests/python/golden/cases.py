@@ -4,8 +4,9 @@ Records hold values only, keyed by physical content: sorted energy multisets, pe
 (energy, multiplicity) lists, thermodynamic and spectral curves. Engine-internal block
 indices never appear, so a renumbering of the blocks is not a change.
 
-Tiers (golden.py): dense -- checked against the numpy reference at record time;
-exact -- deterministic; stochastic -- fixed-seed sampling.
+Tiers (golden.py): exact -- deterministic; stochastic -- fixed-seed sampling. Every full
+spectrum of a model up to DENSE_MAX_N sites must also equal its dense spectrum (support.oracle),
+checked at record and compare time (golden.py dense_inconsistencies).
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ import qed  # the package selected by PYTHONPATH / QED_CORE_DIR
 from qed import Symmetry
 from qed.input import HamiltonianBuilder, Op
 
-import models as gm
-import reference
+from support import models as gm
+from support import oracle
 
 DEVICE = "cpu"
 DENSE_MAX_N = 10
@@ -84,15 +85,6 @@ def symmetry_options(m):
 def spectrum_cases(m):
     H = m.operator()
     cs = []
-    if m.N <= DENSE_MAX_N:
-        def dense():
-            want = np.sort(reference.Reference(m).evals)
-            got = np.sort(quiet(lambda: qed.spectrum(H, sym=Symmetry.auto(), device=DEVICE)).energies)
-            d = float(np.max(np.abs(got - want))) if len(got) == len(want) else math.inf
-            if d > 1e-9 * max(1.0, float(np.max(np.abs(want)))):
-                raise AssertionError(f"dense reference mismatch {d:.2e} ({len(got)} vs {len(want)} levels)")
-            return {"eigenvalues": fl(want)}
-        cs.append(GCase(f"{m.name}/api/dense_reference", "dense", dense))
     for label, sym in symmetry_options(m):
         # a full spectrum without spatial symmetry is 2^N levels: only for small N
         if not label.startswith("total_spin") and (m.N <= 12 or label.startswith("auto")):
@@ -108,7 +100,7 @@ def spectrum_cases(m):
 def eigs_detail_cases(m):
     """Per-level records (energy, multiplicity) and vectors' Rayleigh energies."""
     H = m.operator()
-    Hd = reference.Reference(m).H if m.N <= DENSE_MAX_N else None
+    Hd = oracle.dense(m.terms, m.N) if m.N <= DENSE_MAX_N else None
 
     def lv():
         return levels(quiet(lambda: qed.eigs(H, 6, sym=Symmetry.auto(), device=DEVICE)))
@@ -172,7 +164,7 @@ def dynamics_cases(m):
 
 def expect_cases(m):
     H = m.operator()
-    bond = reference.Model("S0.S1", m.N, reference.heisenberg_terms([(0, 1)]), u1=True, real=True).operator()
+    bond = gm.Model("S0.S1", m.N, gm.heisenberg_terms([(0, 1)])).operator()
 
     def run():
         r = quiet(lambda: qed.expect(H, [bond], 4, sym=Symmetry.auto(), device=DEVICE))
@@ -184,12 +176,30 @@ def expect_cases(m):
 # -----------------------------------------------------------------------------
 # the matrix
 # -----------------------------------------------------------------------------
+def models():
+    """The golden zoo (support.models)."""
+    zoo = list(quiet(gm.make_audit_models)) + gm.nlce_clusters() + [gm.tri_chiral_3x3()]
+    m12, _ = gm.tri_j1j2((2, 2), (-2, 4), 0.125, "tri12_j1j2")
+    return zoo + [m12, gm.square_j1j2(4, 1.0, "square4x4_j2=1")]
+
+
+_DENSE = {}
+
+
+def dense_spectra():
+    """{model name: its full spectrum, ascending} for every model up to DENSE_MAX_N sites, from
+    the dense matrix of its term list (support.oracle); computed once."""
+    if not _DENSE:
+        for m in models():
+            if m.N <= DENSE_MAX_N and m.name not in _DENSE:
+                _DENSE[m.name] = np.linalg.eigvalsh(oracle.dense(m.terms, m.N))
+    return _DENSE
+
+
 def build_cases(device="cpu"):
     global DEVICE
     DEVICE = device
-    zoo = list(quiet(reference.make_audit_models)) + gm.nlce_clusters() + [gm.tri_chiral_3x3()]
-    m12, _ = gm.tri_j1j2((2, 2), (-2, 4), 0.125, "tri12_j1j2")
-    zoo += [m12, gm.square_j1j2(4, 1.0, "square4x4_j2=1")]
+    zoo = models()
     cases, seen = [], set()
     for m in zoo:
         if m.name in seen:

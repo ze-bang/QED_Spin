@@ -10,7 +10,8 @@ calls raise, how many eigenvalues come back, which symmetry sector a level lives
 
 | file | role |
 |---|---|
-| `models.py` | model zoo: the audit models, open NLCE-shaped clusters, a tilted triangular torus with its translation and point groups, a time-reversal-breaking 3x3 torus, square 4x4 J1-J2 at J2 = 1 |
+| `../support/models.py` | the shared model zoo: the audit models, open NLCE-shaped clusters, a tilted triangular torus, a time-reversal-breaking 3x3 torus, square 4x4 J1-J2 at J2 = 1 (and the grid's models) |
+| `../support/oracle.py` | the one dense oracle: the matrix of a model's term list, never through the library |
 | `cases.py`  | the case matrix (verb x lane x option); each case returns a JSON-able record |
 | `golden.py` | `record` / `compare` / `list` |
 | `refs/<tag>/{cpu,gpu}.json.gz` | references, one directory per reference commit |
@@ -24,7 +25,6 @@ while a k -> -k relabel of a time-reversal-breaking spectrum is.
 
 | tier | meaning | tolerance |
 |---|---|---|
-| `dense` | verified against the numpy reference at record time | 1e-9 |
 | `exact` | deterministic | 1e-10 |
 | `transport` | passes through the 9-digit text transport of the symmetry lanes | 1e-7 |
 | `stochastic` | fixed-seed sampling | 1e-10 |
@@ -59,5 +59,7 @@ Removing a feature on purpose: delete its cases from `cases.py`, then
 produces a named case, and moves the dropped records into `meta.retired` with the commit
 and reason. New cases enter with `MODE=bless_new REASON="..."`.
 
-`reference.py` holds the model vocabulary (`Model`, term builders) and the independent
-dense numpy reference; `models.py` the case-specific clusters; `cases.py` the matrix.
+Every record that holds the complete spectrum of a model of at most `cases.DENSE_MAX_N` sites
+must equal the dense spectrum of the model's term list (`support.oracle`), checked by `record`
+(which refuses to write a reference that disagrees) and by `compare`: a reference only records
+what the code returned, so a lane that was wrong when it was taken would otherwise stay green.

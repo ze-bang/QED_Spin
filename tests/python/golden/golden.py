@@ -34,8 +34,9 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(1, os.path.dirname(HERE))          # tests/python: support.models, support.oracle
 
-TOL = {"dense": 1e-9, "exact": 1e-10, "transport": 1e-7, "stochastic": 1e-10}
+TOL = {"exact": 1e-10, "transport": 1e-7, "stochastic": 1e-10}
 
 
 def git_sha():
@@ -129,29 +130,29 @@ def _outcome(r):
 
 
 def dense_inconsistencies(records, tol=1e-8):
-    """Full spectra that disagree with their model's dense reference.
+    """Full spectra that disagree with the dense spectrum of their model.
 
     A reference only records what the code returned, so a lane that is wrong when the
-    reference is taken would stay "green" forever. Every record of a model
-    that carries the complete spectrum (same count as <model>/dense_reference) must
-    equal it as a multiset, whatever the reference says."""
+    reference is taken would stay "green" forever. Every record of a model of at most
+    cases.DENSE_MAX_N sites that holds its complete spectrum (as many eigenvalues as the model
+    has states) must equal the dense spectrum of the model's term list (support.oracle) as a
+    multiset, whatever the reference says. (The check this replaces compared against stored
+    dense_reference records and skipped every record without a matching "count" field -- all
+    of them.)"""
+    from cases import dense_spectra
+    dense = dense_spectra()
     out = []
     for name, rec in records.items():
-        if not name.endswith("/dense_reference") or "values" not in rec:
+        model = name.split("/", 1)[0]
+        values = rec.get("values")
+        ev = values.get("eigenvalues") if isinstance(values, dict) else None
+        if model not in dense or not isinstance(ev, list) or len(ev) != len(dense[model]):
             continue
-        model = name[: -len("/dense_reference")]
-        dense = np.sort(np.asarray(rec["values"]["eigenvalues"], float))
-        scale = max(1.0, float(np.max(np.abs(dense))))
-        for other, r in records.items():
-            if not other.startswith(model + "/") or other == name or "values" not in r:
-                continue
-            v = r["values"]
-            ev = v.get("eigenvalues") if isinstance(v, dict) else None
-            if not isinstance(ev, list) or len(ev) != len(dense) or v.get("count") != len(dense):
-                continue
-            d = float(np.max(np.abs(np.sort(np.asarray(ev, float)) - dense))) / scale
-            if d > tol:
-                out.append((other, d))
+        want = dense[model]
+        scale = max(1.0, float(np.max(np.abs(want))))
+        d = float(np.max(np.abs(np.sort(np.asarray(ev, float)) - want))) / scale
+        if d > tol:
+            out.append((name, d))
     return out
 
 
