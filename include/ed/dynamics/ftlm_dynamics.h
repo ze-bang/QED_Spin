@@ -45,6 +45,9 @@ namespace ed::observables {
 
 using Complex = std::complex<double>;
 
+/// The smallest sector whose Lanczos runs reorthogonalise locally (ftlm_dynamics_kernel).
+inline constexpr std::size_t kLocalReorthMinDim = std::size_t{1} << 16;
+
 /// Parameters for the FTLM cross-irrep kernel.
 struct FtlmCrossIrrepOptions {
     std::size_t krylov_dim       = 200;
@@ -120,16 +123,20 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
     };
     auto sample = [&](auto& bk, auto&& Hs, auto&& Hds, std::size_t s) {
         Sample out;
-        // Local DGKS3 reorthogonalisation in a sector much larger than the Krylov depth: there the
+        // Local DGKS3 reorthogonalisation in a large sector much larger than the Krylov depth: there the
         // O(m^2 n) full pass was most of a sample's work and buys nothing measurable (chain24, T = 1,
         // krylov 80: the weight moves by 8e-7 against a seed-to-seed spread of 4e-4; chain12 errors
-        // against the dense Lehmann sum agree to 4 digits; jobs 62586014/62586016). A sector the run
-        // can exhaust keeps full CGS2, which stops cleanly at its invariant subspace (audit P5-dynamics-05).
+        // against the dense Lehmann sum agree to 4 digits; jobs 62586014/62586016; audit P5-dynamics-05).
+        // Small sectors keep full CGS2: it stops cleanly at an invariant subspace, and it keeps a host
+        // and a device run of the same samples equal to roundoff -- without it their roundoff grows to
+        // 1e-6..1e-5 (gate 39d45991, grid GPU-vs-CPU dynT cells), harmless next to sampling but it would
+        // blind the device-consistency checks.
         auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n) {
             ed::krylov::LanczosKernelOptions lo;
             lo.max_iter   = std::min(n, opts.krylov_dim);
-            lo.reorth     = n > 4 * opts.krylov_dim ? ed::krylov::ReorthPolicy::LocalDGKS3
-                                                    : ed::krylov::ReorthPolicy::FullCGS2;
+            lo.reorth     = n > std::max<std::size_t>(4 * opts.krylov_dim, kLocalReorthMinDim)
+                                ? ed::krylov::ReorthPolicy::LocalDGKS3
+                                : ed::krylov::ReorthPolicy::FullCGS2;
             lo.keep_basis = true;
             if (opts.breakdown_tol > 0.0) lo.breakdown_tol = opts.breakdown_tol;
             auto mv = [&H](const Complex* in, Complex* o, std::size_t nn) { H(in, o, nn); };
