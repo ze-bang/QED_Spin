@@ -458,6 +458,27 @@ def test_mtpq_refuses_a_temperature_its_trajectory_cannot_reach():
                     sym=qed.Symmetry.none())
 
 
+def test_oftlm_exact_states_are_certified_eigenpairs():
+    # OFTLM's exact states come from the certified block eigensolver. They were the Ritz pairs of
+    # one 2 N_V + 30-step Lanczos with no residual check, weighted by e^{-beta theta}: on a wide
+    # spectrum they had not converged, and ln Z came out low by an amount no number of samples
+    # removes (audit C11-thermal-04). Far below the next level the sampled part is negligible,
+    # so OFTLM must be exact there.
+    n, lam = 10, 10.0
+    H = _heisenberg_ring(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 2.0 * lam)   # + lam (S^z_tot)^2: a wide spectrum
+    T = [0.05]
+    sym = qed.Symmetry.none()
+    exact = qed.thermal(H, T, method="exact", sym=sym)
+    r = qed.thermal(H, T, method="ftlm", exact_states=8, samples=4, seed=7, sym=sym)
+    assert r.placement["host_krylov"] == 1
+    np.testing.assert_allclose(r.lnZ, exact.lnZ, rtol=1e-9)
+    np.testing.assert_allclose(r.E, exact.E, rtol=1e-9)
+    assert not [d for d in r.diagnostics if d[0] == "oftlm_exact_states"]
+
+
 @pytest.mark.parametrize("offset", [0.0, 1000.0])
 def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
     # Six decoupled dimers: C = 6 beta^2 3 e^-beta / (1 + 3 e^-beta)^2. At beta = 40 the variance

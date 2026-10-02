@@ -19,6 +19,7 @@
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace ed::thermal {
@@ -72,8 +73,6 @@ Curves oftlm_cpu(
     const std::size_t nT = opts.betas.size();
     const std::size_t R  = std::max<std::size_t>(opts.num_samples, 1);
     const std::size_t M  = std::max<std::size_t>(opts.krylov_dim, 2);
-    std::size_t       Nv = std::min<std::uint64_t>(
-        opts.num_exact, (N > 1 ? N - 1 : 0));
 
     // seed == 0 == NONDETERMINISTIC (random_device), as for FTLM, so
     // independent default runs draw independent samples; explicit seeds
@@ -81,54 +80,19 @@ Curves oftlm_cpu(
     const std::uint64_t base_seed = ed::thermal::resolve_base_seed(opts.random_seed);
 
     // -------------------------------------------------------------------------
-    // 1. N_V lowest exact eigenpairs via one long full-reorthogonalized Lanczos
-    //    with the basis retained; reconstruct the Ritz vectors on the host.
+    // 1. The N_V exact eigenpairs, certified by the caller.
     // -------------------------------------------------------------------------
-    std::vector<double>        exact_eigs;   // eps_i, i < Nv (ascending)
-    std::vector<ComplexVector> exact_vecs;   // |i>, i < Nv
-    if (Nv > 0) {
-        const std::uint64_t Mex = std::min<std::uint64_t>(
-            std::max<std::uint64_t>(
-                opts.exact_krylov ? opts.exact_krylov : (2 * Nv + 30),
-                static_cast<std::uint64_t>(4)),
-            N);
-
-        std::mt19937 gen(static_cast<std::mt19937::result_type>(
-            base_seed ^ 0x9E3779B97F4A7C15ULL));
-        ComplexVector v0 = gaussian_vector(N, gen);
-        const double n0 = std::sqrt(norm2(v0));
-        if (n0 > 0.0) for (auto& c : v0) c /= n0;
-
-        ed::krylov::LanczosKernelOptions lopts;
-        lopts.max_iter   = static_cast<std::size_t>(Mex);
-        lopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
-        lopts.keep_basis = true;
-        auto lres = run_lanczos(apply_H, v0, N, lopts);
-        const auto& basis = lres.basis;
-
-        const ed::krylov::TridiagEig t =
-            ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
-
-        const std::size_t m = t.m;
-        Nv = std::min<std::size_t>(Nv, m);
-        exact_eigs.reserve(Nv);
-        exact_vecs.reserve(Nv);
-        for (std::size_t i = 0; i < Nv; ++i) {
-            exact_eigs.push_back(t.values[i]);
-            // |i> = sum_k basis[k] * z(k, i)   (Ritz vector, column i)
-            ComplexVector vi(N, Complex(0.0, 0.0));
-            const std::size_t kmax = std::min<std::size_t>(m, basis.size());
-            for (std::size_t k = 0; k < kmax; ++k) {
-                const double ck = t.z(k, i);
-                const Complex* bk = basis[k].get();
-                for (std::uint64_t n = 0; n < N; ++n) vi[n] += ck * bk[n];
-            }
-            const double vn = std::sqrt(norm2(vi));
-            if (vn > 0.0) for (auto& c : vi) c /= vn;
-            exact_vecs.push_back(std::move(vi));
-        }
-    }
-    Nv = exact_vecs.size();
+    const std::vector<double>&        exact_eigs = opts.exact_values;
+    const std::vector<ComplexVector>& exact_vecs = opts.exact_vectors;
+    if (exact_vecs.size() != exact_eigs.size())
+        throw std::invalid_argument("oftlm_cpu: " + std::to_string(exact_eigs.size()) + " exact values but "
+                                    + std::to_string(exact_vecs.size()) + " exact vectors");
+    for (const auto& v : exact_vecs)
+        if (v.size() != N)
+            throw std::invalid_argument("oftlm_cpu: an exact vector has length " + std::to_string(v.size())
+                                        + ", the block " + std::to_string(N));
+    const std::size_t Nv = exact_vecs.size();
+    if (Nv > N) throw std::invalid_argument("oftlm_cpu: more exact states than the block holds");
 
     // -------------------------------------------------------------------------
     // 2. R random samples, each orthogonalized against the N_V exact vectors.

@@ -104,11 +104,20 @@ struct FtlmResult {
 ///
 /// <E> Z and <E^2> Z likewise, ln Z = ln Z(beta) - beta e_min and V = <(H - <H>)^2>. The (D - N_V)
 /// factor scales the random part to the complement, so Z is the full trace (no ln D term).
+///
+/// The estimator is unbiased for ANY orthonormal set of exact eigenvectors (the random part
+/// covers the rest of the block), but only if each one is an eigenvector: an unconverged Ritz
+/// pair (v, theta) puts e^{-beta theta} where <v|e^{-beta H}|v> belongs, which is larger by about
+/// beta^2 ||H v - theta v||^2 / 2 (Jensen), so Z comes out low by an amount no number of samples
+/// removes. The caller therefore supplies pairs it has certified by their residuals (the engine
+/// uses its block eigensolver); the kernel does not compute them.
 struct OftlmOptions {
     std::size_t   num_samples  = 20;   ///< R: random samples for the stochastic part
     std::size_t   krylov_dim   = 100;  ///< M: Lanczos steps per random sample
-    std::size_t   num_exact    = 8;    ///< N_V: low-lying states treated exactly
-    std::size_t   exact_krylov = 0;    ///< Lanczos steps for the exact eigenpairs (0 -> auto)
+    /// The N_V exact states: eigenvalues and orthonormal eigenvectors (length N each) of the
+    /// block, certified by their residuals. Empty is plain FTLM.
+    std::vector<double>                            exact_values;
+    std::vector<std::vector<std::complex<double>>> exact_vectors;
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)

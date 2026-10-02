@@ -36,6 +36,7 @@ struct BlockThermo {
     double sz2 = 0.0;          // <Sz^2> of the block's states
     bool   mirrored = false;   // holds +sz and -sz in equal parts
     ed::Lane lane = ed::Lane::HostKrylov;  // where its solve ran
+    std::size_t exact_asked = 0, exact_got = 0;   // OFTLM: exact states asked for, certified
 };
 
 // One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
@@ -55,9 +56,11 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     const bool oftlm = !mtpq && t.exact_states > 0;
     {
         // The kernels' working set, checked before anything is allocated: FTLM keeps a Krylov
-        // window of the block's vectors, OFTLM also the exact states' Lanczos basis, mTPQ a handful.
+        // window of the block's vectors; OFTLM holds its exact states (twice while the eigensolver hands
+        // them over; its Krylov basis is checked by its own budget) and a three-term recurrence;
+        // mTPQ a handful.
         const std::uint64_t vecs = mtpq ? 8
-                                 : oftlm ? std::max<std::size_t>(t.krylov, 4) + 2 * t.exact_states + 34
+                                 : oftlm ? 2 * t.exact_states + 8
                                          : std::max<std::size_t>(t.krylov, 4) + 4;
         ed::core::guard_working_set(n * vecs * 16ull, "ed::thermal");
     }
@@ -85,7 +88,19 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         ed::thermal::OftlmOptions ko;
         ko.num_samples = t.samples;
         ko.krylov_dim  = t.krylov;
-        ko.num_exact   = t.exact_states;
+        // The exact states from the block eigensolver, each locked at ||H v - theta v|| <= kLockRel
+        // s_H. An unconverged solve returns only its certified pairs; the random part then
+        // samples the rest of the block, and the shortfall is reported.
+        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, n - 1));
+        if (want > 0) {
+            BlockSolution ex = solve_block_eigenpairs(ed::matvec::default_cpu_backend(), op, want);
+            if (ex.vectors.size() == ex.values.size()) {
+                ko.exact_values  = std::move(ex.values);
+                ko.exact_vectors = std::move(ex.vectors);
+            }
+        }
+        b.exact_asked = want;
+        b.exact_got   = ko.exact_values.size();
         ko.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
         ko.betas       = beta;
         ko.random_seed = seed;
@@ -333,6 +348,8 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     BlockThermo& b = blocks[d.block];
                     b.c = std::move(r.c);
                     b.lane = r.lane;
+                    b.exact_asked = r.exact_asked;
+                    b.exact_got   = r.exact_got;
                 } catch (...) {
 #pragma omp critical(thermal_failure)
                     if (!failure) failure = std::current_exception();
@@ -377,6 +394,13 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
     out.blocks = blocks.size();
     for (const auto& b : blocks) out.placement.add(b.lane);
+    std::size_t short_blocks = 0, short_states = 0;
+    for (const auto& b : blocks)
+        if (b.exact_got < b.exact_asked) { ++short_blocks; short_states += b.exact_asked - b.exact_got; }
+    if (short_blocks > 0)
+        out.diagnostics.emplace_back("oftlm_exact_states",
+            std::to_string(short_blocks) + " block(s) could not certify all their exact states ("
+            + std::to_string(short_states) + " missing); the random part sampled those states instead");
 
     const std::size_t nT = beta.size();
     out.lnZ.resize(nT); out.E.resize(nT); out.C.resize(nT); out.S.resize(nT); out.F.resize(nT);

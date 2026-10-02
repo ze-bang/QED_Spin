@@ -54,6 +54,15 @@ Breaking changes so far:
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.
+- **OFTLM's exact states are certified eigenpairs** from the block eigensolver (Krylov-Schur,
+  residual <= 1e-10 s_H). They were the Ritz pairs of one 2 N_V + 30-step Lanczos with no
+  residual check, and an unconverged pair biased ln Z low by an amount no number of samples
+  removes. A block that cannot certify all N_V samples the rest and adds an
+  `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
+  `exact_vectors`) in place of `num_exact` and `exact_krylov`.
+- **Host Krylov results repeat bit for bit** at a fixed seed and thread count: the BLAS-1 sums
+  add per-thread partials in thread order (they combined in arrival order, so T = 0 dynamics
+  differed run to run in the 11th digit).
 - **Symmetry detection reads the operator, not its records.** Every verdict (a site
   permutation, the spin flip, complex conjugation, U(1), Sz parity, SU(2)) compares H's
   canonical terms, so it no longer depends on how H was written: a model whose records cancel

@@ -52,7 +52,10 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
-    Lanczos; ``exact_states > 0`` treats that many lowest states of each block exactly),
+    Lanczos; ``exact_states > 0`` treats that many lowest states of each block exactly, as
+    eigenpairs the block eigensolver certified by their residuals -- a block that could not
+    certify them all samples the rest and says so in an ``("oftlm_exact_states", ...)``
+    diagnostic),
     or ``"mtpq"`` (microcanonical thermal pure quantum states). ``krylov`` is the FTLM
     Lanczos depth (default 100), ``steps`` the mTPQ steps per sample (default: enough for the
     coldest ``T``). ``samples`` random vectors per block; ``seed`` 0 draws one. ``dense_max_dim``: the sampled methods
