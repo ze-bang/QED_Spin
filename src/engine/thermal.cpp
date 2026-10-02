@@ -4,6 +4,7 @@
 // Part of the little-group engine; see internal.h for the file map.
 // =============================================================================
 
+#include "validate.h"
 #include "walk.h"
 
 #include <ed/core/memory.h>
@@ -160,12 +161,11 @@ std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, c
 
 ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) {
     const int n_sites = static_cast<int>(H.getNumBits());
-    if (t.temperatures.empty()) throw std::invalid_argument("thermal: no temperatures");
+    detail::validate_hamiltonian(H, "thermal");
+    detail::validate_spec(s, n_sites, "thermal");
+    detail::validate_thermal_spec(t, n_sites);
     std::vector<double> beta;
-    for (double T : t.temperatures) {
-        if (!(T > 0.0)) throw std::invalid_argument("thermal: temperatures must be positive");
-        beta.push_back(1.0 / T);
-    }
+    for (double T : t.temperatures) beta.push_back(1.0 / T);
     detail::require_device(t.device, "thermal");
     ed::parallel::pin_omp_threads_once();
     if (t.device == Device::Gpu && t.method == ThermalSpec::Method::FTLM && t.exact_states > 0)

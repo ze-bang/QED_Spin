@@ -4,6 +4,7 @@
 // Part of the little-group engine; see internal.h for the file map.
 // =============================================================================
 
+#include "validate.h"
 #include "walk.h"
 
 #include <ed/dynamics/cf.h>
@@ -204,16 +205,12 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
 
 DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O, const DynamicsSpec& d) {
     const int n_sites = static_cast<int>(H.getNumBits());
-    if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
-    if (O.getNumBits() != H.getNumBits())
-        throw ed::InvalidRequest("dynamics: the operator acts on " + std::to_string(O.getNumBits()) + " sites, H on "
-                                 + std::to_string(n_sites));
+    detail::validate_hamiltonian(H, "dynamics");
+    detail::validate_spec(s, n_sites, "dynamics");
+    detail::validate_observable(&O, n_sites, "dynamics", 0);
+    detail::validate_dynamics_spec(d);
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
-    for (double T : d.temperatures)
-        if (!(T > 0.0) || !std::isfinite(T))
-            throw ed::InvalidRequest("dynamics: temperatures must be finite and positive; T=None (an empty "
-                                     "list) is the ground state");
     if (distinct.size() != d.temperatures.size())
         throw ed::InvalidRequest("dynamics: a temperature is listed twice");
     detail::require_device(d.device, "dynamics");

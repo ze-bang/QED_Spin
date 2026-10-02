@@ -26,6 +26,7 @@ or the engine's star/irrep indices) without changing the symmetry.
 from __future__ import annotations
 
 import cmath
+import numbers
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Any, Optional, Sequence
@@ -174,6 +175,11 @@ class Symmetry:
             else:
                 raise InvalidRequest(f"sz must be 'auto', 'off', 'even', 'odd' or an int, got {sz!r}")
         elif sz is not None:
+            if isinstance(sz, bool) or not isinstance(sz, numbers.Integral):
+                raise InvalidRequest("sz must be 'auto', 'off', 'even', 'odd' or an int (the number of up "
+                                     f"spins), got {sz!r}")
+            if sz < 0:
+                raise InvalidRequest(f"sz = {sz} counts up spins and must be >= 0")
             spec.n_up = int(sz)
         spec.spin_flip = _toggle(self.spin_flip, "spin_flip")
         spec.time_reversal = _toggle(self.time_reversal, "time_reversal")

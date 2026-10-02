@@ -123,7 +123,28 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
     return d;
 }
 
+// Every index and offset of a saved result is checked before it is used: a damaged or
+// hand-edited file raises ValueError instead of reading out of bounds.
 py::tuple eigs_from_arrays(const py::dict& d) {
+    auto fail = [](const std::string& what) { throw std::invalid_argument("load_eigs: " + what); };
+    // offsets into an array of `size` entries: n + 1 non-decreasing values in 0..size
+    auto check_offsets = [&](const std::vector<std::int64_t>& off, std::size_t n, std::size_t size, const char* name) {
+        if (off.size() != n + 1) fail(std::string(name) + " has the wrong length");
+        for (std::size_t i = 0; i <= n; ++i)
+            if (off[i] < 0 || static_cast<std::size_t>(off[i]) > size || (i > 0 && off[i] < off[i - 1]))
+                fail(std::string(name) + " is not a list of offsets into its array");
+    };
+    auto check_perms = [&](const auto& flat, std::size_t n_perm, int n, const std::string& name) {
+        if (n < 1 || flat.size() != n_perm * static_cast<std::size_t>(n)) fail(name + " has the wrong shape");
+        for (std::size_t p = 0; p < n_perm; ++p) {
+            std::vector<char> seen(static_cast<std::size_t>(n), 0);
+            for (int i = 0; i < n; ++i) {
+                const auto x = flat[p * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)];
+                if (x < 0 || x >= n || seen[static_cast<std::size_t>(x)]) fail(name + " holds an entry that is not a permutation of the sites");
+                seen[static_cast<std::size_t>(x)] = 1;
+            }
+        }
+    };
     sec::EigsResult r;
     const auto energy = vec<double>(d, "level_energy");
     const auto mirror = vec<std::int64_t>(d, "level_mirror");
@@ -131,6 +152,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     const auto vector = vec<std::int64_t>(d, "level_vector");
     const auto tag = vec<std::int64_t>(d, "level_tag");
     if (tag.size() != 11 * energy.size()) throw std::invalid_argument("load_eigs: level_tag has the wrong shape");
+    if (mirror.size() != energy.size() || mult.size() != energy.size() || vector.size() != energy.size())
+        fail("the level arrays differ in length");
     for (std::size_t i = 0; i < energy.size(); ++i) {
         sec::Level L;
         const std::int64_t* t = tag.data() + 11 * i;
@@ -152,6 +175,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         const auto ioff = vec<std::int64_t>(d, "level_irrep_offset");
         if (moff.size() != r.levels.size() + 1 || ioff.size() != r.levels.size() + 1)
             throw std::invalid_argument("load_eigs: level labels have the wrong shape");
+        check_offsets(moff, r.levels.size(), mchi.size(), "level_momentum_offset");
+        check_offsets(ioff, r.levels.size(), std::min(ielem.size(), ichi.size()), "level_irrep_offset");
         for (std::size_t i = 0; i < r.levels.size(); ++i) {
             auto& L = r.levels[i];
             L.momentum.assign(mchi.begin() + moff[i], mchi.begin() + moff[i + 1]);
@@ -171,16 +196,26 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         rd->perms_flat = vec<int>(d, (p + "perms").c_str());
         rd->flip_masks = vec<std::uint64_t>(d, (p + "flip_masks").c_str());
         const auto shape = vec<std::int64_t>(d, (p + "shape").c_str());
+        if (shape.size() < 3 || shape[0] < 1 || shape[1] < 1 || shape[1] > 63 || shape[2] < -1 || shape[2] > shape[1])
+            fail("basis " + std::to_string(b) + " has an impossible shape");
         rd->group_size = static_cast<int>(shape.at(0));
         rd->n_sites = static_cast<int>(shape.at(1));
         rd->n_up = static_cast<int>(shape.at(2));
+        check_perms(rd->perms_flat, static_cast<std::size_t>(rd->group_size), rd->n_sites, p + "perms");
+        if (rd->characters.size() != static_cast<std::size_t>(rd->group_size)
+            || rd->inv_norms.size() != rd->reps.size()
+            || (!rd->flip_masks.empty() && rd->flip_masks.size() != static_cast<std::size_t>(rd->group_size)))
+            fail("basis " + std::to_string(b) + " has arrays of the wrong length");
+        if (!rd->usable()) fail("basis " + std::to_string(b) + " is not a usable sector");
         rd->build_perm_lut();
         bases.push_back(std::move(rd));
     }
     const auto vbasis = vec<std::int64_t>(d, "vector_basis");
     const auto voffset = vec<std::int64_t>(d, "vector_offset");
     const auto amps = vec<std::complex<double>>(d, "vector_amplitudes");
+    check_offsets(voffset, vbasis.size(), amps.size(), "vector_offset");
     for (std::size_t i = 0; i < vbasis.size(); ++i) {
+        if (vbasis[i] < 0 || vbasis[i] >= nb) fail("vector_basis names a basis that is not in the file");
         sec::BlockVector v;
         v.basis = bases.at(static_cast<std::size_t>(vbasis[i]));
         v.amplitudes.assign(amps.begin() + voffset[i], amps.begin() + voffset[i + 1]);
@@ -188,6 +223,9 @@ py::tuple eigs_from_arrays(const py::dict& d) {
             throw std::invalid_argument("load_eigs: a vector does not match its basis");
         r.vectors.push_back(std::move(v));
     }
+    for (const auto& L : r.levels)
+        if (L.vector < -1 || L.vector >= static_cast<int>(r.vectors.size()))
+            fail("level_vector names a vector that is not in the file");
     const auto sc = vec<std::int64_t>(d, "result_scalars");
     r.total_dim = static_cast<std::uint64_t>(sc.at(0)); r.partial_blocks = static_cast<std::size_t>(sc.at(1));
     r.complete = sc.at(2) != 0; r.flip_engaged = sc.at(3) != 0; r.tr_engaged = sc.at(4) != 0;
@@ -196,6 +234,11 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     sec::Spec s;
     const auto ss = vec<std::int64_t>(d, "spec_scalars");
     const int n = static_cast<int>(ss.at(6));
+    if (n < 1 || n > 63) fail("the number of sites is outside 1..63");
+    for (const char* key : {"spec_abelian", "spec_residues"}) {
+        const auto flat = vec<std::int64_t>(d, key);
+        check_perms(flat, flat.size() / static_cast<std::size_t>(n), n, key);
+    }
     auto perms = [n](const std::vector<std::int64_t>& flat) {
         std::vector<sec::Perm> out;
         for (std::size_t i = 0; n > 0 && i + static_cast<std::size_t>(n) <= flat.size(); i += static_cast<std::size_t>(n))
@@ -209,6 +252,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     s.n_up = static_cast<int>(ss.at(0)); s.sz_parity = static_cast<int>(ss.at(1)); s.use_sz = ss.at(2) != 0;
     s.spin_flip = static_cast<int>(ss.at(3)); s.time_reversal = static_cast<int>(ss.at(4));
     s.two_S = static_cast<int>(ss.at(5));
+    if (s.n_up < -1 || s.n_up > n || s.sz_parity < -1 || s.sz_parity > 1 || s.two_S < -1 || s.two_S > n)
+        fail("the saved symmetry labels are out of range");
     r.n_sites = n;
     return py::make_tuple(std::move(r), std::move(s));
 }

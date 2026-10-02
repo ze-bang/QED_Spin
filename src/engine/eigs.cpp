@@ -4,6 +4,7 @@
 // Part of the little-group engine; see internal.h for the file map.
 // =============================================================================
 
+#include "validate.h"
 #include "walk.h"
 
 #include <ed/parallel/numa.h>             // pin_omp_threads_once
@@ -272,7 +273,9 @@ std::vector<double> EigsResult::energies(int k) const {
 
 EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     const int n_sites = static_cast<int>(H.getNumBits());
-    if (o.k < 1) throw std::invalid_argument("eigs: k must be >= 1");
+    detail::validate_hamiltonian(H, "eigs");
+    detail::validate_spec(s, n_sites, "eigs");
+    detail::validate_eigs_options(o);
     detail::require_device(o.device, "eigs");
     ed::parallel::pin_omp_threads_once();
     struct Row { Level level; bool owed_more; };   // owed_more: block stopped short of its request
@@ -475,6 +478,8 @@ std::vector<double> SpectrumResult::expanded() const {
 
 SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     const int n_sites = static_cast<int>(H.getNumBits());
+    detail::validate_hamiltonian(H, "spectrum");
+    detail::validate_spec(s, n_sites, "spectrum");
     detail::require_device(device, "spectrum");
     ed::parallel::pin_omp_threads_once();
     SpectrumResult res;
@@ -550,6 +555,9 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
 std::vector<std::vector<Complex>>
 multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, int n_up) {
     if (!v.basis) throw std::invalid_argument("multiplet: level has no vector");
+    if (n_up < -1 || n_up > n_sites)
+        throw ed::InvalidRequest("multiplet: the Sz sector n_up = " + std::to_string(n_up) + " is outside 0.."
+                                 + std::to_string(n_sites));
     require_normal(s, n_sites);          // a loaded result never went through the walk
     const int sector_nup = v.basis->n_up;
     if (n_up >= 0 && sector_nup != n_up && !(level.mirror == 2 && sector_nup == n_sites - n_up))

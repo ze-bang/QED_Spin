@@ -55,6 +55,8 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.omega = [float(w) for w in omega]
     d.eta = float(eta)
     temps = np.zeros(0) if T is None else np.atleast_1d(np.asarray(T, dtype=float))
+    if T is not None and temps.size == 0:
+        raise InvalidRequest("T is empty; use T=None for the ground state")
     if not np.all(np.isfinite(temps)) or np.any(temps <= 0):
         raise InvalidRequest("temperatures must be finite and positive; use T=None for the ground state")
     unique, rows = np.unique(temps, return_inverse=True)

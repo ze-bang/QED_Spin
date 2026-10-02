@@ -1039,3 +1039,48 @@ def test_a_multiplet_at_the_kth_level_comes_back_whole():
     ref = np.linalg.eigvalsh(_dense(H, n))[:7]
     np.testing.assert_allclose(sorted(e for L in r.levels for e in [float(L.energy)] * int(L.multiplicity)), ref,
                                atol=1e-10)
+
+
+def test_requests_that_cannot_be_answered_are_refused(tmp_path):
+    # The validation layer (P4.4): every verb refuses, with qed.errors.InvalidRequest (a
+    # ValueError), what it would otherwise answer wrongly or crash on.
+    n = 6
+    H = _ring(n)
+    bad = qed.Operator(n)                                  # a DM term with a sign error: not Hermitian
+    for i in range(n):
+        bad.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.3j)
+        bad.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.3j)
+    Hbad = H + bad
+    O = _sz_q(n, math.pi)
+    omega = np.linspace(0.0, 3.0, 31)
+    E = qed.errors.InvalidRequest
+    for call in (lambda: qed.eigs(Hbad, 1), lambda: qed.spectrum(Hbad),
+                 lambda: qed.thermal(Hbad, [1.0], method="exact"), lambda: qed.dynamics(Hbad, O, omega)):
+        with pytest.raises(E, match="not Hermitian"):
+            call()
+    for sz in (-1, True, 0.5, n + 1):
+        with pytest.raises(E):
+            qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, sz=sz))
+    for kw in (dict(eta=0.0), dict(eta=-0.1), dict(T=[1.0], krylov=0), dict(degeneracy_tol=-1.0),
+               dict(T=[]), dict(T=[float("nan")])):
+        with pytest.raises(E):
+            qed.dynamics(H, O, omega, **kw)
+    with pytest.raises(E, match="observable 1 is None"):
+        qed.expect(H, [O, None], 1)
+    with pytest.raises(E, match="None"):
+        qed.thermal(H, [1.0], method="exact", observables=[None])
+    with pytest.raises(E, match="acts on 7 sites"):
+        qed.expect(H, [qed.Operator.product(n + 1, "z", [0])], 1)
+    # a damaged save file is refused, not read out of bounds
+    r = qed.eigs(H, 2, sym=qed.Symmetry(spatial=None), vectors=True)
+    r.save(tmp_path / "good.npz")
+    with np.load(tmp_path / "good.npz") as f:
+        base = {k: f[k] for k in f.files}
+    perms = next(k for k in base if k.startswith("basis") and k.endswith("_perms"))
+    for key, value in (("level_vector", np.full_like(base["level_vector"], 1000)),
+                       ("vector_offset", base["vector_offset"][:-1]),
+                       (perms, np.full_like(base[perms], 100000))):
+        damaged = dict(base, **{key: value})
+        np.savez(tmp_path / "bad.npz", **damaged)
+        with pytest.raises(ValueError):
+            qed.load_eigs(tmp_path / "bad.npz").vectors()

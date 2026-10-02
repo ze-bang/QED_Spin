@@ -4,6 +4,7 @@
 // Part of the little-group engine; see internal.h for the file map.
 // =============================================================================
 
+#include "validate.h"
 #include "walk.h"
 
 #include <ed/sectors/expect.h>
@@ -21,6 +22,7 @@ using namespace ed::solvers::lg_detail;
 std::vector<std::vector<Complex>>
 expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
     const int n_sites = r.n_sites;
+    for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], n_sites, "expect", i);
     for (const ::Operator* O : ops)
         if (s.two_S >= 0 && !ed::ops::su2_invariant(O->canonical()))
             throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
