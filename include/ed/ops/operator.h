@@ -38,6 +38,7 @@
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
 #include <ed/matvec/term_storage.h>
+#include <ed/ops/invariance.h>   // hermitian(masked(*this))
 
 using Complex = std::complex<double>;
 
@@ -282,14 +283,13 @@ public:
         return static_cast<std::size_t>(1ULL << n_bits_);
     }
     [[nodiscard]] bool is_hermitian() const override {
-        // A structural check on the committed term list (adjoint partners with conjugate coefficients, real diagonal),
-        // cached until the term list changes. Every solver lane assumes
+        // H^dagger == H on the canonical terms (invariance.h), cached until the term list changes. Every solver lane assumes
         // Hermiticity (the rep kernels apply H^dagger; Lanczos tridiagonalises
         // the symmetric part silently), so input validation can refuse
         // non-Hermitian input up front instead of returning numbers.
         commitPendingTransforms();
         if (!hermitian_check_done_) {
-            hermitian_cached_      = terms_.is_hermitian();
+            hermitian_cached_      = ed::ops::hermitian(ed::ops::masked(*this));
             hermitian_check_done_  = true;
         }
         return hermitian_cached_;

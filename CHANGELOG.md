@@ -26,6 +26,14 @@ Breaking changes so far:
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.
+- **Symmetry detection reads the operator, not its records.** Every verdict (a site
+  permutation, the spin flip, complex conjugation, U(1), Sz parity, SU(2)) compares H's
+  canonical terms, so it no longer depends on how H was written: a model whose records cancel
+  (the builder's `dm` along z, the Cartesian form of a Heisenberg bond) conserves Sz and, where
+  it is, SU(2); S_tot² written as the full double sum (same-site records included) is SU(2)-
+  and flip-invariant. One relative tolerance, 1e-10 of H's largest coefficient, replaces the
+  detectors' mixed absolute ones. `_core.check_generators_commute` refuses a list that is not
+  a permutation of the sites.
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.
@@ -95,6 +103,10 @@ Breaking changes so far:
 
 C++ API (installed headers; nothing in Python changes):
 
+- The term-level detectors are gone: `<ed/ops/commute_check.h>`, `<ed/ops/su2.h>`,
+  `<ed/ops/time_reversal.h>`, `hamiltonian_is_spin_flip_symmetric` / `sz_axis_of` (`spin_flip.h`
+  keeps `flip_subspace_admissible`) and `TermStorage::is_hermitian`; `<ed/ops/invariance.h>`
+  replaces them, and `ed::sectors::SzContent` is `ed::ops::SzContent`.
 - `ed::matvec::MatVecOperator` and `<ed/matvec/matvec.h>` are merged into `ed::LinearOperator`
   (`<ed/core/linear_operator.h>`), with `as_apply_function` and `check_size` gone.
   `LinearOperator::has_device_kernel()` says whether `bind_cuda()` has a device apply; the

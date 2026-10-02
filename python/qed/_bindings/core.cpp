@@ -25,7 +25,7 @@
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
 #include <ed/dssf/operator_spec.h>
-#include <ed/ops/commute_check.h>
+#include <ed/ops/invariance.h>
 #include <ed/basis/group.h>
 
 #include "bindings.h"
@@ -406,16 +406,14 @@ PYBIND11_MODULE(_core, m) {
           "The queued (level, message) records, oldest first; empties the queue.");
     m.def("check_generators_commute",
           [](const Operator& op, const std::vector<std::vector<int>>& generators) {
+              const ed::ops::MaskedOperator h = ed::ops::masked(op);
               std::vector<bool> out;
               out.reserve(generators.size());
-              for (const auto& g : generators)
-                  out.push_back(ed::symmetry::hamiltonian_commutes_with_permutation(
-                      op.transform_data_, op.three_body_data_, g));
+              for (const auto& g : generators) out.push_back(ed::ops::commutes_with_permutation(h, g));
               return out;
           },
           py::arg("op"), py::arg("generators"),
-          "Per permutation: does relabelling H's term sites by it leave the terms invariant "
-          "([H, U_g] = 0, exact, no matvec)?");
+          "Per permutation: [H, U_g] = 0, compared on H's canonical terms (exact, no matvec)?");
 
     bind_sectors(m);
 

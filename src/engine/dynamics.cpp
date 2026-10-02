@@ -13,9 +13,7 @@
 #include <ed/krylov/lanczos.h>
 #include <ed/sectors/dynamics.h>
 #include <ed/ops/casimir_projector.h>
-#include <ed/ops/spin_flip.h>
 #include <ed/basis/su2_dims.h>
-#include <ed/ops/time_reversal.h>
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>                     // cudaMemGetInfo
 #include <ed/gpu/cuda_backend.cuh>
@@ -266,9 +264,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     detail::require_device(d.device, "dynamics");
     ed::parallel::pin_omp_threads_once();
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
-    if (s.spin_flip == 1 && !ed::symmetry::hamiltonian_is_spin_flip_symmetric(term_soa(H)))
+    if (s.spin_flip == 1 && !ed::ops::flip_invariant(ed::ops::masked(H)))
         throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");
-    if (s.time_reversal == 1 && !ed::symmetry::hamiltonian_is_real(term_soa(H)))
+    if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(ed::ops::masked(H)))
         throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);

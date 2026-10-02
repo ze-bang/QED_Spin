@@ -26,6 +26,7 @@
 // =============================================================================
 
 #include <ed/core/device.h>
+#include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
 #include <ed/basis/rep_sector.h>
 
@@ -106,7 +107,7 @@ struct Spec {
 };
 
 /// What H conserves along the Sz axis.
-enum class SzContent { U1, Parity, None };
+using SzContent = ed::ops::SzContent;
 [[nodiscard]] SzContent sz_content(const ::Operator& H);
 
 struct Subspace {

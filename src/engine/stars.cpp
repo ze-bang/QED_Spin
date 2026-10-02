@@ -5,7 +5,6 @@
 
 #include "internal.h"
 
-#include <ed/ops/commute_check.h>   // term-level [H, U_p] = 0 (group-sector fast path)
 
 #include <map>
 #include <numeric>
@@ -66,7 +65,7 @@ namespace {
 // the reason under ED_SYM_PROFILE / verbose) sends the whole star down the W path, unchanged. Everything the W
 // path derives from monomials is derived here from permutations:
 //   little co-group  identity + one residue per coset of A (first in residue order, as same_coset keeps), fixing k0,
-//                    commuting with H at the TERM level (hamiltonian_commutes_with_permutation; the W path's
+//                    commuting with H on its canonical terms (commutes_with_permutation; the W path's
 //                    monomial_commutes needs an H_k0 apply, i.e. the full k-sector CSR);
 //   table            p_e . p_f = a . p_g with a in A; trivial factor system chi_k0(a) = 1 (as build_little_tables);
 //   irreps           decompose_irreps_tables on that table -> the same published little_characters;
@@ -108,8 +107,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         if (dup) continue;
         // The W path tests commutation on the sector (monomial_commutes) and could keep a residue this term-level
         // test rejects: leave such a star to it, so both lanes always publish the same co-group.
-        if (!ed::symmetry::hamiltonian_commutes_with_permutation(op.transform_data_, op.three_body_data_, p))
-            return decline("residue " + std::to_string(cx.residue_spec[rp]) + " fixes k0 but fails the term-level commutation test");
+        if (!ed::ops::commutes_with_permutation(*cx.terms, p))
+            return decline("residue " + std::to_string(cx.residue_spec[rp]) + " fixes k0 but does not commute with H");
         P.push_back(p); Pinv.push_back(inverse_perm(p)); P_res.push_back(cx.residue_spec[rp]);
     }
     const int nP = static_cast<int>(P.size());

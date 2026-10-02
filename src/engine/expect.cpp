@@ -32,7 +32,7 @@ std::vector<std::vector<Complex>>
 expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
     const int n_sites = r.n_sites;
     for (const ::Operator* O : ops)
-        if (s.two_S >= 0 && !ed::symmetry::hamiltonian_is_su2_symmetric(term_soa(*O)))
+        if (s.two_S >= 0 && !ed::ops::su2_invariant(ed::ops::masked(*O)))
             throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
                                         "invariant (a level holds one member of each spin multiplet)");
     // One averaged operator per (op, flip, keep); one matvec per (averaged op, basis).

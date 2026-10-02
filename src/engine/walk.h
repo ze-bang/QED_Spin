@@ -10,7 +10,6 @@
 #include <ed/sectors/sectors.h>
 #include <ed/ops/casimir.h>
 #include <ed/ops/casimir_projector.h>
-#include <ed/ops/su2.h>
 
 #include <algorithm>
 #include <array>

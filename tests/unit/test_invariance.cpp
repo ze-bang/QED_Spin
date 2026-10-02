@@ -1,28 +1,23 @@
 // =============================================================================
 // tests/unit/test_invariance.cpp
 //
-// The symmetry verdicts of include/ed/ops/invariance.h on a model zoo, against the dense
-// truth and against the record-level detectors they replace (commute_check.h, spin_flip.h,
-// su2.h, time_reversal.h, ed::sectors::sz_content):
+// The symmetry verdicts of include/ed/ops/invariance.h:
 //   1. masked(op) is the operator the kernels apply: its dense matrix equals Operator::apply
 //      on every basis state (every record shape, same-site products included);
-//   2. every new verdict equals the dense truth, and is unchanged when H is scaled by 1e-6
-//      or 1e6;
-//   3. every old verdict equals the new one, except where the records misrepresent the
-//      operator -- cancelling S+S+ / S-S- records (the builder's D_z DM term, the Cartesian
-//      form of the Heisenberg bond) and same-site S_i.S_i records -- listed per model.
+//   2. on a model zoo every verdict equals the dense truth, and is unchanged when H is scaled
+//      by 1e-6 or 1e6 -- including the models whose records misrepresent H (cancelling
+//      S+S+ / S-S- records: the builder's D_z DM term, the Cartesian Heisenberg bond;
+//      same-site S_i.S_i records), where the record-level detectors these replaced were
+//      wrong (P3.1 step 3, 322d560, ran both side by side);
+//   3. the cases of the detectors' own tests: Heisenberg, XXZ, XY, Ising, fields, mixed
+//      Sz S+-, S+S+ pairs, three-body products, the scalar chirality.
 // =============================================================================
 #include "common/catch2_harness.h"
 
 #include <ed/input/hamiltonian_builder.h>
 #include <ed/input/lattice.h>
-#include <ed/ops/commute_check.h>
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
-#include <ed/ops/spin_flip.h>
-#include <ed/ops/su2.h>
-#include <ed/ops/time_reversal.h>
-#include <ed/sectors/sectors.h>
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +25,6 @@
 #include <cstdint>
 #include <memory>
 #include <random>
-#include <set>
 #include <tuple>
 #include <string>
 #include <vector>
@@ -46,7 +40,6 @@ constexpr std::uint64_t kDim = 1ULL << N;
 struct Model {
     std::string name;
     std::shared_ptr<Operator> H;
-    std::set<std::string> old_differs;   // verdicts the record-level detectors get wrong here
 };
 
 std::vector<std::pair<std::size_t, std::size_t>> ring() {
@@ -70,10 +63,10 @@ std::vector<Model> zoo() {
     using ed::input::HamiltonianBuilder;
     std::vector<Model> z;
     const auto bonds = ring();
-    auto built = [&](const std::string& name, auto&& fill, std::set<std::string> differs = {}) {
+    auto built = [&](const std::string& name, auto&& fill) {
         HamiltonianBuilder b(N);
         fill(b);
-        z.push_back({name, b.to_operator(), std::move(differs)});
+        z.push_back({name, b.to_operator()});
     };
     built("heisenberg", [&](HamiltonianBuilder& b) { b.heisenberg(bonds, 1.0); });
     built("xxz", [&](HamiltonianBuilder& b) { b.xxz(bonds, 1.0, 0.5); });
@@ -88,7 +81,7 @@ std::vector<Model> zoo() {
     // D_z conserves S^z, but the builder writes it with S+S+ / S-S- records that cancel.
     built("heisenberg+dm_z", [&](HamiltonianBuilder& b) {
         b.heisenberg(bonds, 1.0).dm(bonds, std::vector<std::array<double, 3>>(bonds.size(), {0.0, 0.0, 0.3}));
-    }, {"sz"});
+    });
     {
         const auto hc = ed::input::lattice::honeycomb(2, 2, true);
         std::vector<std::pair<std::size_t, std::size_t>> hb;
@@ -99,7 +92,7 @@ std::vector<Model> zoo() {
     {   // the Heisenberg ring in Cartesian form: U(1) and SU(2), which the records hide
         auto H = records();
         for (const auto& [i, j] : bonds) cartesian_bond(*H, i, j, 1.0);
-        z.push_back({"heisenberg_cartesian", H, {"sz", "su2"}});
+        z.push_back({"heisenberg_cartesian", H});
     }
     {   // S_tot^2 as the full double sum, i == j included (a constant 3/4 per site)
         auto H = records();
@@ -109,7 +102,7 @@ std::vector<Model> zoo() {
                 H->addTwoBodyTerm(1, i, 0, j, Cx(0.5, 0.0));
                 H->addTwoBodyTerm(2, i, 2, j, Cx(1.0, 0.0));
             }
-        z.push_back({"s_tot_squared", H, {"su2", "flip"}});
+        z.push_back({"s_tot_squared", H});
     }
     {   // Heisenberg plus the scalar chirality S_a.(S_b x S_c) on consecutive triples
         HamiltonianBuilder b(N);
@@ -124,7 +117,7 @@ std::vector<Model> zoo() {
                                     static_cast<std::uint8_t>(pattern[p][2]), s[2],
                                     Cx(0.0, p < 3 ? 0.2 : -0.2));
         }
-        z.push_back({"heisenberg+chirality", H, {}});
+        z.push_back({"heisenberg+chirality", H});
     }
     {   // R + R^dagger for random records R of every shape, same-site two-body products included;
         // the adjoint records are written out (S+ <-> S-, coefficient conjugated, factors reversed)
@@ -160,7 +153,7 @@ std::vector<Model> zoo() {
                                 static_cast<std::uint8_t>(c), s2, w);
             H->addThreeBodyTerm(adj(a), s0, adj(b), s1, adj(c), s2, std::conj(w));
         }
-        z.push_back({"random_records", H, {}});
+        z.push_back({"random_records", H});
     }
     return z;
 }
@@ -251,18 +244,6 @@ Verdicts fresh(const MaskedOperator& H) {
     return v;
 }
 
-Verdicts old(const Operator& H) {
-    H.commitPendingTransforms();
-    const auto& soa = H.terms_;
-    const auto sz = ed::sectors::sz_content(H);
-    Verdicts v{ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa), ed::symmetry::hamiltonian_is_real(soa),
-               sz == ed::sectors::SzContent::U1 && ed::symmetry::hamiltonian_is_su2_symmetric(soa),
-               static_cast<int>(sz), {}};
-    for (const auto& p : perms())
-        v.perm.push_back(ed::symmetry::hamiltonian_commutes_with_permutation(H.transform_data_, H.three_body_data_, p));
-    return v;
-}
-
 }  // namespace
 
 TEST_CASE("masked(op) is the operator the kernels apply", "[invariance]") {
@@ -302,19 +283,84 @@ TEST_CASE("the verdicts are the dense truth, at any scale", "[invariance]") {
     }
 }
 
-TEST_CASE("the record-level detectors agree except where the records misrepresent H", "[invariance]") {
-    for (const auto& m : zoo()) {
-        INFO("model " << m.name);
-        const auto n = fresh(ed::ops::masked(*m.H));
-        const auto o = old(*m.H);
-        auto expect = [&](const char* what, bool same) {
-            INFO("verdict " << what);
-            CHECK(same == (m.old_differs.count(what) == 0));
-        };
-        expect("flip", o.flip == n.flip);
-        expect("real", o.real == n.real);
-        expect("su2", o.su2 == n.su2);
-        expect("sz", o.sz == n.sz);
-        expect("perm", o.perm == n.perm);
-    }
+namespace {
+MaskedOperator P(const char* ops, std::vector<int> sites, Cx c = 1.0) {
+    return MaskedOperator::product(N, ops, sites, c);
+}
+MaskedOperator heisenberg_bond(int i, int j, double J) {
+    return P("zz", {i, j}, J) + P("+-", {i, j}, 0.5 * J) + P("-+", {i, j}, 0.5 * J);
+}
+}  // namespace
+
+TEST_CASE("flip: exchange and transverse fields pass; Zeeman, lone ladders, odd products fail", "[invariance]") {
+    using ed::ops::flip_invariant;
+    CHECK(flip_invariant(P("zz", {0, 1}, 0.7) + P("+-", {0, 1}, 0.5) + P("-+", {0, 1}, 0.5)));
+    const auto hx = P("+", {3}, 0.25) + P("-", {3}, 0.25);
+    CHECK(flip_invariant(hx));
+    CHECK_FALSE(flip_invariant(hx + P("z", {2}, 0.1)));
+    CHECK_FALSE(flip_invariant(P("+", {0}, 0.25)));
+    CHECK(flip_invariant(P("z+", {0, 1}, 0.3) + P("z-", {0, 1}, -0.3)));          // X Sz S+ X = -Sz S-
+    CHECK_FALSE(flip_invariant(P("z+", {0, 1}, 0.3) + P("z-", {0, 1}, 0.3)));
+    CHECK(flip_invariant(P("++", {0, 1}, Cx(0.2, 0.05)) + P("--", {1, 0}, Cx(0.2, 0.05))));
+    CHECK_FALSE(flip_invariant(P("++", {0, 1}, 0.2)));
+    CHECK_FALSE(flip_invariant(P("zzz", {0, 1, 2}, 0.1)));                         // flip-odd
+    CHECK(flip_invariant(P("+-z", {0, 1, 2}, 0.3) + P("-+z", {0, 1, 2}, -0.3)));
+    CHECK_FALSE(flip_invariant(P("+-z", {0, 1, 2}, 0.3) + P("-+z", {0, 1, 2}, 0.3)));
+    CHECK_FALSE(flip_invariant(P("zzz", {0, 0, 1}, 0.1)));                         // = Sz_1 / 4, reduced exactly
+}
+
+TEST_CASE("conjugation: real couplings pass, imaginary ones fail", "[invariance]") {
+    const auto h = heisenberg_bond(0, 1, 1.0);
+    CHECK(ed::ops::conjugation_invariant(h));
+    CHECK_FALSE(ed::ops::conjugation_invariant(h + P("+-", {1, 2}, Cx(0.0, 0.3))));
+}
+
+TEST_CASE("su2: isotropic exchange in any form passes, anything else fails", "[invariance]") {
+    using ed::ops::su2_invariant;
+    auto h = heisenberg_bond(0, 1, 0.7);
+    CHECK(su2_invariant(h));
+    h = h + heisenberg_bond(1, 2, -1.3);                                           // per-bond J
+    CHECK(su2_invariant(h));
+    CHECK(su2_invariant(h + P("zz", {0, 0}, 3.0)));                                // an identity shift
+    CHECK(su2_invariant(P("zz", {2, 0}, 1.0) + P("+-", {2, 0}, 0.5) + P("-+", {2, 0}, 0.5)));
+    CHECK(su2_invariant(P("zz", {0, 1}) + P("+-", {0, 1}, 0.25) + P("-+", {1, 0}, 0.25) + P("-+", {0, 1}, 0.5)));
+    CHECK_FALSE(su2_invariant(P("zz", {0, 1}, 1.5) + P("+-", {0, 1}, 0.5) + P("-+", {0, 1}, 0.5)));   // XXZ
+    CHECK_FALSE(su2_invariant(P("+-", {0, 1}, 0.5) + P("-+", {0, 1}, 0.5)));                          // XY
+    CHECK_FALSE(su2_invariant(P("zz", {0, 1})));                                                       // Ising
+    CHECK_FALSE(su2_invariant(P("zz", {0, 1}) + P("+-", {0, 1}, 0.7) + P("-+", {0, 1}, 0.3)));
+    const auto base = heisenberg_bond(0, 1, 1.0);
+    CHECK_FALSE(su2_invariant(base + P("z", {0}, 0.1)));
+    CHECK_FALSE(su2_invariant(base + P("+", {0}, 0.1) + P("-", {0}, 0.1)));
+    CHECK_FALSE(su2_invariant(base + P("z+", {0, 1}, 0.1)));
+    CHECK_FALSE(su2_invariant(base + P("++", {0, 1}, 0.1)));
+    CHECK_FALSE(su2_invariant(base + P("zzz", {0, 1, 2}, 0.1)));
+    CHECK(su2_invariant(base + P("z", {0}, 0.0) + P("zzz", {0, 1, 2}, 0.0)));
+}
+
+TEST_CASE("su2: the scalar chirality in any factor order passes", "[invariance]") {
+    // lambda S_a.(S_b x S_c) = lambda (i/2) sum_cyc (S+_a S-_b - S-_a S+_b) Sz_c
+    auto chirality = [](int a, int b, int c, double lambda, double flip_last = 1.0) {
+        const Cx h(0.0, 0.5 * lambda);
+        const int s[3] = {a, b, c};
+        MaskedOperator X(N);
+        for (int r = 0; r < 3; ++r) {
+            const int i = s[r], j = s[(r + 1) % 3], k = s[(r + 2) % 3];
+            X.add(P("z+-", {k, i, j}, h));
+            X.add(P("-z+", {i, k, j}, (r == 2 ? flip_last : 1.0) * -h));
+        }
+        return X;
+    };
+    CHECK(ed::ops::su2_invariant(heisenberg_bond(0, 1, 1.0) + chirality(2, 0, 1, 0.3) + chirality(1, 3, 2, -0.7)));
+    CHECK_FALSE(ed::ops::su2_invariant(chirality(0, 1, 2, 0.3, -1.0)));
+    CHECK_FALSE(ed::ops::su2_invariant(chirality(0, 1, 2, 0.3) + P("+-+", {0, 1, 2}, 0.05)));
+}
+
+TEST_CASE("su2 implies U1, the flip and (without chirality) conjugation", "[invariance]") {
+    const auto h = heisenberg_bond(0, 1, 1.0) + heisenberg_bond(1, 2, 0.5);
+    REQUIRE(ed::ops::su2_invariant(h));
+    CHECK(ed::ops::sz_content(h) == ed::ops::SzContent::U1);
+    CHECK(ed::ops::flip_invariant(h));
+    CHECK(ed::ops::conjugation_invariant(h));
+    CHECK(ed::ops::sz_content(h + P("++", {0, 1}, 0.2) + P("--", {0, 1}, 0.2)) == ed::ops::SzContent::Parity);
+    CHECK(ed::ops::sz_content(h + P("+", {0}, 0.2)) == ed::ops::SzContent::None);
 }

@@ -308,38 +308,6 @@ struct TermStorage {
     }
 
     /**
-     * @brief Structural Hermiticity check: every off-diagonal
-     *        product must have an adjoint partner (S+ <-> S-, Sz fixed, sites
-     *        as a multiset) carrying the conjugate coefficient, and every
-     *        diagonal coefficient must be real. Split / duplicated records are
-     *        aggregated by canonical key first. O(#terms log #terms).
-     */
-    [[nodiscard]] bool is_hermitian(double tol = 1e-10) const {
-        using Key = std::vector<std::pair<std::uint64_t, std::uint8_t>>;
-        std::map<Key, Complex> sum;
-        auto canon = [](Key k) { std::sort(k.begin(), k.end()); return k; };
-        auto add = [&](Key k, Complex c) { sum[canon(std::move(k))] += c; };
-        for (const auto& t : offdiag_one_body) add({{t.site_index, t.op_type}}, t.coefficient);
-        for (const auto& t : mixed_two_body)   add({{t.sz_site, 2}, {t.flip_site, t.flip_op_type}}, t.coefficient);
-        for (const auto& t : offdiag_two_body) add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2}}, t.coefficient);
-        for (const auto& t : three_body)       add({{t.site_index_1, t.op_type_1}, {t.site_index_2, t.op_type_2},
-                                                    {t.site_index_3, t.op_type_3}}, t.coefficient);
-        for (const auto& t : diag_one_body)
-            if (std::abs(t.coefficient.imag()) > tol * (1.0 + std::abs(t.coefficient.real()))) return false;
-        for (const auto& t : diag_two_body)
-            if (std::abs(t.coefficient.imag()) > tol * (1.0 + std::abs(t.coefficient.real()))) return false;
-        for (const auto& [key, c] : sum) {
-            Key adj = key;
-            for (auto& [site, op] : adj) if (op != 2) op = static_cast<std::uint8_t>(1 - op);
-            adj = canon(std::move(adj));
-            const auto it = sum.find(adj);
-            const Complex partner = (it == sum.end()) ? Complex{0.0, 0.0} : it->second;
-            if (std::abs(partner - std::conj(c)) > tol * (1.0 + std::abs(c) + std::abs(partner))) return false;
-        }
-        return true;
-    }
-
-    /**
      * @brief Returns true iff every coupling in every bin is purely real
      *        (|imag| <= tol). Linear in the number of terms.
      */

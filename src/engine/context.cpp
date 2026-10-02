@@ -26,33 +26,24 @@ characters_for(const EngineContext& cx, int k_ext) {
     return chi;
 }
 
-// One term-level SoA per engine call, shared by the flip and TR resolvers.
-[[nodiscard]] ed::matvec::TermStorage term_soa(const ::Operator& op) {
-    ed::matvec::TermStorage soa;
-    ed::matvec::TermStorage::classify_route(
-        soa, op.transform_data_, op.three_body_data_,
-        [](const std::complex<double>& c) { return c; });
-    return soa;
-}
-
-// Decide whether A' = A x Z2 engages: [H, prod sigma^x] = 0 at term level AND
+// Decide whether A' = A x Z2 engages: [H, prod sigma^x] = 0 on H's canonical terms AND
 // the active subspace is flip-invariant (n_up = N/2; parity half with N even;
 // full space unconditionally). Require throws loudly on either failure --
 // silently-different physics is worse than an error.
 [[nodiscard]] FlipEngagement
-resolve_flip_engagement(const ed::matvec::TermStorage& soa,
+resolve_flip_engagement(const ed::ops::MaskedOperator& h,
                         const LittleGroupOptions& opt, int n_sites)
 {
     FlipEngagement fe;
     if (opt.spin_flip == 0) return fe;
-    fe.symmetric = ed::symmetry::hamiltonian_is_spin_flip_symmetric(soa);
+    fe.symmetric = ed::ops::flip_invariant(h);
     const bool admissible = ed::symmetry::flip_subspace_admissible(
         opt.n_up, opt.sz_parity, n_sites);
     if (opt.spin_flip == 1) {
         if (!fe.symmetric)
             throw std::runtime_error(
                 "little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
-                "at the term level (e.g. a Zeeman term breaks the flip).");
+                "(e.g. a Zeeman term breaks the flip).");
         if (!admissible)
             throw std::runtime_error(
                 "little_group: spin_flip='require' but the subspace is not "
@@ -71,11 +62,11 @@ resolve_flip_engagement(const ed::matvec::TermStorage& soa,
 // into one star; and inside a REAL-character star, conjugate little-group
 // irreps sigma/sigma* carry identical spectra).
 [[nodiscard]] bool
-resolve_tr_engagement(const ed::matvec::TermStorage& soa,
+resolve_tr_engagement(const ed::ops::MaskedOperator& h,
                       const LittleGroupOptions& opt)
 {
     if (opt.time_reversal == 0) return false;
-    const bool h_real = ed::symmetry::hamiltonian_is_real(soa);
+    const bool h_real = ed::ops::conjugation_invariant(h);
     if (opt.time_reversal == 1 && !h_real)
         throw std::runtime_error(
             "little_group: time_reversal='require' but the Hamiltonian has "
@@ -432,16 +423,17 @@ void make_engine_context(const ::Operator&                    op,
             "group; residues go in `residue_perms`.");
     cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
 
-    const auto soa = term_soa(op);
+    cx.terms.emplace(ed::ops::masked(op));
+    const ed::ops::MaskedOperator& h = *cx.terms;
 
     // Extend the ABELIAN factor by the global spin flip when
     // admissible (A' = A x Z2; the flip commutes with every site perm).
-    const FlipEngagement fe = resolve_flip_engagement(soa, opt, n_sites);
+    const FlipEngagement fe = resolve_flip_engagement(h, opt, n_sites);
     cx.flip_half = fe.engaged;
     cx.flip_mask = fe.engaged ? fe.mask : 0ULL;
 
     // Antiunitary K folding (real H only).
-    tr_on = resolve_tr_engagement(soa, opt);
+    tr_on = resolve_tr_engagement(h, opt);
 
     cx.cg = cx.flip_half
         ? ed::symmetry::make_flip_extended_group_from_perms(

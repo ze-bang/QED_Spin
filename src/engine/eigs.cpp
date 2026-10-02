@@ -9,7 +9,6 @@
 #include <ed/parallel/numa.h>             // pin_omp_threads_once
 #include <ed/sectors/sectors.h>
 #include <ed/basis/bits.h>
-#include <ed/ops/commute_check.h>
 
 namespace ed::sectors {
 
@@ -18,7 +17,6 @@ using namespace ed::solvers::lg_detail;
 
 namespace {
 
-int sz_shift(int op_type) { return op_type == 0 ? 1 : (op_type == 1 ? -1 : 0); }
 
 std::uint64_t binomial(int n, int k) {
     if (k < 0 || k > n) return 0;
@@ -165,45 +163,31 @@ std::uint64_t state_index(std::uint64_t st, int n_up) {
 
 }  // namespace
 
-SzContent sz_content(const ::Operator& H) {
-    bool u1 = true, parity = true;
-    auto account = [&](int delta) {
-        if (delta != 0) u1 = false;
-        if (delta % 2 != 0) parity = false;
-    };
-    for (const auto& t : H.transform_data_) {
-        if (std::abs(t.coefficient) < 1e-15) continue;
-        account(sz_shift(t.op_type) + (t.is_two_body ? sz_shift(t.op_type_2) : 0));
-    }
-    for (const auto& t : H.three_body_data_) {
-        if (std::abs(t.coefficient) < 1e-15) continue;
-        account(sz_shift(t.op_type_1) + sz_shift(t.op_type_2) + sz_shift(t.op_type_3));
-    }
-    return u1 ? SzContent::U1 : (parity ? SzContent::Parity : SzContent::None);
-}
+SzContent sz_content(const ::Operator& H) { return ed::ops::sz_content(ed::ops::masked(H)); }
 
 std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
     const int n_sites = static_cast<int>(H.getNumBits());
     // A permutation H does not commute with would give silently wrong spectra; a residue that
     // does not normalise the abelian group, wrong stars, multiplets and labels.
     require_normal(s, n_sites);
+    const ed::ops::MaskedOperator h = ed::ops::masked(H);
     for (const auto* set : {&s.abelian, &s.residues})
         for (const Perm& g : *set)
-            if (!ed::symmetry::hamiltonian_commutes_with_permutation(H.transform_data_, H.three_body_data_, g))
+            if (!ed::ops::commutes_with_permutation(h, g))
                 throw ed::InvalidRequest("sectors: H does not commute with a supplied site permutation");
-    const SzContent c = sz_content(H);
+    const SzContent c = ed::ops::sz_content(h);
     if (s.n_up >= 0 && c != SzContent::U1)
         throw std::invalid_argument("sectors: n_up names an Sz sector, but H does not conserve Sz");
     if (s.sz_parity >= 0 && c == SzContent::None)
         throw std::invalid_argument("sectors: sz_parity names a parity half, but H does not conserve Sz parity");
-    const bool flip_sym = ed::symmetry::hamiltonian_is_spin_flip_symmetric(term_soa(H));
+    const bool flip_sym = ed::ops::flip_invariant(h);
     if (s.spin_flip == 1 && !flip_sym)
         throw std::invalid_argument("sectors: spin_flip='require', but H is not spin-flip symmetric");
     const bool fold = flip_sym && s.spin_flip != 0;
 
     std::vector<Subspace> out;
     if (s.two_S >= 0) {
-        if (c != SzContent::U1 || !ed::symmetry::hamiltonian_is_su2_symmetric(term_soa(H)))
+        if (c != SzContent::U1 || !ed::ops::su2_invariant(h))
             throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H");
         if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
             throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "

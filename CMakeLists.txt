@@ -167,14 +167,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp)
     # The in-process OrbitTable registry
     ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp)
-    # Spin-flip commutation check (SectorTransporter gate)
-    ed_add_test(test_spin_flip                  tests/unit/test_spin_flip.cpp)
-    # The real-Hamiltonian gate of time-reversal pairing
-    ed_add_test(test_time_reversal              tests/unit/test_time_reversal.cpp)
     # SU(2): S^2 Casimir in the TermStorage schema + labeling
     ed_add_test(test_casimir_operator           tests/unit/test_casimir_operator.cpp)
-    # SU(2): term-level [H, S_tot] = 0 detector
-    ed_add_test(test_su2_detect                 tests/unit/test_su2_detect.cpp)
     # SU(2): S-resolved dims (highest-weight Burnside differencing)
     ed_add_test(test_su2_dims                   tests/unit/test_su2_dims.cpp)
     # SU(2): Lowdin total-spin projector + targeting wrapper
@@ -202,8 +196,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_masked_terms               tests/unit/test_masked_terms.cpp)
     ed_add_test(test_rep_matrix_elements        tests/unit/test_rep_matrix_elements.cpp)
     target_include_directories(test_rep_matrix_elements PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # engine/options.h
-    # The symmetry verdicts on the canonical terms (invariance.h) against the dense truth and the
-    # record-level detectors they replace.
+    # The symmetry verdicts on the canonical terms (invariance.h): flip, conjugation, Sz content,
+    # SU(2), permutations, against the dense truth.
     ed_add_test(test_invariance                 tests/unit/test_invariance.cpp)
 
     # -------------------------------------------------------------------------

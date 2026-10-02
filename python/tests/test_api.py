@@ -759,3 +759,64 @@ def test_auto_certifies_like_cpu(scale):
         except RuntimeError as e:
             outcome[device] = ("raised", type(e).__name__)
     assert outcome["auto"] == outcome["cpu"]
+
+
+# ---------------------------------------------------------------------------
+# Symmetry verdicts on the canonical terms (audit C02-discovery-07 and its members, C07-su2-03)
+# ---------------------------------------------------------------------------
+
+def _ring_bonds(n):
+    return [(i, (i + 1) % n) for i in range(n)]
+
+
+def test_dm_along_z_conserves_sz():
+    # The builder writes D_z with S+S+ / S-S- records that cancel; H conserves Sz, and its
+    # Sz sector gives the dense sector's energy (the cancelling records leave the sector).
+    n = 8
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg(_ring_bonds(n), 1.0).dm(_ring_bonds(n), [(0.0, 0.0, 0.3)] * n)
+    H = b.to_operator()
+    assert "U1" in str(qed._core.sectors.sz_content(H))
+    M = _dense(H, n)
+    pop = np.array([bin(s).count("1") for s in range(1 << n)])
+    sector = np.flatnonzero(pop == n // 2)
+    ref = np.linalg.eigvalsh(M[np.ix_(sector, sector)])[:2]
+    r = qed.eigs(H, 2, sym=qed.Symmetry(spatial=None, sz=n // 2))
+    np.testing.assert_allclose(np.asarray(r.energies)[:2], ref, atol=1e-10)
+
+
+def test_cartesian_heisenberg_is_su2():
+    # J (Sx Sx + Sy Sy + Sz Sz) written as ladder records whose S+S+ / S-S- parts cancel.
+    n = 8
+    P, M = qed.OP_SPLUS, qed.OP_SMINUS
+    xx = {(P, P): 0.25, (P, M): 0.25, (M, P): 0.25, (M, M): 0.25}     # Sx Sx = (S+ + S-)(S+ + S-) / 4
+    yy = {(P, P): -0.25, (P, M): 0.25, (M, P): 0.25, (M, M): -0.25}   # Sy Sy = -(S+ - S-)(S+ - S-) / 4
+    H = qed.Operator(n)
+    for i, j in _ring_bonds(n):
+        for records in (xx, yy):
+            for (a, c), q in records.items():
+                H.add_two_body(a, i, c, j, q)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
+    assert "U1" in str(qed._core.sectors.sz_content(H))
+    e0 = np.linalg.eigvalsh(_dense(H, n))[0]
+    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, total_spin=0))
+    assert abs(float(np.asarray(r.energies)[0]) - e0) < 1e-10
+
+
+def test_s_squared_with_same_site_records_is_su2():
+    # S_tot^2 as the full double sum, i == j included: SU(2) invariant, so expect() under a
+    # total-spin restriction takes it; the ring's singlet ground state has S^2 = 0.
+    n = 8
+    H = qed.Operator(n)
+    for i, j in _ring_bonds(n):
+        H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
+        H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
+        H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
+    S2 = qed.Operator(n)
+    for i in range(n):
+        for j in range(n):
+            S2.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5)
+            S2.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
+            S2.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
+    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, total_spin=0), vectors=True)
+    assert abs(complex(r.expect([S2])[0, 0])) < 1e-8

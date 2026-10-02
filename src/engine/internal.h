@@ -57,8 +57,8 @@
 #include <ed/basis/orbit_table.h>
 #include <ed/basis/symmetry_cache.h>   // acquire_orbit_table_* (orbit-table cache)
 #include <ed/basis/rep_sector.h>
-#include <ed/ops/spin_flip.h>         // sz_axis_of (compose Sz)
-#include <ed/ops/time_reversal.h>     // hamiltonian_is_real
+#include <ed/ops/invariance.h>        // the symmetry verdicts on H's canonical terms
+#include <ed/ops/spin_flip.h>         // flip_subspace_admissible
 #include <ed/gpu/rep_matvec.h>        // GPU rep matvec (host-ptr twin)
 #include <ed/core/select_backend.h>   // ed::have_cuda()
 #include <ed/gpu/little_group.h>      // batched GPU block eigensolve
@@ -654,6 +654,7 @@ struct EngineContext {
     std::uint64_t                        flip_mask = 0;
     int                                  n_irr_raw = 0;
     double                               t_orbit_table = 0.0;   // seconds to acquire otab (+ srl)
+    std::optional<ed::ops::MaskedOperator> terms;                // H's canonical terms (the verdicts)
 
     [[nodiscard]] std::size_t nA_ext() const noexcept {
         return A.size() * (flip_half ? 2u : 1u);
@@ -744,9 +745,8 @@ template <class Chi>
 
 // ---- helpers defined in the engine translation units ----------------------
 // context.cpp
-[[nodiscard]] ed::matvec::TermStorage term_soa(const ::Operator& op);
 [[nodiscard]] FlipEngagement
-resolve_flip_engagement(const ed::matvec::TermStorage& soa,
+resolve_flip_engagement(const ed::ops::MaskedOperator& h,
                         const LittleGroupOptions& opt, int n_sites);
 [[nodiscard]] std::vector<int> conjugate_irrep_map(const EngineContext& cx);
 [[nodiscard]] ed::symmetry::RepSectorData
