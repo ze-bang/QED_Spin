@@ -154,14 +154,98 @@ bool same_group(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSec
         && flips(a) == flips(b);
 }
 
+namespace {
+
+// The orbit walk for sectors of any irrep dimension (rep_sector.h). The ket's coefficient on
+// g s_r is sqrt(d/|G|) sum_j (C_r k_r)_j conj(D(g)_{0j}); the bra's amplitude on a state t is
+// sqrt(d/|G|) sum_i A(t)_{0i} (C_j b_j)_i with A(t) = sum_{g: g t = rep_j} D(g)^T (index_and_matrix).
+// A one-dimensional side takes C = inv_norm and D = chi.
+std::complex<double> orbit_matrix_element_any(const MaskedProgram& P, const ed::symmetry::RepSectorData& src,
+                                              const ed::symmetry::RepSectorData& tgt,
+                                              const std::vector<std::complex<double>>& ket,
+                                              const std::vector<std::complex<double>>& bra) {
+    using C = std::complex<double>;
+    constexpr int kMax = 8;
+    const auto spol = src.make_policy();
+    const auto tpol = tgt.make_policy();
+    const auto view = P.view();
+    const int ds = src.irrep_dim, dt = tgt.irrep_dim;
+    if (ds > kMax || dt > kMax) throw std::invalid_argument("orbit_matrix_element: irrep dimension above 8");
+    const double ws = std::sqrt(static_cast<double>(ds) / static_cast<double>(src.group_size));
+    const double wt = std::sqrt(static_cast<double>(dt) / static_cast<double>(tgt.group_size));
+    // z_j = C_j b_j per bra representative (dt entries each).
+    std::vector<C> z(tgt.reps.size() * static_cast<std::size_t>(dt), C(0.0, 0.0));
+    for (std::size_t j = 0; j < tgt.reps.size(); ++j) {
+        if (dt == 1) { z[j] = tgt.inv_norms[j] * bra[j]; continue; }
+        const C* Cj = tpol.C_of(j);
+        const std::uint64_t o = tpol.first_state_of(j);
+        for (int i = 0; i < dt; ++i)
+            for (int a = 0; a < tpol.rank_of(j); ++a)
+                z[j * static_cast<std::size_t>(dt) + static_cast<std::size_t>(i)] += Cj[i * dt + a] * bra[o + static_cast<std::size_t>(a)];
+    }
+    C total(0.0, 0.0);
+    #pragma omp parallel
+    {
+        C acc(0.0, 0.0), y[kMax], A[kMax * kMax];
+        #pragma omp for schedule(static)
+        for (long long ri = 0; ri < static_cast<long long>(src.reps.size()); ++ri) {
+            const std::size_t r = static_cast<std::size_t>(ri);
+            if (ds == 1) {
+                y[0] = src.inv_norms[r] * ket[r];
+            } else {
+                const C* Cr = spol.C_of(r);
+                const std::uint64_t o = spol.first_state_of(r);
+                for (int i = 0; i < ds; ++i) {
+                    y[i] = C(0.0, 0.0);
+                    for (int a = 0; a < spol.rank_of(r); ++a) y[i] += Cr[i * ds + a] * ket[o + static_cast<std::size_t>(a)];
+                }
+            }
+            for (int g = 0; g < src.group_size; ++g) {
+                C coef(0.0, 0.0);
+                if (ds == 1) coef = y[0] * std::conj(src.characters[static_cast<std::size_t>(g)]);
+                else {
+                    const C* Dg = src.irrep_D.data() + static_cast<std::size_t>(g) * static_cast<std::size_t>(ds * ds);
+                    for (int i = 0; i < ds; ++i) coef += y[i] * std::conj(Dg[i]);   // row 0 of D(g)
+                }
+                if (coef == C(0.0, 0.0)) continue;
+                coef *= ws;
+                const std::uint64_t u = spol.apply_perm(src.reps[r], g);
+                ed::ops::for_each_connection(view, u, [&](std::uint64_t t, const C& h) {
+                    C amp(0.0, 0.0);   // the bra's amplitude on t, conjugated below
+                    if (dt == 1) {
+                        C proj;
+                        const std::int64_t j = tpol.index_and_projection(t, proj);
+                        if (j < 0) return;
+                        // proj = inv_j sum conj(chi): the amplitude is conj(proj) b_j / sqrt|G|
+                        amp = std::conj(proj) * bra[static_cast<std::size_t>(j)] * wt;
+                    } else {
+                        const std::int64_t j = tpol.index_and_matrix(t, A);
+                        if (j < 0) return;
+                        const C* zj = z.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(dt);
+                        for (int i = 0; i < dt; ++i) amp += A[i] * zj[i];   // row 0 of A
+                        amp *= wt;
+                    }
+                    acc += std::conj(amp) * h * coef;
+                });
+            }
+        }
+        #pragma omp critical(qed_orbit_me)
+        total += acc;
+    }
+    return total;
+}
+
+}  // namespace
+
 std::complex<double> orbit_matrix_element(const MaskedProgram& P, const ed::symmetry::RepSectorData& src,
                                           const ed::symmetry::RepSectorData& tgt,
                                           const std::vector<std::complex<double>>& ket,
                                           const std::vector<std::complex<double>>& bra) {
     using C = std::complex<double>;
     if (src.n_sites != tgt.n_sites) throw std::invalid_argument("orbit_matrix_element: sectors of different sizes");
-    if (ket.size() != src.dim() || bra.size() != tgt.dim())
+    if (ket.size() != src.states() || bra.size() != tgt.states())
         throw std::invalid_argument("orbit_matrix_element: vector length != sector dim");
+    if (src.irrep_dim > 1 || tgt.irrep_dim > 1) return orbit_matrix_element_any(P, src, tgt, ket, bra);
     const auto spol = src.make_policy();
     const auto tpol = tgt.make_policy();
     const auto view = P.view();

@@ -128,6 +128,7 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
                 int dense_max_dim, bool prune, double& e0, Placement& placement) {
     EigsOptions eo;
     eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim; eo.prune = prune;
+    eo.group_irreps_d = false;   // the cross-sector rows read one-dimensional sectors
     const EigsResult first = eigs(H, u, eo);
     placement += first.placement;
     eo.vectors = true;

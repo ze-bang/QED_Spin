@@ -19,17 +19,13 @@ namespace lg_detail {
 
 namespace {
 
-// At fixed n_up, one-dimensional irreps of a star are solved in the rep basis of the FULL little
-// group G_k0 = A . P_k0 (x flip) -- C(N, n_up)/|G_k0| states -- instead of W-projecting the whole k-sector.
-[[nodiscard]] bool group_sector_enabled(const LittleGroupOptions& opt) {
-    return opt.n_up >= 0;
-}
-
-// Dimension of the momentum sector k0 (extended index) at fixed n_up, without building it: the multiplicity of the
-// irrep in the permutation representation on n_up-subsets (Burnside), (1/|A'|) sum_g conj(chi(g)) Tr U_g. Tr U_a
-// counts the subsets that are unions of cycles of a (coefficient of x^n_up in prod_cycles (1 + x^len)); a flip
-// element F.a fixes a state only when every cycle of a alternates, 2^cycles states if all cycles are even.
-[[nodiscard]] std::uint64_t burnside_dim(const EngineContext& cx, int k0, int n_up) {
+// Dimension of the momentum sector k0 (extended index) of the subspace (n_up >= 0: fixed Sz; else sz_parity >= 0:
+// a parity half; else the full space), without building it: the multiplicity of the irrep in the permutation
+// representation on the subspace's states (Burnside), (1/|A'|) sum_g conj(chi(g)) Tr U_g. Tr U_a counts the states
+// that are unions of cycles of a (prod_cycles (1 + x^len): the coefficient of x^n_up, the coefficients of the
+// parity, or all of them); a flip element F.a fixes a state only when every cycle of a alternates, 2^cycles states
+// if all cycles are even, each with N/2 up spins (so in a parity half only when N/2 has its parity).
+[[nodiscard]] std::uint64_t burnside_dim(const EngineContext& cx, int k0, int n_up, int sz_parity) {
     const int N = cx.n_sites;
     const auto& chi = cx.giA.irreps[static_cast<std::size_t>(k0 % cx.n_irr_raw)].character;
     const double fs = cx.flip_half ? ((k0 / cx.n_irr_raw == 0) ? 1.0 : -1.0) : 1.0;
@@ -52,8 +48,14 @@ namespace {
             all_even = all_even && len % 2 == 0;
             for (int d = N; d >= len; --d) poly[static_cast<std::size_t>(d)] += poly[static_cast<std::size_t>(d - len)];
         }
-        acc += std::conj(chi[g]) * poly[static_cast<std::size_t>(n_up)];
-        if (cx.flip_half && all_even) acc += std::conj(fs * chi[g]) * std::ldexp(1.0, cycles);
+        double fixed = 0.0;
+        if (n_up >= 0) fixed = poly[static_cast<std::size_t>(n_up)];
+        else
+            for (int n = 0; n <= N; ++n)
+                if (sz_parity < 0 || n % 2 == sz_parity) fixed += poly[static_cast<std::size_t>(n)];
+        acc += std::conj(chi[g]) * fixed;
+        const bool flip_fixes = n_up >= 0 || sz_parity < 0 || (N / 2) % 2 == sz_parity;
+        if (cx.flip_half && all_even && flip_fixes) acc += std::conj(fs * chi[g]) * std::ldexp(1.0, cycles);
     }
     const double dim = acc.real() / static_cast<double>(cx.nA_ext());
     return static_cast<std::uint64_t>(std::llround(dim));
@@ -115,16 +117,26 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     if (nP == 1) return decline("trivial little co-group (nothing to gain)");
 
     const auto& chiA = cx.giA.irreps[static_cast<std::size_t>(k0 % cx.n_irr_raw)].character;
+    // The table p_e p_f = a_ef p_g and its factor system omega(e, f) = chi_k0(a_ef): the irreps of G_k0 that
+    // restrict to chi_k0 on A are the omega-projective irreps of P_k0, D(a p_e) = chi_k0(a) D(e).
     std::vector<std::vector<int>> mult(static_cast<std::size_t>(nP), std::vector<int>(static_cast<std::size_t>(nP), -1));
+    std::vector<std::vector<Complex>> omega(static_cast<std::size_t>(nP),
+                                            std::vector<Complex>(static_cast<std::size_t>(nP), Complex(1, 0)));
+    bool twisted = false;
     for (int e = 0; e < nP; ++e)
         for (int f = 0; f < nP; ++f) {
             const auto c = compose(P[static_cast<std::size_t>(e)], P[static_cast<std::size_t>(f)]);
             for (int g = 0; g < nP; ++g) {
                 const auto it = aidx.find(compose(c, Pinv[static_cast<std::size_t>(g)]));
                 if (it == aidx.end()) continue;
+                const Complex w = chiA[static_cast<std::size_t>(it->second)];
                 // scale-free: unit-modulus characters / phases (group data, not energies)
-                if (std::abs(chiA[static_cast<std::size_t>(it->second)] - Complex(1, 0)) > 1e-8)
-                    return decline("projective factor system (chi_k0(a) != 1 in p_e p_f = a p_g)");
+                if (std::abs(w - Complex(1, 0)) > 1e-8) {
+                    if (!opt.group_irreps_d)
+                        return decline("projective factor system (chi_k0(a) != 1 in p_e p_f = a p_g)");
+                    twisted = true;
+                    omega[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] = w;
+                }
                 mult[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] = g;
                 break;
             }
@@ -132,16 +144,21 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
                 return decline("the coset representatives do not close");
         }
     ed::symmetry::GroupIrreps giP;
-    try { giP = ed::symmetry::decompose_irreps_tables(mult); }
-    catch (const std::exception& ex) { return decline(std::string("decompose_irreps_tables threw: ") + ex.what()); }
+    try {
+        giP = twisted ? ed::symmetry::decompose_projective_irreps(mult, omega)
+                      : ed::symmetry::decompose_irreps_tables(mult);
+    } catch (const std::exception& ex) {
+        return decline(std::string("the irrep decomposition threw: ") + ex.what());
+    }
     const int nIr = static_cast<int>(giP.irreps.size());
-    // The wanted irreps: one-dimensional ones get group sectors here; larger ones, whose partners need the
-    // isotypic basis, go to the W path (Gamma of C6v: A1, A2, B1, B2 here, E1 and E2 there).
+    // The wanted irreps. With opt.group_irreps_d every one gets a group sector here; otherwise the
+    // one-dimensional ones do and the larger ones, whose vectors need the isotypic basis, go to the W
+    // path (Gamma of C6v: A1, A2, B1, B2 here, E1 and E2 there).
     std::vector<int> want;
     for (int ii = 0; ii < nIr; ++ii) {
         const auto& ir = giP.irreps[static_cast<std::size_t>(ii)];
         if (wanted_irrep(opt, ii, P_res, ir.character, {}))
-            (ir.dim == 1 ? want : w_irreps).push_back(ii);
+            (ir.dim == 1 || opt.group_irreps_d ? want : w_irreps).push_back(ii);
     }
     if (want.empty() && !w_irreps.empty()) return decline("only irreps of dimension > 1 are wanted");
     if (want.empty()) {                                  // nothing wanted in this star: no blocks
@@ -170,21 +187,38 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
             for (std::size_t g = 0, n0 = c.size(); g < n0; ++g) c.push_back(fs * c[g]);
         return c;
     };
+    // D(a p_e) = chi_k0(a) D(e) for every element of G_k0 in Gp's order (the flip half: fs D), d x d row-major.
+    auto matrices_of = [&](int ii) {
+        const auto& ir = giP.irreps[static_cast<std::size_t>(ii)];
+        const std::size_t dd = static_cast<std::size_t>(ir.dim) * static_cast<std::size_t>(ir.dim);
+        std::vector<Complex> D;
+        D.reserve(Gx * dd);
+        for (std::size_t a = 0; a < cx.A.size(); ++a)
+            for (int e = 0; e < nP; ++e)
+                for (const Complex& x : ir.matrices[static_cast<std::size_t>(e)]) D.push_back(chiA[a] * x);
+        if (flip)
+            for (std::size_t i = 0, n0 = D.size(); i < n0; ++i) D.push_back(fs * D[i]);
+        return D;
+    };
 
     const auto t_tab = std::chrono::steady_clock::now();
-    const auto tab_ptr = group_orbit_table(Gp, N, opt.n_up, flip);
+    const auto tab_ptr = group_orbit_table(Gp, N, opt.n_up, opt.sz_parity, flip);
     const ed::symmetry::OrbitTable& tab = *tab_ptr;
     sb.t_orbit = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_tab).count();
+    // The group sectors -- of every irrep under opt.group_irreps_d, else of the one-dimensional ones -- with
+    // sum_sigma d_sigma states_sigma tiling the k-sector when every irrep has one.
     std::vector<std::shared_ptr<ed::symmetry::RepSectorData>> secs(static_cast<std::size_t>(nIr));
-    std::uint64_t one_dim_total = 0;
-    bool all_one_dim = true;
+    std::uint64_t one_dim_total = 0;   // the k-sector states the built sectors account for
+    bool all_built = true;
     for (int ii = 0; ii < nIr; ++ii) {
-        if (giP.irreps[static_cast<std::size_t>(ii)].dim != 1) { all_one_dim = false; continue; }
+        const int d = giP.irreps[static_cast<std::size_t>(ii)].dim;
+        if (d != 1 && !opt.group_irreps_d) { all_built = false; continue; }
         secs[static_cast<std::size_t>(ii)] = std::make_shared<ed::symmetry::RepSectorData>(
-            group_sector_from_table(tab, Gp, N, opt.n_up, flip, chars_of(ii)));
-        one_dim_total += secs[static_cast<std::size_t>(ii)]->reps.size();
+            d == 1 ? group_sector_from_table(tab, Gp, N, opt.n_up, flip, chars_of(ii))
+                   : group_sector_irrep_from_table(tab, Gp, N, opt.n_up, flip, d, matrices_of(ii)));
+        one_dim_total += static_cast<std::uint64_t>(d) * secs[static_cast<std::size_t>(ii)]->states();
     }
-    if (all_one_dim ? one_dim_total != dim_k : one_dim_total >= dim_k)
+    if (all_built ? one_dim_total != dim_k : one_dim_total >= dim_k)
         return decline("group-sector dims (" + std::to_string(one_dim_total) + ") do not tile the k-sector ("
                        + std::to_string(dim_k) + ")");
     // Label parity with the W path. There, a co-group element that acts as a SCALAR on this k-sector (a small sector
@@ -201,9 +235,11 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
             for (int ii = 0; ii < nIr && scalar; ++ii) {
                 const auto& sp = secs[static_cast<std::size_t>(ii)];
                 if (!sp || sp->reps.empty()) continue;
-                const Complex x = giP.irreps[static_cast<std::size_t>(ii)].character[static_cast<std::size_t>(e)];
+                // On a sector of dimension d the element is the scalar chi / d when that has modulus 1.
+                const auto& ir = giP.irreps[static_cast<std::size_t>(ii)];
+                const Complex x = ir.character[static_cast<std::size_t>(e)] / static_cast<double>(ir.dim);
                 // scale-free: unit-modulus characters / phases (group data, not energies)
-                if (have && std::abs(x - c) > 1e-8) scalar = false;
+                if (std::abs(std::abs(x) - 1.0) > 1e-8 || (have && std::abs(x - c) > 1e-8)) scalar = false;
                 c = x; have = true;
             }
             if (scalar && rest > 0) {
@@ -237,7 +273,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
                 bool m = ci.size() == cj.size();
                 // scale-free: unit-modulus characters / phases (group data, not energies)
                 for (std::size_t g = 0; m && g < ci.size(); ++g) m = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
-                if (m && secs[static_cast<std::size_t>(ii)]->reps.size() == secs[static_cast<std::size_t>(jj)]->reps.size()) {
+                if (m && secs[static_cast<std::size_t>(ii)]->states() == secs[static_cast<std::size_t>(jj)]->states()) {
                     pair_of[static_cast<std::size_t>(ii)] = jj; pair_of[static_cast<std::size_t>(jj)] = ii; break;
                 }
             }
@@ -251,13 +287,14 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         if (jj >= 0 && jj < ii) continue;                   // partner solved
         sp->build_perm_lut();
         sp->build_buckets();
+        const int d = giP.irreps[static_cast<std::size_t>(ii)].dim;   // each level d times: its partners
         auto impl = std::make_shared<BlockData>();
         impl->tag              = base_tag;
         impl->tag.irrep        = ii;
-        impl->tag.irrep_dim    = 1;
+        impl->tag.irrep_dim    = d;
         impl->tag.tr_folded    = (jj > ii);
-        impl->tag.dim          = sp->reps.size();
-        impl->tag.multiplicity = static_cast<std::uint64_t>((jj > ii ? 2 : 1) * m_star);
+        impl->tag.dim          = sp->states();
+        impl->tag.multiplicity = static_cast<std::uint64_t>((jj > ii ? 2 : 1) * m_star * d);
         impl->hk   = sb.hk;
         impl->gsec = sp;
         impl->gop  = std::make_shared<RepSectorMatVec>(op, std::shared_ptr<const ed::symmetry::RepSectorData>(sp));
@@ -273,7 +310,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     if (lg_diag)
         ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu%s",
                k0, Gx, sb.blocks.size(), dim_k,
-               w_irreps.empty() ? "" : "; its irreps of dimension > 1 go to the isotypic (W) path");
+               w_irreps.empty() ? (twisted ? "; projective factor system" : "")
+                                : "; its irreps of dimension > 1 go to the isotypic (W) path");
     return true;
 }
 
@@ -321,8 +359,8 @@ build_star_blocks(const ::Operator&         op,
     // (w_irreps) to the W path below, whose blocks then cover the k-sector together with group_covered states.
     std::vector<int> w_irreps;
     std::uint64_t group_covered = 0;
-    if (group_sector_enabled(opt)) {
-        dim_k = burnside_dim(cx, k0, opt.n_up);
+    {
+        dim_k = burnside_dim(cx, k0, opt.n_up, opt.sz_parity);
         if (plan_print)
             ED_LOG(Info, "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d dim=%llu",
                    k0, k0 % cx.n_irr_raw, info.flip_parity, m_star, static_cast<unsigned long long>(dim_k));
@@ -337,20 +375,7 @@ build_star_blocks(const ::Operator&         op,
     bool hybrid = !w_irreps.empty();
 
     auto rd = build_k_sector(cx, k0, opt.n_up);
-    if (plan_print && !group_sector_enabled(opt)) {
-        ED_LOG(Info,
-            "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d "
-            "dim=%llu",
-            k0, k0 % cx.n_irr_raw, info.flip_parity, m_star,
-            static_cast<unsigned long long>(rd.reps.size()));
-        // NOTE: no early return. Plan mode must build the little co-group:
-        // the one thing a caller needs in order to NAME an irrep (its
-        // character table) comes from it, and plan is the only pass cheap
-        // enough to ask for it. Plan runs the monomial + isotypic
-        // decomposition and skips just the eigensolves, which is where the
-        // cost actually is.
-    }
-    if (group_sector_enabled(opt) && rd.reps.size() != dim_k)       // the count the path relied on
+    if (rd.reps.size() != dim_k)       // the count the path relied on
         throw std::logic_error("little group: Burnside dimension " + std::to_string(dim_k)
                                + " != momentum sector " + std::to_string(rd.reps.size()));
     if (rd.reps.empty()) return sb;

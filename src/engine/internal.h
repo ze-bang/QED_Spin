@@ -1004,7 +1004,7 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
 
 // group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, stars.cpp).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::OrbitTable>
-group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip);
+group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, int sz_parity, bool flip);
 [[nodiscard]] ed::symmetry::RepSectorData
 group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
                         int n_sites, int n_up, bool flip, const std::vector<Complex>& characters);

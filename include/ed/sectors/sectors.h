@@ -161,6 +161,11 @@ struct EigsOptions {
     /// a block that could hold one. Each block still contributes only its quota of rows, so
     /// this finds the partners of a level in OTHER blocks (e.g. a degenerate ground state).
     double window       = 0.0;
+    /// The levels of an irrep of dimension > 1 (and of a projective factor system) are solved in
+    /// group sectors of that dimension; false keeps them in isotypic blocks of the momentum sector,
+    /// for a consumer whose operators read one-dimensional sectors only (dynamics, until its
+    /// cross-sector rows take d > 1).
+    bool group_irreps_d = true;
 };
 
 /// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host, one

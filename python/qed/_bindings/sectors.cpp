@@ -103,7 +103,14 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
             d[py::str(p + "characters")] = arr(b.characters);
             d[py::str(p + "perms")] = arr(b.perms_flat);
             d[py::str(p + "flip_masks")] = arr(b.flip_masks);
-            d[py::str(p + "shape")] = arr(std::vector<std::int64_t>{b.group_size, b.n_sites, b.n_up});
+            d[py::str(p + "shape")] = arr(std::vector<std::int64_t>{b.group_size, b.n_sites, b.n_up, b.irrep_dim});
+            if (b.irrep_dim > 1) {   // a sector of a d > 1 irrep (rep_sector.h)
+                d[py::str(p + "irrep_D")] = arr(b.irrep_D);
+                d[py::str(p + "class_rank")] = arr(std::vector<std::int64_t>(b.class_rank.begin(), b.class_rank.end()));
+                d[py::str(p + "class_C")] = arr(b.class_C);
+                d[py::str(p + "rep_class")] = arr(std::vector<std::int64_t>(b.rep_class.begin(), b.rep_class.end()));
+                d[py::str(p + "state_offset")] = arr(b.state_offset);
+            }
         }
         vbasis.push_back(it->second);
         amps.insert(amps.end(), v.amplitudes.begin(), v.amplitudes.end());
@@ -218,9 +225,33 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         rd->group_size = static_cast<int>(shape.at(0));
         rd->n_sites = static_cast<int>(shape.at(1));
         rd->n_up = static_cast<int>(shape.at(2));
+        rd->irrep_dim = shape.size() > 3 ? static_cast<int>(shape[3]) : 1;   // files before P6.3: 1
+        if (rd->irrep_dim < 1 || rd->irrep_dim > 8) fail("basis " + std::to_string(b) + " has an impossible irrep dimension");
         check_perms(rd->perms_flat, static_cast<std::size_t>(rd->group_size), rd->n_sites, p + "perms");
+        if (rd->irrep_dim > 1) {
+            const std::size_t dd = static_cast<std::size_t>(rd->irrep_dim * rd->irrep_dim);
+            rd->irrep_D = vec<std::complex<double>>(d, (p + "irrep_D").c_str());
+            rd->class_C = vec<std::complex<double>>(d, (p + "class_C").c_str());
+            rd->state_offset = vec<std::uint64_t>(d, (p + "state_offset").c_str());
+            for (const auto x : vec<std::int64_t>(d, (p + "class_rank").c_str())) {
+                if (x < 0 || x > rd->irrep_dim) fail("basis " + std::to_string(b) + " has an impossible class rank");
+                rd->class_rank.push_back(static_cast<std::uint8_t>(x));
+            }
+            for (const auto x : vec<std::int64_t>(d, (p + "rep_class").c_str())) {
+                if (x < 0 || static_cast<std::size_t>(x) >= rd->class_rank.size())
+                    fail("basis " + std::to_string(b) + " names a stabiliser class that is not in the file");
+                rd->rep_class.push_back(static_cast<std::uint16_t>(x));
+            }
+            bool offsets = rd->state_offset.size() == rd->reps.size() + 1 && !rd->state_offset.empty()
+                           && rd->state_offset[0] == 0;
+            for (std::size_t r = 0; offsets && r < rd->reps.size(); ++r)
+                offsets = rd->state_offset[r + 1] == rd->state_offset[r] + rd->class_rank[rd->rep_class[r]];
+            if (rd->irrep_D.size() != static_cast<std::size_t>(rd->group_size) * dd
+                || rd->class_C.size() != rd->class_rank.size() * dd || rd->rep_class.size() != rd->reps.size() || !offsets)
+                fail("basis " + std::to_string(b) + " has irrep arrays of the wrong length");
+        }
         if (rd->characters.size() != static_cast<std::size_t>(rd->group_size)
-            || rd->inv_norms.size() != rd->reps.size()
+            || rd->inv_norms.size() != (rd->irrep_dim == 1 ? rd->reps.size() : 0)
             || (!rd->flip_masks.empty() && rd->flip_masks.size() != static_cast<std::size_t>(rd->group_size)))
             fail("basis " + std::to_string(b) + " has arrays of the wrong length");
         if (!rd->usable()) fail("basis " + std::to_string(b) + " is not a usable sector");
@@ -236,7 +267,7 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         sec::BlockVector v;
         v.basis = bases.at(static_cast<std::size_t>(vbasis[i]));
         v.amplitudes.assign(amps.begin() + voffset[i], amps.begin() + voffset[i + 1]);
-        if (v.amplitudes.size() != v.basis->reps.size())
+        if (v.amplitudes.size() != v.basis->states())
             throw std::invalid_argument("load_eigs: a vector does not match its basis");
         r.vectors.push_back(std::move(v));
     }

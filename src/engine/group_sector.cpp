@@ -25,7 +25,7 @@ void check_group_args(const std::vector<std::vector<int>>& perms, int n_sites, i
     for (const auto& p : perms)
         if (static_cast<int>(p.size()) != n_sites)
             throw std::invalid_argument("group sector: every permutation must act on n_sites sites");
-    if (flip && 2 * n_up != n_sites)
+    if (flip && n_up >= 0 && 2 * n_up != n_sites)
         throw std::invalid_argument("group sector: the spin flip needs n_up = N/2");
     if ((flip ? 2 : 1) * perms.size() > 65535)
         throw std::invalid_argument("group sector: |G| too large for the uint16 stabiliser ids");
@@ -35,14 +35,18 @@ void check_group_args(const std::vector<std::vector<int>>& perms, int n_sites, i
 namespace lg_detail {
 
 // Through the orbit-table registry: the estimate walk, each survivor's re-walk and the next call
-// on the same group reuse the table.
+// on the same group reuse the table. The subspace: n_up >= 0 fixed Sz, else sz_parity >= 0 a parity
+// half, else the full space.
 std::shared_ptr<const ed::symmetry::OrbitTable>
-group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip) {
+group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, int sz_parity, bool flip) {
     check_group_args(perms, n_sites, n_up, flip);
     const ed::symmetry::CompiledGroup cg = flip
         ? ed::symmetry::make_flip_extended_group_from_perms(perms, static_cast<std::uint64_t>(n_sites))
         : ed::symmetry::CompiledGroup::from_permutations(perms, n_sites);
-    return ed::symmetry::acquire_orbit_table_fixed_sz_compiled(static_cast<std::uint64_t>(n_sites), n_up, cg);
+    const auto n = static_cast<std::uint64_t>(n_sites);
+    if (n_up >= 0) return ed::symmetry::acquire_orbit_table_fixed_sz_compiled(n, n_up, cg);
+    if (sz_parity >= 0) return ed::symmetry::acquire_orbit_table_parity_compiled(n, sz_parity, cg);
+    return ed::symmetry::acquire_orbit_table_full_compiled(n, cg);
 }
 
 ed::symmetry::RepSectorData

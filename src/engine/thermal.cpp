@@ -94,7 +94,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                         && std::all_of(obs.begin(), obs.end(), [](const auto& A) { return A->has_device_kernel(); });
     req.verb  = "thermal";
     req.what  = [&tag] { return detail::block_name(tag); };
-    req.why   = detail::no_kernel_reason(w_block);
+    req.why   = detail::no_kernel_reason(w_block, tag.irrep_dim);
     {
         ed::core::Shape one = shape;
         one.device = true;
@@ -252,7 +252,7 @@ BlockKey block_key(const Spec& s, const StarBuild& sb, const ed::solvers::BlockD
 std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub) {
     std::map<BlockKey, std::uint64_t> d;
     if (sub.n_up < 0 || sub.n_up > n_sites) return d;
-    detail::walk(H, n_sites, s, detail::engine_options(s, sub), [&](const EngineContext&, bool, StarBuild& sb) {
+    detail::walk(H, n_sites, s, detail::engine_options(s, sub, /*group_irreps_d=*/true), [&](const EngineContext&, bool, StarBuild& sb) {
         for (const auto& bi : sb.blocks) d[block_key(s, sb, *bi)] += bi->tag.dim;
     });
     return d;
@@ -318,7 +318,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     std::vector<Pending> pending;
     std::size_t n_blocks = 0;
     for (const Subspace& sub : subs) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, /*group_irreps_d=*/true);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;

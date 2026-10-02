@@ -109,7 +109,7 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, b
     r.device_kernel = bop.op->has_device_kernel();
     r.verb  = "eigs";
     r.what  = [tag = bi.tag] { return detail::block_name(tag); };
-    r.why   = detail::no_kernel_reason(bi.W != nullptr);
+    r.why   = detail::no_kernel_reason(bi.W != nullptr, bi.tag.irrep_dim);
     return r;
 }
 
@@ -442,7 +442,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
         const Subspace& sub = subs[si];
-        const LittleGroupOptions opt = detail::engine_options(s, sub);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, o.group_irreps_d);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             detail::note_time_reversal(res.time_reversal, cx, sub);
@@ -523,7 +523,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         // walk (a k0 selection of its own would drop time reversal Theta).
         auto& again = rewalked[{c.sub, c.k0}];
         if (!std::get<0>(again)) {
-            LittleGroupOptions opt = detail::engine_options(s, sub);
+            LittleGroupOptions opt = detail::engine_options(s, sub, o.group_irreps_d);
             opt.only_k0 = {c.k0};
             detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
                 again = {std::make_shared<StarBuild>(std::move(sb)), cx.tr, cx.k_table->seconds.load()};
@@ -597,7 +597,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     std::size_t n_blocks = 0;
     const auto subs = subspaces(H, s);
     for (const Subspace& sub : subs) {
-        const LittleGroupOptions opt = detail::engine_options(s, sub);
+        const LittleGroupOptions opt = detail::engine_options(s, sub, /*group_irreps_d=*/true);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
             detail::note_time_reversal(res.time_reversal, cx, sub);
@@ -643,22 +643,44 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
 
 std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::vector<Complex>& u,
                             int n_up) {
-    if (u.size() != rd.reps.size())
-        throw std::invalid_argument("expand: vector length != number of representatives");
+    if (u.size() != rd.states())
+        throw std::invalid_argument("expand: vector length != number of basis states");
     const int N = rd.n_sites;
     if (n_up < 0 && N > 34)
         throw std::invalid_argument("expand: the full 2^N space is limited to N <= 34");
     const std::uint64_t dim = n_up < 0 ? (std::uint64_t{1} << N) : binomial(N, n_up);
     std::vector<Complex> psi(dim, Complex(0, 0));
     const auto pol = rd.make_policy();
+    const int d = rd.irrep_dim;
+    const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
+    std::vector<Complex> y(static_cast<std::size_t>(d));
     for (std::size_t a = 0; a < rd.reps.size(); ++a) {
-        if (u[a] == Complex(0, 0)) continue;
-        const Complex w = u[a] * rd.inv_norms[a];
+        // The representative's combination y = C u_a (rep_sector.h); a 1-dim sector: inv_norm u_a.
+        bool zero = true;
+        if (d == 1) {
+            y[0] = u[a] * rd.inv_norms[a];
+            zero = u[a] == Complex(0, 0);
+        } else {
+            const Complex* C = pol.C_of(a);
+            const std::uint64_t o = pol.first_state_of(a);
+            for (int j = 0; j < d; ++j) {
+                y[static_cast<std::size_t>(j)] = Complex(0, 0);
+                for (int al = 0; al < pol.rank_of(a); ++al)
+                    y[static_cast<std::size_t>(j)] += C[j * d + al] * u[o + static_cast<std::size_t>(al)];
+                zero = zero && y[static_cast<std::size_t>(j)] == Complex(0, 0);
+            }
+        }
+        if (zero) continue;
         for (int g = 0; g < rd.group_size; ++g) {
             const std::uint64_t st = pol.apply_perm(rd.reps[a], g);
             if (n_up >= 0 && __builtin_popcountll(st) != n_up)
                 throw std::invalid_argument("expand: the sector is not inside Sz sector n_up");
-            psi[state_index(st, n_up)] += w * std::conj(rd.characters[static_cast<std::size_t>(g)]);
+            Complex c(0, 0);   // sum_j y_j conj(D(g)_{0j}); 1-dim: y conj(chi(g))
+            if (d == 1) c = y[0] * std::conj(rd.characters[static_cast<std::size_t>(g)]);
+            else
+                for (int j = 0; j < d; ++j)
+                    c += y[static_cast<std::size_t>(j)] * std::conj(rd.irrep_D[static_cast<std::size_t>(g) * dd + static_cast<std::size_t>(j)]);
+            psi[state_index(st, n_up)] += c;
         }
     }
     double n2 = 0.0;

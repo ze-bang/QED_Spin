@@ -98,6 +98,13 @@ struct LittleGroupOptions {
     /// decision: a star whose wanted irreps are all one-dimensional takes the group-sector
     /// path even when the co-group also has larger irreps.
     std::vector<CharConstraint> only_irrep_chars;
+    /// The group-sector path also takes irreps of dimension > 1 and little co-groups whose factor
+    /// system is not trivial (coboundaries and projective ones), building group sectors of any
+    /// dimension (rep_sector.h) instead of handing them to the isotypic W path. For the verbs whose
+    /// consumers read such sectors through their operators only (eigenvalues, spectra, thermal);
+    /// vectors, expectation values, dynamics and multiplets keep the W path until they read d > 1
+    /// sectors too (P6.3 step 6).
+    bool group_irreps_d = false;
 };
 
 /// One star's diagnostics.

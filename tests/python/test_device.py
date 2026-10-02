@@ -105,7 +105,7 @@ def test_gpu_runs_every_krylov_solve_on_the_device():
 
 def _square4x4_c4v():
     """The 4x4 square torus with its C4v point group, at sz = 8: Gamma and M have the 2-dim
-    irrep E, whose isotypic (W) blocks have no device kernel."""
+    irrep E, whose blocks (group sectors of dimension 2) have no device kernel."""
     L = 4
     idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
     xy = [(x, y) for y in range(L) for x in range(L)]
@@ -118,22 +118,22 @@ def _square4x4_c4v():
 
 @gpu
 def test_gpu_refuses_a_block_without_a_device_kernel():
-    # With every block a Krylov solve (dense floor 0), device='gpu' refuses the W blocks;
+    # With every block a Krylov solve (dense floor 0), device='gpu' refuses the E blocks;
     # device='auto' runs them on the host and says so.
     H, sym = _square4x4_c4v()
-    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic"):
+    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic|dimension > 1"):
         qed.eigs(H, 1, sym=sym, device="gpu", prune=False, dense_max_dim=0)
     assert qed.eigs(H, 1, sym=sym, device="auto", prune=False, dense_max_dim=0).placement["host_krylov"] > 0
 
 
 @gpu
 def test_gpu_thermal_solves_small_w_blocks_densely():
-    # A W block of at most dense_max_dim states is diagonalised on the host before any device
+    # An E block of at most dense_max_dim states is diagonalised on the host before any device
     # check, so device='gpu' runs it there; sampled (dense_max_dim=0) it is refused, naming it.
     H, sym = _square4x4_c4v()
     r = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu")
     assert r.placement["host_dense"] > 0 and r.placement["host_krylov"] == 0
-    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic"):
+    with pytest.raises(qed.errors.DeviceUnsupported, match="isotypic|dimension > 1"):
         qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu", dense_max_dim=0)
 
 

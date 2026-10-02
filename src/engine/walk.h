@@ -33,9 +33,13 @@ inline std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
     return {id};
 }
 
+/// The walk options of one subspace. `group_irreps_d`: irreps of dimension > 1 and projective factor
+/// systems take the group-sector path too (options.h; the verbs that read blocks through their
+/// operators only).
 inline ed::solvers::LittleGroupOptions
-engine_options(const Spec& s, const Subspace& sub) {
+engine_options(const Spec& s, const Subspace& sub, bool group_irreps_d = false) {
     ed::solvers::LittleGroupOptions o;
+    o.group_irreps_d = group_irreps_d;
     o.n_up          = sub.n_up;
     o.sz_parity     = sub.sz_parity;
     // subspaces() already enforced 'require' against H. Inside a subspace the engine engages
@@ -490,8 +494,10 @@ inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
 }
 
 /// Why a block has no device kernel, for place()'s refusal.
-inline const char* no_kernel_reason(bool w_block) {
-    return w_block ? "is an isotypic (W) block, which has no device kernel" : "has no device kernel";
+inline const char* no_kernel_reason(bool w_block, int irrep_dim) {
+    if (w_block) return "is an isotypic (W) block, which has no device kernel";
+    if (irrep_dim > 1) return "is a sector of an irrep of dimension > 1, which has no device kernel";
+    return "has no device kernel";
 }
 
 /// A thermal average under a spec that restricts the sectors (a total spin, one Sz sector or

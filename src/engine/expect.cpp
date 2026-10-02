@@ -49,9 +49,32 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
         if (L.fold != Antiunitary::None) g.image = L.fold;
     }
     for (const auto& [key, g] : groups) {
-        const auto& basis = *r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis;
+        const auto& basis_ptr = r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis;
+        const auto& basis = *basis_ptr;
         const bool flip = std::get<1>(key);
         const auto keep = static_cast<Keep>(std::get<2>(key));
+        if (basis.irrep_dim > 1) {
+            // A sector of an irrep of dimension > 1: each averaged operator acts within it as H does
+            // (rep_sector.h), so <v|Obar|v> comes from one apply per level and operator.
+            const std::size_t n = basis.states();
+            std::vector<Complex> w(n);
+            auto me = [&](const ::Operator& O, Antiunitary image, const std::vector<Complex>& v) {
+                const ed::solvers::lg_detail::RepSectorMatVec op(avg.program(O, flip, keep, image), basis_ptr);
+                op.apply(v.data(), w.data(), n);
+                Complex acc(0.0, 0.0);
+                for (std::size_t k = 0; k < n; ++k) acc += std::conj(v[k]) * w[k];
+                return acc;
+            };
+            for (const std::size_t li : g.levels) {
+                const Level& L = r.levels[li];
+                const auto& v = r.vectors[static_cast<std::size_t>(L.vector)].amplitudes;
+                for (std::size_t o = 0; o < n_ops; ++o) {
+                    const Complex a = me(*ops[o], Antiunitary::None, v);
+                    out[li][o] = L.fold != Antiunitary::None ? 0.5 * (a + std::conj(me(*ops[o], g.image, v))) : a;
+                }
+            }
+            continue;
+        }
         std::vector<ed::ops::MaskedOperator> avgs;
         for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep));
         if (g.image != Antiunitary::None)
@@ -94,7 +117,7 @@ Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, 
     // Two sectors of one group: the lambda-projected program, one sweep over the ket's
     // representatives. Otherwise (a group sector and a momentum sector, two stars' group
     // sectors, ...) the ket's orbit is walked explicitly.
-    if (ed::ops::same_group(src, tgt) && (src.n_up < 0) == (tgt.n_up < 0)) {
+    if (ed::ops::same_group(src, tgt) && (src.n_up < 0) == (tgt.n_up < 0) && src.irrep_dim == 1 && tgt.irrep_dim == 1) {
         const auto prog = ed::ops::compile_program({O.canonical()}, src, tgt);
         const ed::ops::RepVectorView k{ket.amplitudes.data(), ket.amplitudes.size()};
         const ed::ops::RepVectorView b{bra.amplitudes.data(), bra.amplitudes.size()};

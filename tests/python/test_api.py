@@ -567,10 +567,11 @@ def test_sz_parity_with_a_u1_hamiltonian(n):
         np.testing.assert_allclose(got, np.sort(want), atol=1e-10)
 
 
-def test_one_dimensional_irreps_take_the_group_sector_path():
-    # Gamma of the 4x4 square torus has C4v's two-dimensional E next to A1, A2, B1, B2. A1 selected
-    # by character is a group sector (it went down the isotypic path with the whole star before:
-    # audit E10, P1-matvec-cpu-01); without a selection the star is split between the two paths.
+def test_every_irrep_takes_the_group_sector_path():
+    # Gamma of the 4x4 square torus has C4v's two-dimensional E next to A1, A2, B1, B2. Every irrep
+    # is a group sector -- E one of dimension 2 (P6.3) -- with or without vectors, and A1 selected by
+    # character is one too (it went down the isotypic path with the whole star before: audit E10,
+    # P1-matvec-cpu-01).
     H, (Tx, Ty, C4, sigma) = _square_j1j2()
     sym = qed.Symmetry(spatial=[Tx, Ty, C4, sigma], sz=8, spin_flip="off", time_reversal="off")
     A, residues = sym.groups(H)
@@ -579,13 +580,26 @@ def test_one_dimensional_irreps_take_the_group_sector_path():
     a1 = qed.eigs(H, 1, sym=gamma.select(irrep_character={tuple(r): 1.0 for r in residues}), prune=False)
     assert a1.block_stats and {b["kind"] for b in a1.block_stats} == {"group"}
     split = qed.eigs(H, 40, sym=gamma, prune=False)
-    assert {b["kind"] for b in split.block_stats} == {"group", "isotypic"}
+    assert {b["kind"] for b in split.block_stats} == {"group"}
     plain = qed.Symmetry(spatial=[Tx, Ty], point_group=False, sz=8, spin_flip="off", time_reversal="off")
     ref = np.sort(qed.spectrum(H, sym=plain.select(momentum={tuple(Tx): 0, tuple(Ty): 0})).energies)
     np.testing.assert_allclose(np.sort(qed.spectrum(H, sym=gamma).energies), ref, atol=1e-10)
     a1_in_split = [split.levels[i].energy for i in range(len(split.levels))
                    if all(abs(c - 1) < 1e-9 for c in split.irrep_characters(i).values())]
     assert abs(a1.energies[0] - min(a1_in_split)) < 1e-10
+    # The vectors of the two-dimensional irrep: expectation values through its sector, both partners
+    # of each level, every one an eigenvector in the full basis.
+    vec = qed.eigs(H, 12, sym=gamma, prune=False, vectors=True)
+    assert {b["kind"] for b in vec.block_stats} == {"group"}
+    assert any(lv.irrep_dim == 2 for lv in vec.levels)
+    np.testing.assert_allclose(vec.expect([H])[:, 0].real, [lv.energy for lv in vec.levels], atol=1e-9)
+    vs = vec.vectors()
+    assert len(vs) == 12
+    for v in vs:
+        v = np.asarray(v)
+        e = np.vdot(v, H.apply(v)).real
+        assert np.linalg.norm(H.apply(v) - e * v) < 1e-8
+    np.testing.assert_allclose(np.sort([np.vdot(v, H.apply(v)).real for v in vs]), np.sort(ref)[:12], atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
