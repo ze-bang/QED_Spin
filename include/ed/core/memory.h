@@ -12,6 +12,7 @@
 #pragma once
 
 #include <ed/core/config.h>
+#include <ed/core/errors.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -50,8 +51,10 @@ namespace ed::core {
 }
 
 /// Headroom left under the tightest cgroup-v2 memory limit that contains this
-/// process (memory.max - memory.current, walking from our cgroup up to the root);
-/// 0 = no limit found (not in a limited cgroup, or cgroup v1 / unreadable).
+/// process (memory.max - (memory.current - inactive_file), walking from our cgroup
+/// up to the root); 0 = no limit found (not in a limited cgroup, or cgroup v1 /
+/// unreadable). memory.current counts the page cache the cgroup's reads left
+/// behind; its inactive part is reclaimed before the OOM killer acts, so it is room.
 ///
 /// Under a batch scheduler this is the number that matters: a SLURM job gets a
 /// cgroup of --mem bytes on a node whose MemAvailable may be ten times larger, and
@@ -69,12 +72,23 @@ namespace ed::core {
         try { out = std::stoull(s); } catch (...) { return false; }
         return true;
     };
+    // One "key value" line of a memory.stat file (0 when absent).
+    auto stat_u64 = [](const std::string& file, const char* key) -> std::uint64_t {
+        std::ifstream f(file);
+        std::string k;
+        std::uint64_t v = 0;
+        while (f >> k >> v)
+            if (k == key) return v;
+        return 0;
+    };
     std::uint64_t best = 0;
     bool found = false;
     for (std::string p = path;; ) {
         const std::string dir = "/sys/fs/cgroup" + (p == "/" ? std::string() : p);
         std::uint64_t lim = 0, cur = 0;
         if (read_u64(dir + "/memory.max", lim) && read_u64(dir + "/memory.current", cur)) {
+            const std::uint64_t cache = stat_u64(dir + "/memory.stat", "inactive_file");
+            cur = cur > cache ? cur - cache : 0;
             const std::uint64_t room = lim > cur ? lim - cur : 0;
             if (!found || room < best) best = room;
             found = true;
@@ -96,10 +110,13 @@ namespace ed::core {
     return node < job ? node : job;
 }
 
+/// ED_MEM_GUARD_OFF: every memory guard and every memory-derived cap stands down.
+[[nodiscard]] inline bool mem_guard_off() { return ed::env::flag("ED_MEM_GUARD_OFF", false); }
+
 /// Throw a clean error if `est_bytes` would not fit in ~90% of available RAM.
 /// No-op when ED_MEM_GUARD_OFF is set or RAM is unknown.
 inline void guard_working_set(std::uint64_t est_bytes, const char* what) {
-    if (ed::env::flag("ED_MEM_GUARD_OFF", false)) return;
+    if (mem_guard_off()) return;
     const std::uint64_t avail = available_ram_bytes();
     if (avail == 0) return;  // can't tell -> don't block
     const double budget = 0.90 * static_cast<double>(avail);
@@ -107,7 +124,7 @@ inline void guard_working_set(std::uint64_t est_bytes, const char* what) {
         const auto GiB = [](double b) {
             return std::to_string(static_cast<std::uint64_t>(b / (1024.0 * 1024.0 * 1024.0)));
         };
-        throw std::runtime_error(
+        throw ed::ResourceLimit(
             std::string(what) + ": estimated working set ~" + GiB(est_bytes) +
             " GiB exceeds ~" + GiB(budget) + " GiB available RAM. Reduce the "
             "problem (sz / symmetry / fewer samples / smaller Krylov dim), give "

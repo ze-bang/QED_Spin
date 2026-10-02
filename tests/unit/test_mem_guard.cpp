@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 
 #include <ed/core/memory.h>
 
@@ -32,6 +34,15 @@ TEST_CASE("mem_guard: available RAM is the tighter of node and cgroup", "[mem_gu
 
 TEST_CASE("mem_guard: a working set larger than the ceiling is refused", "[mem_guard]") {
     const std::uint64_t avail = ed::core::available_ram_bytes();
-    REQUIRE_THROWS(ed::core::guard_working_set(avail * 2, "test"));
+    REQUIRE_THROWS_AS(ed::core::guard_working_set(avail * 2, "test"), ed::ResourceLimit);
     REQUIRE_NOTHROW(ed::core::guard_working_set(avail / 100, "test"));
+}
+
+TEST_CASE("mem_guard: ED_MEM_GUARD_OFF stands every guard down", "[mem_guard]") {
+    const char* old = std::getenv("ED_MEM_GUARD_OFF");
+    const std::string saved = old ? old : "";
+    setenv("ED_MEM_GUARD_OFF", "1", 1);
+    REQUIRE(ed::core::mem_guard_off());
+    REQUIRE_NOTHROW(ed::core::guard_working_set(ed::core::available_ram_bytes() * 2, "test"));
+    if (old) setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1); else unsetenv("ED_MEM_GUARD_OFF");
 }

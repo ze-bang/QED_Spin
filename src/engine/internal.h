@@ -820,8 +820,11 @@ star_partition(const EngineContext& cx, bool tr_on);
 /// and P7.3's resident basis replace it).
 template <class B> struct LanePolicy;
 template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
-    /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate.
-    static std::uint64_t ks_budget_bytes() { return ed::core::available_ram_bytes(); }
+    /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate
+    /// (no cap under ED_MEM_GUARD_OFF).
+    static std::uint64_t ks_budget_bytes() {
+        return ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
+    }
     /// The GS vector keeps its Krylov basis up to this dimension, and runs the two-pass above.
     static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
 };
