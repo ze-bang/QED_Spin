@@ -197,3 +197,37 @@ def test_operators_are_apply_callable():
     # We don't assert numeric value -- correctness of the apply() math is
     # covered by the C++ ctest baseline. We only check the bridge works.
     assert out.dtype == np.complex128
+
+
+def test_inputs_are_validated(tmp_path):
+    # Audits C08-operator-terms-01/02/05, C12-dynamics-08/09: a short Q, a zero or too small
+    # unit cell, positions files with too few sites or two columns are refused; a sublattice
+    # in the xyz basis builds the Cartesian component.
+    pos = tmp_path / "p.dat"
+    pos.write_text("".join(f"{float(i)} 0.0 0.0\n" for i in range(4)))
+
+    def spec(**kw):
+        s = qed.dssf.OperatorSpec()
+        s.operator_type, s.components, s.momentum_points = "sum", [2], [[0.5, 0.0, 0.0]]
+        s.num_sites, s.positions_file = 4, str(pos)
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    for bad in (dict(momentum_points=[[0.5, 0.0]]),
+                dict(operator_type="sublattice", unit_cell_size=0),
+                dict(operator_type="sublattice", unit_cell_size=2, sublattice=2),
+                dict(components=[3])):
+        with pytest.raises(ValueError):
+            qed.dssf.build_observables(spec(**bad))
+    short = tmp_path / "short.dat"
+    short.write_text("0 0 0\n1 0 0\n")
+    two = tmp_path / "two.dat"
+    two.write_text("".join(f"{float(i)} 0.0\n" for i in range(4)))
+    for p in (short, two):
+        with pytest.raises(ValueError):
+            qed.dssf.build_observables(spec(positions_file=str(p)))
+    sub = qed.dssf.build_observables(spec(operator_type="sublattice", basis="xyz", components=[0],
+                                          unit_cell_size=1))
+    whole = qed.dssf.build_observables(spec(basis="xyz", components=[0]))
+    assert sub.names[0].startswith("Sx") and sub.operators[0].equals(whole.operators[0])

@@ -340,3 +340,57 @@ def test_low_level_add_one_body():
     eigs = sorted(qed.spectrum(H, sym=qed.Symmetry.none()).energies)
     # Sz_0 + Sz_1 has eigenvalues -1, 0, 0, 1.
     assert np.allclose(eigs, [-1.0, 0.0, 0.0, 1.0], atol=1e-12)
+
+
+# ----------------------------------------------------------------------
+# Four-site terms, emit_into, all-or-nothing bond methods (the Python builder)
+# ----------------------------------------------------------------------
+
+def _dot(n, i, j, c=1.0):
+    P = qed.Operator.product
+    return P(n, "zz", [i, j], c) + P(n, "+-", [i, j], 0.5 * c) + P(n, "-+", [i, j], 0.5 * c)
+
+
+def test_ring_exchange_is_the_cyclic_permutation():
+    # K (P + P^dagger) with P = P_ab P_bc P_cd, P_ij = 1/2 + 2 S_i.S_j (constants included).
+    n, K = 6, 0.7
+    plaq = [(0, 1, 2, 3), (2, 3, 4, 5)]
+    I = qed.Operator.product(n, "I", [0])
+    ref = qed.Operator(n)
+    for a, b, c, d in plaq:
+        P = (0.5 * I + _dot(n, a, b, 2.0)) @ (0.5 * I + _dot(n, b, c, 2.0)) @ (0.5 * I + _dot(n, c, d, 2.0))
+        ref = ref + K * (P + P.adjoint())
+    got = qinput.HamiltonianBuilder(n).ring_exchange(plaq, K=K).to_operator()
+    assert got.equals(ref)
+    assert any(len(sites) == 4 for _, _, sites in got.terms())
+    assert len(qinput.HamiltonianBuilder(n).ring_exchange(plaq, K=0.0)) == 0
+    with pytest.raises(ValueError, match="repeats a site"):
+        qinput.HamiltonianBuilder(n).ring_exchange([(0, 1, 1, 2)])
+
+
+def test_ss_ss_is_the_hermitian_product_of_two_bonds():
+    n, K = 6, 0.3
+    got = qinput.HamiltonianBuilder(n).ss_ss([((0, 1), (2, 3)), ((1, 2), (2, 4))], K=K).to_operator()
+    A, B = _dot(n, 1, 2), _dot(n, 2, 4)
+    ref = K * (_dot(n, 0, 1) @ _dot(n, 2, 3)) + (0.5 * K) * (A @ B + B @ A)
+    assert got.equals(ref) and got.is_hermitian()
+
+
+def test_emit_into_appends_four_site_terms_in_place():
+    n = 6
+    b = qinput.HamiltonianBuilder(n).heisenberg([(i, i + 1) for i in range(n - 1)]).ring_exchange([(0, 1, 2, 3)], 0.4)
+    O = qed.Operator(n)
+    O.add_one_body(qed.OP_SZ, 5, 0.25)
+    assert b.emit_into(O) is None
+    assert O.equals(qed.Operator.product(n, "z", [5], 0.25) + b.to_operator())
+
+
+def test_a_refused_bond_call_adds_nothing():
+    # Audit C15-input-08: a bond out of range used to leave the bonds before it in the builder.
+    b = qinput.HamiltonianBuilder(4).heisenberg([(0, 1)])
+    for call in (lambda: b.heisenberg([(0, 1), (1, 2), (2, 9)]),
+                 lambda: b.kitaev([(0, 1), (1, 2)], [0, 5]),
+                 lambda: b.dm([(0, 1), (1, 7)], [(0.1, 0, 0), (0, 0.2, 0)])):
+        with pytest.raises((IndexError, ValueError)):
+            call()
+        assert len(b) == 3

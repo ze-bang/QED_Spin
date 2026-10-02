@@ -350,9 +350,19 @@ PYBIND11_MODULE(_core, m) {
         .def("iter_three_body_terms", &op_iter_three_body,
              "List of ``(op_type_1, site_1, op_type_2, site_2, op_type_3, "
              "site_3, coeff)`` tuples for every three-body term.")
+        .def("_extend",
+             [](Operator& a, const Operator& b) {
+                 if (a.getNumBits() != b.getNumBits())
+                     throw py::value_error("Operator._extend: the operators act on different numbers of sites");
+                 for (const auto& r : b.records()) a.add_record(r);
+                 for (const auto& r : b.three_body_records()) a.add_record(r);
+                 for (const auto& t : b.extra_terms()) a.add_extra_term(t);
+             },
+             py::arg("other"),
+             "Append ``other``'s records and four-site terms in place (no merging; the builder's "
+             "emit_into).")
         // The algebra: every result is computed exactly on the canonical terms and written
-        // back as records (a term on four or more sites raises Unsupported until the
-        // kernels run on canonical terms).
+        // back as records, terms on four or more sites as extra terms.
         .def_static("product",
                     [](uint64_t num_sites, const std::string& ops, const std::vector<int>& sites, Complex coeff) {
                         return ed::ops::to_operator(

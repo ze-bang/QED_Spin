@@ -1,7 +1,7 @@
-"""``qed.input``: lattices and the Hamiltonian builder (the C++ ``ed::input`` library).
+"""``qed.input``: lattices (the C++ ``ed::input`` library) and the Hamiltonian builder.
 
-``HamiltonianBuilder`` accumulates one-, two- and three-body terms in the (S+, S-, Sz)
-basis and ``to_operator()`` returns a ``qed.Operator`` for the verbs:
+``HamiltonianBuilder`` accumulates terms in the (S+, S-, Sz) basis and ``to_operator()``
+returns a ``qed.Operator`` for the verbs:
 
 .. code-block:: python
 
@@ -43,8 +43,10 @@ Hamiltonian shortcuts (``HamiltonianBuilder``)
 ``zeeman`` /                 uniform / site-resolved magnetic field
 ``zeeman_per_site``
 ``on_site_field``            single-axis ``+h Sz_i``
-``ring_exchange``            4-site ring exchange (currently raises
-                             a clear error -- 4-body is future work)
+``ring_exchange``            ``K (P + P^-1)``, P the cyclic exchange of
+                             a plaquette's four spins
+``ss_ss``                    ``K (S_i.S_j)(S_k.S_l)`` per pair of bonds
+                             (symmetrised when they share a site)
 ``pyrochlore_non_kramers``   pyrochlore non-Kramers ``Jpmpm`` phase
 ==========================  ====================================
 """
@@ -52,9 +54,9 @@ Hamiltonian shortcuts (``HamiltonianBuilder``)
 from __future__ import annotations
 
 from . import _core as _core
+from ._builder import HamiltonianBuilder
 from ._core.input import (  # type: ignore[attr-defined]
     Bond,
-    HamiltonianBuilder,
     Lattice,
     Op,
     Plaquette,
