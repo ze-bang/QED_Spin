@@ -7,6 +7,7 @@
 #include "validate.h"
 #include "walk.h"
 
+#include <ed/core/footprint.h>
 #include <ed/core/memory.h>
 #include <ed/parallel/numa.h>
 #include <ed/parallel/thread_budget.h>
@@ -39,6 +40,23 @@ struct BlockThermo {
     std::size_t exact_asked = 0, exact_got = 0;   // OFTLM: exact states asked for, certified
 };
 
+// How many samples advance in lockstep on the device: at most 8 (and the sample count), and no
+// more than fit in 90% of the free device memory. Every sample computes exactly what it would
+// alone, so the width changes only the speed.
+std::size_t device_sample_width(ed::core::Path path, ed::core::Shape s, std::size_t samples) {
+    const std::size_t most = std::max<std::size_t>(1, std::min<std::size_t>(8, samples));
+    if (ed::core::mem_guard_off()) return most;
+    const std::optional<std::size_t> free = ed::core::available_device_bytes(/*fresh=*/true);
+    if (!free) return most;
+    s.device = true;
+    std::size_t w = most;
+    for (; w > 1; --w) {
+        s.width = w;
+        if (static_cast<double>(ed::core::footprint(path, s).device) <= 0.9 * static_cast<double>(*free)) break;
+    }
+    return w;
+}
+
 // One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
 // or -- at most dense_max_dim states, with no tower and no observables -- its exact
 // thermodynamics on the host. `tower`: the seeds are projected onto it, and Z counts its states
@@ -54,16 +72,14 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     const ed::parallel::ThreadBudgetScope budget(ed::parallel::auto_threads_for_dim(n));
     const bool mtpq  = t.method == ThermalSpec::Method::mTPQ;
     const bool oftlm = !mtpq && t.exact_states > 0;
-    {
-        // The kernels' working set, checked before anything is allocated: FTLM keeps a Krylov
-        // window of the block's vectors; OFTLM holds its exact states (twice while the eigensolver hands
-        // them over; its Krylov basis is checked by its own budget) and a three-term recurrence;
-        // mTPQ a handful.
-        const std::uint64_t vecs = mtpq ? 8
-                                 : oftlm ? 2 * t.exact_states + 8
-                                         : std::max<std::size_t>(t.krylov, 4) + 4;
-        ed::core::guard_working_set(n * vecs * 16ull, "ed::thermal");
-    }
+    // The kernels' working set (core/footprint.h): FTLM keeps its Krylov basis only with
+    // observables; mTPQ holds a handful of vectors.
+    using ed::core::Path;
+    const Path path = mtpq ? Path::Mtpq : obs.empty() ? Path::FtlmSample : Path::FtlmSampleKept;
+    ed::core::Shape shape;
+    shape.dim    = n;
+    shape.krylov = std::max<std::size_t>(t.krylov, 4);
+    shape.tower  = tower != nullptr;
 
     ed::BlockRequest req;
     req.task  = oftlm ? ed::Task::Oftlm : ed::Task::Sampled;
@@ -74,8 +90,32 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     req.verb  = "thermal";
     req.what  = [&tag] { return detail::block_name(tag); };
     req.why   = detail::no_kernel_reason(w_block);
+    {
+        ed::core::Shape one = shape;
+        one.device = true;
+        req.device_bytes = ed::core::footprint(path, one).device;   // one sample
+    }
     BlockThermo b;
     b.lane = ed::place(t.device, req);
+
+    // The working set on that lane, checked before anything is allocated. On the device the
+    // samples advance in lockstep, as many as fit (at most 8).
+    std::size_t width = 1;
+    if (b.lane == ed::Lane::HostDense) {
+        ed::core::guard_working_set(ed::core::footprint(Path::DenseValues, shape).host, "ed::thermal");
+    } else if (oftlm) {
+        // The exact states (twice while the eigensolver hands them over; its Krylov basis is
+        // checked by its own budget) and a three-term recurrence.
+        ed::core::guard_working_set(n * (2 * t.exact_states + 8) * 16ull, "ed::thermal");
+    } else if (ed::on_device(b.lane)) {
+        width = device_sample_width(path, shape, t.samples);
+        ed::core::Shape on = shape;
+        on.device = true;
+        on.width  = width;
+        ed::core::guard_working_set(ed::core::footprint(path, on).host, "ed::thermal");
+    } else {
+        ed::core::guard_working_set(ed::core::footprint(path, shape).host, "ed::thermal");
+    }
 
     ed::thermal::Curves c;
     if (b.lane == ed::Lane::HostDense) {
@@ -111,7 +151,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             auto p = tower->projector;
             seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
         }
-        c = ed::with_backend(b.lane, [&](auto& be) {
+        auto run_lane = [&](std::size_t w) { return ed::with_backend(b.lane, [&](auto& be) {
             using B = std::decay_t<decltype(be)>;
             constexpr bool device = !ed::matvec::is_cpu_backend_v<B>;
             auto H = op.template bind<B>();
@@ -121,6 +161,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 run.steps   = t.steps;
                 run.seed    = seed;
                 run.seed_transform = seed_transform;
+                run.batch_width    = w;
                 if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
                 return ed::thermal::mtpq(be, H, n, beta, run);
             }
@@ -137,8 +178,21 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 ko.observables.push_back(A->template bind<B>());
             }
             if constexpr (device) ko.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
+            ko.batch_width = w;
             return ed::thermal::ftlm_kernel<B>(be, H, n, ko).curves;
-        });
+        }); };
+        // A device allocation that fails (the estimate missed, or another process took memory)
+        // retries with half the samples in lockstep; the results do not depend on the width.
+        for (;;) {
+            try {
+                c = run_lane(width);
+                break;
+            } catch (const ed::ResourceLimit&) {
+                if (!ed::on_device(b.lane) || width <= 1) throw;
+                width /= 2;
+                ED_LOG(Info, "thermal: out of device memory; retrying with %zu samples in lockstep", width);
+            }
+        }
     }
     if (c.E.size() != beta.size())
         throw std::runtime_error("thermal: a block returned " + std::to_string(c.E.size())

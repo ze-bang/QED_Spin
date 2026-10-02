@@ -14,14 +14,22 @@
 #include <ed/core/config.h>
 #include <ed/core/errors.h>
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
+#endif
+
+#ifdef WITH_CUDA
+#include <cuda_runtime.h>
 #endif
 
 namespace ed::core {
@@ -108,6 +116,45 @@ namespace ed::core {
     if (job == 0) return node;
     if (node == 0) return job;
     return node < job ? node : job;
+}
+
+/// Device memory this process can still allocate, or nothing when the device cannot be queried.
+/// The driver's free count misses what the process freed into its default memory pool (CudaBackend
+/// keeps the pool's memory: release threshold UINT64_MAX), which the next allocation reuses, so
+/// the pool's reserved-but-unused bytes are added. Cached for one second (cudaMemGetInfo costs
+/// 20-100 ms per call under WSL2, and the automatic choice only needs an order of magnitude);
+/// `fresh` bypasses the cache, for a strict device request.
+[[nodiscard]] inline std::optional<std::size_t> available_device_bytes(bool fresh = false) noexcept {
+#ifdef WITH_CUDA
+    static std::mutex m;
+    static std::size_t cached_free = 0;
+    static std::chrono::steady_clock::time_point cached_at{};
+    const std::lock_guard<std::mutex> lock(m);
+    const auto now = std::chrono::steady_clock::now();
+    if (fresh || cached_at == std::chrono::steady_clock::time_point{} || now - cached_at > std::chrono::seconds(1)) {
+        std::size_t free_bytes = 0, total_bytes = 0;
+        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+            cudaGetLastError();
+            return std::nullopt;
+        }
+        int dev = -1;
+        cudaMemPool_t pool = nullptr;
+        std::uint64_t reserved = 0, used = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
+                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) == cudaSuccess
+                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess) {
+            if (reserved > used) free_bytes += static_cast<std::size_t>(reserved - used);
+        } else {
+            cudaGetLastError();
+        }
+        cached_free = free_bytes;
+        cached_at   = now;
+    }
+    return cached_free;
+#else
+    (void)fresh;
+    return std::nullopt;
+#endif
 }
 
 /// ED_MEM_GUARD_OFF: every memory guard and every memory-derived cap stands down.

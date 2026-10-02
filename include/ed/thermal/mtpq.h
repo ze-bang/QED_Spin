@@ -175,6 +175,7 @@ struct MtpqRun {
     std::uint64_t seed    = 0;
     std::function<void(Complex*, std::size_t)> seed_transform;
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
+    std::size_t   batch_width = 8;                     ///< device: samples in lockstep at most
 };
 
 /// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
@@ -201,6 +202,7 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     kopts.random_seed    = base_seed;
     kopts.seed_transform = run.seed_transform;
     kopts.batch_matvec   = run.batch_matvec;
+    kopts.batch_width = run.batch_width;
 
     double e_min_est = 0.0, e_max_est = 0.0;
     {

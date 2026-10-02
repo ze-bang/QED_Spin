@@ -39,24 +39,24 @@ enum class Task : std::uint8_t {
     DynamicsFtlm,   ///< T > 0 FTLM dynamics of one source sector
 };
 
-/// One row of the 'auto' table: a block goes to the device at dim >= floor, when (fit_vectors > 0)
-/// fit_vectors vectors of it fit in free device memory (fit_vectors 0: no memory check).
+/// One row of the 'auto' table: a block goes to the device at dim >= floor, when (fit) its
+/// device working set (BlockRequest::device_bytes) fits in free device memory.
 struct AutoRow {
     std::uint64_t floor;
-    std::uint32_t fit_vectors;
+    bool          fit;
 };
 
 /// THE 'auto' table.
 [[nodiscard]] constexpr AutoRow auto_row(Task t) noexcept {
     switch (t) {
-        case Task::Eigs:         return {std::uint64_t{1} << 14, 8};
-        case Task::Sampled:      return {std::uint64_t{1} << 14, 8};
-        case Task::Oftlm:        return {std::numeric_limits<std::uint64_t>::max(), 0};
-        case Task::DenseBatch:   return {0, 0};
-        case Task::DynamicsCf:   return {std::uint64_t{1} << 14, 0};
-        case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, 0};
+        case Task::Eigs:         return {std::uint64_t{1} << 14, true};
+        case Task::Sampled:      return {std::uint64_t{1} << 14, true};
+        case Task::Oftlm:        return {std::numeric_limits<std::uint64_t>::max(), false};
+        case Task::DenseBatch:   return {0, false};
+        case Task::DynamicsCf:   return {std::uint64_t{1} << 14, false};
+        case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, false};
     }
-    return {std::numeric_limits<std::uint64_t>::max(), 0};
+    return {std::numeric_limits<std::uint64_t>::max(), false};
 }
 
 /// A host-placed RepSectorMatVec may still apply H with the device gather on host vectors at
@@ -79,6 +79,10 @@ struct BlockRequest {
     /// the exact-small fallback).
     bool          dense = false;
     std::uint64_t want  = 1;               ///< Eigs only: levels owed (the transitional rule)
+    /// The least device memory the solve needs (ed/core/footprint.h), checked where the task's
+    /// row says so; 0: place() estimates it from the task (Eigs: the two-pass GS vector, or
+    /// Krylov-Schur at its smallest cycle of want + 8; Sampled: one FTLM sample).
+    std::uint64_t device_bytes = 0;
     bool          device_kernel = false;   ///< H and every operator the solve applies bind to a device
     const char*   verb = "";
     /// Built only for a refusal: "the block of star K, irrep I, n_up N (dim D)".

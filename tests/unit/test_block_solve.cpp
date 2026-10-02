@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -99,16 +100,16 @@ std::string message_of(Device d, const ed::BlockRequest& r) {
 
 TEST_CASE("place: the auto table", "[place]") {
     REQUIRE(ed::auto_row(Task::Eigs).floor == 16384);
-    REQUIRE(ed::auto_row(Task::Eigs).fit_vectors == 8);
+    REQUIRE(ed::auto_row(Task::Eigs).fit);
     REQUIRE(ed::auto_row(Task::Sampled).floor == 16384);
-    REQUIRE(ed::auto_row(Task::Sampled).fit_vectors == 8);
-    REQUIRE(ed::auto_row(Task::Oftlm).fit_vectors == 0);
+    REQUIRE(ed::auto_row(Task::Sampled).fit);
+    REQUIRE_FALSE(ed::auto_row(Task::Oftlm).fit);
     REQUIRE(ed::auto_row(Task::DenseBatch).floor == 0);
-    REQUIRE(ed::auto_row(Task::DenseBatch).fit_vectors == 0);
+    REQUIRE_FALSE(ed::auto_row(Task::DenseBatch).fit);
     REQUIRE(ed::auto_row(Task::DynamicsCf).floor == 16384);
-    REQUIRE(ed::auto_row(Task::DynamicsCf).fit_vectors == 0);
+    REQUIRE_FALSE(ed::auto_row(Task::DynamicsCf).fit);
     REQUIRE(ed::auto_row(Task::DynamicsFtlm).floor == 65536);
-    REQUIRE(ed::auto_row(Task::DynamicsFtlm).fit_vectors == 0);
+    REQUIRE_FALSE(ed::auto_row(Task::DynamicsFtlm).fit);
     REQUIRE(ed::kHostGatherFloor == (std::uint64_t{1} << 20));
     REQUIRE(ed::kHostPoolMaxDim == (std::uint64_t{1} << 16));
     REQUIRE(ed::kDeviceDenseMaxDim == 32);
@@ -169,11 +170,11 @@ TEST_CASE("place: Gpu refuses in order and says why", "[place]") {
             == "device='gpu', but the device's memory cannot be queried (no CUDA context could be created)");
     REQUIRE(FakeMachine::fresh_calls == 1);
 
-    // 8 vectors of 16 B: 128 B per state.
-    FakeMachine::reset(true, (std::size_t{128} << 20) - 1);
+    // One FTLM sample on the device holds 4 vectors of 16 B: 64 B per state (core/footprint.h).
+    FakeMachine::reset(true, (std::size_t{64} << 20) - 1);
     REQUIRE(message_of<ed::ResourceLimit>(Device::Gpu, req(Task::Sampled, std::uint64_t{1} << 20))
-            == "device='gpu', but a block of dim 1048576 needs 128 MiB of device memory and 127 MiB are free");
-    FakeMachine::reset(true, std::size_t{128} << 20);
+            == "device='gpu', but a block of dim 1048576 needs 64 MiB of device memory and 63 MiB are free");
+    FakeMachine::reset(true, std::size_t{64} << 20);
     REQUIRE(ed::place(Device::Gpu, req(Task::Sampled, std::uint64_t{1} << 20), FakeMachine::probe())
             == Lane::DeviceKrylov);
     REQUIRE(FakeMachine::fresh_calls == 1);
@@ -208,13 +209,41 @@ TEST_CASE("place: Auto floors", "[place]") {
 }
 
 TEST_CASE("place: Auto with too little device memory stays on the host", "[place]") {
-    FakeMachine::reset(true, (std::size_t{128} << 20) - 1);
+    // The two-pass GS vector: 5 device vectors, 80 B per state.
+    FakeMachine::reset(true, (std::size_t{80} << 20) - 1);
     REQUIRE(ed::place(Device::Auto, req(Task::Eigs, std::uint64_t{1} << 20), FakeMachine::probe())
             == Lane::HostKrylov);
+    FakeMachine::reset(true, std::size_t{80} << 20);
+    REQUIRE(ed::place(Device::Auto, req(Task::Eigs, std::uint64_t{1} << 20), FakeMachine::probe())
+            == Lane::DeviceKrylov);
+    FakeMachine::reset(true, (std::size_t{80} << 20) - 1);
     REQUIRE(FakeMachine::fresh_calls == 0);   // the cached query
     FakeMachine::reset(true, std::nullopt);
     REQUIRE(ed::place(Device::Auto, req(Task::Sampled, std::uint64_t{1} << 20), FakeMachine::probe())
             == Lane::HostKrylov);
+}
+
+TEST_CASE("place: the request's device working set is what must fit", "[place]") {
+    auto r = req(Task::Sampled, std::uint64_t{1} << 20);
+    r.device_bytes = std::uint64_t{1} << 30;   // e.g. FTLM keeping its basis
+    FakeMachine::reset(true, (std::size_t{1} << 30) - 1);
+    REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::HostKrylov);
+    REQUIRE_THROWS_AS(ed::place(Device::Gpu, r, FakeMachine::probe()), ed::ResourceLimit);
+    FakeMachine::reset(true, std::size_t{1} << 30);
+    REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::DeviceKrylov);
+    // Krylov-Schur at its smallest cycle (want + 8): (3 (k + 8) + 2 k + 8) vectors.
+    const auto k = req(Task::Eigs, std::uint64_t{1} << 20, true, 4);
+    REQUIRE(ed::device_need(k) == std::uint64_t{(3 * 12 + 2 * 4 + 8) * 16} << 20);
+
+    // ED_MEM_GUARD_OFF: no memory check, so no query either.
+    const char* old = std::getenv("ED_MEM_GUARD_OFF");
+    const std::string saved = old ? old : "";
+    setenv("ED_MEM_GUARD_OFF", "1", 1);
+    FakeMachine::reset(true, std::size_t{1});
+    REQUIRE(ed::place(Device::Gpu, r, FakeMachine::probe()) == Lane::DeviceKrylov);
+    REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::DeviceKrylov);
+    REQUIRE(FakeMachine::free_calls == 0);
+    if (old) setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1); else unsetenv("ED_MEM_GUARD_OFF");
 }
 
 TEST_CASE("place: DenseBatch", "[place]") {

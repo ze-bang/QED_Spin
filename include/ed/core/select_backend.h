@@ -11,16 +11,16 @@
 // The CUDA headers stay here through P2.4 (P2.7 moves them to the users).
 // =============================================================================
 
-#include <chrono>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 
 #include <ed/core/device.h>
+#include <ed/core/footprint.h>
+#include <ed/core/memory.h>
 #include <ed/core/errors.h>
 #include <ed/matvec/linear_operator.h>
 #include <ed/core/log.h>
@@ -69,44 +69,6 @@ inline bool have_cuda() noexcept {
 #endif
 }
 
-/// Device memory this process can still allocate, or nothing when the device cannot be queried.
-/// The driver's free count misses what the process freed into its default memory pool (CudaBackend
-/// keeps the pool's memory: release threshold UINT64_MAX), which the next allocation reuses, so
-/// the pool's reserved-but-unused bytes are added. Cached for one second (cudaMemGetInfo costs
-/// 20-100 ms per call under WSL2, and the automatic choice only needs an order of magnitude);
-/// `fresh` bypasses the cache, for a strict device request.
-inline std::optional<std::size_t> free_device_bytes(bool fresh = false) noexcept {
-#ifdef WITH_CUDA
-    static std::mutex m;
-    static std::size_t cached_free = 0;
-    static std::chrono::steady_clock::time_point cached_at{};
-    const std::lock_guard<std::mutex> lock(m);
-    const auto now = std::chrono::steady_clock::now();
-    if (fresh || cached_at == std::chrono::steady_clock::time_point{} || now - cached_at > std::chrono::seconds(1)) {
-        std::size_t free_bytes = 0, total_bytes = 0;
-        if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-            cudaGetLastError();
-            return std::nullopt;
-        }
-        int dev = -1;
-        cudaMemPool_t pool = nullptr;
-        std::uint64_t reserved = 0, used = 0;
-        if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
-                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) == cudaSuccess
-                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess) {
-            if (reserved > used) free_bytes += static_cast<std::size_t>(reserved - used);
-        } else {
-            cudaGetLastError();
-        }
-        cached_free = free_bytes;
-        cached_at   = now;
-    }
-    return cached_free;
-#else
-    (void)fresh;
-    return std::nullopt;
-#endif
-}
 
 // ---------------------------------------------------------------------------
 // place(): the one device decision for every block of every verb.
@@ -115,8 +77,22 @@ inline std::optional<std::size_t> free_device_bytes(bool fresh = false) noexcept
 /// What place() asks of the machine (a test seam: the [place] unit tests count the calls).
 struct DeviceProbe {
     bool (*available)() noexcept = &have_cuda;
-    std::optional<std::size_t> (*free_bytes)(bool fresh) noexcept = &free_device_bytes;
+    std::optional<std::size_t> (*free_bytes)(bool fresh) noexcept = &ed::core::available_device_bytes;
 };
+
+/// The device working set place() checks for a block whose request does not state it.
+[[nodiscard]] inline std::uint64_t device_need(const BlockRequest& r) {
+    if (r.device_bytes > 0) return r.device_bytes;
+    using ed::core::Path;
+    ed::core::Shape s;
+    s.dim = r.dim;
+    s.device = true;
+    if (r.task == Task::Sampled) return ed::core::footprint(Path::FtlmSample, s).device;
+    if (r.want <= 1) return ed::core::footprint(Path::GsTwoPass, s).device;
+    s.k = static_cast<std::size_t>(r.want);
+    s.krylov = s.k + 8;
+    return ed::core::footprint(Path::KrylovSchur, s).device;
+}
 
 /// The lane one block runs on. In order:
 ///   a. DenseBatch: the host under Cpu or without a device ('gpu' raises DeviceUnavailable),
@@ -124,7 +100,8 @@ struct DeviceProbe {
 ///   b. A block the verb solves densely runs dense on the host under every device.
 ///   c. Cpu: the host Krylov lanes, before any probe ('cpu' never initialises CUDA).
 ///   d. Auto: the device when the block has a kernel, its task may run there, dim >= the
-///      task's floor, a device is visible and (fit_vectors > 0) the vectors fit; else the host.
+///      task's floor, a device is visible and (the row's fit) its device working set fits in free
+///      device memory (not checked under ED_MEM_GUARD_OFF); else the host.
 ///   e. Gpu: the device, or DeviceUnavailable / DeviceUnsupported / ResourceLimit saying why not.
 /// TRANSITIONAL: a device-bound Eigs block of dim <= kDeviceDenseMaxDim or 2 want >= dim is
 /// solved densely on the host.
@@ -141,12 +118,13 @@ struct DeviceProbe {
     if (r.dense) return Lane::HostDense;
     if (d == Device::Cpu) return Lane::HostKrylov;
     const AutoRow row = auto_row(r.task);
-    const std::uint64_t need = std::uint64_t{row.fit_vectors} * r.dim * sizeof(std::complex<double>);
+    const bool fit = row.fit && !ed::core::mem_guard_off();
+    const std::uint64_t need = fit ? device_need(r) : 0;
     const bool small_eigs = r.task == Task::Eigs && (r.dim <= kDeviceDenseMaxDim || 2 * r.want >= r.dim);
     if (d == Device::Auto) {
         if (!r.device_kernel || r.task == Task::Oftlm || r.dim < row.floor || !probe.available())
             return Lane::HostKrylov;
-        if (row.fit_vectors > 0) {
+        if (fit) {
             const std::optional<std::size_t> free = probe.free_bytes(false);
             if (!free || need > *free) return Lane::HostKrylov;
         }
@@ -162,7 +140,7 @@ struct DeviceProbe {
                                     + (r.what ? r.what() : "a block of dim " + std::to_string(r.dim)) + " "
                                     + r.why + "; use device='auto' or 'cpu'");
     if (small_eigs) return Lane::HostDense;
-    if (row.fit_vectors > 0) {
+    if (fit) {
         const std::optional<std::size_t> free = probe.free_bytes(true);
         if (!free)
             throw ed::DeviceUnavailable("device='gpu', but the device's memory cannot be queried "

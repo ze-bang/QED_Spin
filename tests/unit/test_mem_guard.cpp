@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <string>
 
+#include <ed/core/footprint.h>
 #include <ed/core/memory.h>
 
 TEST_CASE("mem_guard: available RAM is the tighter of node and cgroup", "[mem_guard]") {
@@ -45,4 +46,36 @@ TEST_CASE("mem_guard: ED_MEM_GUARD_OFF stands every guard down", "[mem_guard]") 
     REQUIRE(ed::core::mem_guard_off());
     REQUIRE_NOTHROW(ed::core::guard_working_set(ed::core::available_ram_bytes() * 2, "test"));
     if (old) setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1); else unsetenv("ED_MEM_GUARD_OFF");
+}
+
+TEST_CASE("footprint: the paths count the vectors the kernels hold", "[mem_guard][footprint]") {
+    using ed::core::Path;
+    ed::core::Shape s;
+    s.dim = 1000;
+    s.krylov = 100;
+    const std::uint64_t V = 16 * 1000;
+    // FTLM without a kept basis does not grow with the Krylov depth (L5-memory-04).
+    REQUIRE(ed::core::footprint(Path::FtlmSample, s).host == 5 * V);
+    REQUIRE(ed::core::footprint(Path::FtlmSampleKept, s).host == 106 * V);
+    s.tower = true;
+    REQUIRE(ed::core::footprint(Path::FtlmSample, s).host == 6 * V);
+    s.tower = false;
+    // On the device: per sample in lockstep; the kept basis has a staging copy.
+    s.device = true;
+    s.width = 8;
+    REQUIRE(ed::core::footprint(Path::FtlmSample, s).device == 32 * V);
+    REQUIRE(ed::core::footprint(Path::FtlmSample, s).host == 8 * V);
+    REQUIRE(ed::core::footprint(Path::FtlmSampleKept, s).device == 8 * 205 * V);
+    REQUIRE(ed::core::footprint(Path::Mtpq, s).device == 16 * V);
+    s.width = 1;
+    REQUIRE(ed::core::footprint(Path::Mtpq, s).device == 5 * V);
+    s.k = 4;
+    s.krylov = 68;
+    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).device == (3 * 68 + 8 + 8) * V);
+    s.device = false;
+    REQUIRE(ed::core::footprint(Path::KrylovSchur, s).host == (2 * 68 + 4 + 10) * V);
+    REQUIRE(ed::core::footprint(Path::DenseVectors, s).host == 32ull * 1000 * 1000);
+    REQUIRE(ed::core::footprint(Path::Multiplet, s).host == 6 * V + 8 * 1000);
+    s.dim = std::uint64_t{1} << 40;   // saturates instead of wrapping
+    REQUIRE(ed::core::footprint(Path::DenseVectors, s).host > (std::uint64_t{1} << 63));
 }
