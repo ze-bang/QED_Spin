@@ -78,8 +78,8 @@ struct GpuSharedRankTable {
 // device's memory and at most `cap_gib` (a fixed 16-24 GiB would fill a 10 GB MIG slice).
 [[nodiscard]] inline double device_cache_budget(double share, double cap_gib) {
     constexpr double GiB = 1073741824.0;
-    if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB"); v != nullptr && v[0] != '\0')
-        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", cap_gib)) * GiB;
+    const double set = ed::env::real("ED_GPU_SYM_CACHE_GIB", -1.0);   // -1: not set
+    if (set >= 0.0) return set * GiB;
     std::size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) { cudaGetLastError(); return cap_gib * GiB; }
     return std::min(cap_gib * GiB, share * static_cast<double>(total_b));
