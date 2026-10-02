@@ -134,6 +134,7 @@ void fill_shells(Lattice& L, const Cells& C, const Layout& lay, const std::vecto
                         const Position p = lay.position(d, v);
                         const Position& q = C.basis[static_cast<std::size_t>(u)];
                         const double r = std::hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+                        // scale-free: lattice geometry
                         if (r > 1e-9) all.push_back({u, v, d, r});
                     }
     std::vector<double> radii;
@@ -141,12 +142,14 @@ void fill_shells(Lattice& L, const Cells& C, const Layout& lay, const std::vecto
     std::sort(radii.begin(), radii.end());
     std::vector<double> shells;              // the three smallest distinct distances
     for (double r : radii) {
+        // scale-free: lattice geometry
         if (shells.empty() || r > shells.back() * (1.0 + 1e-9)) shells.push_back(r);
         if (shells.size() == 3) break;
     }
     std::vector<Vec> vecs;                   // the lattice vectors up to the third shell
     for (auto w : all) {
         for (w.rank = 0; w.rank < static_cast<int>(shells.size()); ++w.rank)
+            // scale-free: lattice geometry
             if (std::abs(w.r - shells[w.rank]) <= 1e-9 * shells[w.rank]) break;
         if (w.rank < static_cast<int>(shells.size())) vecs.push_back(w);
     }

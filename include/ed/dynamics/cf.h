@@ -67,6 +67,7 @@ struct CfSpectralOptions {
     /// smallest eigenvalue of the tridiagonal matrix. Zero is a shift like any other.
     std::optional<double> energy_shift;
     /// Convergence tolerance for the Lanczos tridiag build.
+    // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double      tolerance        = 1e-12;
 };
 
@@ -130,6 +131,7 @@ CfSpectralResult cf_spectral_from_vector(Backend&                   be,
     // device-resident; the CPU specialization is a plain memcpy.
     be.copy_from_host(phi_seed, phi.get(), local_n);
     const double phi_norm = be.nrm2(phi.get(), local_n);
+    // scale-free: unit-vector norm
     if (phi_norm < 1e-14) {
         R.spectral_function.assign(omega_grid.size(), 0.0);
         return R;

@@ -49,6 +49,7 @@ public:
     enum class Map { K, F, Dz, Theta };
     [[nodiscard]] MaskedOperator image(Map g) const;
     /// equals(dagger(), tol).
+    // scale-free: relative tolerance (to the operator's largest coefficient)
     [[nodiscard]] bool is_hermitian(double tol = 1e-12) const;
     /// Net change of the number of set bits (up spins) if uniform over all terms,
     /// else throws: an operator that changes S^z by different amounts is two operators.
@@ -57,6 +58,7 @@ public:
     [[nodiscard]] int delta_up() const { return kSetBitIsDown ? -delta_set_bits() : delta_set_bits(); }
     /// Same coefficients as `o`, each within rtol * the largest |coefficient| of either (so the
     /// verdict does not depend on the overall scale; two empty operators are equal).
+    // scale-free: relative tolerance (to the operator's largest coefficient)
     [[nodiscard]] bool equals(const MaskedOperator& o, double rtol = 1e-12) const;
     /// Canonical terms (merged, coefficients above `drop`).
     [[nodiscard]] std::vector<MaskedTerm> terms(double drop = 0.0) const;

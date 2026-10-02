@@ -100,6 +100,7 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
         if (opt.project) {
             for (int g = 0; g < G; ++g) {
                 const auto wg = w[static_cast<std::size_t>(g)];
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(wg) < 1e-15) continue;
                 Ol.add(O.image(src.perms_flat.data() + static_cast<std::size_t>(g) * n,
                                flip_of(src, g)), wg);

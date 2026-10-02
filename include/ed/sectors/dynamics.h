@@ -36,6 +36,7 @@ struct DynamicsSpec {
     std::size_t         krylov         = 200;
     std::size_t         samples        = 40;   ///< T > 0: random vectors per source sector
     std::uint64_t       seed           = 0;    ///< 0 = draw one
+    // scale-free: relative to s_H (numerics.h)
     double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window, relative to s_H (numerics.h)
     int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
     bool                prune          = true; ///< T = 0: the ground-manifold eigensolve prunes blocks (EigsOptions)

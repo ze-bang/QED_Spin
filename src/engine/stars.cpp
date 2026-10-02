@@ -122,6 +122,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
             for (int g = 0; g < nP; ++g) {
                 const auto it = aidx.find(compose(c, Pinv[static_cast<std::size_t>(g)]));
                 if (it == aidx.end()) continue;
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(chiA[static_cast<std::size_t>(it->second)] - Complex(1, 0)) > 1e-8)
                     return decline("projective factor system (chi_k0(a) != 1 in p_e p_f = a p_g)");
                 mult[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] = g;
@@ -200,6 +201,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
                 const auto& sp = secs[static_cast<std::size_t>(ii)];
                 if (!sp || sp->reps.empty()) continue;
                 const Complex x = giP.irreps[static_cast<std::size_t>(ii)].character[static_cast<std::size_t>(e)];
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (have && std::abs(x - c) > 1e-8) scalar = false;
                 c = x; have = true;
             }
@@ -208,6 +210,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
                 for (const auto& ir : giP.irreps) {
                     if (ir.dim == 1) continue;
                     const Complex x = ir.character[static_cast<std::size_t>(e)] / static_cast<double>(ir.dim);
+                    // scale-free: unit-modulus characters / phases (group data, not energies)
                     if (std::abs(std::abs(x) - 1.0) < 1e-8 && (!have || std::abs(x - c) < 1e-8)) { some = true; break; }
                 }
                 scalar = some;
@@ -222,6 +225,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
     if (tr_on && opt.only_irrep.empty()) {
         bool sector_real = true;
+        // scale-free: unit-modulus characters / phases (group data, not energies)
         for (const Complex& c : chiA) if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
         for (int ii = 0; ii < nIr && sector_real; ++ii) {
             if (pair_of[static_cast<std::size_t>(ii)] >= 0 || !secs[static_cast<std::size_t>(ii)]) continue;
@@ -230,6 +234,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
                 if (!secs[static_cast<std::size_t>(jj)]) continue;
                 const auto& cj = giP.irreps[static_cast<std::size_t>(jj)].character;
                 bool m = ci.size() == cj.size();
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 for (std::size_t g = 0; m && g < ci.size(); ++g) m = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
                 if (m && secs[static_cast<std::size_t>(ii)]->reps.size() == secs[static_cast<std::size_t>(jj)]->reps.size()) {
                     pair_of[static_cast<std::size_t>(ii)] = jj; pair_of[static_cast<std::size_t>(jj)] = ii; break;
@@ -379,6 +384,7 @@ build_star_blocks(const ::Operator&         op,
         for (std::size_t i = 0; i < a.phase.size(); ++i) {
             const Complex ratio = a.phase[i] / b.phase[i];
             if (first) { r = ratio; first = false; }
+            // scale-free: unit-modulus characters / phases (group data, not energies)
             else if (std::abs(ratio - r) > 1e-8) return false;
         }
         return true;
@@ -459,6 +465,7 @@ build_star_blocks(const ::Operator&         op,
                     const auto& a = irrep(ii).character;
                     const auto& b = info.little_characters[static_cast<std::size_t>(ii)];
                     same = a.size() == b.size();
+                    // scale-free: unit-modulus characters / phases (group data, not energies)
                     for (std::size_t g = 0; same && g < a.size(); ++g) same = std::abs(a[g] - b[g]) < 1e-8;
                 }
                 if (!same) {
@@ -504,10 +511,12 @@ build_star_blocks(const ::Operator&         op,
                 if (tr_on && opt.only_irrep.empty()) {
                     bool sector_real = true;
                     for (const Complex& c : rdr.characters)
+                        // scale-free: unit-modulus characters / phases (group data, not energies)
                         if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
                     for (const auto& m : M) {
                         if (!sector_real) break;
                         for (const Complex& ph : m.phase)
+                            // scale-free: unit-modulus characters / phases (group data, not energies)
                             if (std::abs(ph.imag()) > 1e-12) { sector_real = false; break; }
                     }
                     if (sector_real) {
@@ -518,6 +527,7 @@ build_star_blocks(const ::Operator&         op,
                                 const auto& cj = irrep(jj).character;
                                 bool conj_match = ci.size() == cj.size();
                                 for (std::size_t g = 0; conj_match && g < ci.size(); ++g)
+                                    // scale-free: unit-modulus characters / phases (group data, not energies)
                                     conj_match = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
                                 if (conj_match && irrep(ii).dim == irrep(jj).dim
                                     && Ws[static_cast<std::size_t>(ii)].size()

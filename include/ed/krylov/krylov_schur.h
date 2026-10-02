@@ -48,11 +48,13 @@ using Complex = std::complex<double>;
 struct KrylovSchurOptions {
     std::size_t num_eigs        = 1;
     std::size_t max_iter        = 100;
+    // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double      tolerance       = 1e-10;
     bool        compute_vectors = false;
     /// Maximum restart cycles before we give up.
     std::size_t max_restarts    = 30;
     /// Breakdown threshold passed to the per-cycle `lanczos_kernel`.
+    // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double      breakdown_tol   = 1e-13;
     /// Memory cap on the per-cycle Krylov subspace, in resident length-N
     /// vectors (the basis held during each restart cycle is the dominant cost).
@@ -142,6 +144,7 @@ krylov_schur_kernel(Backend&                             be,
     auto run_cycle = [&](Cycle& c) -> bool {
         deflate(v_seed.get());
         const double seed_norm = be.nrm2(v_seed.get(), local_n);
+        // scale-free: unit-vector norm
         if (seed_norm < 1e-13) return false;
         be.scale(Scalar(1.0 / seed_norm), v_seed.get(), local_n);
         std::vector<const Scalar*> aux;
@@ -218,6 +221,7 @@ krylov_schur_kernel(Backend&                             be,
                 ritz_vector(c, i, phi.get());
                 deflate(phi.get());
                 const double pn = be.nrm2(phi.get(), local_n);
+                // scale-free: unit-vector norm
                 if (pn < 1e-14) break;
                 be.scale(Scalar(1.0 / pn), phi.get(), local_n);
                 locked_evals.push_back(c.evals[i]);
@@ -246,7 +250,8 @@ krylov_schur_kernel(Backend&                             be,
         std::vector<Scalar> host(local_n);
         for (std::size_t round = 0; round < k_target; ++round) {
             const double top = *std::max_element(locked_evals.begin(), locked_evals.end());
-            const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::max(1.0, std::abs(top)));
+            // scale-free: relative to |top|, floored by the (relative) lock tolerance
+            const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::abs(top));
             for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
             be.copy_from_host(host.data(), v_seed.get(), local_n);
             Cycle c;

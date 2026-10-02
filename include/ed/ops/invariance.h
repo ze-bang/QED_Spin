@@ -20,6 +20,7 @@ class Operator;   // ops/operator.h: the term records the kernels read
 namespace ed::ops {
 
 /// Two coefficients agree when they differ by at most this times the largest |coefficient|.
+// scale-free: relative tolerance (to the operator's largest coefficient)
 inline constexpr double kInvarianceRtol = 1e-10;
 
 /// The operator a ::Operator describes: its records summed, same-site products reduced exactly,

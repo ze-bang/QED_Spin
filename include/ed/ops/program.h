@@ -92,6 +92,7 @@ struct CompileOptions {
     bool project = true;
     /// Projected coefficients below drop * max|coeff| of the UNPROJECTED observable are
     /// discarded after merging (selection-rule zeros compile to no terms).
+    // scale-free: relative tolerance (to the operator's largest coefficient)
     double drop = 1e-14;
 };
 

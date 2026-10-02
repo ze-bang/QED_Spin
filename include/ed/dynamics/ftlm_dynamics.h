@@ -158,6 +158,7 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         auto phi = bk.make_zero_vector(dim_dst);
         O_apply(r.get(), phi.get(), dim_dst);
         const double nphi = bk.nrm2(phi.get(), dim_dst);
+        // scale-free: unit-vector norm
         if (nphi < 1e-14) return out;                             // O annihilates |r>: no spectral weight
         bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
 

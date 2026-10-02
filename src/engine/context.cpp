@@ -90,6 +90,7 @@ conjugate_irrep_map(const EngineContext& cx) {
                 cx.giA.irreps[static_cast<std::size_t>(k2)].character;
             bool match = true;
             for (std::size_t a = 0; a < nA; ++a) {
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(chi_k2[a] - std::conj(chi_k[a])) > 1e-8) {
                     match = false;
                     break;
@@ -154,6 +155,7 @@ void build_residue_maps(EngineContext& cx,
                 for (int a = 0; a < nA; ++a) {
                     if (std::abs(chi_k2[static_cast<std::size_t>(a)]
                                  - chi_k[static_cast<std::size_t>(conj[static_cast<std::size_t>(a)])])
+                        // scale-free: unit-modulus characters / phases (group data, not energies)
                         > 1e-8) { match = false; break; }
                 }
                 if (match) hit = k2;
@@ -208,6 +210,7 @@ build_k_sector(const EngineContext& cx, int k, int n_up) {
     for (std::size_t i = 0; i < cx.otab->reps.size(); ++i) {
         const double nsq = ed::symmetry::projected_norm_sq_stab(
             cx.otab->stabilizer_of(i), rd.characters);
+        // scale-free: squared norm of a projected unit vector
         if (nsq <= 1e-12) continue;
         if (cx.srl) rd.local_of_shared[i] = static_cast<std::int32_t>(rd.reps.size());
         rd.reps.push_back(cx.otab->reps[i]);
@@ -261,6 +264,7 @@ build_monomial(const EngineContext& cx, int rp,
         // U_p |psi_i> = chi(b) (N_j / N_i) |psi_j>, b = a*^{-1}: chi(b) = conj(chi(a*)).
         const Complex ph = std::conj(chi[astar])
                          * (rd.inv_norms[i] / rd.inv_norms[j]);
+        // scale-free: unit-modulus characters / phases (group data, not energies)
         if (std::abs(std::abs(ph) - 1.0) > 1e-8) {   // must be unit
             ok.store(false, std::memory_order_relaxed);
             continue;
@@ -293,6 +297,7 @@ monomial_commutes(const RepSectorMatVec& hk, const Monomial& m,
         diff  += std::norm(mhx[i] - hmx[i]);
         scale += std::norm(hmx[i]);
     }
+    // scale-free: a difference relative to the operator's own scale
     return std::sqrt(diff / scale) < 1e-8;
 }
 
@@ -330,9 +335,11 @@ build_little_tables(const std::vector<Monomial>& M,
                               M[static_cast<std::size_t>(b)].to[i])];
                     const Complex ratio = comp / M[static_cast<std::size_t>(c)].phase[i];
                     if (i == 0) omega = ratio;
+                    // scale-free: unit-modulus characters / phases (group data, not energies)
                     else if (std::abs(ratio - omega) > 1e-8) { constant = false; break; }
                 }
                 if (!constant) continue;
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(omega - Complex(1, 0)) > 1e-8) return false;  // projective
                 hit = c;
             }
@@ -384,12 +391,14 @@ build_isotypic_columns(const std::vector<Monomial>&     M,
         }
         Eigen::JacobiSVD<Eigen::MatrixXcd> svd(A, Eigen::ComputeThinU);
         const auto& sv = svd.singularValues();
+        // scale-free: unit-modulus characters / phases (group data, not energies)
         const double tol = 1e-8 * static_cast<double>(nP);
         for (int c = 0; c < sv.size(); ++c) {
             if (sv(c) <= tol) continue;
             std::vector<std::pair<std::int32_t, Complex>> col;
             for (int r = 0; r < nO; ++r) {
                 const Complex u = svd.matrixU()(r, c);
+                // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(u) > 1e-12)
                     col.emplace_back(orbit[static_cast<std::size_t>(r)], u);
             }

@@ -372,6 +372,7 @@ public:
     /// Host-side applies so far, and their total seconds (representation builds excluded).
     [[nodiscard]] std::uint64_t applies() const noexcept { return applies_.load(std::memory_order_relaxed); }
     [[nodiscard]] double apply_seconds() const noexcept {
+        // scale-free: ns -> s
         return 1e-9 * static_cast<double>(apply_ns_.load(std::memory_order_relaxed));
     }
     /// Seconds spent building the representation apply() engaged (reduced CSR or device mirror).
@@ -749,6 +750,7 @@ template <class Chi>
         bool ok = true;
         for (const auto& [i, x] : c) {
             const std::optional<Complex> v = chi(i);
+            // scale-free: unit-modulus characters / phases (group data, not energies)
             if (!v || std::abs(*v - x) > 1e-8) { ok = false; break; }
         }
         if (ok) return true;

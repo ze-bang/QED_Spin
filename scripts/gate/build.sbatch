@@ -14,6 +14,7 @@ D="logs/gate/${SLURM_JOB_ID}"; mkdir -p "${D}"
 echo "host=$(hostname) variant=${QED_VARIANT} commit=$(git rev-parse --short HEAD) dirty=$(git status --porcelain -uno | wc -l)"
 scripts/check_env_registry.sh;                                                                    echo "env_registry $?" >> "${D}/rc"
 scripts/check_no_print.sh;                                                                        echo "no_print $?" >> "${D}/rc"
+scripts/check_tolerance_literals.sh;                                                              echo "tolerance_literals $?" >> "${D}/rc"
 scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant "${QED_VARIANT}" --name tests --tests --no-python; b1=$?
 echo "build_tests ${b1}" >> "${D}/rc"
 scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant "${QED_VARIANT}" --target _core;      b2=$?

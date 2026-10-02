@@ -185,6 +185,7 @@ struct LanczosKernelOptionsT {
     /// Threshold below which a LocalDGKS3 projection is skipped (the
     /// resulting correction sits below the round-off floor). Default
     /// sqrt(eps) ~= 1.49e-8.
+    // scale-free: sqrt(eps): a relative orthogonality threshold
     double local_ortho_threshold = 1.49011611938476562e-08;
 };
 using LanczosKernelOptions = LanczosKernelOptionsT<Complex>;

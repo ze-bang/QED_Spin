@@ -165,6 +165,7 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
 bool same_momentum(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSectorData& b) {
     if (a.group_size != b.group_size) return false;
     for (std::size_t g = 0; g < a.characters.size(); ++g)
+        // scale-free: unit-modulus characters / phases (group data, not energies)
         if (std::abs(a.characters[g] - b.characters[g]) > 1e-9) return false;
     return true;
 }
@@ -184,6 +185,7 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
     std::mt19937_64 gen(0x70E4ULL);
     std::normal_distribution<double> nd(0.0, 1.0);
     for (auto& z : v) z = Complex(nd(gen), nd(gen));
+    // scale-free: unit-vector norm
     if (hp.prepare_start_vector(v.data(), n) < 1e-12) return hp.ghost_shift();
     ed::krylov::LanczosKernelOptions lo;
     lo.max_iter   = std::min<std::size_t>(n, 30);

@@ -67,6 +67,7 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
     rd.inv_norms.reserve(tab.reps.size());
     for (std::size_t i = 0; i < tab.reps.size(); ++i) {
         const double nsq = ed::symmetry::projected_norm_sq_stab(tab.stabilizer_of(i), characters);
+        // scale-free: squared norm of a projected unit vector
         if (nsq <= 1e-12) continue;
         rd.reps.push_back(tab.reps[i]);
         rd.inv_norms.push_back(1.0 / std::sqrt(nsq));

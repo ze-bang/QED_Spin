@@ -109,6 +109,7 @@ struct OftlmOptions {
     std::size_t   krylov_dim   = 100;  ///< M: Lanczos steps per random sample
     std::size_t   num_exact    = 8;    ///< N_V: low-lying states treated exactly
     std::size_t   exact_krylov = 0;    ///< Lanczos steps for the exact eigenpairs (0 -> auto)
+    // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
     std::uint64_t random_seed  = 0;

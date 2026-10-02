@@ -177,6 +177,7 @@ bool lowest_levels(std::size_t m, const double* w, Bound&& bound, double scale, 
         std::size_t i = j;
         bool converged = false;
         double value = first;
+        // scale-free: relative to the Ritz values' scale
         for (; i < m && std::abs(w[i] - first) <= 1e-9 * scale; ++i)
             if (!converged && bound(i) <= 1e-7 * scale) { converged = true; value = w[i]; }
         if (!converged) return false;
@@ -202,6 +203,7 @@ inline std::size_t leading_block(const std::vector<double>& alpha, const std::ve
         if (i + 1 < beta.size()) scale = std::max(scale, std::abs(beta[i + 1]));
     }
     for (std::size_t i = 1; i < m; ++i)
+        // scale-free: relative to the Ritz values' scale
         if (std::abs(beta[i]) <= 1e-12 * scale) return i;
     return m;
 }
@@ -513,6 +515,7 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override, 
             ++m;
             // An invariant subspace (see leading_block): its tridiagonal is exact; going on would
             // build vectors from roundoff.
+            // scale-free: relative to the Ritz values' scale
             if (!(b > 1e-12 * scale)) { done = true; break; }
             scale = std::max(scale, b);
             std::swap(vp, vc);
@@ -522,6 +525,7 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override, 
                 // Paige bound on the smallest Ritz value only.
                 const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
                 const double tscale = std::max({std::abs(t.values[0]), std::abs(t.values[m - 1]), 1e-300});
+                // scale-free: relative to the Ritz values' scale
                 if (beta[m] * std::abs(t.z(m - 1, 0)) < 1e-9 * tscale) done = true;
             }
         }
