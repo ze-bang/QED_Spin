@@ -383,26 +383,35 @@ TEST_CASE("thermal: dense_max_dim = 0 samples the block", "[thermal]") {
     REQUIRE(worst > 1e-10);
 }
 
-TEST_CASE("thermal: a spin tower or observables keep a small block sampled", "[thermal]") {
+TEST_CASE("thermal: a spin tower or observables take the exact small-block solve too", "[thermal]") {
+    // P6.6 (audit P4-thermal-12): below dense_max_dim a block is solved exactly whatever is asked of it
+    // -- a spin tower on Q^dag H Q, observables through the eigenvectors -- instead of sampled.
     auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
-    const double e0 = ring_spectrum().front();
     SECTION("total spin") {
         auto s = one_block();
         s.use_sz = true;
-        s.two_S = 0;   // the singlets: the seeds are projected onto the tower
+        s.two_S = 0;   // the singlets
         const auto r = ed::sectors::thermal(*H, s, few_samples(ed::sectors::ThermalSpec::Method::FTLM));
-        REQUIRE(r.placement.host_dense == 0);
-        REQUIRE(r.placement.host_krylov >= 1);
-        for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
+        REQUIRE(r.placement.host_dense >= 1);
+        REQUIRE(r.placement.host_krylov == 0);
+        ed::sectors::ThermalSpec ex;
+        ex.method = ed::sectors::ThermalSpec::Method::Exact;
+        ex.temperatures = kT;
+        const auto x = ed::sectors::thermal(*H, s, ex);
+        for (std::size_t i = 0; i < kT.size(); ++i) {
+            REQUIRE(std::abs(r.E[i] - x.E[i]) <= 1e-9 * std::max(1.0, std::abs(x.E[i])));
+            REQUIRE(std::abs(r.lnZ[i] - x.lnZ[i]) <= 1e-9 * std::max(1.0, std::abs(x.lnZ[i])));
+        }
     }
     SECTION("observables") {
         auto t = few_samples(ed::sectors::ThermalSpec::Method::FTLM);
         t.observables = {H.get()};
         const auto r = ed::sectors::thermal(*H, one_block(), t);
-        REQUIRE(r.placement.host_dense == 0);
-        REQUIRE(r.placement.host_krylov == 1);
+        REQUIRE(r.placement.host_dense == 1);
+        REQUIRE(r.placement.host_krylov == 0);
         REQUIRE(r.O.size() == 1);
-        for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
+        for (std::size_t i = 0; i < kT.size(); ++i)   // <H>(T) is E(T)
+            REQUIRE(std::abs(r.O[0][i] - Complex(r.E[i], 0.0)) <= 1e-9 * std::max(1.0, std::abs(r.E[i])));
     }
 }
 
