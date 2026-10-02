@@ -254,9 +254,11 @@ krylov_schur_kernel(Backend&                             be,
             const double gap = std::max(10.0 * opts.tolerance, 1e-8 * std::abs(top));
             for (auto& z : host) z = gaussian_entry<Scalar>(nd, gen);
             be.copy_from_host(host.data(), v_seed.get(), local_n);
-            Cycle c;
-            if (!run_cycle(c) || c.evals[c.idx[0]] >= top - gap) break;
-            ritz_vector(c, c.idx[0], v_seed.get());
+            {
+                Cycle c;
+                if (!run_cycle(c) || c.evals[c.idx[0]] >= top - gap) break;
+                ritz_vector(c, c.idx[0], v_seed.get());
+            }   // the probe's basis is freed before lock_until runs cycles of its own
             const std::size_t before = locked_evals.size();
             lock_until(before + 1, opts.max_restarts);
             if (locked_evals.size() == before) { converged = false; break; }   // skipped, not recovered

@@ -32,9 +32,9 @@ enum class Path {
     /// `width` mTPQ samples: the spectral-bounds Lanczos (5 vectors), then psi and H psi per
     /// sample plus its host seed.
     Mtpq,
-    /// Krylov-Schur for `k` levels with a `krylov`-vector cycle: the cycle basis twice (the
-    /// degeneracy probe runs cycles while the outer one is alive), k + 1 locked vectors, seeds and
-    /// working vectors; on the device the staging copy of locked + basis columns as well.
+    /// Krylov-Schur for `k` levels with a `krylov`-vector cycle: the cycle basis, k + 1 locked
+    /// vectors, seeds and working vectors (measured: m + k + 10 on the host); on the device the
+    /// staging copy of the locked and basis columns as well.
     KrylovSchur,
     /// The certified ground-state vector keeping its basis (`krylov` vectors, host only).
     GsKeptBasis,
@@ -86,8 +86,8 @@ struct Shape {
             else          { host = (5.0 + t) * V; }
             break;
         case Path::KrylovSchur:
-            if (s.device) { dev = (3.0 * M + 2.0 * k + 8.0) * V; host = 3.0 * V; }
-            else          { host = (2.0 * M + k + 10.0) * V; }
+            if (s.device) { dev = (2.0 * M + 2.0 * k + 8.0) * V; host = 3.0 * V; }
+            else          { host = (M + k + 10.0) * V; }
             break;
         case Path::GsKeptBasis:
             host = (std::min(M, static_cast<double>(s.dim)) + 6.0) * V;

@@ -292,7 +292,7 @@ static std::uint64_t ks_cycle_cap(std::uint64_t nb, std::size_t k) {
     return room < per ? 1 : static_cast<std::uint64_t>(room / per);
 }
 
-// Budgets. The cycle (m length-nb vectors, held twice while the degeneracy probe runs) is capped
+// Budgets. The cycle (m length-nb vectors) is capped
 // by ks_cycle_cap; a cap below k + 8 vectors is a clean refusal, never a silent fall-back to the
 // ghost-prone scan. The total iteration budget is max(200k, 2000), spent as restart cycles.
 template <class B>
