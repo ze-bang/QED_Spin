@@ -29,7 +29,7 @@ else
     "grid_gpu_mtpq|${GRID} -k 'gpu and (th_mtpq or th_O)'"
     "grid_gpu_dyn0|${GRID} -k 'gpu and dyn0'"
     "grid_gpu_dynT_zz|${GRID} -k 'gpu and dynT_zz'"
-    "grid_gpu_dynT_pm|${GRID} -k 'gpu and dynT_pm'"
+    "grid_gpu_dynT_pm|${GRID} -k 'gpu and (dynT_pm or dynT_3b)'"
   )
 fi
 # Audit repro ratchet (python/tests/regress): shards bin-packed by the scripts' # SECONDS caps,

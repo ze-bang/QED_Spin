@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-# A term is (coeff, ((op, site), ...)) with op in "+-z" (xy are expanded).
+# A term is (coeff, ((op, site), ...)) with op in "+-zud" (xy are expanded; u and d are the
+# projectors on spin up and down).
 Term = tuple
 
 
@@ -36,6 +37,21 @@ def dot(i, j, J=1.0, jz=None):
     jz = J if jz is None else jz
     return [(0.5 * J, (("+", i), ("-", j))), (0.5 * J, (("-", i), ("+", j))),
             (jz, (("z", i), ("z", j)))]
+
+
+def ring(a, b, c, d, K):
+    """K (P + P^dagger), P the cyclic exchange of the spins on a -> b -> c -> d -> a, as its
+    16 + 16 matrix elements: |P s><s| = prod_i |(Ps)_i><s_i| with |up><up| = u, |dn><dn| = d,
+    |up><dn| = S+, |dn><up| = S-."""
+    sites = (a, b, c, d)
+    one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}   # (new, old), 1 = up
+    terms = []
+    for s in range(16):
+        old = [(s >> i) & 1 for i in range(4)]
+        new = [old[(i - 1) % 4] for i in range(4)]   # site i receives the spin of site i - 1
+        terms.append((K, tuple((one[(n, o)], x) for n, o, x in zip(new, old, sites))))
+        terms.append((K, tuple((one[(o, n)], x) for n, o, x in zip(new, old, sites))))
+    return terms
 
 
 def triple(i, j, k, chi):
@@ -62,11 +78,16 @@ class Model:
     extra: dict = field(default_factory=dict)
 
     def operator(self):
+        """Terms on up to three sites as records, longer ones (and projectors) through the algebra."""
         import qed
         H = qed.Operator(self.N)
         code = {"+": qed.OP_SPLUS, "-": qed.OP_SMINUS, "z": qed.OP_SZ}
+        long = []
         for c, ops in self.terms:
             if abs(c) < 1e-15:
+                continue
+            if len(ops) > 3 or any(op not in code for op, _ in ops):
+                long.append((c, ops))
                 continue
             args = [x for op, s in ops for x in (code[op], s)]
             if len(ops) == 1:
@@ -75,6 +96,8 @@ class Model:
                 H.add_two_body(*args, c)
             else:
                 H.add_three_body(*args, c)
+        for c, ops in long:
+            H = H + qed.Operator.product(self.N, "".join(op for op, _ in ops), [s for _, s in ops], c)
         return H
 
     def generator_set(self):
@@ -90,6 +113,9 @@ def _apply(ops, s):
         bit = (s >> site) & 1
         if op == "z":
             amp *= 0.5 if bit == 0 else -0.5
+        elif op in "ud":
+            if bit != (op == "d"):
+                return 0.0, s
         elif op == "+":
             if bit == 0:
                 return 0.0, s
@@ -185,7 +211,49 @@ def xyz_chain(N=12, jx=1.0, jy=0.6, jz=0.8):
                  u1=False, su2=False, notes="XYZ ring: Sz parity only, flip, translations")
 
 
-MODELS = {m.name: m for m in (chain(), triangular(3), triangular(3, chi=0.25), xyz_chain())}
+def square_ring(Lx=4, Ly=3, K=0.3):
+    """Heisenberg square torus with the four-site ring exchange K (P + P^dagger) on every plaquette."""
+    idx = lambda x, y: (x % Lx) + Lx * (y % Ly)  # noqa: E731
+    xy = [(x, y) for y in range(Ly) for x in range(Lx)]
+    terms = []
+    for x, y in xy:
+        terms += dot(idx(x, y), idx(x + 1, y)) + dot(idx(x, y), idx(x, y + 1))
+        terms += ring(idx(x, y), idx(x + 1, y), idx(x + 1, y + 1), idx(x, y + 1), K)
+    T1 = [idx(x + 1, y) for x, y in xy]
+    T2 = [idx(x, y + 1) for x, y in xy]
+    return Model(f"sq{Lx * Ly}ring", Lx * Ly, terms, [T1, T2], (Lx, Ly), xy,
+                 notes="square torus + four-site ring exchange: U(1), SU(2), flip, real")
+
+
+def kagome_bq(L=2, K=0.2):
+    """Heisenberg kagome torus (L x L cells) with K (S_u.S_u')(S_d.S_d') on every bowtie: u, u' the
+    other two sites of a site's up triangle, d, d' of its down triangle (four sites, commuting
+    factors, so Hermitian)."""
+    idx = lambda x, y, s: 3 * ((x % L) + L * (y % L)) + s  # noqa: E731
+    cells = [(x, y) for y in range(L) for x in range(L)]
+    up = [(idx(x, y, 0), idx(x, y, 1), idx(x, y, 2)) for x, y in cells]
+    down = [(idx(x, y, 1), idx(x + 1, y, 0), idx(x + 1, y - 1, 2)) for x, y in cells]
+    terms = []
+    for tri in up + down:
+        for i in range(3):
+            terms += dot(tri[i], tri[(i + 1) % 3])
+    for c in range(3 * L * L):
+        tu = next(t for t in up if c in t)
+        td = next(t for t in down if c in t)
+        a, b = (s for s in tu if s != c)
+        e, f = (s for s in td if s != c)
+        for c1, o1 in dot(a, b):
+            for c2, o2 in dot(e, f):
+                terms.append((K * c1 * c2, o1 + o2))
+    T1 = [idx(x + 1, y, s) for x, y in cells for s in range(3)]
+    T2 = [idx(x, y + 1, s) for x, y in cells for s in range(3)]
+    coords = [(x, y) for x, y in cells for _ in range(3)]
+    return Model(f"kagome{3 * L * L}bq", 3 * L * L, terms, [T1, T2], (L, L), coords,
+                 notes="kagome torus + four-site bowtie biquadratic: U(1), SU(2), flip, real")
+
+
+MODELS = {m.name: m for m in (chain(), triangular(3), triangular(3, chi=0.25), xyz_chain(), square_ring(),
+                              kagome_bq())}
 
 
 # ---------------------------------------------------------------------------

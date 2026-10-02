@@ -32,20 +32,21 @@ HERE = Path(__file__).resolve().parent
 CONTENT_MODELS = {
     "none":    ["chain12", "tri9chi"],
     "sz_all":  ["chain12", "tri9", "tri9chi"],
-    "sz_one":  ["chain12", "tri9"],
+    "sz_one":  ["chain12", "tri9", "sq12ring"],
     "parity":  ["xyz12"],
     "flip":    ["chain12"],
     "abelian": ["chain12", "tri9", "tri9chi", "xyz12"],
-    "lg":      ["chain12", "tri9", "tri9chi", "xyz12"],
+    "lg":      ["chain12", "tri9", "tri9chi", "xyz12", "sq12ring", "kagome12bq"],
     "tr":      ["chain12"],
-    "su2":     ["chain12", "tri9"],
+    "su2":     ["chain12", "tri9", "sq12ring", "kagome12bq"],
 }
 TASKS = ["eigs", "vectors", "expect", "spectrum", "th_exact", "th_ftlm", "th_mtpq", "th_Oexact", "th_Oftlm",
-         "dyn0_zz", "dyn0_pm", "dynT_zz", "dynT_pm"]
+         "dyn0_zz", "dyn0_pm", "dyn0_3b", "dynT_zz", "dynT_pm", "dynT_3b"]
 BACKENDS = ["cpu", "gpu"]
 
-# Dynamics probes need U(1) for S+ (it changes Sz); skip them where Sz is broken.
-Q = {"chain12": (3,), "tri9": (1, 1), "tri9chi": (1, 1), "xyz12": (3,)}
+# Dynamics probes need U(1) for S+ (it changes Sz); skip them where Sz is broken. The _3b probe
+# is three-body (three_body_probe).
+Q = {"chain12": (3,), "tri9": (1, 1), "tri9chi": (1, 1), "xyz12": (3,), "sq12ring": (1, 1), "kagome12bq": (1, 0)}
 OMEGA = np.linspace(-1.0, 7.0, 161)
 ETA = 0.1
 T_EXACT = np.linspace(0.2, 4.0, 12)
@@ -61,7 +62,7 @@ def _cells():
     for task, backend in itertools.product(TASKS, BACKENDS):
         for content, models in CONTENT_MODELS.items():
             for mname in models:
-                if task.endswith("_pm") and not MODELS[mname].u1:
+                if task.endswith(("_pm", "_3b")) and not MODELS[mname].u1:
                     continue
                 yield pytest.param(task, content, mname, backend,
                                    id=f"{task}-{content}-{mname}-{backend}")
@@ -76,6 +77,13 @@ def _baseline(backend):
 
 def _gpu_available():
     return qed.has_cuda_build() and qed._core.cuda_device_count() > 0
+
+
+def three_body_probe(m, q):
+    """(1/sqrt N) sum_j exp(-i Q.r_j) S^z_j S^+_{T1 j} S^z_{T2 j} (T2 = T1^2 on a chain)."""
+    T1 = m.translations[0]
+    T2 = m.translations[-1] if len(m.translations) > 1 else [T1[T1[j]] for j in range(m.N)]
+    return [(c, (("z", j), ("+", T1[j]), ("z", T2[j]))) for c, ((_, j),) in fourier(m.N, m.coords, m.shape, q, "+")]
 
 
 def _rel_l1(a, b):
@@ -228,7 +236,7 @@ def _run(task, content, mname, device, monkeypatch):
     if task.startswith("dyn"):
         op = "z" if task.endswith("_zz") else "+"
         T = None if task.startswith("dyn0") else T_DYN
-        terms = fourier(m.N, m.coords, m.shape, Q[mname], op)
+        terms = three_body_probe(m, Q[mname]) if task.endswith("_3b") else fourier(m.N, m.coords, m.shape, Q[mname], op)
         obs = Model("obs", m.N, terms, [], (), []).operator()
         # As for sampled thermodynamics, the device path must reproduce the CPU path -- except under
         # a spin restriction. There the target Lanczos starts from O|r> with no weight on the fully
