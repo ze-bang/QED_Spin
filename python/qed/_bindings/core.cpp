@@ -70,9 +70,8 @@ ComplexArray to_numpy(const ComplexVec& v) {
     return out;
 }
 
-// Add a one-site term op[site] with coefficient `coeff` to an Operator's
-// transform_data_ in the same Structure-of-Arrays format that the C++
-// fixtures use.
+// Add a one-site term op[site] with coefficient `coeff` to an Operator (one record, as the
+// C++ fixtures add them).
 void op_add_one_body(Operator& op,
                      int op_type,
                      uint64_t site,
@@ -88,7 +87,7 @@ void op_add_one_body(Operator& op,
     t.site_index = site;
     t.coefficient = coeff;
     t.is_two_body = false;
-    op.transform_data_.push_back(t);
+    op.add_record(t);
     // Mark the SoA + isReal() + matvec backend caches stale so a subsequent
     // apply()/isReal() rebuilds. The size-aware commitPendingTransforms()
     // would also catch this, but invalidating eagerly here also
@@ -116,7 +115,7 @@ void op_add_two_body(Operator& op,
     t.site_index_2 = site_2;
     t.coefficient = coeff;
     t.is_two_body = true;
-    op.transform_data_.push_back(t);
+    op.add_record(t);
     op.invalidateMatrixCaches();
 }
 
@@ -143,7 +142,7 @@ void op_add_three_body(Operator& op,
     t.op_type_3 = static_cast<uint8_t>(op_type_3);
     t.site_index_3 = site_3;
     t.coefficient = coeff;
-    op.three_body_data_.push_back(t);
+    op.add_record(t);
     op.invalidateMatrixCaches();
 }
 
@@ -168,7 +167,7 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
 // Yields (op_type, site, coeff) tuples for every one-body term.
 py::list op_iter_one_body(const Operator& op) {
     py::list out;
-    for (const auto& t : op.transform_data_) {
+    for (const auto& t : op.records()) {
         if (t.is_two_body) continue;
         out.append(py::make_tuple(static_cast<int>(t.op_type),
                                   static_cast<uint64_t>(t.site_index),
@@ -181,7 +180,7 @@ py::list op_iter_one_body(const Operator& op) {
 // two-body term.
 py::list op_iter_two_body(const Operator& op) {
     py::list out;
-    for (const auto& t : op.transform_data_) {
+    for (const auto& t : op.records()) {
         if (!t.is_two_body) continue;
         out.append(py::make_tuple(static_cast<int>(t.op_type),
                                   static_cast<uint64_t>(t.site_index),
@@ -196,7 +195,7 @@ py::list op_iter_two_body(const Operator& op) {
 // tuples for every three-body term.
 py::list op_iter_three_body(const Operator& op) {
     py::list out;
-    for (const auto& t : op.three_body_data_) {
+    for (const auto& t : op.three_body_records()) {
         out.append(py::make_tuple(static_cast<int>(t.op_type_1),
                                   static_cast<uint64_t>(t.site_index_1),
                                   static_cast<int>(t.op_type_2),
@@ -309,7 +308,7 @@ PYBIND11_MODULE(_core, m) {
                  // a list of 6-tuples mirroring ``Operator::TransformData``
                  // (three-body terms are not included).
                  py::list out;
-                 for (const auto& t : op.transform_data_) {
+                 for (const auto& t : op.records()) {
                      out.append(py::make_tuple(
                          static_cast<int>(t.op_type),
                          t.site_index,
@@ -341,7 +340,7 @@ PYBIND11_MODULE(_core, m) {
              "List of ``(op_type, site, coeff)`` tuples for every one-body "
              "term currently in the operator. ``op_type`` is one of "
              "``OP_SPLUS`` / ``OP_SMINUS`` / ``OP_SZ``. Order matches the "
-             "internal ``transform_data_`` storage order.")
+             "insertion order of the records.")
         .def("iter_two_body_terms", &op_iter_two_body,
              "List of ``(op_type_1, site_1, op_type_2, site_2, coeff)`` "
              "tuples for every two-body term. Same ordering convention as "
@@ -406,7 +405,7 @@ PYBIND11_MODULE(_core, m) {
           "The queued (level, message) records, oldest first; empties the queue.");
     m.def("check_generators_commute",
           [](const Operator& op, const std::vector<std::vector<int>>& generators) {
-              const ed::ops::MaskedOperator h = ed::ops::masked(op);
+              const ed::ops::MaskedOperator& h = op.canonical();
               std::vector<bool> out;
               out.reserve(generators.size());
               for (const auto& g : generators) out.push_back(ed::ops::commutes_with_permutation(h, g));

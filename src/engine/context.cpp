@@ -423,7 +423,7 @@ void make_engine_context(const ::Operator&                    op,
             "group; residues go in `residue_perms`.");
     cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
 
-    cx.terms.emplace(ed::ops::masked(op));
+    cx.terms = &op.canonical();
     const ed::ops::MaskedOperator& h = *cx.terms;
 
     // Extend the ABELIAN factor by the global spin flip when

@@ -32,7 +32,7 @@ std::vector<std::vector<Complex>>
 expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
     const int n_sites = r.n_sites;
     for (const ::Operator* O : ops)
-        if (s.two_S >= 0 && !ed::ops::su2_invariant(ed::ops::masked(*O)))
+        if (s.two_S >= 0 && !ed::ops::su2_invariant(O->canonical()))
             throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
                                         "invariant (a level holds one member of each spin multiplet)");
     // One averaged operator per (op, flip, keep); one matvec per (averaged op, basis).
@@ -71,7 +71,7 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
 Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
     const int n_sites = r.n_sites;
     if (i >= r.levels.size() || j >= r.levels.size()) throw std::out_of_range("matrix_element: level index");
-    if (!O.three_body_data_.empty())
+    if (!O.three_body_records().empty())
         throw std::invalid_argument("matrix_element: three-body terms are not supported between sectors");
     const Level& Li = r.levels[i];
     const Level& Lj = r.levels[j];
@@ -81,7 +81,7 @@ Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, 
     using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
     const auto n = static_cast<std::uint64_t>(n_sites);
     ed::dssf::CrossSectorOrbitObservable obs(Ref::from_rep(*vj.basis, n), 0, Ref::from_rep(*vi.basis, n), 0,
-                                             O.transform_data_, O.getSpin());
+                                             O.records(), O.getSpin());
     std::vector<Complex> y(vi.amplitudes.size());
     obs.apply(vj.amplitudes.data(), y.data(), y.size());
     return dot(vi.amplitudes, y);

@@ -10,10 +10,13 @@
 //      same-site S_i.S_i records), where the record-level detectors these replaced were
 //      wrong (P3.1 step 3, 322d560, ran both side by side);
 //   3. the cases of the detectors' own tests: Heisenberg, XXZ, XY, Ising, fields, mixed
-//      Sz S+-, S+S+ pairs, three-body products, the scalar chirality.
+//      Sz S+-, S+S+ pairs, three-body products, the scalar chirality;
+//   4. to_operator(m) is m (its canonical terms and its dense apply), Operator::canonical()
+//      follows the records, and a copy is independent.
 // =============================================================================
 #include "common/catch2_harness.h"
 
+#include <ed/core/errors.h>
 #include <ed/input/hamiltonian_builder.h>
 #include <ed/input/lattice.h>
 #include <ed/ops/invariance.h>
@@ -256,11 +259,11 @@ TEST_CASE("masked(op) is the operator the kernels apply", "[invariance]") {
         REQUIRE(d <= 1e-13 * std::max(1.0, max_abs(D)));
     }
     auto bad = records();
-    bad->addOneBodyTerm(3, 0, Cx(1.0, 0.0));
-    CHECK_THROWS_AS(ed::ops::masked(*bad), std::invalid_argument);
-    auto far = records();
-    far->addTwoBodyTerm(2, 0, 2, N, Cx(1.0, 0.0));
-    CHECK_THROWS_AS(ed::ops::masked(*far), std::invalid_argument);
+    CHECK_THROWS_AS(bad->addOneBodyTerm(3, 0, Cx(1.0, 0.0)), std::invalid_argument);
+    CHECK_THROWS_AS(bad->addTwoBodyTerm(2, 0, 2, N, Cx(1.0, 0.0)), std::invalid_argument);
+    CHECK_THROWS_AS(bad->addThreeBodyTerm(0, 0, 1, 1, 7, 2, Cx(1.0, 0.0)), std::invalid_argument);
+    CHECK(bad->records().empty());
+    CHECK(bad->three_body_records().empty());
     CHECK_THROWS_AS(ed::ops::commutes_with_permutation(ed::ops::masked(*records()), {0, 0, 1, 2, 3, 4, 5, 6}),
                     std::invalid_argument);
 }
@@ -363,4 +366,47 @@ TEST_CASE("su2 implies U1, the flip and (without chirality) conjugation", "[inva
     CHECK(ed::ops::conjugation_invariant(h));
     CHECK(ed::ops::sz_content(h + P("++", {0, 1}, 0.2) + P("--", {0, 1}, 0.2)) == ed::ops::SzContent::Parity);
     CHECK(ed::ops::sz_content(h + P("+", {0}, 0.2)) == ed::ops::SzContent::None);
+}
+
+TEST_CASE("to_operator writes the canonical terms as records the kernels apply", "[invariance]") {
+    std::mt19937 rng(20261001);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
+    std::uniform_int_distribution<int> pick_len(1, 3);
+    std::normal_distribution<double> g(0.0, 1.0);
+    for (int trial = 0; trial < 40; ++trial) {
+        MaskedOperator m(N);
+        for (int t = 0; t < 6; ++t) {      // products of at most three factors: at most three sites
+            std::string ops;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                ops.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            m.add(MaskedOperator::product(N, ops, sites, Cx(g(rng), g(rng))));
+        }
+        m = m + m.dagger();
+        const ::Operator op = ed::ops::to_operator(m);
+        INFO("trial " << trial);
+        REQUIRE(op.canonical().equals(m, 1e-14));
+        const auto D = dense_apply(op), A = m.to_dense();
+        double d = 0.0;
+        for (std::size_t i = 0; i < D.size(); ++i) d = std::max(d, std::abs(D[i] - A[i]));
+        REQUIRE(d <= 1e-13 * std::max(1.0, max_abs(A)));
+    }
+    CHECK(ed::ops::to_operator(MaskedOperator(N)).records().empty());
+    CHECK_THROWS_AS(ed::ops::to_operator(MaskedOperator::product(N, "zzzz", {0, 1, 2, 3})), ed::Unsupported);
+}
+
+TEST_CASE("canonical() follows the records, and a copy is independent", "[invariance]") {
+    auto H = records();
+    H->addTwoBodyTerm(2, 0, 2, 1, Cx(1.0, 0.0));
+    CHECK(H->canonical().equals(MaskedOperator::product(N, "zz", {0, 1})));
+    ::Operator copy(*H);
+    H->addOneBodyTerm(2, 3, Cx(0.5, 0.0));
+    CHECK(H->canonical().equals(MaskedOperator::product(N, "zz", {0, 1}) + MaskedOperator::product(N, "z", {3}, 0.5)));
+    CHECK(copy.canonical().equals(MaskedOperator::product(N, "zz", {0, 1})));
+    copy = *H;
+    CHECK(copy.canonical().equals(H->canonical()));
+    CHECK(ed::ops::sz_content(H->canonical()) == ed::ops::SzContent::U1);
 }

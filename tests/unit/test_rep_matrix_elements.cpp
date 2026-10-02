@@ -271,7 +271,7 @@ TEST_CASE("sectors built by the engine", "[rep_me]") {
         t.op_type = 2; t.site_index = static_cast<std::uint64_t>(i); t.op_type_2 = 2;
         t.site_index_2 = static_cast<std::uint64_t>((i + 1) % N);
         t.coefficient = Cx(1.0, 0.0); t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        op->add_record(t);
     }
     std::vector<std::vector<int>> A;
     for (int s = 0; s < N; ++s) {

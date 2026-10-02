@@ -200,14 +200,14 @@ enum class Keep { All, Sz, Parity };
 // what `keep` conserves. Equal terms are merged, so the result is no larger than it must be.
 inline ::Operator averaged(const ::Operator& O, const std::vector<Perm>& G, bool flip, Keep keep) {
     std::vector<std::pair<AvgTerm, Complex>> terms;
-    for (const auto& t : O.transform_data_) {
+    for (const auto& t : O.records()) {
         AvgTerm x;
         x.n = t.is_two_body ? 2 : 1;
         x.op   = {t.op_type, t.op_type_2, 0};
         x.site = {t.site_index, t.site_index_2, 0};
         terms.push_back({x, t.coefficient});
     }
-    for (const auto& t : O.three_body_data_) {
+    for (const auto& t : O.three_body_records()) {
         AvgTerm x;
         x.n = 3;
         x.op   = {t.op_type_1, t.op_type_2, t.op_type_3};
@@ -259,9 +259,8 @@ inline ::Operator averaged(const ::Operator& O, const std::vector<Perm>& G, bool
 
 inline ::Operator conjugated(const ::Operator& O) {
     ::Operator out(O.getNumBits(), O.getSpin());
-    out.copyTermsFrom(O);
-    for (auto& t : out.transform_data_) t.coefficient = std::conj(t.coefficient);
-    for (auto& t : out.three_body_data_) t.coefficient = std::conj(t.coefficient);
+    for (auto t : O.records()) { t.coefficient = std::conj(t.coefficient); out.add_record(t); }
+    for (auto t : O.three_body_records()) { t.coefficient = std::conj(t.coefficient); out.add_record(t); }
     return out;
 }
 

@@ -163,14 +163,14 @@ std::uint64_t state_index(std::uint64_t st, int n_up) {
 
 }  // namespace
 
-SzContent sz_content(const ::Operator& H) { return ed::ops::sz_content(ed::ops::masked(H)); }
+SzContent sz_content(const ::Operator& H) { return ed::ops::sz_content(H.canonical()); }
 
 std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
     const int n_sites = static_cast<int>(H.getNumBits());
     // A permutation H does not commute with would give silently wrong spectra; a residue that
     // does not normalise the abelian group, wrong stars, multiplets and labels.
     require_normal(s, n_sites);
-    const ed::ops::MaskedOperator h = ed::ops::masked(H);
+    const ed::ops::MaskedOperator& h = H.canonical();
     for (const auto* set : {&s.abelian, &s.residues})
         for (const Perm& g : *set)
             if (!ed::ops::commutes_with_permutation(h, g))

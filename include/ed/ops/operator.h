@@ -107,21 +107,14 @@ public:
         bool is_two_body{false};
     };
 
-    /// Canonical AoS term storage. Direct pushes into these vectors are
-    /// fully supported: ``commitPendingTransforms()`` (called automatically
-    /// by every matvec entry point) tracks vector sizes and rebuilds the
-    /// SoA cache _and_ invalidates the backend CSR cache whenever they
-    /// change.
-    ///
-    /// The recommended API is the typed setters below
-    /// (``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``);
-    /// they encode intent at the call site and proactively invalidate via
-    /// ``invalidateMatrixCaches()`` so a subsequent ``isReal()`` call
-    /// returns a fresh answer without waiting for the next matvec. Direct
-    /// pushes are safe because ``commitPendingTransforms`` is size-aware,
-    /// but new code should prefer the typed setters.
+private:
+    /// The term records in insertion order: what the kernels read (through the SoA bins
+    /// below) until the walk runs on the canonical terms (P3.2). They change only through
+    /// add_record and the typed setters, which validate every factor.
     std::vector<TransformData>           transform_data_;
     std::vector<ThreeBodyTransformData>  three_body_data_;
+
+public:
 
     /// SoA cache derived from ``transform_data_`` / ``three_body_data_``.
     /// Regenerated on demand by ``commitPendingTransforms()`` whenever
@@ -131,8 +124,38 @@ public:
     mutable ed::matvec::TermStorage terms_;
 
     // ------------------------------------------------------------------
-    // Typed setters: the canonical public mutation surface.
+    // Records: read them, append one (validated), or use the typed setters.
     // ------------------------------------------------------------------
+
+    /// The records in insertion order (a two-body record is O1 O2 with O2 acting first).
+    [[nodiscard]] const std::vector<TransformData>& records() const noexcept { return transform_data_; }
+    [[nodiscard]] const std::vector<ThreeBodyTransformData>& three_body_records() const noexcept {
+        return three_body_data_;
+    }
+
+    /// Append one record. Throws std::invalid_argument for an op type outside 0 (S+), 1 (S-),
+    /// 2 (Sz) or a site outside [0, n_bits).
+    void add_record(const TransformData& t) {
+        check_factor_(t.op_type, t.site_index);
+        if (t.is_two_body) check_factor_(t.op_type_2, t.site_index_2);
+        transform_data_.push_back(t);
+        invalidateMatrixCaches();
+    }
+    void add_record(const ThreeBodyTransformData& t) {
+        check_factor_(t.op_type_1, t.site_index_1);
+        check_factor_(t.op_type_2, t.site_index_2);
+        check_factor_(t.op_type_3, t.site_index_3);
+        three_body_data_.push_back(t);
+        invalidateMatrixCaches();
+    }
+
+    /// The operator's canonical terms (invariance.h), built on first use and kept until the
+    /// records change.
+    [[nodiscard]] const ed::ops::MaskedOperator& canonical() const {
+        std::lock_guard<std::mutex> lock(canonical_mutex_);
+        if (!canonical_) canonical_ = std::make_shared<const ed::ops::MaskedOperator>(ed::ops::masked(*this));
+        return *canonical_;
+    }
 
     /// Append a one-body term (op_type, site, coeff) to the canonical AoS
     /// storage and invalidate the SoA cache. ``op_type``: 0 = S+, 1 = S-,
@@ -143,8 +166,7 @@ public:
         td.site_index  = site;
         td.coefficient = coeff;
         td.is_two_body = false;
-        transform_data_.push_back(td);
-        invalidateMatrixCaches();
+        add_record(td);
     }
 
     /// Append a two-body term (op1*site1)(op2*site2) with coupling ``coeff``.
@@ -158,8 +180,7 @@ public:
         td.site_index_2 = site_2;
         td.coefficient  = coeff;
         td.is_two_body  = true;
-        transform_data_.push_back(td);
-        invalidateMatrixCaches();
+        add_record(td);
     }
 
     /// Append a three-body term (op1*site1)(op2*site2)(op3*site3) with
@@ -176,8 +197,7 @@ public:
         td.op_type_3    = op_type_3;
         td.site_index_3 = site_3;
         td.coefficient  = coeff;
-        three_body_data_.push_back(td);
-        invalidateMatrixCaches();
+        add_record(td);
     }
 
     /// Replace this operator's canonical AoS term storage with a verbatim
@@ -198,15 +218,8 @@ public:
      *
      * Called automatically by ``term_view_()`` (and therefore by ``apply``)
      * before the matvec kernel reads ``terms_``. Public so that callers reading the
-     * SoA bins directly can force a refresh after touching the AoS vectors.
-     *
-     * The size-tracking check (vs a plain ``terms_fresh_`` flag) is what
-     * makes direct pushes to ``transform_data_`` / ``three_body_data_``
-     * safe: a caller that forgot to invoke ``invalidateMatrixCaches()``
-     * after appending a term still gets a correct SoA rebuild on the
-     * next ``apply()``, because the recorded AoS sizes diverge from the
-     * live ones. The typed setters above (``addOneBodyTerm`` &c.) are
-     * still preferred -- they invalidate the backend CSR cache eagerly.
+     * SoA bins directly can force a refresh. The record counts are compared as well as
+     * ``terms_fresh_``, a second guard behind add_record's eager invalidation.
      */
     void commitPendingTransforms() const {
         const std::size_t aos_n  = transform_data_.size();
@@ -260,6 +273,7 @@ public:
         terms_fresh_                    = false;
         terms_committed_aos_size_       = 0;
         terms_committed_three_aos_size_ = 0;
+        canonical_.reset();
         if (backend_) backend_->invalidate_caches();
     }
 
@@ -289,7 +303,7 @@ public:
         // non-Hermitian input up front instead of returning numbers.
         commitPendingTransforms();
         if (!hermitian_check_done_) {
-            hermitian_cached_      = ed::ops::hermitian(ed::ops::masked(*this));
+            hermitian_cached_      = ed::ops::hermitian(canonical());
             hermitian_check_done_  = true;
         }
         return hermitian_cached_;
@@ -365,6 +379,7 @@ public:
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
+            canonical_.reset();
             backend_.reset();
         }
         return *this;
@@ -382,6 +397,7 @@ public:
             terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
+            canonical_.reset();
             backend_.reset();
             other.backend_.reset();
         }
@@ -506,6 +522,19 @@ protected:
     // policy without re-implementing apply() itself.
     // -------------------------------------------------------------------
     mutable std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
+
+    // The canonical terms (canonical()), immutable once built; reset with the other caches.
+    mutable std::shared_ptr<const ed::ops::MaskedOperator> canonical_;
+    mutable std::mutex canonical_mutex_;
+
+    void check_factor_(uint8_t op, uint64_t site) const {
+        if (op > 2)
+            throw std::invalid_argument("Operator: op type " + std::to_string(op)
+                                        + " is not 0 (S+), 1 (S-) or 2 (Sz)");
+        if (site >= n_bits_)
+            throw std::invalid_argument("Operator: site " + std::to_string(site) + " is outside [0, "
+                                        + std::to_string(n_bits_) + ")");
+    }
 
     /**
      * @brief Construct a fresh matvec backend for this operator.

@@ -4,7 +4,7 @@
 //
 // TermStorage: the canonical, single-source-of-truth Structure-of-Arrays
 // term schema for a spin-system Hamiltonian. Owned by `Operator`, which
-// routes its AoS term list (``transform_data_`` / ``three_body_data_``) into
+// routes its AoS term records (``Operator::records()`` / ``three_body_records()``) into
 // it via ``classify_route`` in ``commitPendingTransforms``.
 //
 // The matvec kernels read only these SoA bins. The bit-flip schema (field

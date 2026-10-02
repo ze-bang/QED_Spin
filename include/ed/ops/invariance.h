@@ -27,6 +27,12 @@ inline constexpr double kInvarianceRtol = 1e-10;
 /// outside {0 = S+, 1 = S-, 2 = Sz} or a site outside [0, n).
 [[nodiscard]] MaskedOperator masked(const ::Operator& op);
 
+/// The Operator whose records are `m`'s canonical terms, in key order: a term on k sites is
+/// one k-body record (Z = 2 Sz folded into the coefficient; the identity is the record
+/// Sz_0 Sz_0 = 1/4), so masked(to_operator(m)) == m. Throws ed::Unsupported for a term on
+/// four or more sites (the kernels take at most three until they run on the canonical terms).
+[[nodiscard]] ::Operator to_operator(const MaskedOperator& m);
+
 /// g H g^-1 == H, given the image.
 [[nodiscard]] inline bool invariant(const MaskedOperator& H, const MaskedOperator& image,
                                     double rtol = kInvarianceRtol) {

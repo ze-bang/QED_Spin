@@ -58,9 +58,9 @@ bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
 std::set<int> n_up_shifts(const ::Operator& O) {
     auto d = [](int op) { return op == 0 ? -1 : (op == 1 ? 1 : 0); };   // S+ clears a set bit
     std::set<int> out;
-    for (const auto& t : O.transform_data_)
+    for (const auto& t : O.records())
         if (std::abs(t.coefficient) > 1e-15) out.insert(d(t.op_type) + (t.is_two_body ? d(t.op_type_2) : 0));
-    for (const auto& t : O.three_body_data_)
+    for (const auto& t : O.three_body_records())
         if (std::abs(t.coefficient) > 1e-15) out.insert(d(t.op_type_1) + d(t.op_type_2) + d(t.op_type_3));
     return out;
 }
@@ -126,7 +126,7 @@ bool apply_term(const ::Operator::TransformData& t, std::uint64_t& st, Complex& 
 // selection rule makes a projection vanish exactly; random weights cannot cancel an allowed one.
 std::vector<bool> reachable(const ed::symmetry::RepSectorData& src, const std::vector<Target>& ts,
                             const ::Operator& O) {
-    if (!O.three_body_data_.empty()) return std::vector<bool>(ts.size(), true);
+    if (!O.three_body_records().empty()) return std::vector<bool>(ts.size(), true);
     std::unordered_map<std::uint64_t, Complex> psi;
     const auto sp = src.make_policy();
     std::mt19937_64 gen(0x5E1EC7ULL);
@@ -138,7 +138,7 @@ std::vector<bool> reachable(const ed::symmetry::RepSectorData& src, const std::v
         for (int g = 0; g < src.group_size; ++g) {
             const std::uint64_t base = sp.apply_perm(src.reps[r], g);
             const Complex w = c * std::conj(src.characters[static_cast<std::size_t>(g)]);
-            for (const auto& t : O.transform_data_) {
+            for (const auto& t : O.records()) {
                 std::uint64_t st = base;
                 Complex amp;
                 if (apply_term(t, st, amp)) psi[st] += w * amp;
@@ -264,9 +264,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     detail::require_device(d.device, "dynamics");
     ed::parallel::pin_omp_threads_once();
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
-    if (s.spin_flip == 1 && !ed::ops::flip_invariant(ed::ops::masked(H)))
+    if (s.spin_flip == 1 && !ed::ops::flip_invariant(H.canonical()))
         throw ed::InvalidRequest("dynamics: spin_flip='require', but H is not spin-flip symmetric");
-    if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(ed::ops::masked(H)))
+    if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(H.canonical()))
         throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
     const Spec u = unfolded(s);
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
@@ -350,7 +350,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                     ed::dssf::CrossSectorOrbitObservable obs(
                         Ref::from_rep(*v.basis, static_cast<std::uint64_t>(n_sites)), 0,
                         Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0,
-                        O.transform_data_, spin);
+                        O.records(), spin);
                     const std::size_t n = t.rd->reps.size();
                     std::vector<Complex> phi(n);
                     auto t_sc = std::chrono::steady_clock::now();
@@ -487,7 +487,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     auto observable = [&](const Job& j, const Target& t) {
         return ed::dssf::CrossSectorOrbitObservable(
             Ref::from_rep(*j.src->rd, static_cast<std::uint64_t>(n_sites)), 0,
-            Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0, O.transform_data_, spin);
+            Ref::from_rep(*t.rd, static_cast<std::uint64_t>(n_sites)), 0, O.records(), spin);
     };
     auto collect = [&](const Job& j, auto&& kernel) {
         Source src;

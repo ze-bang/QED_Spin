@@ -45,10 +45,8 @@ using ComplexVector = std::vector<Complex>;
 //
 //   H = J Σ_{i,j bond} ( 1/2*(S+_i S-_j + S-_i S+_j) + Sz_i Sz_j )
 //
-// We go through the optimized SoA path by pushing TransformData entries
-// directly into ``op->transform_data_``; ``Operator::commitPendingTransforms``
-// (invoked automatically by every matvec entry point) tracks the vector size
-// and rebuilds the SoA ``terms_`` cache on the next apply().
+// The TransformData records go in through Operator::add_record; the SoA ``terms_`` cache is
+// rebuilt from them on the next apply().
 inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
                                                        bool periodic = false) {
     auto op = std::make_unique<Operator>(N, 0.5f);
@@ -66,7 +64,7 @@ inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
             t.site_index_2 = j;
             t.coefficient = J_real;
             t.is_two_body = true;
-            op->transform_data_.push_back(t);
+            op->add_record(t);
         }
         // 1/2 S+_i S-_j
         {
@@ -77,7 +75,7 @@ inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
             t.site_index_2 = j;
             t.coefficient = J_half;
             t.is_two_body = true;
-            op->transform_data_.push_back(t);
+            op->add_record(t);
         }
         // 1/2 S-_i S+_j
         {
@@ -88,7 +86,7 @@ inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
             t.site_index_2 = j;
             t.coefficient = J_half;
             t.is_two_body = true;
-            op->transform_data_.push_back(t);
+            op->add_record(t);
         }
     }
     return op;

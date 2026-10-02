@@ -2,8 +2,10 @@
 // src/ops/invariance.cpp -- the records-to-terms adapter and the symmetry verdicts.
 // =============================================================================
 #include <ed/ops/invariance.h>
+#include <ed/core/errors.h>
 #include <ed/ops/operator.h>
 
+#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -40,7 +42,7 @@ MaskedOperator total(int n, char a) {   // S^a_tot
 MaskedOperator masked(const ::Operator& op) {
     const int n = static_cast<int>(op.getNumBits());
     MaskedOperator m(n);
-    for (const auto& t : op.transform_data_) {
+    for (const auto& t : op.records()) {
         if (t.is_two_body)
             m.add(MaskedOperator::product(n, {op_char(t.op_type), op_char(t.op_type_2)},
                                           {site_of(t.site_index, n), site_of(t.site_index_2, n)},
@@ -49,12 +51,46 @@ MaskedOperator masked(const ::Operator& op) {
             m.add(MaskedOperator::product(n, std::string(1, op_char(t.op_type)),
                                           {site_of(t.site_index, n)}, t.coefficient));
     }
-    for (const auto& t : op.three_body_data_)   // O1 acts first: the last factor of a product
+    for (const auto& t : op.three_body_records())   // O1 acts first: the last factor of a product
         m.add(MaskedOperator::product(n, {op_char(t.op_type_3), op_char(t.op_type_2), op_char(t.op_type_1)},
                                       {site_of(t.site_index_3, n), site_of(t.site_index_2, n),
                                        site_of(t.site_index_1, n)},
                                       t.coefficient));
     return m;
+}
+
+::Operator to_operator(const MaskedOperator& m) {
+    const int n = m.n_sites();
+    ::Operator op(static_cast<std::uint64_t>(n), 0.5f);
+    const double zf = kSetBitIsDown ? 2.0 : -2.0;   // Z = (-1)^bit = zf Sz
+    for (const auto& t : m.terms()) {
+        const std::uint64_t on = t.flip_mask | t.sign_mask;
+        const int k = masked_popcount(on);
+        if (k > 3)
+            throw ed::Unsupported("Operator: a term on " + std::to_string(k) + " sites; the kernels take at "
+                                  "most three");
+        std::array<std::uint8_t, 3> o{};
+        std::array<std::uint64_t, 3> st{};
+        Complex c = t.coeff;
+        int f = 0;
+        for (int i = 0; i < n; ++i) {
+            const std::uint64_t b = 1ULL << i;
+            if (!(on & b)) continue;
+            st[static_cast<std::size_t>(f)] = static_cast<std::uint64_t>(i);
+            if (t.flip_mask & b) {   // S+ lifts a down spin, S- lowers an up one
+                o[static_cast<std::size_t>(f)] = ((t.cond_val & b) == down_bits(b)) ? 0 : 1;
+            } else {
+                o[static_cast<std::size_t>(f)] = 2;
+                c *= zf;
+            }
+            ++f;
+        }
+        if (k == 0)      op.addTwoBodyTerm(2, 0, 2, 0, 4.0 * c);
+        else if (k == 1) op.addOneBodyTerm(o[0], st[0], c);
+        else if (k == 2) op.addTwoBodyTerm(o[0], st[0], o[1], st[1], c);
+        else             op.addThreeBodyTerm(o[0], st[0], o[1], st[1], o[2], st[2], c);
+    }
+    return op;
 }
 
 bool commutes_with_permutation(const MaskedOperator& H, const std::vector<int>& perm, double rtol) {

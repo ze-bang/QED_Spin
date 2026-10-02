@@ -348,7 +348,7 @@ HamiltonianBuilder& HamiltonianBuilder::ring_exchange(
     // which is *not* representable as a single 2-body Operator term.
     //
     // For the C++ matrix-free Operator we instead route ring-exchange
-    // through `three_body_data_`, which already supports the full
+    // through the three-body records, which already support the full
     // S^{op_i}_i S^{op_j}_j S^{op_k}_k tri-product, by **fusing** the
     // 4th leg via `Sz_a Sz_b = 1/4` for spin-1/2 anti-aligned pairs. This
     // is mathematically equivalent for the spin-1/2 ring on a square
@@ -443,7 +443,7 @@ void HamiltonianBuilder::emit_into(Operator& op) const {
         td.site_index = t.site;
         td.coefficient = t.coeff;
         td.is_two_body = false;
-        op.transform_data_.push_back(td);
+        op.add_record(td);
     }
     for (const auto& t : two_body_) {
         Operator::TransformData td;
@@ -453,7 +453,7 @@ void HamiltonianBuilder::emit_into(Operator& op) const {
         td.site_index_2 = t.site_j;
         td.coefficient = t.coeff;
         td.is_two_body = true;
-        op.transform_data_.push_back(td);
+        op.add_record(td);
     }
     for (const auto& t : three_body_) {
         Operator::ThreeBodyTransformData td;
@@ -464,7 +464,7 @@ void HamiltonianBuilder::emit_into(Operator& op) const {
         td.op_type_3 = op_to_int(t.op_k);
         td.site_index_3 = t.site_k;
         td.coefficient = t.coeff;
-        op.three_body_data_.push_back(td);
+        op.add_record(td);
     }
     op.invalidateMatrixCaches();
 }

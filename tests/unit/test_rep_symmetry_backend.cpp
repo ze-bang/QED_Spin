@@ -121,15 +121,15 @@ build_heisenberg_pbc_full(std::uint64_t N, double J) {
         Operator::TransformData t;
         t.op_type = 2; t.site_index = i; t.op_type_2 = 2;
         t.site_index_2 = j; t.coefficient = J_real; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        op->add_record(t);
 
         t.op_type = 0; t.site_index = i; t.op_type_2 = 1;
         t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        op->add_record(t);
 
         t.op_type = 1; t.site_index = i; t.op_type_2 = 0;
         t.site_index_2 = j; t.coefficient = J_half; t.is_two_body = true;
-        op->transform_data_.push_back(t);
+        op->add_record(t);
     }
     return op;
 }
@@ -159,7 +159,7 @@ void run_case(int N, std::int64_t n_up) {
 
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, full_op->transform_data_, full_op->three_body_data_,
+        soa, full_op->records(), full_op->three_body_records(),
         [](const Complex& c) { return c; });
     const TermView_t tv = make_term_view(soa, /*spin_l=*/0.5, /*is_real=*/true);
 
@@ -218,7 +218,7 @@ void run_parity_case(int N, std::int64_t n_up) {
     auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, full_op->transform_data_, full_op->three_body_data_,
+        soa, full_op->records(), full_op->three_body_records(),
         [](const Complex& c) { return c; });
 
     const ed::symmetry::OrbitTable tab = zn_orbit_table(N, n_up);
@@ -370,7 +370,7 @@ TEST_CASE("rep_symmetry_backend: dense-vector GATHER vs SCATTER throughput",
     auto full_op = build_heisenberg_pbc_full(static_cast<std::uint64_t>(N), 1.0);
     ed::matvec::TermStorage soa;
     ed::matvec::TermStorage::classify_route(
-        soa, full_op->transform_data_, full_op->three_body_data_,
+        soa, full_op->records(), full_op->three_body_records(),
         [](const Complex& c) { return c; });
 
     // Largest sector (k=0).

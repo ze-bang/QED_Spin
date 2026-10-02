@@ -89,7 +89,7 @@ public:
     /// @param dst        Target sector (provides the output orbit basis).
     /// @param dst_sector Sector index within ``dst`` (0: a ref wraps one sector).
     /// @param transforms Observable terms (one/two-body; same layout as
-    ///                   ``Operator::transform_data_``).
+    ///                   ``Operator::records()``).
     /// @param spin_l     Spin S (0.5 for spin-1/2). Used for the
     ///                   diagonal/off-diagonal matrix-element
     ///                   prefactors.

@@ -266,9 +266,8 @@ TEST_CASE("Operator: isReal() cache invalidates when a complex coefficient "
     // ``isReal()`` caches its first answer in ``real_check_done_``, so a
     // real-only operator that is queried once and then gets a complex
     // coefficient would keep claiming real -- routing a subsequent
-    // solve through the real fast path with the wrong matvec. An
-    // explicit ``invalidateMatrixCaches()`` after a direct AoS push must
-    // reset the isReal() cache too.
+    // solve through the real fast path with the wrong matvec. Adding a
+    // record must reset the isReal() cache too.
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     REQUIRE(op->isReal());
 
@@ -277,7 +276,7 @@ TEST_CASE("Operator: isReal() cache invalidates when a complex coefficient "
     t.site_index   = 0;
     t.coefficient  = Complex(0.0, 0.5);  // pure imaginary
     t.is_two_body  = false;
-    op->transform_data_.push_back(t);
+    op->add_record(t);
     op->invalidateMatrixCaches();
 
     INFO("After pushing an imaginary coefficient, isReal() must return false.");
@@ -292,7 +291,7 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
     t.op_type = 2; t.site_index = 0; t.op_type_2 = 2;
     t.site_index_2 = 1; t.coefficient = Complex(0.0, 0.0);
     t.is_two_body = true;
-    modified->transform_data_.push_back(t);
+    modified->add_record(t);
 
     const uint64_t dim = 1ULL << 4;
     auto eb = reference_from_operator(*base,     dim).eigs;
@@ -301,23 +300,10 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
 }
 
 // =============================================================================
-// AoS cache invalidation.
-//
-// Sequence:
-//   1. build the operator
-//   2. call apply() (sets terms_fresh_ = true, populates SoA cache)
-//   3. push a new term directly into transform_data_ (bypassing the
-//      typed setters and any explicit invalidateMatrixCaches() call)
-//   4. call apply() again
-//
-// Without size tracking, step (4) would reuse the SoA cache from step (2)
-// and silently drop the term added in step (3). The operator records the
-// AoS sizes at every commit and rebuilds the SoA cache when they diverge
-// from the live sizes; this test asserts that the new term participates
-// in the second apply.
+// Cache invalidation: a record added between two applies (the first one built the SoA
+// cache) must take part in the second.
 // =============================================================================
-TEST_CASE("Operator: direct AoS push between applies is honoured "
-          "(size-tracking cache invalidation)",
+TEST_CASE("Operator: a record added between applies is honoured",
           "[operator_apply][regression][s0]") {
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     const uint64_t dim = 1ULL << 4;
@@ -334,7 +320,7 @@ TEST_CASE("Operator: direct AoS push between applies is honoured "
     t.site_index   = 0;
     t.coefficient  = Complex(3.14159, 0.0);
     t.is_two_body  = false;
-    op->transform_data_.push_back(t);
+    op->add_record(t);
 
     std::vector<Complex> y_after(dim, Complex(0.0, 0.0));
     op->apply(x.data(), y_after.data(), dim);

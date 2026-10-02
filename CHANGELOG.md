@@ -107,6 +107,11 @@ C++ API (installed headers; nothing in Python changes):
   `<ed/ops/time_reversal.h>`, `hamiltonian_is_spin_flip_symmetric` / `sz_axis_of` (`spin_flip.h`
   keeps `flip_subspace_admissible`) and `TermStorage::is_hermitian`; `<ed/ops/invariance.h>`
   replaces them, and `ed::sectors::SzContent` is `ed::ops::SzContent`.
+- `Operator`'s records are private: `records()` / `three_body_records()` read them, and
+  `add_record` (which the typed setters call) appends one after checking its op types (0, 1, 2)
+  and sites (below `n_bits`). `Operator::canonical()` is the cached canonical form, and
+  `ed::ops::to_operator(m)` writes a `MaskedOperator` back as records (at most three sites
+  per term until the walk runs on canonical terms).
 - `ed::matvec::MatVecOperator` and `<ed/matvec/matvec.h>` are merged into `ed::LinearOperator`
   (`<ed/core/linear_operator.h>`), with `as_apply_function` and `check_size` gone.
   `LinearOperator::has_device_kernel()` says whether `bind_cuda()` has a device apply; the
