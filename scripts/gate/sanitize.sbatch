@@ -36,6 +36,9 @@ if [ "${KIND}" = asan ]; then
     export QED_VARIANT=cpu
     source scripts/golden/env.sh
     SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+    # Set before the build: test discovery runs every test binary at build time.
+    export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1
+    export LSAN_OPTIONS=suppressions=${PWD}/scripts/gate/lsan.supp:print_suppressions=0
     scripts/build.sh --cluster "${QED_CLUSTER:-alliance}" --variant cpu --name asan --tests -- \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="${SAN}" \
         -DCMAKE_EXE_LINKER_FLAGS="${SAN}" -DCMAKE_SHARED_LINKER_FLAGS="${SAN}" > "${D}/build-asan.log" 2>&1
@@ -43,8 +46,6 @@ if [ "${KIND}" = asan ]; then
     echo "asan_build ${b}" >> "${D}/rc"
     [ "${b}" = 0 ] || { grep -m20 "error" "${D}/build-asan.log"; exit 1; }
     export OMP_NUM_THREADS=4
-    export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1
-    export LSAN_OPTIONS=suppressions=${PWD}/scripts/gate/lsan.supp:print_suppressions=0
     ctest --test-dir build/cpu-asan --output-on-failure -j 4 --timeout 1800 > "${D}/ctest-asan.log" 2>&1
     record asan_ctest $? "${D}/ctest-asan.log"
     grep -E "tests passed|tests failed" "${D}/ctest-asan.log"
