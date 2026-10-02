@@ -181,7 +181,7 @@ def _tri_sites(Lx, Ly):
     return idx, [(x, y) for y in range(Ly) for x in range(Lx)]
 
 
-def triangular(L=3, chi=0.0, Ly=None):
+def triangular(L=3, chi=0.0, Ly=None, h=0.0):
     Lx, Ly = L, (L if Ly is None else Ly)
     idx, xy = _tri_sites(Lx, Ly)
     terms = []
@@ -191,12 +191,16 @@ def triangular(L=3, chi=0.0, Ly=None):
         if chi:
             terms += triple(idx(x, y), idx(x + 1, y), idx(x, y + 1), chi)
             terms += triple(idx(x + 1, y), idx(x + 1, y + 1), idx(x, y + 1), chi)
+        if h:
+            terms.append((h, (("z", idx(x, y)),)))
     T1 = [idx(x + 1, y) for x, y in xy]
     T2 = [idx(x, y + 1) for x, y in xy]
-    name = f"tri{Lx * Ly}" + ("chi" if chi else "")
-    return Model(name, Lx * Ly, terms, [T1, T2], (Lx, Ly), xy, real=not chi,
+    name = f"tri{Lx * Ly}" + ("chi" if chi else "") + ("h" if h else "")
+    return Model(name, Lx * Ly, terms, [T1, T2], (Lx, Ly), xy, real=not chi, su2=not h,
                  notes="triangular torus; odd N gives a degenerate ground state"
-                       + ("; scalar chirality: complex, TR-odd, three-body" if chi else ""))
+                       + ("; scalar chirality: complex, TR-odd, three-body" if chi else "")
+                       + ("; uniform field h S^z: no spin flip, so a sector label off N/2 (N odd) checks "
+                          "which bit value is spin up" if h else ""))
 
 
 def xyz_chain(N=12, jx=1.0, jy=0.6, jz=0.8):
@@ -252,8 +256,8 @@ def kagome_bq(L=2, K=0.2):
                  notes="kagome torus + four-site bowtie biquadratic: U(1), SU(2), flip, real")
 
 
-MODELS = {m.name: m for m in (chain(), triangular(3), triangular(3, chi=0.25), xyz_chain(), square_ring(),
-                              kagome_bq())}
+MODELS = {m.name: m for m in (chain(), triangular(3), triangular(3, chi=0.25), triangular(3, h=0.3),
+                              xyz_chain(), square_ring(), kagome_bq())}
 
 
 # ---------------------------------------------------------------------------

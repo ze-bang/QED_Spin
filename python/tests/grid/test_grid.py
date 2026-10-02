@@ -31,12 +31,12 @@ HERE = Path(__file__).resolve().parent
 # Which models carry each content (the content must be physically present).
 CONTENT_MODELS = {
     "none":    ["chain12", "tri9chi"],
-    "sz_all":  ["chain12", "tri9", "tri9chi"],
-    "sz_one":  ["chain12", "tri9", "sq12ring"],
+    "sz_all":  ["chain12", "tri9", "tri9chi", "tri9h"],
+    "sz_one":  ["chain12", "tri9", "tri9h", "sq12ring"],
     "parity":  ["xyz12"],
     "flip":    ["chain12"],
     "abelian": ["chain12", "tri9", "tri9chi", "xyz12"],
-    "lg":      ["chain12", "tri9", "tri9chi", "xyz12", "sq12ring", "kagome12bq"],
+    "lg":      ["chain12", "tri9", "tri9chi", "tri9h", "xyz12", "sq12ring", "kagome12bq"],
     "tr":      ["chain12"],
     "su2":     ["chain12", "tri9", "sq12ring", "kagome12bq"],
 }
@@ -46,7 +46,8 @@ BACKENDS = ["cpu", "gpu"]
 
 # Dynamics probes need U(1) for S+ (it changes Sz); skip them where Sz is broken. The _3b probe
 # is three-body (three_body_probe).
-Q = {"chain12": (3,), "tri9": (1, 1), "tri9chi": (1, 1), "xyz12": (3,), "sq12ring": (1, 1), "kagome12bq": (1, 0)}
+Q = {"chain12": (3,), "tri9": (1, 1), "tri9chi": (1, 1), "tri9h": (1, 1), "xyz12": (3,), "sq12ring": (1, 1),
+     "kagome12bq": (1, 0)}
 OMEGA = np.linspace(-1.0, 7.0, 161)
 ETA = 0.1
 T_EXACT = np.linspace(0.2, 4.0, 12)

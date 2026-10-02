@@ -549,6 +549,47 @@ def _ring_in_field(n, h=0.1):
     return b.to_operator()
 
 
+def _sz_total(n):
+    Sz = qed.Operator(n)
+    for i in range(n):
+        Sz = Sz + qed.Operator.product(n, "z", [i])
+    return Sz
+
+
+def test_magnetisation_in_a_field_is_physical():
+    # M(T) = Tr(S^z e^{-beta H}) / Z, against dense matrices of the library's own operators, so the
+    # check holds whichever bit value means spin up (the Sz label meets physics here).
+    n = 8
+    H, Sz = _ring_in_field(n, h=0.3), _sz_total(n)    # J S.S + 0.3 sum_i S^z_i
+    E, V = np.linalg.eigh(_dense(H, n))
+    mz = np.real(np.einsum("ji,jk,ki->i", V.conj(), _dense(Sz, n), V))
+    T = np.array([0.3, 1.0, 3.0])
+    w = np.exp(-(E - E[0])[None, :] / T[:, None])
+    M_ref = (w * mz).sum(axis=1) / w.sum(axis=1)
+    assert M_ref[0] < -0.1                           # the field lowers Sz
+    for sym in (qed.Symmetry(spatial=None), qed.Symmetry()):
+        r = qed.thermal(H, T, method="exact", sym=sym)
+        np.testing.assert_allclose(r.M, M_ref, atol=1e-10)
+
+
+def test_a_multiplet_expands_to_every_sz_member():
+    # Under total_spin = 1 each level stands for three states; expanded to the full basis they are
+    # eigenvectors with Sz = -1, 0, 1 (the tower is walked from one end by S^- or S^+).
+    n = 8
+    H, Sz = _ring(n), _sz_total(n)
+    Hd, Zd = _dense(H, n), _dense(Sz, n)
+    r = qed.eigs(H, 2, sym=qed.Symmetry(spatial=None, total_spin=1), vectors=True)
+    assert len(r.levels) >= 1
+    for i, lvl in enumerate(r.levels):
+        members = r._raw.multiplet(r._spec, i, -1)
+        assert len(members) == 3
+        sz = sorted(float(np.real(np.vdot(v, Zd @ v))) for v in members)
+        np.testing.assert_allclose(sz, [-1.0, 0.0, 1.0], atol=1e-10)
+        for v in members:
+            v = np.asarray(v, complex)
+            np.testing.assert_allclose(Hd @ v, float(lvl.energy) * v, atol=1e-9)
+
+
 def test_thermal_under_total_spin_counts_whole_multiplets():
     # Every S = 1 multiplet has Sz = -1, 0, 1 in equal parts: M = 0 and chi = beta S(S+1)/(3N)
     # (they came out as M = S, chi = 0), and the run says it is a restricted ensemble.
