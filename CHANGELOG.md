@@ -42,6 +42,15 @@ Breaking changes so far:
   every error but "no component in this sector" through (they came back as an empty list).
   Environment variables parse strictly: "8GB", "inf" or "maybe" are refused (they were read
   as 8, inf and true); `import qed` warns (raises under `ED_ENV_STRICT`) and every verb raises.
+- **Results scale with the units of H.** Every threshold that judges an energy is relative to
+  s_H, the sum of |c| over H's terms (an upper bound of ||H||; `<ed/core/numerics.h>`): the
+  Krylov-Schur lock (1e-10 s_H) and breakdown (64 eps s_H), the certified ground-state residual
+  (1e-9 s_H), the Lanczos breakdown of FTLM, OFTLM and the dynamics continued fractions and
+  samples (64 eps s_H; they ran past an exhausted Krylov space), the dense "block is real" test
+  (32 eps max |H_ij|; it was 1e-12, which dropped the imaginary part of an H in small units),
+  the mTPQ shift margin and the pruning margin floor (5% of s_H; it was 1). `degeneracy_tol` of
+  `dynamics` is now relative to s_H (default 1e-8), so s * H keeps its ground manifold.
+  `LinearOperator::norm_bound()` carries s_H to the block solvers.
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.

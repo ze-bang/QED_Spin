@@ -36,6 +36,9 @@ public:
     virtual void apply(const Complex* in, Complex* out, std::size_t n) const = 0;
     [[nodiscard]] virtual std::size_t dim() const = 0;
     [[nodiscard]] virtual bool is_hermitian() const { return true; }
+    /// An upper bound of ||A||_2 (the scale the solvers' tolerances are relative to,
+    /// <ed/core/numerics.h>), or 0 when unknown.
+    [[nodiscard]] virtual double norm_bound() const { return 0.0; }
     [[nodiscard]] virtual std::string description() const { return "LinearOperator"; }
 
     /// bind_cuda() returns a device apply.

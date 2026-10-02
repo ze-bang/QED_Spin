@@ -47,6 +47,9 @@ using Complex = std::complex<double>;
 /// Parameters for the FTLM cross-irrep kernel.
 struct FtlmCrossIrrepOptions {
     std::size_t krylov_dim       = 200;
+    /// Both Lanczos runs stop at an invariant subspace, beta <= breakdown_tol (energy units;
+    /// the engine passes 64 eps s_H). 0: every step runs.
+    double      breakdown_tol    = 0.0;
     std::size_t num_samples      = 30;
     double      broadening       = 0.05;
     /// Base seed: sample s starts from gaussian_vector(dim_src, sample_engine(random_seed, s))
@@ -125,6 +128,7 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
             lo.max_iter   = std::min(n, opts.krylov_dim);
             lo.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
             lo.keep_basis = true;
+            if (opts.breakdown_tol > 0.0) lo.breakdown_tol = opts.breakdown_tol;
             auto mv = [&H](const Complex* in, Complex* o, std::size_t nn) { H(in, o, nn); };
             return ed::krylov::lanczos_kernel(bk, mv, n, v0, lo);
         };

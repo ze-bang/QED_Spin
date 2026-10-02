@@ -1110,3 +1110,30 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
         np.savez(tmp_path / "bad.npz", **damaged)
         with pytest.raises(ValueError):
             qed.load_eigs(tmp_path / "bad.npz").vectors()
+
+
+@pytest.mark.parametrize("scale", [1e-13, 1e-6, 1e6])
+def test_results_scale_with_the_units_of_h(scale):
+    # P4.5: every tolerance that judges an energy is relative to H's scale, so s * H gives s times
+    # the answer -- on the dense lane (a complex DM block stays complex at s = 1e-13), the Krylov
+    # lanes (dense_max_dim=0) and the dynamics ground manifold.
+    n = 10
+    b = qed.input.HamiltonianBuilder(n)
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b.heisenberg(bonds, 1.0).dm(bonds, [(0.0, 0.0, 0.4)] * n)
+    H1 = b.to_operator()
+    Hs = H1 * scale
+    sym = qed.Symmetry(spatial=None)
+    for kw in (dict(), dict(dense_max_dim=0, prune=False)):
+        e1 = np.asarray(qed.eigs(H1, 4, sym=sym, **kw).energies)
+        es = np.asarray(qed.eigs(Hs, 4, sym=sym, **kw).energies)
+        np.testing.assert_allclose(es / scale, e1, rtol=1e-9, atol=1e-9 * np.max(np.abs(e1)))
+    s1 = np.sort(qed.spectrum(H1, sym=sym).energies)
+    ss = np.sort(qed.spectrum(Hs, sym=sym).energies)
+    np.testing.assert_allclose(ss / scale, s1, rtol=1e-9, atol=1e-9 * np.max(np.abs(s1)))
+    O = _sz_q(n, math.pi)
+    omega = np.linspace(0.0, 3.0, 61)
+    d1 = qed.dynamics(H1, O, omega, eta=0.1, sym=qed.Symmetry(spatial=None))
+    ds = qed.dynamics(Hs, O, omega * scale, eta=0.1 * scale, sym=qed.Symmetry(spatial=None))
+    assert d1.ground_manifold == ds.ground_manifold
+    np.testing.assert_allclose(np.asarray(ds.S[0]) * scale, np.asarray(d1.S[0]), rtol=1e-6, atol=1e-9)

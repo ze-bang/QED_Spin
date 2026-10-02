@@ -42,8 +42,11 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
             if (a > max_imag) max_imag = a;
         }
 
+    double max_abs = 0.0;              // relative to the block's own scale (numerics.h)
+    for (Eigen::Index j = 0; j < Hb.cols(); ++j)
+        for (Eigen::Index i = j; i < Hb.rows(); ++i) max_abs = std::max(max_abs, std::abs(Hb(i, j)));
     lapack_int info;
-    if (max_imag <= 1.0e-12) {
+    if (max_imag <= ed::numerics::kRealBlockRel * max_abs) {
         Eigen::MatrixXd R = Hb.real();  // symmetric; LAPACK reads upper only
         info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'N', 'U', n, R.data(), n,
                               w.data());
@@ -247,8 +250,9 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     // otherwise, so the cycle length is imposed through that cap.
     const std::uint64_t cycle_cap = (cap > 0) ? std::min<std::uint64_t>(cap, per_cycle)
                                               : static_cast<std::uint64_t>(per_cycle);
-    // absolute residual ||H x - theta x||
-    const double tol = 1e-9;
+    // residual ||H x - theta x|| relative to the block's norm bound (numerics.h)
+    const double scale = ed::numerics::scale_or_one(H.norm_bound());
+    const double tol = ed::numerics::kLockRel * scale;
 
     CountedH Hc{H.bind<B>()};
     auto v0 = staged_seed(be, nb, 0x51ED0B70ULL);   // same stream as the k = 1 scan
@@ -257,6 +261,7 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     o.max_iter             = per_cycle;
     o.max_restarts         = restarts;
     o.tolerance            = tol;
+    o.breakdown_tol        = ed::numerics::kBreakdownRel * scale;
     o.max_subspace_vectors = cycle_cap;
     o.compute_vectors      = vectors;
     auto r = ed::krylov::krylov_schur_kernel(be, Hc, nb, v0.get(), o);
@@ -471,7 +476,7 @@ BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
 // Ritz vector) returns nullopt.
 template <class B>
 static std::optional<std::pair<double, std::vector<Complex>>>
-gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) {
+gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override, double resid_tol) {
     using UV = ed::matvec::Backend::UniqueVec;
     const std::size_t max_iter = std::min<std::size_t>(
         n, max_iter_override > 0 ? static_cast<std::size_t>(max_iter_override) : kLgGsTwoPassMaxIter);
@@ -547,7 +552,7 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) 
         be.axpy(Complex(-ray, 0.0), u.get(), w.get(), n);
         const double resid = be.nrm2(w.get(), n);
         E0 = ray;
-        if (resid <= kLgGsResidTol || attempt == kLgGsRestarts) break;
+        if (resid <= resid_tol || attempt == kLgGsRestarts) break;
         be.copy(u.get(), seed.get(), n);   // restarted refinement
     }
     // Release the work vectors before the host copy: the lane exists to stay at a few n-vectors.
@@ -557,7 +562,7 @@ gs_two_pass(B& be, CountedH& H, std::size_t n, std::uint64_t max_iter_override) 
 
 // The certified GS eigenpair of a block above the caller's dense crossover: FullCGS2
 // Lanczos + kept-basis Ritz vector up to kept_basis_max_dim, the two-pass no-reorth lane
-// above it. Residual-guarded: the vector is certified only when ||H u - E u|| <= kLgGsResidTol.
+// above it. Residual-guarded: the vector is certified only when ||H u - E u|| <= gs_resid_tol(H).
 template <class B>
 GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_basis_max_dim,
                          std::uint64_t max_iter) {
@@ -574,7 +579,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         for (std::size_t i = 0; i < n; ++i)
             u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
     } else if (n > kept_basis_max_dim) {
-        auto pr = gs_two_pass(be, Hc, n, max_iter);
+        auto pr = gs_two_pass(be, Hc, n, max_iter, gs_resid_tol(H));
         g.applies = Hc.applies;
         if (!pr) return g;
         E0 = pr->first;
@@ -625,7 +630,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         den += std::norm(u[i]);
     }
     g.residual = std::sqrt(num / den);
-    if (!(g.residual <= kLgGsResidTol)) return g;
+    if (!(g.residual <= gs_resid_tol(H))) return g;
     const double inv = 1.0 / std::sqrt(den);
     for (auto& c : u) c *= inv;
     g.energy    = E0;

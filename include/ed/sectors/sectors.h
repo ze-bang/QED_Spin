@@ -136,7 +136,8 @@ struct EigsOptions {
     int  per_block     = 0;
     bool cut           = true;
     /// Solve only the blocks whose 40-step Lanczos estimate lies within prune_margin
-    /// (relative) of the k-th level found so far. False: solve every block.
+    /// times max(|E_k|, 5% of s_H) of the k-th level found so far (s_H: the sum of |c| over
+    /// H's terms, so s * H prunes alike). False: solve every block.
     bool   prune        = true;
     double prune_margin = 0.02;
     /// Also keep every level within `window` (absolute) above the k-th; pruning never drops

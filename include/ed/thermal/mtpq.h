@@ -221,7 +221,8 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     }
     // L just above the spectrum. The margin covers the Lanczos estimate of E_max, a lower bound on it.
     const double W = e_max_est - e_min_est;
-    const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(1.0, std::abs(e_max_est)), 1e-9});
+    const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(std::abs(e_max_est), W),
+                                           std::numeric_limits<double>::min()});   // relative: s * H alike
     kopts.large_value = L;
 
     constexpr std::size_t MTPQ_HARD_CAP = 200000;

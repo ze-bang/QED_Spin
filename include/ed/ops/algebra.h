@@ -62,6 +62,9 @@ public:
     [[nodiscard]] std::vector<MaskedTerm> terms(double drop = 0.0) const;
     /// The largest |coefficient| (0 for an empty operator).
     [[nodiscard]] double max_abs() const;
+    /// Sum of |coefficient| over the canonical terms: an upper bound of the operator norm
+    /// (every site factor I, Z, S+, S- has norm 1).
+    [[nodiscard]] double l1_norm() const;
     /// Dense matrix M[t * 2^n + s] = <t|O|s> (tests only; n <= 12).
     [[nodiscard]] std::vector<Complex> to_dense() const;
 

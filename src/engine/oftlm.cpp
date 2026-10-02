@@ -155,13 +155,13 @@ Curves oftlm_cpu(
         // practice (Jaklic-Prelovsek; Schnack-Richter-Steinigeweg PRR 2,
         // 013186) runs the stochastic samples bare -- ghost Ritz duplicates
         // redistribute the sample weight but leave the trace estimator
-        // consistent. The run stops early when ||w|| < 1e-10.
+        // consistent. The run stops early when ||w|| <= opts.breakdown_tol.
         ed::krylov::LanczosKernelOptions lopts;
         lopts.max_iter      = static_cast<std::size_t>(
             std::min<std::uint64_t>(N, M));
         lopts.reorth        = ed::krylov::ReorthPolicy::None;
         lopts.keep_basis    = false;
-        lopts.breakdown_tol = 1e-10;
+        lopts.breakdown_tol = opts.breakdown_tol;
         auto lres = run_lanczos(apply_H, v, N, lopts);
 
         ed::krylov::TridiagEig t =

@@ -198,6 +198,12 @@ double MaskedOperator::max_abs() const {
     return m;
 }
 
+double MaskedOperator::l1_norm() const {
+    double s = 0.0;
+    for (const auto& [k, c] : t_) s += std::abs(c);
+    return s;
+}
+
 bool MaskedOperator::equals(const MaskedOperator& o, double rtol) const {
     if (o.n_ != n_) return false;
     const double scale = std::max(max_abs(), o.max_abs());

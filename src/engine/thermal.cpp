@@ -86,6 +86,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         ko.num_samples = t.samples;
         ko.krylov_dim  = t.krylov;
         ko.num_exact   = t.exact_states;
+        ko.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
         ko.betas       = beta;
         ko.random_seed = seed;
         c = ed::thermal::oftlm_cpu(apply_H, n, ko);
@@ -111,6 +112,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             ed::thermal::FtlmOptions ko;
             ko.num_samples    = t.samples;
             ko.krylov_dim     = t.krylov;
+            ko.breakdown_tol  = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
             ko.betas          = beta;
             ko.random_seed    = seed;
             ko.seed_transform = seed_transform;

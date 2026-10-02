@@ -297,6 +297,11 @@ public:
     [[nodiscard]] bool is_hermitian() const override {
         return h_->is_hermitian();
     }
+    /// The inner bound, or the ghost level when that lies further out (0: unknown).
+    [[nodiscard]] double norm_bound() const override {
+        const double b = h_->norm_bound();
+        return b > 0.0 ? std::max(b, std::abs(ghost_shift_)) : 0.0;
+    }
 
     /// Project a (random) seed into the target tower and normalise it.
     /// Returns ||P_S seed|| -- ~0 tells the caller to redraw.

@@ -252,7 +252,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     if (d.temperatures.empty()) {
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
         auto t_gm = std::chrono::steady_clock::now();
-        const auto manifold = ground_manifold(H, n_sites, u, d.degeneracy_tol, d.device, d.dense_max_dim, out.e0, out.placement);
+        // The window is relative to H's scale: s * H keeps the same manifold.
+        const double window = d.degeneracy_tol * ed::numerics::scale_or_one(H.norm_bound());
+        const auto manifold = ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, out.e0, out.placement);
         // With a spin tower the solve returns the Sz = S member of each multiplet; the other
         // members follow by total S- (normalised), each in the same momentum sector one Sz lower.
         std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)
@@ -284,7 +286,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         ed::observables::CfSpectralOptions cf;
         cf.krylov_dim = std::max<std::size_t>(d.krylov, 2);
         cf.broadening = d.eta;
-        cf.tolerance  = 1e-12;
+        cf.tolerance  = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         cf.energy_shift = out.e0;
         std::set<std::pair<int, int>> reached;
         for (const auto& [v, parity] : states) {
@@ -427,6 +429,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     auto options = [&](std::size_t i) {
         ed::observables::FtlmCrossIrrepOptions fo;
         fo.krylov_dim  = d.krylov;
+        fo.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         fo.num_samples = d.samples;
         fo.broadening  = d.eta;
         fo.random_seed = seed0 + 0x9E3779B97F4A7C15ULL * (i + 1);

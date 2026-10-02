@@ -13,7 +13,8 @@
 // target momentum sector (and every Sz or parity sector O reaches) by the
 // cross-sector rep-basis scatter; ||O|psi>|| decides every selection rule.
 //
-//   T = 0:  the ground manifold is every level within `degeneracy_tol` of E0;
+//   T = 0:  the ground manifold is every level within degeneracy_tol * s_H of E0 (s_H: the sum
+//           of |c| over H's terms, <ed/core/numerics.h>, so s * H keeps the same manifold);
 //           S = (1/g) sum over the manifold of the continued fraction of O|a> in each
 //           target sector, with omega measured from E0.
 //   T > 0:  finite-temperature Lanczos over every source sector (the Jaklic-Prelovsek
@@ -35,7 +36,7 @@ struct DynamicsSpec {
     std::size_t         krylov         = 200;
     std::size_t         samples        = 40;   ///< T > 0: random vectors per source sector
     std::uint64_t       seed           = 0;    ///< 0 = draw one
-    double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window
+    double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window, relative to s_H (numerics.h)
     int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
     Device              device         = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
 };

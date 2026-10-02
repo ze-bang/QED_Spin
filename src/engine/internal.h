@@ -32,6 +32,7 @@
 #include <ed/core/config.h>      // typed environment accessors
 #include <ed/core/errors.h>      // ed::InvalidRequest
 #include <ed/core/log.h>         // ED_LOG
+#include <ed/core/numerics.h>    // relative tolerances (s_H)
 #include <ed/sectors/sectors.h>  // LittleGroupBlockTag
 
 #include <ed/basis/bits.h>                       // applyPermutation
@@ -124,10 +125,12 @@ inline constexpr std::size_t kLgGsSmallMaxIter   = 200;
 // Restart count for the two-pass GS lane.
 inline constexpr int kLgGsRestarts = 4;
 
-// Residual acceptance for the certified GS vector, calibrated for the
-// CF/DSSF consumer. Shared by the two-pass INNER accept-or-restart loop
-// and the outer guard in solve_gs_vector.
-inline constexpr double kLgGsResidTol = 1e-8;
+// Residual acceptance for the certified GS vector (the CF/DSSF consumer): kGsResidRel times
+// the block operator's norm bound (<ed/core/numerics.h>). Shared by the two-pass INNER
+// accept-or-restart loop and the outer guard in solve_gs_vector.
+[[nodiscard]] inline double gs_resid_tol(const ed::LinearOperator& H) {
+    return ed::numerics::kGsResidRel * ed::numerics::scale_or_one(H.norm_bound());
+}
 
 
 // U-composition convention (matches irreps.cpp): U(g)U(h) = U(g·h) with
@@ -183,6 +186,7 @@ public:
         for (std::size_t g = 0; g < rows_->n_groups(); ++g)
             if (rows_->group_flip[g] != 0)
                 offdiag_terms_ += rows_->vsub_tbegin[rows_->group_vbegin[g + 1]] - rows_->vsub_tbegin[rows_->group_vbegin[g]];
+        for (const auto& c : rows_->term_coeff) norm_bound_ += std::abs(c);
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
@@ -206,6 +210,8 @@ public:
     [[nodiscard]] std::string description() const override {
         return "LittleGroupRepSector(H_k)";
     }
+    /// s_H of the operator (sum of |c| over its terms): a block's norm cannot exceed it.
+    [[nodiscard]] double norm_bound() const override { return norm_bound_; }
 
     /// Let the verbs run this sector on a CUDA device (the device rep-gather kernel over the
     /// same RepSectorData); it also permits the host-pointer gather. Off unless a caller asks.
@@ -350,6 +356,7 @@ private:
     std::shared_ptr<const ed::ops::MaskedProgram>  rows_;    // the operator's row program
     ed::matvec::basis::RepSymmetryBasisPolicy      pol_;     // views into *rd_
     std::uint64_t                                  offdiag_terms_ = 0;
+    double                                         norm_bound_ = 0.0;   // sum of |c| over the program
     mutable std::once_flag                         csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
     mutable std::once_flag                         gpu_once_;
@@ -582,6 +589,7 @@ public:
     [[nodiscard]] std::string description() const override {
         return "LittleGroupBlock(W^h H_k W)";
     }
+    [[nodiscard]] double norm_bound() const override { return hk_.norm_bound(); }
     [[nodiscard]] const RepSectorMatVec& hk() const { return hk_; }
     [[nodiscard]] const SparseColumns&   cols() const { return W_; }
 
@@ -831,7 +839,7 @@ struct BlockSolution {
     std::uint64_t                     applies   = 0;   ///< H applies of this solve
 };
 
-/// The certified lowest eigenpair of one block: `certified` when ||H u - E u|| <= kLgGsResidTol
+/// The certified lowest eigenpair of one block: `certified` when ||H u - E u|| <= gs_resid_tol(H)
 /// (a miss or an internal numerical failure leaves it false).
 struct GsVector {
     double               energy   = 0.0;

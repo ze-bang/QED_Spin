@@ -221,6 +221,8 @@ public:
     [[nodiscard]] std::string description() const override {
         return "Operator(n_bits=" + std::to_string(n_bits_) + ")";
     }
+    /// s_H: the sum of |c| over the canonical terms.
+    [[nodiscard]] double norm_bound() const override { return canonical().l1_norm(); }
 
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {
         if (n_bits >= 64) {

@@ -54,6 +54,9 @@ using Complex = std::complex<double>;
 struct FtlmOptions {
     std::size_t num_samples  = 40;
     std::size_t krylov_dim   = 100;
+    /// A sample's Lanczos run stops at an invariant subspace, beta <= breakdown_tol (energy
+    /// units; the engine passes 64 eps s_H, <ed/core/numerics.h>). 0: every step runs.
+    double      breakdown_tol = 0.0;
     std::vector<double> betas;           ///< inverse-temperature grid (positive), any order
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
@@ -106,6 +109,7 @@ struct OftlmOptions {
     std::size_t   krylov_dim   = 100;  ///< M: Lanczos steps per random sample
     std::size_t   num_exact    = 8;    ///< N_V: low-lying states treated exactly
     std::size_t   exact_krylov = 0;    ///< Lanczos steps for the exact eigenpairs (0 -> auto)
+    double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
     std::uint64_t random_seed  = 0;
 };
@@ -305,6 +309,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
         // ---- 2. Lanczos: tridiagonal (basis kept only for full reorth) ----
         ed::krylov::LanczosKernelOptions kopts;
         kopts.max_iter = opts.krylov_dim;
+        if (opts.breakdown_tol > 0.0) kopts.breakdown_tol = opts.breakdown_tol;
         // Observables need the Krylov basis itself, orthonormal (the Ritz vectors are built from it).
         if (opts.full_reorthogonalization || n_obs > 0) {
             kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;

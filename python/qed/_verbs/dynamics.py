@@ -37,7 +37,8 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
              dense_max_dim: Optional[int] = None) -> DynamicsResult:
     """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.
 
-    ``T=None``: the ground state, averaged over a degenerate ground manifold.
+    ``T=None``: the ground state, averaged over a degenerate ground manifold: every level within
+    ``degeneracy_tol`` times the scale of H (the sum of |c| over its terms) of E0.
     ``T=[...]``: finite-temperature Lanczos with ``samples`` random vectors per sector; a
     temperature listed twice gets the same row twice.
     ``O`` may change Sz (S+, S-) and need not share any symmetry of H, so dynamics works in

@@ -414,7 +414,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
             acc += r->level.multiplicity;
             if (acc >= static_cast<std::uint64_t>(o.k)) { kth = r->level.energy; break; }
         }
-        if (c.estimate > kth + std::max(o.prune_margin * std::max(1.0, std::abs(kth)), o.window)) {
+        // The margin is relative: to |E_k|, floored at 5% of s_H (a scaled H keeps its decisions).
+        const double margin_floor = 0.05 * ed::numerics::scale_or_one(H.norm_bound());
+        if (c.estimate > kth + std::max(o.prune_margin * std::max(margin_floor, std::abs(kth)), o.window)) {
             ++res.pruned_blocks;
             continue;
         }
