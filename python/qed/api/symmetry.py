@@ -26,12 +26,12 @@ or the engine's star/irrep indices) without changing the symmetry.
 from __future__ import annotations
 
 import cmath
-import math
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Any, Optional, Sequence
 
 from .. import _core
+from .._perm import order
 from ..errors import InvalidRequest
 
 _TOGGLE = {"auto": -1, "off": 0, "require": 1}
@@ -108,7 +108,8 @@ class Symmetry:
         """(closed abelian group, point-group coset representatives) for H: the abelian group is
         normal in the whole spatial group, the identity first. ``diagnostics``, when given,
         receives a (code, message) pair for each fallback taken."""
-        from .._groups import close_group, spatial_split, split_generator_set
+        from .._groups import spatial_split, split_generator_set
+        from .._perm import close_group, is_permutation
 
         n = int(H.num_sites)
         identity = [list(range(n))]
@@ -142,7 +143,7 @@ class Symmetry:
             # Group arithmetic on a map that is not a bijection never closes (its powers never
             # return to the identity): refuse it before any.
             for p in perms:
-                if sorted(int(x) for x in p) != list(range(n)):
+                if not is_permutation(p, n):
                     raise InvalidRequest(f"spatial symmetry: {list(p)} is not a permutation of the {n} sites")
             if not perms:
                 return identity, []
@@ -214,20 +215,6 @@ class Symmetry:
         return spec
 
 
-def _order(p) -> int:
-    seen, order = set(), 1
-    for s in range(len(p)):
-        if s in seen:
-            continue
-        n, t = 0, s
-        while t not in seen:
-            seen.add(t)
-            t = p[t]
-            n += 1
-        order = order * n // math.gcd(order, n)
-    return order
-
-
 def momentum_of(level, spec, translations) -> tuple:
     """The momentum of a level along each translation T: the fraction theta in [0, 1) with
     T|psi> = exp(-2 pi i theta)|psi>, where T acts on basis states as
@@ -240,7 +227,7 @@ def momentum_of(level, spec, translations) -> tuple:
             raise InvalidRequest(f"momentum_of: {list(T)} is not in the abelian group")
         chi = complex(level.momentum[index[key]])
         theta = (-cmath.phase(chi) / (2 * cmath.pi)) % 1.0
-        out.append(Fraction(theta).limit_denominator(_order(key)) % 1)
+        out.append(Fraction(theta).limit_denominator(order(key)) % 1)
     return tuple(out)
 
 

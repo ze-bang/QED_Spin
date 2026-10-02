@@ -12,71 +12,27 @@ The engine works through the co-group G'/A per star, so :func:`spatial_split` ke
 ``_CO_GROUP_CAP``: a group without a large normal abelian subgroup (S_n of an all-to-all or
 field-only H) uses a maximal abelian subgroup A and its normaliser G' = N_G(A) instead.
 
-Convention (as irreps.cpp): (g.e)[i] = e[g[i]].
+Permutations follow :mod:`qed._perm` (images; compose(a, b)[i] = a[b[i]]).
 """
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import numpy as np
 
+from ._perm import CLOSURE_CAP, close_group, compose, inverse, order
 from .errors import InvalidRequest
 
 __all__ = ["close_group", "normal_abelian_split", "spatial_split", "split_generator_set",
            "split_nonabelian", "abelian_generators", "maximal_abelian_subgroup", "normaliser_split"]
 
-_GROUP_CLOSURE_CAP = 4096   # G (and so A) must stay enumerable
 _CO_GROUP_CAP = 128         # |G'/A|: Oh (48) fits, and so do the accidental groups of small tori
-
-
-def _compose(g, e):
-    """(g.e)[i] = e[g[i]]."""
-    return tuple(e[g[i]] for i in range(len(g)))
 
 
 def _rows(perms) -> list[tuple[int, ...]]:
     """A permutation list (any sequence of rows, a numpy array included; None for none) as
     tuples of ints."""
     return [] if perms is None else [tuple(int(x) for x in p) for p in perms]
-
-
-def close_group(gens, cap=_GROUP_CLOSURE_CAP):
-    """BFS closure of a permutation set, sorted (the identity first). None when the group exceeds cap."""
-    gens = [tuple(g) for g in gens]
-    if not gens:
-        return None
-    n = len(gens[0])
-    ident = tuple(range(n))
-    elems = {ident}
-    frontier = [ident]
-    while frontier:
-        nxt = []
-        for e in frontier:
-            for g in gens:
-                c = _compose(g, e)
-                if c not in elems:
-                    if len(elems) >= cap:
-                        return None
-                    elems.add(c)
-                    nxt.append(c)
-        frontier = nxt
-    return sorted(elems)
-
-
-def _perm_order(p) -> int:
-    seen = [False] * len(p)
-    order = 1
-    for s in range(len(p)):
-        if seen[s]:
-            continue
-        length, t = 0, s
-        while not seen[t]:
-            seen[t] = True
-            t = p[t]
-            length += 1
-        order = order * length // math.gcd(order, length)
-    return order
 
 
 class _Enumerated:
@@ -90,7 +46,7 @@ class _Enumerated:
         n = self.P.shape[1]
         if self.elems[0] != tuple(range(n)):
             raise InvalidRequest("the permutation group does not contain the identity (not closed)")
-        self.orders = np.array([_perm_order(p) for p in self.elems], dtype=np.int64)
+        self.orders = np.array([order(p) for p in self.elems], dtype=np.int64)
         self.fpf = (self.P != np.arange(n)).all(axis=1)
         self._right: dict[int, np.ndarray] = {}
 
@@ -251,10 +207,10 @@ def _normalizer(E: _Enumerated, A: np.ndarray) -> np.ndarray:
     in_a[A] = True
     sub = _Enumerated(E.P[A])
     keep = np.ones(len(E), dtype=bool)
-    inverse = np.argsort(E.P, axis=1)
+    inverses = np.argsort(E.P, axis=1)
     for g in _generating_set(sub):
         a = sub.P[g]
-        rows = np.take_along_axis(E.P, a[inverse], axis=1)       # g o a o g^-1, one row per g
+        rows = np.take_along_axis(E.P, a[inverses], axis=1)       # g o a o g^-1, one row per g
         keep &= in_a[E.lookup(rows)]
     return np.flatnonzero(keep)
 
@@ -371,23 +327,23 @@ def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list
     else:
         A = close_group(gens)
         if A is None:
-            raise InvalidRequest(f"the abelian group exceeds the {_GROUP_CLOSURE_CAP}-element closure cap")
+            raise InvalidRequest(f"the abelian group exceeds the {CLOSURE_CAP}-element closure cap")
     for a in gens:
         for b in gens:
-            if _compose(a, b) != _compose(b, a):
+            if compose(a, b) != compose(b, a):
                 raise InvalidRequest("the generators of the abelian part do not commute")
     a_set = set(A)
     residues, covered = [], set(a_set)
     for p in star:
         if p in covered:
             continue
-        p_inv = tuple(int(x) for x in np.argsort(p))
-        if any(_compose(_compose(p_inv, a), p) not in a_set for a in gens):
+        p_inv = inverse(p)
+        if any(compose(p, compose(a, p_inv)) not in a_set for a in gens):
             raise InvalidRequest(f"the residue {list(p)} does not normalise the abelian part: the abelian "
                                  "part must be a normal subgroup (pass the permutations as one list and "
                                  "qed.Symmetry chooses one)")
         residues.append(list(p))
-        covered.update(_compose(a, p) for a in A)
+        covered.update(compose(p, a) for a in A)
     return [list(a) for a in A], residues
 
 
@@ -413,7 +369,7 @@ def split_nonabelian(symmetry_or_gens):
         return "no generators given"
     G = close_group(perms)
     if G is None:
-        return f"the closed group exceeds the {_GROUP_CLOSURE_CAP}-element cap"
+        return f"the closed group exceeds the {CLOSURE_CAP}-element cap"
     A, residues, _ = spatial_split(G)
     if not residues:
         return "the input group is abelian -- nothing to project beyond the momentum sectors"

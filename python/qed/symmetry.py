@@ -25,7 +25,8 @@ from ._core.symmetry import (  # type: ignore[attr-defined]
     site_swap,
     translation,
 )
-from ._groups import close_group, split_nonabelian
+from ._groups import split_nonabelian
+from ._perm import close_group
 
 __all__ = [
     "close_group",

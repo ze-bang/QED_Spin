@@ -10,24 +10,15 @@ import numpy as np
 import pytest
 
 import qed
-from qed._groups import close_group, normal_abelian_split, spatial_split, split_generator_set
+from qed._groups import normal_abelian_split, spatial_split, split_generator_set
+from qed._perm import close_group
+from qed._perm import compose as _compose
+from qed._perm import inverse as _inverse
 
 from grid.models import dense, triangular
 
 needs_pynauty = pytest.mark.skipif(importlib.util.find_spec("pynauty") is None,
                                    reason="the automorphism search needs pynauty")
-
-
-def _compose(a, b):
-    """(a o b)[i] = a[b[i]]."""
-    return tuple(a[b[i]] for i in range(len(a)))
-
-
-def _inverse(p):
-    q = [0] * len(p)
-    for i, x in enumerate(p):
-        q[x] = i
-    return tuple(q)
 
 
 def _check_split(G, A, residues):

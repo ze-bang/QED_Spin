@@ -69,7 +69,7 @@ def _run_full_automorphism_pipeline(
     size = float(aut[1]) * 10.0 ** int(aut[2])
     if size > cap:
         return None, size
-    from ._groups import close_group
+    from ._perm import close_group
     gens = [tuple(int(x) for x in g) for g in aut[0]]
     expanded = close_group(gens, cap=cap) if gens else [tuple(range(graph.number_of_vertices))]
 
@@ -123,7 +123,7 @@ class Symmetries:
 
     def describe(self) -> str:
         """The group's order, its abelian part and residues, then one line per cut made."""
-        from ._groups import close_group
+        from ._perm import close_group
         A = close_group(self.abelian) if self.abelian else None
         a, r = (len(A) if A is not None else len(self.abelian)), len(self.residues)
         lines = [f"{a * (r + 1)} spatial symmetries: an abelian part of {a} (the momenta) and "
