@@ -53,7 +53,7 @@ character.
 | thermodynamics | `thermal` (thermal.cpp) | exact spectra, or FTLM / mTPQ / OFTLM per block on the lane `ed::place` chooses (blocks up to `dense_max_dim` diagonalised); blocks combine in log space with their multiplicities |
 | ⟨O⟩(T) | `thermal(observables=)` | O averaged over the symmetries the block uses; exact from block eigenvectors, FTLM from the symmetric estimator on each sample's Krylov basis |
 | T = 0 dynamics | `dynamics` (dynamics.cpp) | the degenerate ground manifold (with every member of each spin multiplet), then one continued fraction per target sector O reaches |
-| T > 0 dynamics | `dynamics(T=)` | finite-temperature Lanczos between each source sector and every target it reaches (`CrossSectorOrbitObservable` maps between their bases) |
+| T > 0 dynamics | `dynamics(T=)` | finite-temperature Lanczos between each source sector and every target it reaches (O maps between their bases through the projected program of its canonical terms, `CrossSectorMatVec`) |
 | ⟨O⟩, ⟨i\|O\|j⟩ | `expect` / `matrix_element` | the averaged O in each level's basis; arbitrary O between two levels' vectors |
 
 ## Backends

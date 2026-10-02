@@ -40,10 +40,20 @@ Breaking changes so far:
   `A.is_hermitian()`, `A.terms()` (the unique canonical terms as `(coeff, ops, sites)`),
   `A.image(perm, flip=False)` and `Operator.product(N, "+-zxyudI"-string, sites, coeff)`, all
   exact (same-site products reduced by the spin-1/2 algebra). Terms on four or more sites (a
-  ring exchange, (S_i.S_j)^2) work in the Hamiltonian on every lane, CPU and GPU, and in the
-  observables of `expect` and `thermal`; `dynamics` and `matrix_element` raise
-  `qed.errors.Unsupported` for them for now. Op types outside S+, S-, S^z and sites outside the operator
-  are refused when a term is added.
+  ring exchange, (S_i.S_j)^2) work in the Hamiltonian on every lane, CPU and GPU, and in every
+  observable (`expect`, `thermal`, `dynamics`, `matrix_element`). Op types outside S+, S-, S^z
+  and sites outside the operator are refused when a term is added.
+- **Observables act through their canonical terms.** `expect`, thermal observables,
+  `matrix_element` and `dynamics` apply O between symmetry sectors through the projected
+  program of its canonical terms, so the result no longer depends on how O was written.
+  Fixed: `dynamics` dropped the three-body terms of O (and refused an O of three-body terms
+  only); it decided which target sectors O reaches by probing 8 sampled orbits, so weight
+  carried only by the others was lost; `dynamics` and `matrix_element` applied a same-site
+  product S_a[i] S_b[i] in the wrong order; an O on another number of sites than H was
+  accepted. `matrix_element` works between levels of different symmetry groups, and a
+  non-Hermitian O is exact everywhere. Results are deterministic run to run at a fixed thread
+  count. `ED_XSEC_CSR_BUDGET_GIB` now bounds the merged cross-sector CSR (it charged the
+  unmerged stream, |G| x terms times larger).
 - **Fixed: GPU solves of two operators that differ only in tiny or huge couplings** (all
   below ~5e-10, or above ~9e9) in one process: the device-mirror cache compared coefficients
   rounded to 1e-9, so the second solve reused the first operator's couplings. The cache now

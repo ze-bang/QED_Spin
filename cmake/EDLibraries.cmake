@@ -14,7 +14,6 @@ set(ED_ENGINE_SOURCES
     src/basis/group.cpp
     src/basis/irreps.cpp
     src/dssf/operator_spec.cpp
-    src/dynamics/cross_sector.cpp
     src/input/lattice.cpp
     src/input/hamiltonian_builder.cpp
     src/engine/oftlm.cpp
