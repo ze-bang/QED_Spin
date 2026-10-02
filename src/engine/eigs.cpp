@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <tuple>
 
 namespace ed::sectors {
@@ -116,6 +117,16 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, b
 // it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
 // is never trusted to prune; -inf when the estimate failed). A block the transitional
 // small-block rule keeps on the host is solved exactly.
+// The bytes a kept star holds: its sectors' representatives and norms, and the reduced CSRs its
+// operators built.
+std::uint64_t star_bytes(const StarBuild& sb) {
+    std::uint64_t b = 0;
+    if (sb.hk) b += 16 * sb.hk->rep_data().reps.size() + sb.hk->csr_bytes();
+    for (const auto& bi : sb.blocks)
+        if (bi->gop) b += 16 * bi->gsec->reps.size() + bi->gop->csr_bytes();
+    return b;
+}
+
 double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
     const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
@@ -323,9 +334,10 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         return detail::block_budget(16ull * dim * (k == 1 ? 6u : 3u * k + 30u));
     };
     // Solve one block and append its rows.
-    auto solve_block = [&](const Subspace& sub, StarBuild& sb,
-                           const std::shared_ptr<BlockData>& bi, const EngineContext& cx) {
-                const double context_orbit_s = cx.k_table->seconds.load();   // 0: no star needed it
+    // star_tr: the walk context's time-reversal map; context_orbit_s: its orbit table's seconds (0
+    // while no star needed it).
+    auto solve_block = [&](const Subspace& sub, StarBuild& sb, const std::shared_ptr<BlockData>& bi,
+                           Antiunitary star_tr, double context_orbit_s) {
                 const std::size_t dim = bi->tag.dim;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 if (!bop.op) return;
@@ -385,7 +397,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                     L.energy       = ev[i];
                     L.tag          = bi->tag;
                     L.mirror       = sub.mirror;
-                    L.fold         = detail::fold_of(cx, sub, bi->tag);
+                    L.fold         = detail::fold_of(star_tr, sub, bi->tag);
                     L.multiplicity = mult;
                     detail::label(L, sb);
                     if (o.vectors) {
@@ -414,8 +426,16 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // of increasing estimate. A block whose 40-step estimate is still far above its true
     // minimum could be skipped wrongly; prune = false solves every block.
     const bool prune = o.prune && o.cut && o.per_block == 0 && s.two_S < 0;
-    struct Candidate { std::size_t sub; int k0, irrep, flip; double estimate; };
+    // A candidate holds its star while the stars kept fit `keep_cap` (a quarter of the RAM the job
+    // may still allocate); a survivor without one walks its star again, once for all its survivors.
+    struct Candidate {
+        std::size_t sub; int k0, irrep, flip; double estimate;
+        std::shared_ptr<StarBuild> star; std::shared_ptr<BlockData> bi; Antiunitary tr; double orbit_s;
+    };
     std::vector<Candidate> candidates;
+    std::vector<std::size_t> fresh;   // the current star's candidates
+    const std::uint64_t keep_cap = ed::core::mem_guard_off() ? ~std::uint64_t{0} : ed::core::available_ram_bytes() / 4;
+    std::uint64_t held = 0;
     const auto subs = subspaces(H, s);
     std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
@@ -430,11 +450,24 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 if (s.two_S < 0)
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
-                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx); continue; }
+                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load()); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
-                                      prune_estimate(bop, *bi, o.device)});
+                                      prune_estimate(bop, *bi, o.device), nullptr, bi, cx.tr, 0.0});
+                fresh.push_back(candidates.size() - 1);
             }
+            // The star's candidates keep it -- its sectors and the CSRs their estimates built --
+            // while the stars kept fit `keep_cap`; a survivor then needs no second walk.
+            if (fresh.empty()) return;
+            const std::uint64_t bytes = star_bytes(sb);
+            auto star = held + bytes <= keep_cap ? std::make_shared<StarBuild>(std::move(sb)) : nullptr;
+            if (star) held += bytes;
+            for (std::size_t i : fresh) {
+                candidates[i].star = star;
+                candidates[i].orbit_s = cx.k_table->seconds.load();
+                if (!star) candidates[i].bi.reset();
+            }
+            fresh.clear();
         });
     }
     detail::require_some_block(s, n_blocks, "eigs");
@@ -443,7 +476,17 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     if (s.two_S >= 0 && !detail::has_selection(s)) res.total_dim = detail::tower_states(subs, n_sites, s.two_S);
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) { return a.estimate < b.estimate; });
-    for (const Candidate& c : candidates) {
+    // Stars walked again for survivors that kept none, by (subspace, star): (star, its map, its seconds).
+    std::map<std::pair<std::size_t, int>, std::tuple<std::shared_ptr<StarBuild>, Antiunitary, double>> rewalked;
+    std::map<std::pair<std::size_t, int>, std::size_t> owed;   // such candidates not yet decided
+    for (const Candidate& c : candidates)
+        if (!c.star) ++owed[{c.sub, c.k0}];
+    auto settle = [&](const Candidate& c) {   // a re-walked star goes with its last candidate
+        if (c.star) return;
+        const std::pair<std::size_t, int> key{c.sub, c.k0};
+        if (--owed[key] == 0) rewalked.erase(key);
+    };
+    for (Candidate& c : candidates) {
         // The k-th level found so far (with multiplicity); +inf while fewer than k are known.
         std::vector<const Row*> sorted;
         for (const auto& r : rows) sorted.push_back(&r);
@@ -459,18 +502,33 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         const double margin_floor = 0.05 * ed::numerics::scale_or_one(H.norm_bound());
         if (c.estimate > kth + std::max(o.prune_margin * std::max(margin_floor, std::abs(kth)), o.window)) {
             ++res.pruned_blocks;
+            settle(c);
+            c.star.reset();   // a star is released with its last candidate
+            c.bi.reset();
+            continue;
+        }
+        const Subspace& sub = subs[c.sub];
+        if (c.star) {
+            solve_block(sub, *c.star, c.bi, c.tr, c.orbit_s);
+            c.star.reset();
+            c.bi.reset();
             continue;
         }
         // The survivor's star alone, under the caller's Spec: the same symmetries as the estimate
         // walk (a k0 selection of its own would drop time reversal Theta).
-        const Subspace& sub = subs[c.sub];
-        LittleGroupOptions opt = detail::engine_options(s, sub);
-        opt.only_k0 = {c.k0};
-        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
-            for (const auto& bi : sb.blocks)
+        auto& again = rewalked[{c.sub, c.k0}];
+        if (!std::get<0>(again)) {
+            LittleGroupOptions opt = detail::engine_options(s, sub);
+            opt.only_k0 = {c.k0};
+            detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
+                again = {std::make_shared<StarBuild>(std::move(sb)), cx.tr, cx.k_table->seconds.load()};
+            });
+        }
+        if (const auto star = std::get<0>(again))
+            for (const auto& bi : star->blocks)
                 if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip)
-                    solve_block(sub, sb, bi, cx);
-        });
+                    solve_block(sub, *star, bi, std::get<1>(again), std::get<2>(again));
+        settle(c);
     }
 
     detail::require_some_level(s, rows.empty(), "eigs");
@@ -544,7 +602,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
                 if (!bop.op) continue;
                 Level L;
                 L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
-                L.fold = detail::fold_of(cx, sub, bi->tag);
+                L.fold = detail::fold_of(cx.tr, sub, bi->tag);
                 detail::label(L, sb);
                 const std::size_t id = batch.add(*bop.op);
                 bop.op.reset();                    // keep only the ghost filter past the star

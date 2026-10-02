@@ -351,7 +351,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 std::vector<std::shared_ptr<const ed::LinearOperator>> obs;
                 // A block paired by an antiunitary map (its star's time-reversal fold, a Theta
                 // mirror) averages each <O> with the conjugate of its image's.
-                const Antiunitary image = detail::fold_of(cx, sub, bi->tag);
+                const Antiunitary image = detail::fold_of(cx.tr, sub, bi->tag);
                 const bool folded = image != Antiunitary::None;
                 if (n_obs > 0) {
                     const auto& basis = bi->gop ? *bi->gsec : *sb.hk->rep_data_ptr();

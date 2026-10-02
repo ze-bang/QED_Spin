@@ -123,11 +123,10 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     return b;
 }
 
-/// The antiunitary pairing of a block's levels: its star fold's map (K or Theta), or Theta when the
-/// subspace's mirror is the time-reversal image.
-inline Antiunitary fold_of(const ed::solvers::lg_detail::EngineContext& cx, const Subspace& sub,
-                           const ed::solvers::LittleGroupBlockTag& tag) {
-    if (tag.tr_folded) return cx.tr;
+/// The antiunitary pairing of a block's levels: its star fold's map (`star_tr`, the walk context's
+/// tr: K or Theta), or Theta when the subspace's mirror is the time-reversal image.
+inline Antiunitary fold_of(Antiunitary star_tr, const Subspace& sub, const ed::solvers::LittleGroupBlockTag& tag) {
+    if (tag.tr_folded) return star_tr;
     return sub.mirror == 2 && sub.theta ? Antiunitary::Theta : Antiunitary::None;
 }
 
