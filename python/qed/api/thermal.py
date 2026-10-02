@@ -79,7 +79,7 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     ops = [] if observables is None else list(observables)
     t.observables = ops
     diagnostics: list = []
-    r = _core.sectors.thermal(H, int(H.num_sites), sym.resolve(H, diagnostics), t)
+    r = _core.sectors.thermal(H, sym.resolve(H, diagnostics), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
     return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), S=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
                          M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,

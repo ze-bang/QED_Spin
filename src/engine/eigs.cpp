@@ -182,7 +182,8 @@ SzContent sz_content(const ::Operator& H) {
     return u1 ? SzContent::U1 : (parity ? SzContent::Parity : SzContent::None);
 }
 
-std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s) {
+std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
+    const int n_sites = static_cast<int>(H.getNumBits());
     // A permutation H does not commute with would give silently wrong spectra; a residue that
     // does not normalise the abelian group, wrong stars, multiplets and labels.
     require_normal(s, n_sites);
@@ -255,13 +256,15 @@ std::vector<double> EigsResult::energies(int k) const {
     return e;
 }
 
-EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptions& o) {
+EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
+    const int n_sites = static_cast<int>(H.getNumBits());
     if (o.k < 1) throw std::invalid_argument("eigs: k must be >= 1");
     detail::require_device(o.device, "eigs");
     ed::parallel::pin_omp_threads_once();
     struct Row { Level level; bool owed_more; };   // owed_more: block stopped short of its request
     struct BlockEnd { double last; bool short_; };
     EigsResult res;
+    res.n_sites = n_sites;
     std::vector<Row> rows;
     std::vector<BlockEnd> ends;
 
@@ -358,7 +361,7 @@ EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s, const EigsOptio
     const bool prune = o.prune && o.cut && o.per_block == 0 && s.two_S < 0;
     struct Candidate { std::size_t sub; int k0, irrep, flip; double estimate; };
     std::vector<Candidate> candidates;
-    const auto subs = subspaces(H, n_sites, s);
+    const auto subs = subspaces(H, s);
     std::size_t n_blocks = 0;
     for (std::size_t si = 0; si < subs.size(); ++si) {
         const Subspace& sub = subs[si];
@@ -454,7 +457,8 @@ std::vector<double> SpectrumResult::expanded() const {
     return e;
 }
 
-SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device device) {
+SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
+    const int n_sites = static_cast<int>(H.getNumBits());
     detail::require_device(device, "spectrum");
     ed::parallel::pin_omp_threads_once();
     SpectrumResult res;
@@ -463,7 +467,7 @@ SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s, Device 
     struct Entry { std::size_t id; Level proto; detail::BlockOp filter; };
     std::vector<Entry> entries;
     std::size_t n_blocks = 0;
-    for (const Subspace& sub : subspaces(H, n_sites, s)) {
+    for (const Subspace& sub : subspaces(H, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;

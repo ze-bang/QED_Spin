@@ -170,7 +170,7 @@ def test_engine_refuses_a_residue_that_does_not_normalise():
     spec.abelian = [list(a) for a in close_group([[1, 2, 3, 0]])]
     spec.residues = [[1, 0, 2, 3]]
     with pytest.raises(qed.errors.InvalidRequest, match="does not normalise"):
-        qed._core.sectors.eigs(H, 4, spec, k=1)
+        qed._core.sectors.eigs(H, spec, k=1)
 
 
 def test_normaliser_split_keeps_what_normalises_the_translations():
@@ -248,7 +248,7 @@ def _check_labels(r, n, n_up=None):
         chars = r.irrep_characters(i)
         if not chars or abs(chars[ident] - 1) > 1e-9 or L.vector < 0:
             continue
-        v = np.asarray(r._raw.multiplet(r._spec, n, i, -1 if n_up is None else n_up)[0], complex)
+        v = np.asarray(r._raw.multiplet(r._spec, i, -1 if n_up is None else n_up)[0], complex)
         for R, chi in chars.items():
             if R == ident:
                 continue
@@ -312,8 +312,8 @@ def test_labels_name_the_callers_residues_when_the_engine_skips_one():
     spec = sym.resolve(H)
     shifted = sym.resolve(H)
     shifted.residues = [list(spec.abelian[1])] + [list(p) for p in spec.residues]
-    a = qed._core.sectors.eigs(H, n, spec, k=6)
-    b = qed._core.sectors.eigs(H, n, shifted, k=6)
+    a = qed._core.sectors.eigs(H, spec, k=6)
+    b = qed._core.sectors.eigs(H, shifted, k=6)
 
     def labels(res, s):
         return sorted((round(L.energy, 9),

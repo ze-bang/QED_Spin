@@ -325,7 +325,7 @@ TEST_CASE("thermal: a block up to dense_max_dim is exact for every sampling meth
     // 4 samples of 8 Lanczos steps cannot reach 1e-10 at any temperature: the dense path ran.
     for (const auto& [m, exact_states] : {std::pair{M::FTLM, std::size_t{0}}, std::pair{M::FTLM, std::size_t{2}},
                                           std::pair{M::mTPQ, std::size_t{0}}}) {
-        const auto r = ed::sectors::thermal(*H, kRing, one_block(), few_samples(m, exact_states));
+        const auto r = ed::sectors::thermal(*H, one_block(), few_samples(m, exact_states));
         INFO("method " << static_cast<int>(m) << ", exact_states " << exact_states);
         REQUIRE(r.placement.host_dense == 1);
         REQUIRE(r.placement.host_krylov == 0);
@@ -340,7 +340,7 @@ TEST_CASE("thermal: dense_max_dim = 0 samples the block", "[thermal]") {
     const auto E = exact_energies(eigs);
     auto t = few_samples(ed::sectors::ThermalSpec::Method::FTLM);
     t.dense_max_dim = 0;
-    const auto r = ed::sectors::thermal(*H, kRing, one_block(), t);
+    const auto r = ed::sectors::thermal(*H, one_block(), t);
     REQUIRE(r.placement.host_krylov == 1);
     REQUIRE(r.placement.host_dense == 0);
     double worst = 0.0;
@@ -359,7 +359,7 @@ TEST_CASE("thermal: a spin tower or observables keep a small block sampled", "[t
         auto s = one_block();
         s.use_sz = true;
         s.two_S = 0;   // the singlets: the seeds are projected onto the tower
-        const auto r = ed::sectors::thermal(*H, kRing, s, few_samples(ed::sectors::ThermalSpec::Method::FTLM));
+        const auto r = ed::sectors::thermal(*H, s, few_samples(ed::sectors::ThermalSpec::Method::FTLM));
         REQUIRE(r.placement.host_dense == 0);
         REQUIRE(r.placement.host_krylov >= 1);
         for (double e : r.E) REQUIRE(e >= e0 - 1e-9);
@@ -367,7 +367,7 @@ TEST_CASE("thermal: a spin tower or observables keep a small block sampled", "[t
     SECTION("observables") {
         auto t = few_samples(ed::sectors::ThermalSpec::Method::FTLM);
         t.observables = {H.get()};
-        const auto r = ed::sectors::thermal(*H, kRing, one_block(), t);
+        const auto r = ed::sectors::thermal(*H, one_block(), t);
         REQUIRE(r.placement.host_dense == 0);
         REQUIRE(r.placement.host_krylov == 1);
         REQUIRE(r.O.size() == 1);

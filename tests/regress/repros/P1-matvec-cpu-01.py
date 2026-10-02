@@ -43,7 +43,7 @@ def worker(cfg):
     spec.only_irrep = list(cfg["irreps"])
     from qed.api import _device
     t0 = time.perf_counter()
-    raw = qed._core.sectors.eigs(H, N, spec, k=1, vectors=False, dense_max_dim=64,
+    raw = qed._core.sectors.eigs(H, spec, k=1, vectors=False, dense_max_dim=64,
                                  allow_partial=True, device=_device.resolve("cpu"), prune=False,
                                  window=float(cfg["window"]))
     dt = time.perf_counter() - t0

@@ -52,7 +52,7 @@ struct DynamicsCurves {
     Diagnostics                      diagnostics;
 };
 
-[[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s,
+[[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, const Spec& s,
                                       const ::Operator& O, const DynamicsSpec& d);
 
 }  // namespace ed::sectors

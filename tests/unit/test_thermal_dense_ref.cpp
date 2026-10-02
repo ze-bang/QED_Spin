@@ -132,7 +132,7 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (one block)",
     SECTION("FTLM") {
         const auto ref = dense_reference(T_BROAD);
         for (std::uint64_t seed : SEEDS) {
-            const auto r = ed::sectors::thermal(*H, N_SITES, no_symmetry(), spec_for(ThermalSpec::Method::FTLM, seed));
+            const auto r = ed::sectors::thermal(*H, no_symmetry(), spec_for(ThermalSpec::Method::FTLM, seed));
             REQUIRE(r.placement.host_krylov == 1);
             check_close(r, ref, TOL_E, true, "FTLM/no-sym seed=" + std::to_string(seed));
         }
@@ -140,7 +140,7 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (one block)",
     SECTION("mTPQ") {
         const auto ref = dense_reference(T_HIGH);
         for (std::uint64_t seed : SEEDS) {
-            const auto r = ed::sectors::thermal(*H, N_SITES, no_symmetry(), spec_for(ThermalSpec::Method::mTPQ, seed));
+            const auto r = ed::sectors::thermal(*H, no_symmetry(), spec_for(ThermalSpec::Method::mTPQ, seed));
             REQUIRE(r.placement.host_krylov == 1);
             check_close(r, ref, TOL_E, false, "mTPQ/no-sym seed=" + std::to_string(seed));
         }
@@ -153,7 +153,7 @@ TEST_CASE("thermal methods vs dense reference: Sz sectors combined by the verb",
     SECTION("FTLM") {
         const auto ref = dense_reference(T_BROAD);
         for (std::uint64_t seed : SEEDS) {
-            const auto r = ed::sectors::thermal(*H, N_SITES, sz_sectors(), spec_for(ThermalSpec::Method::FTLM, seed));
+            const auto r = ed::sectors::thermal(*H, sz_sectors(), spec_for(ThermalSpec::Method::FTLM, seed));
             REQUIRE(r.blocks == N_SITES + 1);
             check_close(r, ref, TOL_E, true, "FTLM/sz seed=" + std::to_string(seed));
         }
@@ -161,7 +161,7 @@ TEST_CASE("thermal methods vs dense reference: Sz sectors combined by the verb",
     SECTION("mTPQ") {
         const auto ref = dense_reference(T_HIGH);
         for (std::uint64_t seed : SEEDS) {
-            const auto r = ed::sectors::thermal(*H, N_SITES, sz_sectors(), spec_for(ThermalSpec::Method::mTPQ, seed));
+            const auto r = ed::sectors::thermal(*H, sz_sectors(), spec_for(ThermalSpec::Method::mTPQ, seed));
             REQUIRE(r.blocks == N_SITES + 1);
             check_close(r, ref, /*tol_E=*/0.5, false, "mTPQ/sz seed=" + std::to_string(seed));
         }
@@ -178,13 +178,13 @@ TEST_CASE("thermal on the device vs dense reference",
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
     constexpr std::uint64_t GPU_SEED = 42ULL;
     SECTION("FTLM") {
-        const auto r = ed::sectors::thermal(*H, N_SITES, no_symmetry(),
+        const auto r = ed::sectors::thermal(*H, no_symmetry(),
                                             spec_for(ThermalSpec::Method::FTLM, GPU_SEED, ed::Device::Gpu));
         REQUIRE(r.placement.device_krylov == 1);
         check_close(r, dense_reference(T_BROAD), TOL_E, true, "FTLM/gpu");
     }
     SECTION("mTPQ") {
-        const auto r = ed::sectors::thermal(*H, N_SITES, no_symmetry(),
+        const auto r = ed::sectors::thermal(*H, no_symmetry(),
                                             spec_for(ThermalSpec::Method::mTPQ, GPU_SEED, ed::Device::Gpu));
         REQUIRE(r.placement.device_krylov == 1);
         check_close(r, dense_reference(T_HIGH), TOL_E, false, "mTPQ/gpu");

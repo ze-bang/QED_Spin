@@ -128,5 +128,5 @@ def matrix_elements(m, H, content, device, O, k):
     r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=_prune(device),
               dense_max_dim=_dense_max_dim(device))
     n = min(3, len(r.levels))
-    full = [r._raw.multiplet(r._spec, r._n_sites, i, -1)[0] for i in range(n)]
+    full = [r._raw.multiplet(r._spec, i, -1)[0] for i in range(n)]
     return [(r.matrix_element(O, i, j), full[i], full[j]) for i in range(n) for j in range(n)]

@@ -29,7 +29,8 @@ Complex dot(const std::vector<Complex>& a, const std::vector<Complex>& b) {
 }  // namespace
 
 std::vector<std::vector<Complex>>
-expect(const EigsResult& r, const Spec& s, int n_sites, const std::vector<const ::Operator*>& ops) {
+expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
+    const int n_sites = r.n_sites;
     for (const ::Operator* O : ops)
         if (s.two_S >= 0 && !ed::symmetry::hamiltonian_is_su2_symmetric(term_soa(*O)))
             throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
@@ -67,7 +68,8 @@ expect(const EigsResult& r, const Spec& s, int n_sites, const std::vector<const 
     return out;
 }
 
-Complex matrix_element(const EigsResult& r, int n_sites, const ::Operator& O, std::size_t i, std::size_t j) {
+Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
+    const int n_sites = r.n_sites;
     if (i >= r.levels.size() || j >= r.levels.size()) throw std::out_of_range("matrix_element: level index");
     if (!O.three_body_data_.empty())
         throw std::invalid_argument("matrix_element: three-body terms are not supported between sectors");

@@ -26,12 +26,12 @@
 namespace ed::sectors {
 
 /// values[level][op] for every level of `r`; each level must carry a vector (eigs with
-/// vectors = true). `s` and `n_sites` are the ones `r` was computed with.
+/// vectors = true). `s` is the Spec `r` was computed with.
 [[nodiscard]] std::vector<std::vector<Complex>>
-expect(const EigsResult& r, const Spec& s, int n_sites, const std::vector<const ::Operator*>& ops);
+expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops);
 
 /// <v_i| O |v_j> for levels i and j of `r` (one- and two-body terms).
-[[nodiscard]] Complex matrix_element(const EigsResult& r, int n_sites, const ::Operator& O,
+[[nodiscard]] Complex matrix_element(const EigsResult& r, const ::Operator& O,
                                      std::size_t i, std::size_t j);
 
 }  // namespace ed::sectors

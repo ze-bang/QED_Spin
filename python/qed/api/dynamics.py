@@ -66,7 +66,7 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.dense_max_dim = -1 if dense_max_dim is None else int(dense_max_dim)
     d.device = _device.resolve(device)
     diagnostics: list = []
-    r = _core.sectors.dynamics(H, int(H.num_sites), sym.resolve(H, diagnostics), O, d)
+    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), O, d)
     S = np.asarray(r.S)
     if len(temps):                       # the caller's temperatures, in the caller's order
         S = S[rows.reshape(-1)]

@@ -8,7 +8,7 @@ although one is returned.
 
 Test: odd Heisenberg ring N=9 (ground level S=1/2 at momenta +-k, multiplicity > 1 under the
 auto symmetry). qed.eigs(H, 1, vectors=True).vectors() returns 1 vector, while the very call it
-makes (r._raw.multiplet(spec, n, 0, -1)) returns m full-space vectors. Each of those is checked
+makes (r._raw.multiplet(spec, 0, -1)) returns m full-space vectors. Each of those is checked
 to be an eigenvector of an independent dense Kronecker-product H (Rayleigh residual), so the
 extra work is real eigenvector construction, not empty padding.
 """
@@ -47,7 +47,7 @@ try:
     r = qed.eigs(H, 1, vectors=True)
     m = int(r.levels[0].multiplicity)
     vs_api = r.vectors()
-    raw = r._raw.multiplet(r._spec, r._n_sites, 0, -1)
+    raw = r._raw.multiplet(r._spec, 0, -1)
 except Exception as e:  # noqa: BLE001
     print(f"REPRO: INCONCLUSIVE eigs/vectors raised {type(e).__name__}: {str(e)[:200]}")
     raise SystemExit(0)

@@ -45,7 +45,7 @@ spec.time_reversal = 0
 spec.only_k0 = [0]
 t0 = time.time()
 try:
-    res = _core.sectors.eigs(H, N, spec, k=1)
+    res = _core.sectors.eigs(H, spec, k=1)
     print(f"CHILD_OK |A|={len(A)} t={time.time()-t0:.1f}s E={[l.energy for l in res.levels][:1]}", flush=True)
 except Exception as ex:
     print(f"CHILD_RAISE |A|={len(A)} t={time.time()-t0:.1f}s {type(ex).__name__}: {str(ex)[:160]}", flush=True)

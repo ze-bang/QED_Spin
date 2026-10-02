@@ -172,7 +172,7 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
                 int dense_max_dim, double& e0, Placement& placement) {
     EigsOptions eo;
     eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim;
-    const EigsResult first = eigs(H, n_sites, u, eo);
+    const EigsResult first = eigs(H, u, eo);
     placement += first.placement;
     eo.vectors = true;
     if (first.levels.empty())        // eigs raises for a selection; nothing else leaves it empty
@@ -193,7 +193,7 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
             deep.per_block = pb;
             deep.cut       = false;
             deep.window    = 0.0;
-            const EigsResult r = eigs(H, n_sites, one, deep);
+            const EigsResult r = eigs(H, one, deep);
             placement += r.placement;
             const bool exhausted = static_cast<int>(r.levels.size()) < pb;
             if (exhausted || r.levels.back().energy > e0 + tol) {
@@ -252,8 +252,8 @@ double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
 
 }  // namespace
 
-DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const ::Operator& O,
-                        const DynamicsSpec& d) {
+DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O, const DynamicsSpec& d) {
+    const int n_sites = static_cast<int>(H.getNumBits());
     if (d.omega.empty()) throw std::invalid_argument("dynamics: empty frequency grid");
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
@@ -414,7 +414,7 @@ DynamicsCurves dynamics(const ::Operator& H, int n_sites, const Spec& s, const :
         std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> Hp;
         std::uint64_t tower_dim = 0;
     };
-    std::vector<Subspace> source_subs = subspaces(H, n_sites, u);
+    std::vector<Subspace> source_subs = subspaces(H, u);
     std::shared_ptr<::Operator> s2c;
     if (s.two_S >= 0) {
         const int n0 = source_subs.front().n_up;

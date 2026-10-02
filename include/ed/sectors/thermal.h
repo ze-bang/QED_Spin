@@ -52,7 +52,7 @@ struct ThermalCurves {
     Diagnostics   diagnostics;
 };
 
-[[nodiscard]] ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s,
+[[nodiscard]] ThermalCurves thermal(const ::Operator& H, const Spec& s,
                                     const ThermalSpec& t);
 
 }  // namespace ed::sectors

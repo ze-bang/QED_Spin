@@ -47,7 +47,7 @@ spec.spin_flip = 0
 spec.time_reversal = 0
 spec.n_up = -1
 try:
-    r = _core.sectors.spectrum(H, N, spec)
+    r = _core.sectors.spectrum(H, spec)
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE spectrum raised {type(ex).__name__}: {str(ex)[:200]}")
     raise SystemExit(0)

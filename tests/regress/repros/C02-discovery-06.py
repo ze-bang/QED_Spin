@@ -62,7 +62,7 @@ try:
         if not chars or L.vector < 0:
             continue
         if abs(chars[ident] - 1) < 1e-9:                         # (a): one-dimensional irreps
-            v = np.asarray(e._raw.multiplet(e._spec, N, i, NUP)[0], complex)
+            v = np.asarray(e._raw.multiplet(e._spec, i, NUP)[0], complex)
             for R, chi in chars.items():
                 if R == ident:
                     continue
@@ -84,7 +84,7 @@ try:
     shifted.residues = [list(spec.abelian[1])] + [list(p) for p in spec.residues]
 
     def labels(s):
-        r = qed._core.sectors.eigs(H, N, s, k=len(states))
+        r = qed._core.sectors.eigs(H, s, k=len(states))
         return sorted((round(L.energy, 9),
                        tuple(sorted((tuple(s.residues[k]) if k >= 0 else (), round(c.real, 9), round(c.imag, 9))
                                     for k, c in L.irrep_characters)))

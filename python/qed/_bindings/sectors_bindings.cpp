@@ -53,7 +53,7 @@ std::vector<T> vec(const py::dict& d, const char* key) {
     return std::vector<T>(a.data(), a.data() + a.size());
 }
 
-py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s, int n_sites) {
+py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
     py::dict d;
     const std::size_t nl = r.levels.size();
     std::vector<double> energy(nl);
@@ -115,7 +115,7 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s, int n_site
     d["spec_only_k0"] = arr(std::vector<std::int64_t>(s.only_k0.begin(), s.only_k0.end()));
     d["spec_only_irrep"] = arr(std::vector<std::int64_t>(s.only_irrep.begin(), s.only_irrep.end()));
     d["spec_scalars"] = arr(std::vector<std::int64_t>{s.n_up, s.sz_parity, s.use_sz ? 1 : 0, s.spin_flip,
-                                                      s.time_reversal, s.two_S, n_sites});
+                                                      s.time_reversal, s.two_S, r.n_sites});
     d["result_scalars"] = arr(std::vector<std::int64_t>{
         static_cast<std::int64_t>(r.total_dim), static_cast<std::int64_t>(r.partial_blocks),
         r.complete ? 1 : 0, r.flip_engaged ? 1 : 0, r.tr_engaged ? 1 : 0,
@@ -209,7 +209,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     s.n_up = static_cast<int>(ss.at(0)); s.sz_parity = static_cast<int>(ss.at(1)); s.use_sz = ss.at(2) != 0;
     s.spin_flip = static_cast<int>(ss.at(3)); s.time_reversal = static_cast<int>(ss.at(4));
     s.two_S = static_cast<int>(ss.at(5));
-    return py::make_tuple(std::move(r), std::move(s), n);
+    r.n_sites = n;
+    return py::make_tuple(std::move(r), std::move(s));
 }
 
 // Where a verb's solves ran (sec::Placement), as a dict.
@@ -270,7 +271,7 @@ void bind_sectors(py::module_& m) {
         .def_readonly("n_up", &sec::Subspace::n_up)
         .def_readonly("sz_parity", &sec::Subspace::sz_parity)
         .def_readonly("mirror", &sec::Subspace::mirror);
-    s.def("subspaces", &sec::subspaces, py::arg("H"), py::arg("n_sites"), py::arg("spec"));
+    s.def("subspaces", &sec::subspaces, py::arg("H"), py::arg("spec"));
 
     py::class_<sec::Level>(s, "Level")
         .def_readonly("energy", &sec::Level::energy)
@@ -297,6 +298,7 @@ void bind_sectors(py::module_& m) {
 
     py::class_<sec::EigsResult>(s, "EigsResult")
         .def_readonly("levels", &sec::EigsResult::levels)
+        .def_readonly("n_sites", &sec::EigsResult::n_sites)
         .def_readonly("total_dim", &sec::EigsResult::total_dim)
         .def_readonly("partial_blocks", &sec::EigsResult::partial_blocks)
         .def_readonly("complete", &sec::EigsResult::complete)
@@ -315,31 +317,30 @@ void bind_sectors(py::module_& m) {
                                        to_array(v.amplitudes));
              }, py::arg("i"),
              "(representatives, amplitudes) of vector i in the rep basis it was solved in.")
-        .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int n_sites,
-                             int level, int n_up) {
+        .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up) {
                  const auto& L = r.levels.at(static_cast<std::size_t>(level));
                  if (L.vector < 0) throw std::invalid_argument("multiplet: the level carries no vector");
                  std::vector<std::vector<std::complex<double>>> vs;
                  {
                      py::gil_scoped_release nogil;
-                     vs = sec::multiplet(spec, n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up);
+                     vs = sec::multiplet(spec, r.n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up);
                  }
                  py::list out;
                  for (auto& v : vs) out.append(to_array(std::move(v)));
                  return out;
-             }, py::arg("spec"), py::arg("n_sites"), py::arg("level"), py::arg("n_up") = -1,
+             }, py::arg("spec"), py::arg("level"), py::arg("n_up") = -1,
              "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space).")
-        .def("expect", [](const sec::EigsResult& r, const sec::Spec& spec, int n_sites,
+        .def("expect", [](const sec::EigsResult& r, const sec::Spec& spec,
                           const std::vector<const ::Operator*>& ops) {
                  py::gil_scoped_release nogil;
-                 return sec::expect(r, spec, n_sites, ops);
-             }, py::arg("spec"), py::arg("n_sites"), py::arg("ops"),
+                 return sec::expect(r, spec, ops);
+             }, py::arg("spec"), py::arg("ops"),
              "<O> per level averaged over its symmetry multiplet: [level][op].")
-        .def("matrix_element", [](const sec::EigsResult& r, int n_sites, const ::Operator& O,
+        .def("matrix_element", [](const sec::EigsResult& r, const ::Operator& O,
                                   std::size_t i, std::size_t j) {
                  py::gil_scoped_release nogil;
-                 return sec::matrix_element(r, n_sites, O, i, j);
-             }, py::arg("n_sites"), py::arg("O"), py::arg("i"), py::arg("j"),
+                 return sec::matrix_element(r, O, i, j);
+             }, py::arg("O"), py::arg("i"), py::arg("j"),
              "<v_i|O|v_j> between the vectors of levels i and j.");
 
     py::class_<sec::SpectrumResult>(s, "SpectrumResult")
@@ -353,11 +354,11 @@ void bind_sectors(py::module_& m) {
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });
 
     s.def("spectrum",
-          [](const ::Operator& H, int n_sites, const sec::Spec& spec, sec::Device device) {
+          [](const ::Operator& H, const sec::Spec& spec, sec::Device device) {
               py::gil_scoped_release nogil;
-              return sec::spectrum(H, n_sites, spec, device);
+              return sec::spectrum(H, spec, device);
           },
-          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("device") = sec::Device::Cpu,
+          py::arg("H"), py::arg("spec"), py::arg("device") = sec::Device::Cpu,
           "The complete spectrum of H, every symmetry block diagonalised densely.");
 
     py::enum_<sec::ThermalSpec::Method>(s, "ThermalMethod")
@@ -395,11 +396,11 @@ void bind_sectors(py::module_& m) {
         .def_readonly("diagnostics", &sec::ThermalCurves::diagnostics);
 
     s.def("thermal",
-          [](const ::Operator& H, int n_sites, const sec::Spec& spec, const sec::ThermalSpec& t) {
+          [](const ::Operator& H, const sec::Spec& spec, const sec::ThermalSpec& t) {
               py::gil_scoped_release nogil;
-              return sec::thermal(H, n_sites, spec, t);
+              return sec::thermal(H, spec, t);
           },
-          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("thermal"),
+          py::arg("H"), py::arg("spec"), py::arg("thermal"),
           "Thermodynamics of H over every symmetry block, combined in log space.");
 
     py::class_<sec::DynamicsSpec>(s, "DynamicsSpec")
@@ -426,20 +427,19 @@ void bind_sectors(py::module_& m) {
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
 
     s.def("dynamics",
-          [](const ::Operator& H, int n_sites, const sec::Spec& spec, const ::Operator& O,
-             const sec::DynamicsSpec& d) {
+          [](const ::Operator& H, const sec::Spec& spec, const ::Operator& O, const sec::DynamicsSpec& d) {
               py::gil_scoped_release nogil;
-              return sec::dynamics(H, n_sites, spec, O, d);
+              return sec::dynamics(H, spec, O, d);
           },
-          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("O"), py::arg("dynamics"),
+          py::arg("H"), py::arg("spec"), py::arg("O"), py::arg("dynamics"),
           "S(omega) = <O^dag delta(omega - H + E) O> over the momentum sectors of H.");
 
-    s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"), py::arg("n_sites"),
+    s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"),
           "A result as named arrays (qed.api EigResult.save).");
     s.def("eigs_from_arrays", &eigs_from_arrays, py::arg("arrays"),
-          "(result, spec, n_sites) from eigs_to_arrays output (qed.load_eigs).");
+          "(result, spec) from eigs_to_arrays output (qed.load_eigs); result.n_sites is restored.");
     s.def("eigs",
-          [](const ::Operator& H, int n_sites, const sec::Spec& spec, int k, bool vectors,
+          [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors,
              int dense_max_dim, bool allow_partial, sec::Device device,
              bool prune, double prune_margin, double window) {
               sec::EigsOptions o;
@@ -447,9 +447,9 @@ void bind_sectors(py::module_& m) {
               o.allow_partial = allow_partial; o.device = device;
               o.prune = prune; o.prune_margin = prune_margin; o.window = window;
               py::gil_scoped_release nogil;
-              return sec::eigs(H, n_sites, spec, o);
+              return sec::eigs(H, spec, o);
           },
-          py::arg("H"), py::arg("n_sites"), py::arg("spec"), py::arg("k") = 1,
+          py::arg("H"), py::arg("spec"), py::arg("k") = 1,
           py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
           py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
           py::arg("prune") = true, py::arg("prune_margin") = 0.02, py::arg("window") = 0.0,

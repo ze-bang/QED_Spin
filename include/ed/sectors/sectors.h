@@ -89,7 +89,7 @@ struct Subspace {
     int mirror    = 1;   ///< 2 when the flip image of this subspace is folded in
 };
 
-[[nodiscard]] std::vector<Subspace> subspaces(const ::Operator& H, int n_sites, const Spec& s);
+[[nodiscard]] std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s);
 
 
 // -----------------------------------------------------------------------------
@@ -189,6 +189,7 @@ struct BlockStats {
 struct EigsResult {
     std::vector<Level>       levels;        ///< ascending, cut so that multiplicities reach k
     std::vector<BlockVector> vectors;
+    int                      n_sites = 0;   ///< of the H the result was computed for
     std::uint64_t            total_dim = 0; ///< sum of dim x multiplicity over the walk
     std::size_t              partial_blocks = 0;  ///< blocks that could not certify their rows
     bool                     complete = true;     ///< no uncertified level can lie below the cut
@@ -204,8 +205,7 @@ struct EigsResult {
     [[nodiscard]] std::vector<double> energies(int k) const;
 };
 
-[[nodiscard]] EigsResult eigs(const ::Operator& H, int n_sites, const Spec& s,
-                              const EigsOptions& o);
+[[nodiscard]] EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o);
 
 /// The complete spectrum: every block diagonalised densely.
 struct SpectrumResult {
@@ -221,8 +221,7 @@ struct SpectrumResult {
     [[nodiscard]] std::vector<double> expanded() const;
 };
 
-[[nodiscard]] SpectrumResult spectrum(const ::Operator& H, int n_sites, const Spec& s,
-                                      Device device = Device::Cpu);
+[[nodiscard]] SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device = Device::Cpu);
 
 /// Expand a rep-basis vector into the Sz sector n_up (the C(N, n_up) states in
 /// ascending integer order) or, for n_up < 0, the full 2^N space.

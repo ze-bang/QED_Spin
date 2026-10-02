@@ -144,6 +144,11 @@ C++ API (installed headers; nothing in Python changes):
   the backend, and `LanczosKernelOptions`, `LanczosKernelResult` and `KrylovSchurResult`
   alias `LanczosKernelOptionsT<Complex>` and the like. `ed::matvec::is_cpu_backend_v<B>`
   tells a host backend of any scalar type. `LanczosKernelOptions::on_step` (no caller) is gone.
+- The `ed::sectors` entry points take the number of sites from H: `subspaces(H, s)`,
+  `eigs(H, s, o)`, `spectrum(H, s, device)`, `thermal(H, s, t)`, `dynamics(H, s, O, d)`
+  (each lost its `int n_sites`, which nothing checked against H). `EigsResult::n_sites` records
+  it for `expect(r, s, ops)` and `matrix_element(r, O, i, j)`, which lost theirs too; the
+  `_core.sectors` bindings follow, and `eigs_from_arrays` returns `(result, spec)`.
 - **Build.** One static library, `qed_engine` (`QED::qed_engine` when installed), replaces
   `ed_parallel`, `ed_core`, `ed_matvec`, `ed_dssf`, `ed_symmetry`, `ed_input`,
   `ed_solvers_cpu` and `ed_solvers_gpu`; it carries the include path, `WITH_CUDA` and the link

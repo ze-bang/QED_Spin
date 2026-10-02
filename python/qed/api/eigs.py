@@ -65,7 +65,7 @@ class EigResult(Labelled):
             if len(out) >= self.k:
                 break
             try:
-                vs = self._raw.multiplet(self._spec, self._n_sites, i, want)
+                vs = self._raw.multiplet(self._spec, i, want)
             except ValueError:
                 continue                     # no component in this Sz sector
             out.extend(vs[: self.k - len(out)])
@@ -77,7 +77,7 @@ class EigResult(Labelled):
         a complex array [len(levels), len(ops)]. Needs ``vectors=True``."""
         single = not isinstance(ops, (list, tuple))
         ops = [ops] if single else list(ops)
-        vals = np.asarray(self._raw.expect(self._spec, self._n_sites, ops), complex)
+        vals = np.asarray(self._raw.expect(self._spec, ops), complex)
         return vals.reshape(len(self.levels), len(ops))
 
     @_log.replays
@@ -85,7 +85,7 @@ class EigResult(Labelled):
         """<v_i| O |v_j> between the vectors of ``levels[i]`` and ``levels[j]`` -- the
         partners the solver returned, from which each level's multiplet is expanded.
         ``O`` is arbitrary: it may change Sz and break every symmetry."""
-        return complex(self._raw.matrix_element(self._n_sites, O, int(i), int(j)))
+        return complex(self._raw.matrix_element(O, int(i), int(j)))
 
     def save(self, path) -> None:
         """Write the result to an ``.npz`` file: the levels with their block labels, the
@@ -93,7 +93,7 @@ class EigResult(Labelled):
         data. :func:`qed.load_eigs` restores it; :meth:`vectors`, :meth:`expect` and
         :meth:`matrix_element` then work without H."""
         arrays = {k: np.asarray(v) for k, v in
-                  _core.sectors.eigs_to_arrays(self._raw, self._spec, self._n_sites).items()}
+                  _core.sectors.eigs_to_arrays(self._raw, self._spec).items()}
         np.savez_compressed(path, format_version=np.int64(1), k=np.int64(self.k),
                             energies=np.asarray(self.energies), **arrays)
 
@@ -118,8 +118,7 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
-    n = int(H.num_sites)
-    raw = _core.sectors.eigs(H, n, spec, k=int(k), vectors=bool(vectors),
+    raw = _core.sectors.eigs(H, spec, k=int(k), vectors=bool(vectors),
                              dense_max_dim=-1 if dense_max_dim is None else int(dense_max_dim),
                              allow_partial=bool(allow_partial), device=_device.resolve(device),
                              prune=bool(prune), window=float(window))
@@ -127,7 +126,7 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     return EigResult(energies=np.asarray(raw.energies(rows), float), levels=list(raw.levels),
                      k=int(k), symmetry=sym, complete=bool(raw.complete),
                      device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
-                     _raw=raw, _spec=spec, _n_sites=n,
+                     _raw=raw, _spec=spec, _n_sites=int(raw.n_sites),
                      diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
                      block_stats=list(raw.block_stats),
                      placement=dict(raw.placement))
@@ -140,7 +139,7 @@ def load_eigs(path) -> "EigResult":
         d = {key: f[key] for key in f.files}
     if int(d.get("format_version", 0)) != 1:
         raise ValueError(f"{path}: not an EigResult file (format_version 1)")
-    raw, spec, n = _core.sectors.eigs_from_arrays(d)
+    raw, spec = _core.sectors.eigs_from_arrays(d)
     return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
                      symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),
-                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(n))
+                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(raw.n_sites))

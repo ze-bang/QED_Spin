@@ -158,7 +158,8 @@ std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, c
 
 }  // namespace
 
-ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const ThermalSpec& t) {
+ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) {
+    const int n_sites = static_cast<int>(H.getNumBits());
     if (t.temperatures.empty()) throw std::invalid_argument("thermal: no temperatures");
     std::vector<double> beta;
     for (double T : t.temperatures) {
@@ -197,7 +198,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
         if (t.exact_states > 0)
             throw std::invalid_argument("thermal: exact_states (OFTLM) cannot be restricted to one spin tower; "
                                         "use FTLM or mTPQ");
-        const Subspace hw = subspaces(H, n_sites, s).front();
+        const Subspace hw = subspaces(H, s).front();
         dim_at    = block_dims(H, n_sites, s, hw);
         dim_above = block_dims(H, n_sites, s, {hw.n_up - 1, -1, 1});
     }
@@ -221,7 +222,7 @@ ThermalCurves thermal(const ::Operator& H, int n_sites, const Spec& s, const The
     std::vector<Deferred> deferred;
     std::vector<Pending> pending;
     std::size_t n_blocks = 0;
-    for (const Subspace& sub : subspaces(H, n_sites, s)) {
+    for (const Subspace& sub : subspaces(H, s)) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {

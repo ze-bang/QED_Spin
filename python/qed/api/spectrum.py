@@ -36,7 +36,7 @@ def spectrum(H, *, sym: Optional[Symmetry] = None, device: str = "cpu") -> Spect
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
-    raw = _core.sectors.spectrum(H, int(H.num_sites), spec,
+    raw = _core.sectors.spectrum(H, spec,
                                  device=_device.resolve(device))
     return SpectrumResult(energies=np.asarray(raw.expanded()), levels=list(raw.levels),
                           device_blocks=int(raw.device_blocks), symmetry=sym,
