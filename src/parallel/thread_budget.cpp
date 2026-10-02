@@ -55,35 +55,16 @@ int auto_threads_for_dim(std::uint64_t dim) {
     const int max_t = omp_max_threads();
     if (auto_threads_disabled() || max_t <= 1) return max_t;
 
-    // Aim for one OMP/BLAS worker per kPerK*1024 basis states (kPerK * 16 KiB
-    // of complex double per thread), growing the team linearly with dim, and
-    // soft-cap it at kCeil threads: the dominant Lanczos kernels (SpMV,
-    // zaxpy, dznrm2) are memory-bandwidth bound and saturate well below
-    // ``max_threads`` on every machine we have measured.
-    //
-    // On a 32-core x86_64 box (Ryzen 7950X-class, OpenBLAS-pthread, gcc-13)
-    // we measured the following Lanczos(N) total runtime in ms vs OMP+BLAS
-    // thread count for the unsymmetrised 1D Heisenberg PBC chain:
-    //
-    //     N \\ threads     1    2    4    8    16
-    //     -----------   ----------------------------
-    //     14             7    7    6   11    11
-    //     16            32   28   24   38    60
-    //     18           320  244  219  198   248
-    //     20          1647 1486 1094 1374  1310
-    //
-    // The optimum sits at 4-8 threads for every N >= 16; a ceiling of 8
-    // captures that without needing per-machine tuning.
+    // One OMP/BLAS worker per kPerK*1024 basis states (kPerK * 16 KiB of complex double per thread),
+    // growing with dim up to the whole team: a small block on a big team spends its steps on
+    // fork/join, a large one is memory-bandwidth bound and scales with the memory channels it
+    // reaches. The old ceiling of 8 threads was tuned on a 2-channel desktop (Lanczos optimum at
+    // 4-8 threads); on the 12-channel EPYC nodes it left most cores idle on every large thermal
+    // block (audit P4-thermal-03).
     constexpr std::uint64_t kPerK = 8;
-    constexpr int kCeil = 8;
-    const int ceil = std::min(kCeil, max_t);
-
     const std::uint64_t denom = kPerK * 1024ULL;
-
     const std::uint64_t want64 = std::max<std::uint64_t>(1, dim / denom);
-    const int want = static_cast<int>(std::min<std::uint64_t>(
-        want64, static_cast<std::uint64_t>(max_t)));
-    return std::clamp(want, 1, ceil);
+    return static_cast<int>(std::min<std::uint64_t>(want64, static_cast<std::uint64_t>(max_t)));
 }
 
 ThreadBudgetScope::ThreadBudgetScope(int threads, int blas_threads) {

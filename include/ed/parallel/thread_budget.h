@@ -29,10 +29,9 @@
 // build does not hard-require OpenBLAS).
 //
 // The heuristic is deliberately simple: one thread per ~8K basis states
-// (roughly 128 KiB of complex doubles per thread), soft-capped at 8, i.e.
-// ``threads = clamp(dim / 8192, 1, min(8, max_threads))``. At dim = 16k
-// that gives 2 threads; from dim = 65k on it gives 8 threads (our measured
-// optimum is 4-8). Pass ``ED_AUTO_THREADS=0`` to opt out entirely (useful
+// (roughly 128 KiB of complex doubles per thread), up to the whole team, i.e.
+// ``threads = clamp(dim / 8192, 1, max_threads)``. At dim = 16k that gives 2
+// threads, from dim = 262k on 32 (no ceiling: audit P4-thermal-03). Pass ``ED_AUTO_THREADS=0`` to opt out entirely (useful
 // when the caller is itself OMP-parallel and nesting would oversubscribe).
 //
 // Numerically a no-op: changing the BLAS / OMP thread count never changes
@@ -46,7 +45,7 @@ namespace ed::parallel {
 
 /// Compute the recommended thread count for a Krylov-style memory-bound
 /// kernel operating on a vector of `dim` complex doubles: one thread per 8K
-/// basis states, soft-capped at 8. Honours ``ED_AUTO_THREADS=0`` (returns
+/// basis states, up to the whole team. Honours ``ED_AUTO_THREADS=0`` (returns
 /// ``omp_get_max_threads()`` unchanged). Always returns at least 1 and at
 /// most ``omp_get_max_threads()``.
 int auto_threads_for_dim(std::uint64_t dim);
