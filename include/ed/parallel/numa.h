@@ -13,37 +13,30 @@
 // DEFAULT-OFF and never changes numerical results, only thread affinity.
 //
 // Env knob (re-read on each call so unit tests can flip it between
-// invocations):
+// invocations; parsed as a registry Flag, see <ed/core/config.h>):
 //
 //   ED_NUMA_PIN_THREADS       0 (off, default) | 1 (on)
-//       When 1, `pin_omp_threads_once()` enters a `#pragma omp parallel`
-//       region on first call and binds each worker thread to a single
-//       hardware logical CPU via `pthread_setaffinity_np`. Pinning is
-//       idempotent: repeat calls are silent no-ops within a process.
-//       The mapping is the simple compact one (thread_num -> cpu
-//       thread_num); honour OMP_PROC_BIND / OMP_PLACES if you need a
-//       different layout.
+//       When on, the first `pin_omp_threads_once()` called from serial code
+//       binds OpenMP thread t to the t-th CPU the process may run on (its
+//       cgroup cpuset or taskset mask, wrapping around) via
+//       `pthread_setaffinity_np`. A call inside a parallel region waits for
+//       the next one. When OMP_PROC_BIND binds the threads already, they are
+//       left as they are. Failures are logged (Warn) and not counted.
 // =============================================================================
 
 namespace ed::parallel {
 
-/// Read ED_NUMA_PIN_THREADS (default false). Re-reads each call.
+/// ED_NUMA_PIN_THREADS as a registry Flag (default false). Re-reads each call.
 bool numa_pin_threads_enabled();
 
-/// Returns the number of times the per-process pinning has been *applied*
-/// (zero means "not pinned yet, or knob is off"). Test-friendly accessor.
+/// The number of times the per-process pinning has been *applied* (zero: not
+/// pinned yet, the knob is off, OMP_PROC_BIND binds the threads, or pinning
+/// failed). Test-friendly accessor.
 int  pin_omp_threads_application_count();
 
-/// Apply OpenMP thread-to-CPU pinning once per process.
-///
-/// First call (with ED_NUMA_PIN_THREADS=1) enters `#pragma omp parallel`
-/// and calls `pthread_setaffinity_np` on each worker thread to bind it to
-/// a single CPU. Subsequent calls are no-ops (idempotent within a
-/// process). On non-Linux platforms or if the env knob is off, the call
-/// is a silent no-op.
-///
-/// Safe to call from anywhere -- typically invoked at the top of a solve /
-/// thermal entry point, just before the first big OpenMP region.
+/// Apply OpenMP thread-to-CPU pinning once per process (see the knob above).
+/// Repeat calls are no-ops; on non-Linux platforms, without OpenMP or with the
+/// knob off, the call is a silent no-op. Called at the top of every verb.
 void pin_omp_threads_once();
 
 }  // namespace ed::parallel

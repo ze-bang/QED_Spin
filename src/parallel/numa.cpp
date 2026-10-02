@@ -10,11 +10,13 @@
 
 #include "ed/parallel/numa.h"
 
-#include <algorithm>
+#include <ed/core/config.h>
+#include <ed/core/log.h>
+
 #include <atomic>
-#include <cstdlib>
+#include <cstddef>
 #include <mutex>
-#include <string>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -23,36 +25,22 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
-#include <unistd.h>
 #endif
 
 namespace ed::parallel {
 
 namespace {
 
-bool parse_bool_env(const char* name) {
-    const char* v = std::getenv(name);
-    if (!v || !*v) return false;
-    // Accept the common spellings; any other non-empty value -> false to
-    // keep "ED_NUMA_PIN_THREADS=foo" from silently turning the knob on.
-    if (v[0] == '1') return true;
-    std::string s(v);
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
-// Process-wide pinning state. We only ever apply pinning *once* per
-// process: pthread_setaffinity_np is irreversible from the application
-// side (we'd have to remember the inherited mask to restore it), and
-// repeated calls would just thrash the kernel's scheduler bookkeeping.
-std::once_flag g_pin_once_flag;
+// Pinning is applied at most once per process: pthread_setaffinity_np is irreversible from the
+// application side (the inherited masks would have to be remembered to restore them).
+std::mutex       g_pin_mutex;
+bool             g_pin_done = false;   // guarded by g_pin_mutex
 std::atomic<int> g_pin_application_count{0};
 
 }  // anonymous namespace
 
 bool numa_pin_threads_enabled() {
-    return parse_bool_env("ED_NUMA_PIN_THREADS");
+    return ed::env::flag("ED_NUMA_PIN_THREADS", false);
 }
 
 int pin_omp_threads_application_count() {
@@ -61,38 +49,47 @@ int pin_omp_threads_application_count() {
 
 void pin_omp_threads_once() {
     if (!numa_pin_threads_enabled()) return;
-#if !defined(__linux__)
-    // pthread_setaffinity_np is glibc/Linux only. Other platforms get a
-    // silent no-op so the rest of the build stays portable.
-    return;
-#else
-    std::call_once(g_pin_once_flag, []() {
-#ifdef _OPENMP
-        const int max_threads = omp_get_max_threads();
-        const long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-        if (max_threads <= 0 || ncpu <= 0) return;
-        // Compact mapping: thread t -> CPU (t mod ncpu). On a typical
-        // 2-socket box with hyperthreads, this lands threads 0..N-1 on
-        // contiguous logical cores -- callers who want a different
-        // layout (spread across sockets, etc.) should set OMP_PROC_BIND
-        // / OMP_PLACES via the environment, which OpenMP applies before
-        // we ever get here.
-        #pragma omp parallel num_threads(max_threads)
-        {
-            const int tid = omp_get_thread_num();
-            cpu_set_t mask;
-            CPU_ZERO(&mask);
-            CPU_SET(static_cast<size_t>(tid % ncpu), &mask);
-            // Best effort: ignore the return code. If pinning fails (e.g.
-            // we're inside a cgroup that already restricts the mask), we
-            // don't want to bring the solver down.
-            (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t),
-                                         &mask);
-        }
-#endif  // _OPENMP
-        g_pin_application_count.fetch_add(1, std::memory_order_relaxed);
-    });
-#endif  // __linux__
+#if defined(__linux__) && defined(_OPENMP)
+    // Inside a parallel region only the calling team would be pinned, for good: wait for the
+    // next call from serial code.
+    if (omp_in_parallel()) return;
+    std::lock_guard<std::mutex> lock(g_pin_mutex);
+    if (g_pin_done) return;
+    g_pin_done = true;
+    // OMP_PROC_BIND / OMP_PLACES bind the threads already (and bind this one to a single place,
+    // so its mask no longer names the process's CPUs): leave them as they are.
+    if (omp_get_proc_bind() != omp_proc_bind_false) {
+        ED_LOG(Info, "ED_NUMA_PIN_THREADS: OMP_PROC_BIND binds the threads; not pinning them again");
+        return;
+    }
+    // The CPUs this process may run on (its cgroup cpuset or taskset mask): thread t takes the
+    // t-th of them, wrapping around.
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        ED_LOG(Warn, "ED_NUMA_PIN_THREADS: sched_getaffinity failed; the threads are not pinned");
+        return;
+    }
+    std::vector<int> cpus;
+    for (int c = 0; c < CPU_SETSIZE; ++c)
+        if (CPU_ISSET(c, &allowed)) cpus.push_back(c);
+    if (cpus.empty()) return;
+    std::atomic<int> failed{0};
+    #pragma omp parallel
+    {
+        const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
+        cpu_set_t mask;
+        CPU_ZERO(&mask);
+        CPU_SET(cpus[t % cpus.size()], &mask);
+        if (pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask) != 0)
+            failed.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (failed.load() > 0) {
+        ED_LOG(Warn, "ED_NUMA_PIN_THREADS: %d OpenMP thread(s) could not be pinned", failed.load());
+        return;
+    }
+    g_pin_application_count.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 }  // namespace ed::parallel
