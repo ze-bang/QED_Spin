@@ -252,7 +252,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     for (const ::Operator* O : t.observables)
                         for (bool conj : {false, true}) {
                             if (conj && !folded) break;
-                            obs.push_back(detail::block_observable(avg->get(*O, flip, keep, conj), sb, bi,
+                            obs.push_back(detail::block_observable(avg->program(*O, flip, keep, conj), sb, bi,
                                                                    t.device != Device::Cpu));
                         }
                 }

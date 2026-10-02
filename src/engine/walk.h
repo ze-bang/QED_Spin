@@ -187,10 +187,11 @@ inline std::vector<Perm> close_group(const std::vector<Perm>& gens, int n) {
 using Keep = ed::ops::SzKeep;
 
 /// O averaged over the symmetry group of a Spec (and the spin flip), without the terms whose
-/// S^z change `keep` excludes, conjugated (K) for a time-reversed partner: the row program of
-/// that average (Operator::row_program's form), built once per (operator, flip, keep, conj).
-/// An operator averaged over the symmetries a block uses is block diagonal and has the same
-/// trace against any function of H over an ensemble those symmetries preserve.
+/// S^z change `keep` excludes, conjugated (K) for a time-reversed partner; built once per
+/// (operator, flip, keep, conj), as canonical terms (average) or as the row program a sector
+/// matvec walks (program). An operator averaged over the symmetries a block uses is block
+/// diagonal and has the same trace against any function of H over an ensemble those
+/// symmetries preserve.
 class Averager {
 public:
     Averager(const Spec& s, int n_sites) {
@@ -198,19 +199,28 @@ public:
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);
     }
-    std::shared_ptr<const ed::ops::MaskedProgram> get(const ::Operator& O, bool flip, Keep keep, bool conj) {
-        auto& slot = cache_[{&O, flip, static_cast<int>(keep), conj}];
+    const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep, bool conj) {
+        auto& slot = averages_[{&O, flip, static_cast<int>(keep), conj}];
         if (!slot) {
             ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(O.canonical(), keep), G_, flip);
             if (conj) a = a.image(ed::ops::MaskedOperator::Map::K);
-            slot = std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_operator(a.dagger()));
+            slot = std::make_shared<const ed::ops::MaskedOperator>(std::move(a));
         }
+        return *slot;
+    }
+    std::shared_ptr<const ed::ops::MaskedProgram> program(const ::Operator& O, bool flip, Keep keep, bool conj) {
+        auto& slot = programs_[{&O, flip, static_cast<int>(keep), conj}];
+        if (!slot)
+            slot = std::make_shared<const ed::ops::MaskedProgram>(
+                ed::ops::compile_operator(average(O, flip, keep, conj).dagger()));
         return slot;
     }
 
 private:
+    using Key = std::tuple<const ::Operator*, bool, int, bool>;
     std::vector<Perm> G_;
-    std::map<std::tuple<const ::Operator*, bool, int, bool>, std::shared_ptr<const ed::ops::MaskedProgram>> cache_;
+    std::map<Key, std::shared_ptr<const ed::ops::MaskedOperator>> averages_;
+    std::map<Key, std::shared_ptr<const ed::ops::MaskedProgram>> programs_;
 };
 
 /// A block-diagonal (averaged) operator, given by its row program, restricted to block `bi` of

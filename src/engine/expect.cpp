@@ -28,6 +28,7 @@ Complex dot(const std::vector<Complex>& a, const std::vector<Complex>& b) {
 
 }  // namespace
 
+
 std::vector<std::vector<Complex>>
 expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
     const int n_sites = r.n_sites;
@@ -35,35 +36,54 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
         if (s.two_S >= 0 && !ed::ops::su2_invariant(O->canonical()))
             throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
                                         "invariant (a level holds one member of each spin multiplet)");
-    // One averaged operator per (op, flip, keep); one matvec per (averaged op, basis).
+    // Every level's vector lives in its own sector basis; the operators averaged over the
+    // symmetry group (and the flip where the level folds or projects by it) are invariant, so
+    // <v|Obar|v> is one rep_matrix_elements sweep per (basis, flip, keep) over all operators --
+    // and their conjugates, for a time-reversal-folded level: <K v|A|K v> = conj(<v|A^K|v>) --
+    // and all the levels sharing them. No matvec, no CSR, a fixed order.
     detail::Averager avg(s, n_sites);
-    std::map<std::pair<const void*, const void*>, std::shared_ptr<RepSectorMatVec>> matvecs;
-    auto average_of = [&](std::size_t o, bool flip, detail::Keep keep, bool conj) {
-        return avg.get(*ops[o], flip, keep, conj);
-    };
-    auto value = [&](const std::shared_ptr<const ed::ops::MaskedProgram>& A, const BlockVector& v) {
-        auto& mv = matvecs[{A.get(), v.basis.get()}];
-        if (!mv) mv = std::make_shared<RepSectorMatVec>(A, v.basis);
-        std::vector<Complex> y(v.amplitudes.size());
-        mv->apply(v.amplitudes.data(), y.data(), y.size());
-        return dot(v.amplitudes, y);
-    };
-
-    std::vector<std::vector<Complex>> out;
-    out.reserve(r.levels.size());
-    for (const Level& L : r.levels) {
+    const std::size_t n_ops = ops.size();
+    std::vector<std::vector<Complex>> out(r.levels.size(), std::vector<Complex>(n_ops));
+    struct Group { std::vector<std::size_t> levels; bool folded = false; };
+    std::map<std::tuple<const void*, bool, int>, Group> groups;
+    using detail::Keep;
+    for (std::size_t li = 0; li < r.levels.size(); ++li) {
+        const Level& L = r.levels[li];
         if (L.vector < 0) throw std::invalid_argument("expect: a level has no vector (solve with vectors)");
         const BlockVector& v = r.vectors[static_cast<std::size_t>(L.vector)];
         const bool flip = L.mirror == 2 || L.tag.flip_parity >= 0 || v.basis->has_flips();
-        using detail::Keep;
         const Keep keep = v.basis->n_up >= 0 ? Keep::Zero : (L.tag.sz_parity >= 0 ? Keep::Even : Keep::All);
-        std::vector<Complex> row;
-        for (std::size_t o = 0; o < ops.size(); ++o) {
-            const Complex a = value(average_of(o, flip, keep, false), v);
-            // The time-reversed partner K psi: <K psi|A|K psi> = conj(<psi|A*|psi>).
-            row.push_back(L.tag.tr_folded ? 0.5 * (a + std::conj(value(average_of(o, flip, keep, true), v))) : a);
+        Group& g = groups[{v.basis.get(), flip, static_cast<int>(keep)}];
+        g.levels.push_back(li);
+        g.folded = g.folded || L.tag.tr_folded;
+    }
+    for (const auto& [key, g] : groups) {
+        const auto& basis = *r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis;
+        const bool flip = std::get<1>(key);
+        const auto keep = static_cast<Keep>(std::get<2>(key));
+        std::vector<ed::ops::MaskedOperator> avgs;
+        for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, false));
+        if (g.folded)
+            for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, true));
+        ed::ops::CompileOptions copt;
+        copt.project = false;   // already invariant under the sector's group
+        const auto prog = ed::ops::compile_program(avgs, basis, basis, copt);
+        std::vector<ed::ops::RepVectorView> vecs;
+        std::vector<std::pair<int, int>> pairs;
+        for (std::size_t i = 0; i < g.levels.size(); ++i) {
+            const auto& amp = r.vectors[static_cast<std::size_t>(r.levels[g.levels[i]].vector)].amplitudes;
+            vecs.push_back({amp.data(), amp.size()});
+            pairs.emplace_back(static_cast<int>(i), static_cast<int>(i));
         }
-        out.push_back(std::move(row));
+        const auto me = ed::ops::rep_matrix_elements(basis, basis, prog, vecs, vecs, pairs);
+        const std::size_t width = avgs.size();
+        for (std::size_t i = 0; i < g.levels.size(); ++i) {
+            const Level& L = r.levels[g.levels[i]];
+            for (std::size_t o = 0; o < n_ops; ++o) {
+                const Complex a = me[i * width + o];
+                out[g.levels[i]][o] = L.tag.tr_folded ? 0.5 * (a + std::conj(me[i * width + n_ops + o])) : a;
+            }
+        }
     }
     return out;
 }
