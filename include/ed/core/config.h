@@ -74,8 +74,8 @@ struct Row {
       "Full-space Operator.apply only: dim below which the assembled CSR is preferred over matrix-free")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
       "=1 logs per-bucket us timers inside lanczos_kernel at Info")\
-    X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \
-      "Byte budget for the cross-sector orbit-observable triplet CSR; over budget -> csr_refused_")\
+    X("ED_XSEC_CSR_BUDGET_GIB", Real, "dynamics", "4.0",                       \
+      "Byte budget (exact pre-merge bound) for the host CSR of O between two sectors in dynamics; over budget -> row walk")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "24 (rank-table cache) / 16 (sector mirror)",\
       "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors; 0 pins none")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\

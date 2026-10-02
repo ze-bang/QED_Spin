@@ -1,21 +1,14 @@
 // =============================================================================
 // src/gpu/rep_matvec.cu
 //
-// On-the-fly representative GPU sector matvec (the definitions behind
-// ed/gpu/rep_matvec.h). Compiled into ed_solvers_gpu (so we
-// have nvcc + thrust available); the matching ed_core .cpp file
-// ``rep_matvec_stub.cpp`` only contributes the throwing
-// stubs when WITH_CUDA is OFF.
+// On-the-fly representative GPU sector matvecs (the definitions behind ed/gpu/rep_matvec.h;
+// rep_matvec_stub.cpp holds the throwing stubs of a build without WITH_CUDA).
 //
-// On first bind, uploads a device-resident snapshot of the CSR-free
-// representative sector data (``RepSectorData``: representatives, inverse
-// norms, group permutations, characters, rank -> orbit reverse table) and
-// the term SoA (the same POD structs the host uses, copied byte-for-byte).
-//
-// The returned MatvecFn takes DEVICE pointers (per the bind_cuda()
-// contract from <ed/matvec/linear_operator.h>) and dispatches the
-// on-the-fly representative kernels
-// (``launch_apply_terms_rep_symmetry_gpu{,_gather}<DeviceRepSymmetryBasisPolicy>``).
+// A sector is uploaded once (GpuSectorMirror: representatives, inverse norms, group
+// permutations, characters, the reverse rank lookup) and shared by every operator bound on
+// it; an operator's row program (ed::ops::MaskedProgram) is uploaded per bind. The returned
+// functions take DEVICE pointers (the bind_cuda() contract of <ed/matvec/linear_operator.h>)
+// and launch the row walk kernel (walk_gather) with a row and a column sector.
 // =============================================================================
 
 #ifdef WITH_CUDA
@@ -63,19 +56,15 @@ inline void cuda_check(cudaError_t err, const char* what) {
 }  // namespace detail
 
 // =============================================================================
-// GpuRepSectorMirror -- on-the-fly representative SpMV device snapshot, the
-// only device representation of a symmetry sector.
-//
-// Holds NO orbit CSR and NO O(full-Sz-dim) projection table. The
-// resident footprint is:
+// GpuSectorMirror -- the only device representation of a symmetry sector. It holds NO orbit
+// CSR and NO O(full-Sz-dim) projection table, only:
 //   * reps (dim x 8 B) + inv_norms (dim x 8 B)
-//   * the |G| site permutations (group_size * n_sites ints)
+//   * the |G| site permutations (group_size * n_sites ints) and their byte LUT
 //   * the per-sector character array (group_size complex)
-//   * rep_index_of_rank: C(n_sites, n_up) int32 reverse lookup keyed by the
-//     combinadic rank of an orbit REPRESENTATIVE (built from ``reps`` alone,
-//     no orbit walk).
-// The group action + projection are regenerated arithmetically inside the
-// kernel; per-SpMV traffic is just the in/out vectors -> the genuine /|G|.
+//   * the reverse lookup: the shared rank table below plus a per-sector remap, or a
+//     binary search over the sorted reps.
+// The group action + projection are regenerated arithmetically inside the kernel; per-SpMV
+// traffic is just the in/out vectors -> the genuine /|G|.
 // =============================================================================
 // ONE rank -> shared-rep-index table per (N, n_up) subspace, co-owned by
 // every irrep sector's mirror through a content-keyed weak registry. Avoids
@@ -132,7 +121,9 @@ acquire_gpu_shared_rank(
     return sp;
 }
 
-struct GpuRepSectorMirror {
+// The device snapshot of one sector (no operator). Its policy (basis_view) is the row basis
+// of an operator acting into the sector and the column basis of one acting out of it.
+struct GpuSectorMirror {
     thrust::device_vector<std::uint64_t>   d_reps;
     thrust::device_vector<double>          d_inv_norms;
     thrust::device_vector<int>             d_perms;
@@ -140,7 +131,6 @@ struct GpuRepSectorMirror {
     thrust::device_vector<std::uint64_t>   d_flips;   // flip masks
     thrust::device_vector<std::uint64_t>   d_perm_lut; // byte-LUT fast path
     int                                     perm_lut_bpw = 0;
-    thrust::device_vector<std::int32_t>    d_rep_index_of_rank;
     // Two-level lookup: shared table (co-owned) + per-sector remap.
     std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
     thrust::device_vector<std::int32_t>    d_local_of_shared;
@@ -149,12 +139,6 @@ struct GpuRepSectorMirror {
     int           n_sites    = 0;
     int           n_up       = -1;
     std::uint64_t dim        = 0;
-
-    // The operator's row program (ed::ops::MaskedProgram), on the device.
-    thrust::device_vector<std::uint64_t>           d_group_flip, d_vsub_val, d_term_sign;
-    thrust::device_vector<int>                     d_group_setbits;
-    thrust::device_vector<std::uint32_t>           d_group_vbegin, d_vsub_tbegin;
-    thrust::device_vector<thrust::complex<double>> d_term_coeff;
 
     ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis_view() const noexcept {
         ed::matvec::basis::DeviceRepSymmetryBasisPolicy v;
@@ -167,8 +151,6 @@ struct GpuRepSectorMirror {
         v.perm_lut          = d_perm_lut.empty()
             ? nullptr : thrust::raw_pointer_cast(d_perm_lut.data());
         v.perm_lut_bpw      = perm_lut_bpw;
-        v.rep_index_of_rank = d_rep_index_of_rank.empty()
-            ? nullptr : thrust::raw_pointer_cast(d_rep_index_of_rank.data());
         if (shared_rank_tab && !d_local_of_shared.empty()) {
             v.shared_rank_of  = thrust::raw_pointer_cast(
                 shared_rank_tab->d_shared_of_rank.data());
@@ -181,8 +163,25 @@ struct GpuRepSectorMirror {
         v.n_up              = n_up;
         return v;
     }
+};
 
-    ed::ops::ProgramView<thrust::complex<double>> program_view() const noexcept {
+// An operator's row program on the device.
+struct GpuProgram {
+    thrust::device_vector<std::uint64_t>           d_group_flip, d_vsub_val, d_term_sign;
+    thrust::device_vector<int>                     d_group_setbits;
+    thrust::device_vector<std::uint32_t>           d_group_vbegin, d_vsub_tbegin;
+    thrust::device_vector<thrust::complex<double>> d_term_coeff;
+
+    explicit GpuProgram(const ed::ops::MaskedProgram& rows)
+        : d_group_flip(rows.group_flip), d_vsub_val(rows.vsub_val), d_term_sign(rows.term_sign),
+          d_group_setbits(rows.group_setbits), d_group_vbegin(rows.group_vbegin),
+          d_vsub_tbegin(rows.vsub_tbegin) {
+        // std::complex<double> and thrust::complex<double> share their layout
+        const auto* c = reinterpret_cast<const thrust::complex<double>*>(rows.term_coeff.data());
+        d_term_coeff.assign(c, c + rows.term_coeff.size());
+    }
+
+    ed::ops::ProgramView<thrust::complex<double>> view() const noexcept {
         return {static_cast<std::uint32_t>(d_group_flip.size()),
                 thrust::raw_pointer_cast(d_group_flip.data()),
                 thrust::raw_pointer_cast(d_group_setbits.data()),
@@ -194,28 +193,33 @@ struct GpuRepSectorMirror {
     }
 };
 
+// O from a column sector to a row sector (the same mirror for an operator on one sector).
+struct GpuRows {
+    std::shared_ptr<const GpuSectorMirror> row, col;
+    bool                                   same;   // one sector: the diagonal needs no lookup
+    GpuProgram                             program;
+};
+
 namespace detail {
 
-// Build a GpuRepSectorMirror from a CSR-free RepSectorData + the operator's row program.
-// Builds the reverse rank table from ``reps`` only (no orbit walk).
-inline std::shared_ptr<GpuRepSectorMirror>
-build_rep_mirror(const ed::symmetry::RepSectorData& data,
-                 const ed::ops::MaskedProgram& rows)
+// Build a GpuSectorMirror from a CSR-free RepSectorData (no orbit walk).
+inline std::shared_ptr<GpuSectorMirror>
+build_sector_mirror(const ed::symmetry::RepSectorData& data)
 {
     if (!data.usable()) {
         throw std::runtime_error(
-            "build_rep_mirror: RepSectorData is not usable (need n_up >= -1, "
+            "build_sector_mirror: RepSectorData is not usable (need n_up >= -1, "
             "non-empty reps, and matching characters / perms sizes)");
     }
     const int n_sites = data.n_sites;
     const int n_up    = data.n_up;
     if (n_sites <= 0 || n_sites > 64 || n_up < -1 || n_up > n_sites) {
-        throw std::runtime_error("build_rep_mirror: invalid n_sites / n_up");
+        throw std::runtime_error("build_sector_mirror: invalid n_sites / n_up");
     }
     // Sz-parity and full-space sectors (n_up < 0) look states up like every other
     // sector (below): nothing is indexed by the state itself, so N is not capped.
 
-    auto mirror = std::make_shared<GpuRepSectorMirror>();
+    auto mirror = std::make_shared<GpuSectorMirror>();
     mirror->group_size = data.group_size;
     mirror->n_sites    = n_sites;
     mirror->n_up       = n_up;
@@ -242,7 +246,7 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
     if (data.reps.size() > static_cast<std::size_t>(
             std::numeric_limits<std::int32_t>::max())) {
         throw std::runtime_error(
-            "build_rep_mirror: sector has more than INT32_MAX representatives; "
+            "build_sector_mirror: sector has more than INT32_MAX representatives; "
             "the reverse-lookup value type would overflow");
     }
 
@@ -295,27 +299,17 @@ build_rep_mirror(const ed::symmetry::RepSectorData& data,
         mirror->perm_lut_bpw = tmp.perm_lut_bpw;
     }
 
-    mirror->d_group_flip    = rows.group_flip;
-    mirror->d_group_setbits = rows.group_setbits;
-    mirror->d_group_vbegin  = rows.group_vbegin;
-    mirror->d_vsub_val      = rows.vsub_val;
-    mirror->d_vsub_tbegin   = rows.vsub_tbegin;
-    mirror->d_term_sign     = rows.term_sign;
-    {   // std::complex<double> and thrust::complex<double> share their layout
-        const auto* c = reinterpret_cast<const thrust::complex<double>*>(rows.term_coeff.data());
-        mirror->d_term_coeff.assign(c, c + rows.term_coeff.size());
-    }
-
-    cuda_check(cudaDeviceSynchronize(), "synchronize after rep mirror upload");
+    cuda_check(cudaDeviceSynchronize(), "synchronize after sector mirror upload");
     return mirror;
 }
 
 }  // namespace detail
 
 // -----------------------------------------------------------------------------
-// The sector rows on the device: one thread per row walks the operator's row program
-// (row_walk.h) from its representative, as the host sector_rows.h does -- the diagonal
-// without a lookup, every other group's target looked up once and conjugated:
+// An operator's rows on the device: one thread per row of the row sector walks the row
+// program (row_walk.h) from its representative, as the host sector_rows.h does -- every
+// group's target looked up once in the column sector and conjugated, and on one sector
+// (Same) the diagonal without a lookup:
 //     out[r] = sum conj(h) in[r] + inv_norm[r] conj(h proj) in[j].
 // One walk serves NV vectors, each accumulated in the same order, so a multi-vector apply
 // equals NV single applies bit for bit.
@@ -330,25 +324,26 @@ struct WalkPointers {
     DC*       out[NV];
 };
 
-template <int NV>
-__global__ void sector_walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis,
-                                   ed::ops::ProgramView<DC> P, WalkPointers<NV> p) {
+template <int NV, bool Same>
+__global__ void walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy row,
+                            ed::matvec::basis::DeviceRepSymmetryBasisPolicy col,
+                            ed::ops::ProgramView<DC> P, WalkPointers<NV> p) {
     const std::uint64_t r = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (r >= basis.dim()) return;
-    const std::uint64_t s = basis.state_of(r);
-    const double w = basis.inv_norms[r];
+    if (r >= row.dim()) return;
+    const std::uint64_t s = row.state_of(r);
+    const double w = row.inv_norms[r];
     DC acc[NV];
 #pragma unroll
     for (int v = 0; v < NV; ++v) acc[v] = DC(0.0, 0.0);
     ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const DC& h) {
         DC c;
         std::uint64_t j;
-        if (t == s) {
+        if (Same && t == s) {
             c = thrust::conj(h);
             j = r;
         } else {
             cuDoubleComplex proj;
-            j = basis.index_and_projection(t, proj);
+            j = (Same ? row : col).index_and_projection(t, proj);
             if (j == ed::matvec::basis::kDeviceNotFound) return;
             c = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
         }
@@ -362,20 +357,22 @@ __global__ void sector_walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPoli
 }  // namespace
 
 // out[i] = O in[i] for i < k (device pointers), in launches of up to 8 vectors.
-void launch_sector_walk(const GpuRepSectorMirror& mirror, const DC* const* ins, DC* const* outs, std::size_t k)
+void launch_walk(const GpuRows& op, const DC* const* ins, DC* const* outs, std::size_t k)
 {
     using detail::cuda_check;
-    const std::uint64_t dim = mirror.dim;
+    const std::uint64_t dim = op.row->dim;
     if (dim == 0 || k == 0) return;
-    const auto basis = mirror.basis_view();
-    const auto prog  = mirror.program_view();
+    const auto row  = op.row->basis_view();
+    const auto col  = op.col->basis_view();
+    const auto prog = op.program.view();
     constexpr unsigned kThreads = 256;
     const auto blocks = static_cast<unsigned>((dim + kThreads - 1) / kThreads);
     auto launch = [&](auto nv_tag, std::size_t off) {
         constexpr int NV = decltype(nv_tag)::value;
         WalkPointers<NV> p;
         for (int v = 0; v < NV; ++v) { p.in[v] = ins[off + v]; p.out[v] = outs[off + v]; }
-        sector_walk_gather<NV><<<blocks, kThreads>>>(basis, prog, p);
+        if (op.same) walk_gather<NV, true><<<blocks, kThreads>>>(row, col, prog, p);
+        else         walk_gather<NV, false><<<blocks, kThreads>>>(row, col, prog, p);
     };
     std::size_t off = 0;
     while (off < k) {
@@ -384,58 +381,35 @@ void launch_sector_walk(const GpuRepSectorMirror& mirror, const DC* const* ins, 
         else if (left >= 4) { launch(std::integral_constant<int, 4>{}, off); off += 4; }
         else if (left >= 2) { launch(std::integral_constant<int, 2>{}, off); off += 2; }
         else                { launch(std::integral_constant<int, 1>{}, off); off += 1; }
-        cuda_check(cudaGetLastError(), "sector walk kernel launch");
+        cuda_check(cudaGetLastError(), "walk kernel launch");
     }
 }
 
 }  // namespace ed::symmetry::gpu_mirror
 
 // =============================================================================
-// make_sector_matvec_gpu_rep -- on-the-fly representative GPU matvec entry.
-//
-// Builds a resident GpuRepSectorMirror from a CSR-free RepSectorData (reps +
-// inv_norms + |G| characters + group perms) and returns a DEVICE-pointer
-// MatvecFn driving the sector walk kernel (launch_sector_walk).
-// No orbit CSR / no O(full-Sz-dim) projection table is allocated or
-// streamed.
+// The factories: the resident sector mirrors (shared, content-keyed) plus the operator's
+// program, uploaded per bind (a few KiB).
 // =============================================================================
 namespace ed::symmetry::gpu_mirror::detail {
 
-// The resident device mirror of (sector, operator), shared by every bind of it.
-std::shared_ptr<const GpuRepSectorMirror>
-acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
-                   const ed::ops::MaskedProgram&      rows)
+// The resident device mirror of a sector, shared by every operator bound on it.
+std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry::RepSectorData& rep)
 {
-
-    // Memoise the resident device mirror across binds. A single GS solve
-    // binds the operator several times (phase-1 scan, phase-2 refine, vector
-    // pull); without this each rebuilds the mirror and re-uploads reps + terms
-    // (~150 MB at an N=32 sector).
-    //
-    // The key MUST be content-based, NOT the RepSectorData address: sector
-    // operators are transient, so a destroyed sector's rep_data_ address is
-    // reused by the next sector, and within one Hamiltonian every sector
-    // shares identical terms -- so an (address, terms_hash) key collides
-    // across DIFFERENT sectors and returns the wrong mirror (GPU OOB on a
-    // dim-equal parity/flip pair). Key on the sector's own content: the
-    // per-sector characters (unique per irrep), the rep-list signature
-    // (n_up / size / samples), and the program's footprint.
-    // Doubles enter the keys by their exact bit pattern: a rounded value (llround(c * 1e9))
-    // let operators whose coefficients agree to 1e-9, or overflow alike, share one mirror.
+    // Sector operators are transient, so a destroyed sector's address is reused by the next
+    // one: the cache is keyed on the sector's own content -- the per-sector characters (unique
+    // per irrep), the rep-list signature (n_up / size / samples), the group action -- and
+    // each entry carries the full fingerprint, so reuse never depends on hash quality.
+    // Doubles enter by their exact bit pattern.
     auto bits = [](double x) {
         std::uint64_t u;
         std::memcpy(&u, &x, sizeof u);
         return u;
     };
-    auto content_key = [&bits](const ed::symmetry::RepSectorData& r,
-                               const ed::ops::MaskedProgram& P) {
+    auto content_key = [&bits](const ed::symmetry::RepSectorData& r) {
         std::uint64_t h = 1469598103934665603ULL;
-        // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold:
-        // the plain XOR-multiply mix is structurally degenerate on the
-        // sign-patterned character values this key exists to separate --
-        // on a Z8 ring, chi_{k+4}(g) = (-1)^g chi_k(g) would hash
-        // IDENTICALLY to chi_k, so conjugate-partner sectors would reuse
-        // each other's mirror.
+        // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold: on a Z8 ring,
+        // chi_{k+4}(g) = (-1)^g chi_k(g) would otherwise hash like chi_k.
         auto mix = [&h](std::uint64_t v) {
             v += 0x9E3779B97F4A7C15ULL;
             v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -452,119 +426,96 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
             mix(r.reps[r.reps.size() / 2]);
             mix(r.reps.back());
         }
-        for (const auto& c : r.characters) {   // per-irrep, uniquely identifies k
+        for (const auto& c : r.characters) {
             mix(bits(c.real()));
             mix(bits(c.imag()));
         }
         if (!r.flip_masks.empty()) mix(r.flip_masks.front());
-        mix(P.n_groups());
-        mix(P.n_terms());
-        if (P.n_terms() > 0) mix(bits(P.term_coeff.back().real()));
         return h;
     };
-    // The operator's program, word for word. The sector fingerprint below identifies the rep
-    // basis but NOT the operator -- fine when one operator (H) is mirrored per sector, WRONG
-    // when several operators share a sector (e.g. a q-mesh of transverse probes O_q on the
-    // GS sector). Every program array (coefficients by their bits) is kept in the slot and
-    // compared exactly, so distinct operators never share a mirror.
-    auto program_words = [&bits](const ed::ops::MaskedProgram& P) {
-        std::vector<std::uint64_t> w;
-        w.push_back(P.n_groups());
-        w.push_back(P.n_terms());
-        w.insert(w.end(), P.group_flip.begin(), P.group_flip.end());
-        for (int b : P.group_setbits) w.push_back(static_cast<std::uint64_t>(static_cast<std::int64_t>(b)));
-        w.insert(w.end(), P.group_vbegin.begin(), P.group_vbegin.end());
-        w.insert(w.end(), P.vsub_val.begin(), P.vsub_val.end());
-        w.insert(w.end(), P.vsub_tbegin.begin(), P.vsub_tbegin.end());
-        w.insert(w.end(), P.term_sign.begin(), P.term_sign.end());
-        for (const auto& z : P.term_coeff) { w.push_back(bits(z.real())); w.push_back(bits(z.imag())); }
-        return w;
-    };
-    const std::vector<std::uint64_t> terms_w = program_words(rows);
-    // Registry entries carry a FULL fingerprint of what the mirror encodes:
-    // reuse must never depend on hash quality (a silent wrong-mirror hit is
-    // wrong PHYSICS with correct-looking norms). The fingerprint covers
-    // everything the device tables are built from except the reps list,
-    // which is fully determined by (n_up window, group action, characters)
-    // and cross-checked by its (size, front, mid, back) signature.
+    // The reps list is determined by (n_up window, group action, characters) and
+    // cross-checked by its (size, front, mid, back) signature.
     struct MirrorSlot {
-        int                                       n_up;
-        std::uint64_t                             reps_sig[4];
-        std::vector<std::uint64_t>                terms;
-        std::vector<std::complex<double>>         chi;
-        std::vector<int>                          perms;
-        std::vector<std::uint64_t>                flips;
-        std::weak_ptr<const GpuRepSectorMirror>   mirror;
+        int                                     n_up;
+        std::uint64_t                           reps_sig[4];
+        std::vector<std::complex<double>>       chi;
+        std::vector<int>                        perms;
+        std::vector<std::uint64_t>              flips;
+        std::weak_ptr<const GpuSectorMirror>    mirror;
     };
-    auto fingerprint_matches = [](const MirrorSlot& s,
-                                  const ed::symmetry::RepSectorData& r,
-                                  const std::vector<std::uint64_t>& tw) {
-        return s.n_up == r.n_up
-            && s.terms == tw                  // operator terms, not just sector
-            && s.reps_sig[0] == r.reps.size()
-            && s.reps_sig[1] == (r.reps.empty() ? 0 : r.reps.front())
-            && s.reps_sig[2] == (r.reps.empty() ? 0
-                                   : r.reps[r.reps.size() / 2])
-            && s.reps_sig[3] == (r.reps.empty() ? 0 : r.reps.back())
-            && s.chi == r.characters
-            && s.perms == r.perms_flat
-            && s.flips == r.flip_masks;
+    auto signature = [](const ed::symmetry::RepSectorData& r, std::uint64_t (&sig)[4]) {
+        sig[0] = r.reps.size();
+        sig[1] = r.reps.empty() ? 0 : r.reps.front();
+        sig[2] = r.reps.empty() ? 0 : r.reps[r.reps.size() / 2];
+        sig[3] = r.reps.empty() ? 0 : r.reps.back();
+    };
+    std::uint64_t sig[4];
+    signature(rep, sig);
+    auto matches = [&](const MirrorSlot& s) {
+        return s.n_up == rep.n_up && std::equal(sig, sig + 4, s.reps_sig) && s.chi == rep.characters
+            && s.perms == rep.perms_flat && s.flips == rep.flip_masks;
     };
 
-    std::shared_ptr<const GpuRepSectorMirror> mirror;
-    {
-        static std::mutex mtx;
-        static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
-        static std::vector<std::shared_ptr<const GpuRepSectorMirror>> keep;
-        // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of
-        // sector arrays at N=36). Shares ED_GPU_SYM_CACHE_GIB semantics.
-        static const double kKeepBudget = [] {
-            return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 16.0)) * 1073741824.0;
-        }();
-        const std::uint64_t key = content_key(rep, rows);
-        std::lock_guard<std::mutex> lk(mtx);
-        auto& bucket = registry[key];
-        for (auto it = bucket.begin(); it != bucket.end();) {
-            auto locked = it->mirror.lock();
-            if (!locked) { it = bucket.erase(it); continue; }   // expired
-            if (fingerprint_matches(*it, rep, terms_w)) {
-                mirror = std::move(locked);
-                break;
-            }
-            ++it;
-        }
-        if (!mirror) {
-            mirror = build_rep_mirror(rep, rows);
-            MirrorSlot s;
-            s.n_up        = rep.n_up;
-            s.reps_sig[0] = rep.reps.size();
-            s.reps_sig[1] = rep.reps.empty() ? 0 : rep.reps.front();
-            s.reps_sig[2] = rep.reps.empty() ? 0
-                              : rep.reps[rep.reps.size() / 2];
-            s.reps_sig[3] = rep.reps.empty() ? 0 : rep.reps.back();
-            s.terms       = terms_w;
-            s.chi         = rep.characters;
-            s.perms       = rep.perms_flat;
-            s.flips       = rep.flip_masks;
-            s.mirror      = mirror;
-            bucket.push_back(std::move(s));
-            keep.push_back(mirror);
-            auto bytes_of = [](const std::shared_ptr<const GpuRepSectorMirror>& mm) {
-                return static_cast<double>(
-                    mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8
-                    + mm->d_perm_lut.size() * 8 + mm->d_perms.size() * 4
-                    + mm->d_local_of_shared.size() * 4);
-            };
-            double total = 0.0;
-            for (const auto& mm : keep) total += bytes_of(mm);
-            while (keep.size() > 1 && total > kKeepBudget) {
-                total -= bytes_of(keep.front());
-                keep.erase(keep.begin());
-            }
-        }
+    static std::mutex mtx;
+    static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
+    static std::vector<std::shared_ptr<const GpuSectorMirror>> keep;
+    // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of sector arrays at N=36).
+    static const double kKeepBudget = [] {
+        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 16.0)) * 1073741824.0;
+    }();
+    std::lock_guard<std::mutex> lk(mtx);
+    auto& bucket = registry[content_key(rep)];
+    for (auto it = bucket.begin(); it != bucket.end();) {
+        auto locked = it->mirror.lock();
+        if (!locked) { it = bucket.erase(it); continue; }   // expired
+        if (matches(*it)) return locked;
+        ++it;
     }
-
+    std::shared_ptr<const GpuSectorMirror> mirror = build_sector_mirror(rep);
+    MirrorSlot s;
+    s.n_up   = rep.n_up;
+    std::copy(sig, sig + 4, s.reps_sig);
+    s.chi    = rep.characters;
+    s.perms  = rep.perms_flat;
+    s.flips  = rep.flip_masks;
+    s.mirror = mirror;
+    bucket.push_back(std::move(s));
+    keep.push_back(mirror);
+    auto bytes_of = [](const std::shared_ptr<const GpuSectorMirror>& mm) {
+        return static_cast<double>(mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8 + mm->d_perm_lut.size() * 8
+                                   + mm->d_perms.size() * 4 + mm->d_local_of_shared.size() * 4);
+    };
+    double total = 0.0;
+    for (const auto& mm : keep) total += bytes_of(mm);
+    while (keep.size() > 1 && total > kKeepBudget) {
+        total -= bytes_of(keep.front());
+        keep.erase(keep.begin());
+    }
     return mirror;
+}
+
+// O from the column sector to the row sector on the device.
+std::shared_ptr<const GpuRows> make_rows(const ed::symmetry::RepSectorData& row,
+                                         const ed::symmetry::RepSectorData& col,
+                                         const ed::ops::MaskedProgram& rows) {
+    const bool same = &row == &col;
+    auto r_mirror = acquire_sector_mirror(row);
+    auto c_mirror = same ? r_mirror : acquire_sector_mirror(col);
+    auto out = std::make_shared<const GpuRows>(GpuRows{std::move(r_mirror), std::move(c_mirror), same, GpuProgram(rows)});
+    cuda_check(cudaDeviceSynchronize(), "synchronize after program upload");
+    return out;
+}
+
+ed::LinearOperator::MatvecFn single(std::shared_ptr<const GpuRows> op, const char* who) {
+    using DC = thrust::complex<double>;
+    return [op, who](const ed::matvec::Complex* in, ed::matvec::Complex* out, std::size_t n) {
+        if (n != op->row->dim)
+            throw std::runtime_error(std::string(who) + ": output length " + std::to_string(n) + " != rows "
+                                     + std::to_string(op->row->dim));
+        const DC* ins[1] = {reinterpret_cast<const DC*>(in)};
+        DC* outs[1] = {reinterpret_cast<DC*>(out)};
+        launch_walk(*op, ins, outs, 1);
+    };
 }
 
 }  // namespace ed::symmetry::gpu_mirror::detail
@@ -573,25 +524,18 @@ ed::LinearOperator::MatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
                                          const ed::ops::MaskedProgram&      rows)
 {
-    using DC = thrust::complex<double>;
-    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, rows);
-    const std::uint64_t dim_captured = mirror->dim;
-
-    return [mirror, dim_captured](const ed::matvec::Complex* in,
-                                  ed::matvec::Complex* out,
-                                  std::size_t n) {
-        if (n != dim_captured) {
-            throw std::runtime_error(
-                "ed::symmetry::make_sector_matvec_gpu_rep: size mismatch (" +
-                std::to_string(n) + " vs " +
-                std::to_string(dim_captured) + ")");
-        }
-        const DC* ins[1] = {reinterpret_cast<const DC*>(in)};
-        DC* outs[1] = {reinterpret_cast<DC*>(out)};
-        ed::symmetry::gpu_mirror::launch_sector_walk(*mirror, ins, outs, 1);
-    };
+    namespace gd = ed::symmetry::gpu_mirror::detail;
+    return gd::single(gd::make_rows(rep, rep, rows), "make_sector_matvec_gpu_rep");
 }
 
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& src,
+                                        const ed::symmetry::RepSectorData& tgt,
+                                        const ed::ops::MaskedProgram&      rows)
+{
+    namespace gd = ed::symmetry::gpu_mirror::detail;
+    return gd::single(gd::make_rows(tgt, src, rows), "make_cross_matvec_gpu_rep");
+}
 
 // k vectors per call through the multi-vector gather (one row walk serves up to 8 of them).
 ed::LinearOperator::MultiMatvecFn
@@ -599,18 +543,18 @@ ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData
                                                const ed::ops::MaskedProgram&      rows)
 {
     using DC = thrust::complex<double>;
-    const auto mirror = ed::symmetry::gpu_mirror::detail::acquire_rep_mirror(rep, rows);
-    const std::uint64_t dim_captured = mirror->dim;
-    return [mirror, dim_captured](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
-                                  std::size_t n, std::size_t k) {
-        if (n != dim_captured)
+    const auto op = ed::symmetry::gpu_mirror::detail::make_rows(rep, rep, rows);
+    return [op](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
+                std::size_t n, std::size_t k) {
+        if (n != op->row->dim)
             throw std::runtime_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: size mismatch (" +
-                                     std::to_string(n) + " vs " + std::to_string(dim_captured) + ")");
-        ed::symmetry::gpu_mirror::launch_sector_walk(*mirror, reinterpret_cast<const DC* const*>(ins),
-                                                     reinterpret_cast<DC* const*>(outs), k);
+                                     std::to_string(n) + " vs " + std::to_string(op->row->dim) + ")");
+        ed::symmetry::gpu_mirror::launch_walk(*op, reinterpret_cast<const DC* const*>(ins),
+                                              reinterpret_cast<DC* const*>(outs), k);
     };
 }
 // ---------------------------------------------------------------------------
+// Host-pointer twin:// ---------------------------------------------------------------------------
 // Host-pointer twin: persistent device staging buffers around the resident
 // mirror, one H2D + D2H per apply. Built for the little-group engine's CPU
 // Lanczos (host vectors); the staging traffic is O(dim) against the kernel's

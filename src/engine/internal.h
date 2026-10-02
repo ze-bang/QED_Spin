@@ -420,11 +420,6 @@ public:
         if (csr_) csr_->spmv(in, out);
         else ed::matvec::cross_gather(rows_->view(), tgt_pol_, src_pol_, same_, rows(), in, out);
     }
-    /// The merged CSR (built on demand when it fits the budget), or null.
-    [[nodiscard]] const ed::matvec::ReducedSymmetryCsr<Complex>* csr() const {
-        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
-        return csr_.get();
-    }
 
 private:
     void maybe_build_csr_() const {

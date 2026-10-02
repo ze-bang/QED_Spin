@@ -38,6 +38,14 @@ ed::LinearOperator::MatvecFn
 make_sector_matvec_gpu_rep(const RepSectorData&            rep,
                            const ed::ops::MaskedProgram&   rows);
 
+/// O from sector `src` to sector `tgt` on the device: the rows of the target, each walk
+/// target looked up in the source (``rows`` = compile_program({O^dagger}, tgt, src), the
+/// host CrossSectorMatVec's program). Takes device pointers (in: src dim, out: tgt dim).
+ed::LinearOperator::MatvecFn
+make_cross_matvec_gpu_rep(const RepSectorData&            src,
+                          const RepSectorData&            tgt,
+                          const ed::ops::MaskedProgram&   rows);
+
 /// The same sector matvec on k vectors at once (device pointers ins[i] -> outs[i]): one walk
 /// over each row's terms and orbit lookups serves up to 8 vectors, and every output equals
 /// the single-vector apply bit for bit.

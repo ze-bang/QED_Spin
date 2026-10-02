@@ -624,6 +624,44 @@ TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one g
     CHECK(checked >= 24);
 }
 
+#ifdef WITH_CUDA
+TEST_CASE("device: the cross-sector walk is the host's", "[row_walk][cuda]") {
+    if (!ed::have_cuda()) SKIP("no CUDA device");
+    std::mt19937 rng(20261007);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    MaskedOperator O(N);   // three-body, four-site and Sz-changing terms
+    O.add(P("z+z", {0, 1, 2}, Cx(0.7, 0.2)));
+    O.add(P("+-zz", {1, 3, 4, 6}, Cx(-0.4, 0.9)));
+    O.add(P("x", {5}, Cx(0.3, 0.0)));
+    O.add(P("-", {7}, Cx(0.0, 1.1)));
+    struct Pair { bool flip; int kR, nR, kC, nC; };
+    const Pair pairs[] = {{false, 1, 4, 3, 4}, {false, 1, 3, 1, 4}, {false, 3, -1, 0, -1}, {true, 5, -1, 2, -1}};
+    for (const Pair& pr : pairs) {
+        const auto G = ring_group(false, pr.flip);
+        const auto chis = characters(G, false, pr.flip);
+        const RepSectorData R = make_sector(G, chis[static_cast<std::size_t>(pr.kR)], pr.nR);
+        const RepSectorData C = make_sector(G, chis[static_cast<std::size_t>(pr.kC)], pr.nC);
+        if (R.reps.empty() || C.reps.empty()) continue;
+        INFO("flip " << pr.flip << " rows (" << pr.kR << ", " << pr.nR << ") cols (" << pr.kC << ", " << pr.nC << ")");
+        const auto Pg = ed::ops::compile_program({O.dagger()}, R, C);
+        const std::size_t dr = R.reps.size(), dc = C.reps.size();
+        std::vector<Cx> x(dc), yh(dr), yd(dr);
+        for (auto& z : x) z = Cx(gauss(rng), gauss(rng));
+        ed::matvec::cross_gather(Pg.view(), R.make_policy(), C.make_policy(), false, dr, x.data(), yh.data());
+        const auto fn = ed::symmetry::make_cross_matvec_gpu_rep(C, R, Pg);
+        Cx *din = nullptr, *dout = nullptr;
+        REQUIRE(cudaMalloc(&din, dc * sizeof(Cx)) == cudaSuccess);
+        REQUIRE(cudaMalloc(&dout, dr * sizeof(Cx)) == cudaSuccess);
+        REQUIRE(cudaMemcpy(din, x.data(), dc * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
+        fn(din, dout, dr);
+        REQUIRE(cudaMemcpy(yd.data(), dout, dr * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+        cudaFree(din); cudaFree(dout);
+        CHECK(max_abs(yh) > 0.0);
+        CHECK(max_diff(yd, yh) <= 1e-12 * std::max(1.0, max_abs(yh)));
+    }
+}
+#endif
+
 TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups", "[row_walk]") {
     std::mt19937 rng(20261006);
     const std::string alphabet = "+-zxyudI";

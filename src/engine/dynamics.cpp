@@ -16,7 +16,6 @@
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>                     // cudaMemGetInfo
 #include <ed/gpu/cuda_backend.cuh>
-#include <ed/gpu/device_csr.h>
 #endif
 
 #include <map>
@@ -440,9 +439,6 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
         return fo;
     };
-    auto observable = [](const Job& j, std::size_t k) {
-        return CrossSectorMatVec(j.programs[k], j.src->rd, j.targets[k]->rd);
-    };
     auto collect = [&](const Job& j, auto&& kernel) {
         Source src;
         bool any = false;
@@ -473,7 +469,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, fo);
             }
-            const auto obs = observable(j, k);
+            const CrossSectorMatVec obs(j.programs[k], j.src->rd, t->rd);
             auto H_dst = [t](const Complex* in, Complex* o, std::size_t nn) { t->H->apply(in, o, nn); };
             auto O_ap  = [&obs](const Complex* in, Complex* o, std::size_t nn) { obs.apply(in, o, nn); };
             return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, O_ap, dim_src, t->rd->reps.size(),
@@ -491,7 +487,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         if (j.s2) j.s2->enable_device(true);
         const auto H_src = j.Hp ? j.Hp->bind_cuda() : j.src->H->bind_cuda();
         // Samples in lockstep (one multi-vector launch per H apply) when both H have a
-        // multi-vector kernel, O is thread-safe, and their Krylov bases fit in half the free memory.
+        // multi-vector kernel and their Krylov bases fit in half the free memory.
         const ed::LinearOperator& src_op = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
         auto batched = [&](const ed::LinearOperator& dst_op, std::size_t dim_dst) {
             auto f = fo;
@@ -513,25 +509,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, batched(src_op, dim_src));
             }
-            const auto obs = observable(j, k);
             const std::size_t dim_dst = t->rd->reps.size();
             t->H->enable_device(true);
             const auto H_dst = t->H->bind_cuda();
-            ed::matvec::DeviceMatvecFn O_ap;
-            const auto* c = obs.csr();
-            if (c)
-                O_ap = ed::matvec::make_device_csr_matvec(reinterpret_cast<const std::int64_t*>(c->row_ptr.data()),
-                                                          c->col_idx.data(), c->val.data(), c->dim, c->nnz());
-            else    // no CSR within budget: stage through the host walk
-                O_ap = [&obs, &cbe, dim_src](const Complex* in, Complex* o, std::size_t nn) {
-                    std::vector<Complex> hi(dim_src), ho(nn);
-                    cbe.copy_to_host(in, hi.data(), dim_src);
-                    obs.apply(hi.data(), ho.data(), nn);
-                    cbe.copy_from_host(ho.data(), o, nn);
-                };
+            const auto O_ap = ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *j.programs[k]);
             return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, O_ap, dim_src, dim_dst,
-                                                         d.temperatures, d.omega,
-                                                         c ? batched(*t->H, dim_dst) : fo);
+                                                         d.temperatures, d.omega, batched(*t->H, dim_dst));
         });
 #else
         return run(i);

@@ -41,6 +41,13 @@ ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
         "through CpuBackend (device='cpu').");
 }
 
+ed::LinearOperator::MatvecFn
+ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*src*/,
+                                        const ed::symmetry::RepSectorData& /*tgt*/,
+                                        const ed::ops::MaskedProgram& /*rows*/) {
+    throw std::logic_error("ed::symmetry::make_cross_matvec_gpu_rep: built without WITH_CUDA.");
+}
+
 ed::LinearOperator::MultiMatvecFn
 ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
     throw std::logic_error(

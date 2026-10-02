@@ -34,7 +34,6 @@ if(WITH_CUDA)
         src/gpu/combinadic.cu
         src/gpu/little_group.cu
         src/gpu/rep_matvec.cu
-        src/gpu/device_csr.cu
         src/gpu/rep_matrix_elements.cu
     )
 else()
