@@ -9,6 +9,8 @@ import numpy as np
 
 import qed
 
+trapezoid = getattr(np, "trapezoid", None) or np.trapz   # numpy < 2 has only trapz
+
 N = 16
 b = qed.input.HamiltonianBuilder(N)
 b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
@@ -29,6 +31,6 @@ for n in (N // 4, N // 2):
     ground = qed.dynamics(H, sz_q(q), omega, eta=0.05)          # averaged over the ground manifold
     warm = qed.dynamics(H, sz_q(q), omega, eta=0.05, T=[1.0], samples=20, seed=1)
     print(f"q = {q:.3f}: peak at omega = {omega[np.argmax(ground.S[0])]:.3f} (T=0), "
-          f"weight {np.trapezoid(ground.S[0], omega):.4f} (T=0), {np.trapezoid(warm.S[0], omega):.4f} (T=1)")
+          f"weight {trapezoid(ground.S[0], omega):.4f} (T=0), {trapezoid(warm.S[0], omega):.4f} (T=1)")
 # S^+_q, S^-_q (operators that change Sz) work the same way; O need not share any
 # symmetry of H.

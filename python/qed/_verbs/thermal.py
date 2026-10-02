@@ -18,9 +18,13 @@ _METHODS = {"exact", "ftlm", "mtpq"}
 class ThermalResult:
     """Thermodynamics per temperature: energy ``E``, heat capacity ``C``, ``entropy``, free
     energy ``F`` and ``lnZ``. ``M`` and ``chi`` (magnetisation per system and
-    susceptibility per site) are present when H conserves Sz. ``O``: <O>(T) per requested
-    observable, a complex array [len(observables), len(T)] (None without observables).
-    ``diagnostics``: (code, message) pairs for fallbacks the run took."""
+    susceptibility per site) come from the Sz decomposition: present when H conserves Sz and
+    the symmetry decomposes by it (None under ``Symmetry.none()`` or ``sz='off'``). A run
+    restricted to part of the space (one Sz sector, a momentum or irrep selection, a total
+    spin) is the canonical ensemble of that part -- its entropy tends to the log of the part's
+    dimension -- and says so with a ``("restricted_ensemble", ...)`` entry in ``diagnostics``.
+    ``O``: <O>(T) per requested observable, a complex array [len(observables), len(T)] (None
+    without observables). ``diagnostics``: (code, message) pairs for fallbacks the run took."""
 
     T: np.ndarray
     E: np.ndarray
