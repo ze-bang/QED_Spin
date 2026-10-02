@@ -631,9 +631,11 @@ TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups
     std::uniform_int_distribution<int> pick_len(1, 4);
     std::normal_distribution<double> gauss(0.0, 1.0);
     const std::size_t D = kAll + 1;
-    auto rnd_vec = [&](std::size_t d) {
+    auto rnd_vec = [&](std::size_t d) {   // unit norm: expand() returns a normalised vector
         std::vector<Cx> v(d);
-        for (auto& x : v) x = Cx(gauss(rng), gauss(rng));
+        double n2 = 0.0;
+        for (auto& x : v) { x = Cx(gauss(rng), gauss(rng)); n2 += std::norm(x); }
+        for (auto& x : v) x /= std::sqrt(n2);
         return v;
     };
     struct Side { bool dihedral, flip; int irrep, n_up; };
