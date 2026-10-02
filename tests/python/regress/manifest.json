@@ -101,7 +101,7 @@
   {"id":"K3-model-scale-01","rep":"C02-discovery-07","sev":"high","axis":"robustness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"K3-model-scale-02","rep":"L5-memory-03","sev":"high","axis":"robustness","status":"fixed","dev":"cpu","seconds":280},
   {"id":"K3-model-scale-03","rep":"K3-model-scale-03","sev":"medium","axis":"capability","status":"fixed","dev":"cpu","seconds":10},
-  {"id":"K3-model-scale-04","rep":"K3-model-scale-04","sev":"medium","axis":"capability","status":"open","dev":"cpu","seconds":10},
+  {"id":"K3-model-scale-04","rep":"K3-model-scale-04","sev":"medium","axis":"capability","status":"fixed","dev":"cpu","seconds":10},
   {"id":"K3-model-scale-05","rep":"C12-dynamics-01","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"K3-model-scale-06","rep":"K3-model-scale-06","sev":"low","axis":"capability","status":"fixed","dev":"cpu","seconds":30},
   {"id":"K3-model-scale-09","rep":"K3-model-scale-09","sev":"low","axis":"capability","status":"fixed","dev":"cpu","seconds":10},

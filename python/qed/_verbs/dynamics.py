@@ -1,4 +1,4 @@
-"""``qed.dynamics``: dynamical correlations S(omega) of a probe O over the sectors of H."""
+"""``qed.dynamics``: dynamical correlations S_AB(omega) over the sectors of H."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,9 +14,11 @@ from .symmetry import Symmetry
 
 @dataclass
 class DynamicsResult:
-    """``S[i]`` is S(omega) at temperature ``T[i]``; at T = 0 ``T`` is empty and ``S`` has one
-    row. omega is measured from the ground-state energy at T = 0 and is the transferred
-    energy at T > 0. ``diagnostics``: (code, message) pairs for fallbacks the run took."""
+    """``S[..., i, :]`` is S(omega) at temperature ``T[i]``; at T = 0 ``T`` is empty and that axis has
+    one row. The leading axes are the probes' (none for one ``O``): ``[len(O)]``, or
+    ``[len(O), len(O)]`` for ``B="all"``. S is real for autocorrelations and complex once a probe
+    pairs two operators. omega is measured from the ground-state energy at T = 0 and is the
+    transferred energy at T > 0. ``diagnostics``: (code, message) pairs for fallbacks the run took."""
 
     omega: np.ndarray
     T: np.ndarray
@@ -29,19 +31,44 @@ class DynamicsResult:
     placement: dict = field(default_factory=dict)
 
 
+def _probes(O, B):
+    """The (A, B) pairs of a call, the shape of their probe axes, and whether any is a cross pair."""
+    single = isinstance(O, _core.Operator)
+    ops = [O] if single else list(O)
+    if not ops or not all(isinstance(o, _core.Operator) for o in ops):
+        raise InvalidRequest("O must be a qed.Operator or a non-empty sequence of them")
+    if B is None:
+        return [(o, None) for o in ops], ([] if single else [len(ops)]), False
+    if isinstance(B, str):
+        if B != "all":
+            raise InvalidRequest(f"B must be None, a qed.Operator, a sequence of them or 'all', got {B!r}")
+        return [(a, b) for a in ops for b in ops], [len(ops), len(ops)], True
+    if isinstance(B, _core.Operator):
+        return [(o, B) for o in ops], ([] if single else [len(ops)]), True
+    bs = list(B)
+    if len(bs) != len(ops) or not all(isinstance(b, _core.Operator) for b in bs):
+        raise InvalidRequest(f"B as a sequence pairs with O: {len(ops)} qed.Operator(s) expected, got {len(bs)}")
+    return list(zip(ops, bs)), ([] if single else [len(ops)]), True
+
+
 @_log.replays
-def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
+def dynamics(H, O, omega: Sequence[float], B=None, *, eta: float = 0.05,
              T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
              krylov: int = 200, samples: int = 40, seed: int = 0,
              degeneracy_tol: float = 1e-8, device: str = "cpu",
              dense_max_dim: Optional[int] = None, prune: bool = True) -> DynamicsResult:
-    """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.
+    """S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>, Lorentzian width ``eta``.
+
+    ``O`` is the probe A, or a sequence of them. ``B``: ``None`` gives each O's autocorrelation
+    (real); a qed.Operator, every <O_i^dag B>; a sequence as long as ``O``, the pairs
+    <O_i^dag B_i>; ``"all"``, every <O_i^dag O_j> (a len(O) x len(O) matrix of spectra). One call
+    shares the ground manifold (T = 0) and the source sectors (T > 0) among its probes.
 
     ``T=None``: the ground state, averaged over a degenerate ground manifold: every level within
     ``degeneracy_tol`` times the scale of H (the sum of |c| over its terms) of E0.
     ``T=[...]``: finite-temperature Lanczos with ``samples`` random vectors per sector; a
     temperature listed twice gets the same row twice.
-    ``O`` may change Sz (S+, S-) and need not share any symmetry of H, so dynamics works in
+    The probes may change Sz (S+, S-) and need not share any symmetry of H, so dynamics works in
     momentum sectors. ``sym.select(sz=..., momentum=...)`` restricts the source states (the
     ground state of those sectors, or their restricted ensemble at T > 0, flagged in
     ``diagnostics``); ``k0``, ``irrep`` and ``irrep_character`` name point-group blocks and
@@ -52,6 +79,7 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     """
     if dense_max_dim is not None and int(dense_max_dim) < 0:
         raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
+    probes, axes, cross = _probes(O, B)
     sym = Symmetry.auto() if sym is None else sym
     d = _core.sectors.DynamicsSpec()
     d.omega = [float(w) for w in omega]
@@ -71,10 +99,13 @@ def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
     d.prune = bool(prune)
     d.device = _device.resolve(device)
     diagnostics: list = []
-    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), O, d)
-    S = np.asarray(r.S)
-    if len(temps):                       # the caller's temperatures, in the caller's order
-        S = S[rows.reshape(-1)]
+    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), probes, d)
+    S = np.asarray(r.S, dtype=complex)            # [probe, row, omega]
+    if len(temps):                                # the caller's temperatures, in the caller's order
+        S = S[:, rows.reshape(-1), :]
+    if not cross:
+        S = S.real
+    S = S.reshape(tuple(axes) + S.shape[1:])
     return DynamicsResult(omega=np.asarray(r.omega), T=temps, S=S,
                           e0=float(r.e0), ground_manifold=int(r.ground_manifold),
                           device_blocks=int(r.device_blocks), symmetry=sym,

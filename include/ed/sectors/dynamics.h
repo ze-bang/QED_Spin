@@ -2,8 +2,9 @@
 // =============================================================================
 // include/ed/sectors/dynamics.h
 //
-// Dynamical correlation functions S(omega) = <O^dag delta(omega - H + E_i) O> over the
-// symmetry sectors of H.
+// Dynamical correlation functions S_AB(omega) = <A^dag delta(omega - H + E_i) B> over the symmetry
+// sectors of H: autocorrelations (B = A, real) and cross-correlations (complex), several probes per
+// call sharing the ground manifold (T = 0) and the source sectors (T > 0).
 //
 // A probe O is in general not invariant under the point group, time reversal or the
 // spin flip (a Fourier mode O_Q maps to O_{pQ}), so the multiplicity folding that is
@@ -15,11 +16,12 @@
 //
 //   T = 0:  the ground manifold is every level within degeneracy_tol * s_H of E0 (s_H: the sum
 //           of |c| over H's terms, <ed/core/numerics.h>, so s * H keeps the same manifold);
-//           S = (1/g) sum over the manifold of the continued fraction of O|a> in each
-//           target sector, with omega measured from E0.
+//           S = (1/g) sum over the manifold of the continued fraction of B|a> in each
+//           target sector (with A|a> projected on its Krylov vectors for a cross pair),
+//           omega measured from E0.
 //   T > 0:  finite-temperature Lanczos over every source sector (the Jaklic-Prelovsek
 //           estimator, samples per sector), S = sum_s S_s / sum_s Z_s with Z taken over
-//           ALL source sectors, including those O annihilates.
+//           ALL source sectors, including those the probes annihilate.
 // =============================================================================
 
 #include <ed/sectors/sectors.h>
@@ -43,19 +45,34 @@ struct DynamicsSpec {
     Device              device         = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
 };
 
+/// One correlation: S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>; B null: A's
+/// autocorrelation.
+struct Probe {
+    const ::Operator* A = nullptr;
+    const ::Operator* B = nullptr;
+};
+
 struct DynamicsCurves {
     std::vector<double>              omega;
     std::vector<double>              T;        ///< empty for T = 0
-    std::vector<std::vector<double>> S;        ///< one row per temperature (one row at T = 0)
+    /// [probe][row][omega]: one row per temperature (one row at T = 0). An autocorrelation's
+    /// imaginary part is zero up to roundoff.
+    std::vector<std::vector<std::vector<Complex>>> S;
     double                           e0 = 0.0;
     int                              ground_manifold = 0;   ///< T = 0: levels averaged over
-    std::size_t                      target_sectors = 0;    ///< sectors O reached
+    std::size_t                      target_sectors = 0;    ///< sectors the probes reached
     std::size_t                      device_blocks  = 0;    ///< continued fractions / FTLM sources run on a GPU
     Placement                        placement;
     Diagnostics                      diagnostics;
 };
 
 [[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, const Spec& s,
-                                      const ::Operator& O, const DynamicsSpec& d);
+                                      const std::vector<Probe>& probes, const DynamicsSpec& d);
+
+/// O's autocorrelation alone.
+[[nodiscard]] inline DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
+                                             const DynamicsSpec& d) {
+    return dynamics(H, s, std::vector<Probe>{Probe{&O, nullptr}}, d);
+}
 
 }  // namespace ed::sectors

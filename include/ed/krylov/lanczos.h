@@ -169,6 +169,12 @@ struct LanczosKernelOptionsT {
     /// growing basis). NOT consulted when `reorth == None`.
     std::vector<const Scalar*> aux_ortho_ptrs;
 
+    /// Optional: called with each basis vector V_j (backend memory) as iteration j begins, for
+    /// j = 0 .. iters_done - 1 -- the rows of the returned tridiagonal. A caller that needs one
+    /// projection per Krylov vector (an off-diagonal resolvent <a|(z - H)^-1|v0>) takes it here
+    /// instead of keeping the basis.
+    std::function<void(std::size_t, const Scalar*)> on_vector;
+
     /// Number of recent basis vectors the LocalDGKS3 ring buffer
     /// retains. Range: 1..N. Only consulted when
     /// ``reorth == LocalDGKS3``.
@@ -355,6 +361,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
 
     for (std::size_t j = 0; j < cap; ++j) {
         ed::core::poll_interrupt();   // Ctrl-C from Python (a no-op elsewhere)
+        if (opts.on_vector) opts.on_vector(j, v_curr.get());
         const double t0 = profile_on ? now_us() : 0.0;
         // w = H * v_curr (matvec is opaque to this kernel --- it may
         // be a host term-matvec, a cuBLAS-backed SpMV, etc.)

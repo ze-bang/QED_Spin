@@ -21,6 +21,7 @@
 #endif
 
 #include <map>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 
@@ -192,11 +193,15 @@ ed::ops::MaskedOperator total_s_minus(int n_sites) {
 
 }  // namespace
 
-DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O, const DynamicsSpec& d) {
+DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Probe>& probes, const DynamicsSpec& d) {
     const int n_sites = static_cast<int>(H.getNumBits());
     detail::validate_hamiltonian(H, "dynamics");
     detail::validate_spec(s, n_sites, "dynamics");
-    detail::validate_observable(&O, n_sites, "dynamics", 0);
+    if (probes.empty()) throw ed::InvalidRequest("dynamics: no probe");
+    for (std::size_t p = 0; p < probes.size(); ++p) {
+        detail::validate_observable(probes[p].A, n_sites, "dynamics", p);
+        if (probes[p].B) detail::validate_observable(probes[p].B, n_sites, "dynamics", p);
+    }
     detail::validate_dynamics_spec(d);
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
@@ -217,8 +222,38 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     // lists their Sz sectors).
     const bool whole = s.two_S >= 0 && subspaces(H, u).front().members > 1;
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
-    const ed::ops::MaskedOperator& Oc = O.canonical();
-    const auto shifts = n_up_shifts(Oc);
+    // Each probe's operators: B starts the resolvent, A is projected on it (a cross pair only;
+    // an autocorrelation is B = A), with the Sz changes each makes.
+    struct Prep {
+        const ed::ops::MaskedOperator* Ac = nullptr;
+        const ed::ops::MaskedOperator* Bc = nullptr;
+        bool cross = false;
+        std::set<int> shifts_A, shifts_B;
+    };
+    std::vector<Prep> pr(probes.size());
+    std::set<int> shifts;   // every Sz change any probe makes: the subspaces a source reaches
+    for (std::size_t p = 0; p < probes.size(); ++p) {
+        pr[p].cross = probes[p].B && probes[p].B != probes[p].A;
+        pr[p].Ac = &probes[p].A->canonical();
+        pr[p].Bc = pr[p].cross ? &probes[p].B->canonical() : pr[p].Ac;
+        pr[p].shifts_A = n_up_shifts(*pr[p].Ac);
+        pr[p].shifts_B = n_up_shifts(*pr[p].Bc);
+        shifts.insert(pr[p].shifts_A.begin(), pr[p].shifts_A.end());
+        shifts.insert(pr[p].shifts_B.begin(), pr[p].shifts_B.end());
+    }
+    // The target subspaces of probe p from `src`: where B goes, and A too for a cross pair.
+    auto probe_targets = [&](std::size_t p, const Subspace& src) {
+        std::vector<Subspace> out;
+        const auto ta = targets_of(src, pr[p].shifts_A, n_sites);
+        for (const Subspace& t : targets_of(src, pr[p].shifts_B, n_sites)) {
+            const bool both = !pr[p].cross || std::any_of(ta.begin(), ta.end(), [&t](const Subspace& x) {
+                return x.n_up == t.n_up && x.sz_parity == t.sz_parity;
+            });
+            if (both) out.push_back(t);
+        }
+        return out;
+    };
+    const std::size_t P = probes.size();
 
     DynamicsCurves out;
     out.omega = d.omega;
@@ -288,70 +323,90 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         phase["ground manifold"] += clock_since(t_gm);
         out.ground_manifold = static_cast<int>(states.size());
 
-        std::vector<double> S(d.omega.size(), 0.0);
+        std::vector<std::vector<Complex>> S(P, std::vector<Complex>(d.omega.size(), Complex(0, 0)));
         ed::matvec::CpuBackend be;
         ed::observables::CfSpectralOptions cf;
         cf.krylov_dim = std::max<std::size_t>(d.krylov, 2);
         cf.broadening = d.eta;
         cf.tolerance  = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         cf.energy_shift = out.e0;
-        // The target subspaces, each with the states O takes into it. A target subspace is
-        // streamed one momentum sector at a time: a sector is built once, used by every state O
-        // takes into it, and freed before the next, so the call holds one target sector rather
+        // The target subspaces, each with the (state, probe) pairs it receives. A target subspace
+        // is streamed one momentum sector at a time: a sector is built once, used by every pair
+        // that reaches it, and freed before the next, so the call holds one target sector rather
         // than every sector of every target subspace.
-        std::map<std::pair<int, int>, std::vector<std::size_t>> reaching;
+        std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> reaching;
         for (std::size_t si = 0; si < states.size(); ++si) {
             const Subspace src{states[si].first.basis->n_up, states[si].second, 1};
-            for (const Subspace& tsub : targets_of(src, shifts, n_sites))
-                reaching[{tsub.n_up, tsub.sz_parity}].push_back(si);
+            for (std::size_t p = 0; p < P; ++p)
+                for (const Subspace& tsub : probe_targets(p, src))
+                    reaching[{tsub.n_up, tsub.sz_parity}].push_back({si, p});
         }
         std::size_t reached = 0;
         for (const auto& [key, who] : reaching) {
             const Subspace tsub{key.first, key.second, 1};
-            std::vector<ed::ops::MaskedOperator> Ot;
-            for (std::size_t si : who)
-                Ot.push_back(connecting_part(Oc, {states[si].first.basis->n_up, states[si].second, 1}, tsub));
+            std::vector<ed::ops::MaskedOperator> Bt, At;   // per pair, the parts that reach tsub
+            for (const auto& [si, p] : who) {
+                const Subspace src{states[si].first.basis->n_up, states[si].second, 1};
+                Bt.push_back(connecting_part(*pr[p].Bc, src, tsub));
+                At.push_back(pr[p].cross ? connecting_part(*pr[p].Ac, src, tsub) : ed::ops::MaskedOperator(n_sites));
+            }
             stream_sectors(tsub, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
-                std::shared_ptr<RepSectorMatVec> Ht;       // H of this sector, once O reaches it
+                std::shared_ptr<RepSectorMatVec> Ht;       // H of this sector, once a probe reaches it
+                const std::size_t n = rd->reps.size();
                 for (std::size_t w = 0; w < who.size(); ++w) {
-                    const BlockVector& v = states[who[w]].first;
-                    auto t_pr = std::chrono::steady_clock::now();
-                    const auto P = cross_program(Ot[w], *v.basis, *rd);
-                    phase["compile O"] += clock_since(t_pr);
-                    if (!P) continue;
-                    const std::size_t n = rd->reps.size();
-                    std::vector<Complex> phi(n);
-                    auto t_sc = std::chrono::steady_clock::now();
-                    CrossSectorMatVec(P, v.basis, rd).apply(v.amplitudes.data(), phi.data(), n);
-                    phase["apply O"] += clock_since(t_sc);
-                    double n2 = 0.0;
-                    for (const auto& c : phi) n2 += std::norm(c);
-                    if (n2 < 1e-24) continue;
+                    const auto [si, p] = who[w];
+                    const BlockVector& v = states[si].first;
+                    // X|v> in this sector; false when X does not reach it or annihilates v here.
+                    auto carry = [&](const ed::ops::MaskedOperator& X, std::vector<Complex>& phi) {
+                        auto t_pr = std::chrono::steady_clock::now();
+                        const auto Pg = cross_program(X, *v.basis, *rd);
+                        phase["compile O"] += clock_since(t_pr);
+                        if (!Pg) return false;
+                        phi.assign(n, Complex(0, 0));
+                        auto t_sc = std::chrono::steady_clock::now();
+                        CrossSectorMatVec(Pg, v.basis, rd).apply(v.amplitudes.data(), phi.data(), n);
+                        phase["apply O"] += clock_since(t_sc);
+                        double n2 = 0.0;
+                        for (const auto& c : phi) n2 += std::norm(c);
+                        return n2 >= 1e-24;
+                    };
+                    std::vector<Complex> phi_b, phi_a;
+                    if (!carry(Bt[w], phi_b)) continue;
+                    if (pr[p].cross && !carry(At[w], phi_a)) continue;
                     if (!Ht) { Ht = std::make_shared<RepSectorMatVec>(H, rd); ++reached; }
-                    ed::observables::CfSpectralResult r;
                     auto t_cf = std::chrono::steady_clock::now();
                     // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.
                     const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, n));
+                    // The autocorrelation's continued fraction, or the cross pair's poles, on `bk`.
+                    auto spectrum = [&](auto& bk, auto&& apply) {
+                        if (!pr[p].cross) {
+                            const auto r = ed::observables::cf_spectral_from_vector(bk, apply, n, phi_b.data(), d.omega, cf);
+                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r.spectral_function[i];
+                        } else {
+                            const auto r = ed::observables::cross_spectral_from_vectors(bk, apply, n, phi_b.data(),
+                                                                                        phi_a.data(), d.omega, cf);
+                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r[i];
+                        }
+                    };
                     if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
                         Ht->enable_device(true);
                         ed::matvec::CudaBackend cbe;
-                        r = ed::observables::cf_spectral_from_vector(cbe, Ht->bind_cuda(), n, phi.data(),
-                                                                     d.omega, cf);
+                        spectrum(cbe, Ht->bind_cuda());
                         ++out.device_blocks;
 #endif
                     } else {
-                        auto apply = [&Ht](const Complex* in, Complex* o, std::size_t nn) { Ht->apply(in, o, nn); };
-                        r = ed::observables::cf_spectral_from_vector(be, apply, n, phi.data(), d.omega, cf);
+                        spectrum(be, [&Ht](const Complex* in, Complex* o, std::size_t nn) { Ht->apply(in, o, nn); });
                     }
                     out.placement.add(lane);
                     phase["continued fraction"] += clock_since(t_cf);
-                    for (std::size_t i = 0; i < S.size(); ++i) S[i] += r.spectral_function[i];
                 }
             });
         }
-        for (auto& x : S) x /= static_cast<double>(states.size());
-        out.S.push_back(std::move(S));
+        for (std::size_t p = 0; p < P; ++p) {
+            for (auto& x : S[p]) x /= static_cast<double>(states.size());
+            out.S.push_back({std::move(S[p])});
+        }
         out.target_sectors = reached;
         report();
         return out;
@@ -363,7 +418,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     const std::size_t nT = d.temperatures.size(), nW = d.omega.size();
     const auto t_all = std::chrono::steady_clock::now();
     const std::uint64_t seed0 = d.seed ? d.seed : std::random_device{}();
-    struct Source { std::map<double, std::vector<double>> S; std::map<double, double> Z; double emin = 0.0; };
+    // One source sector's sums: S per probe and temperature, Z per temperature.
+    struct Source {
+        std::vector<std::map<double, std::vector<Complex>>> S;
+        std::map<double, double> Z;
+        double emin = 0.0;
+    };
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
     // use. With a spin tower the initial states are its members at every Sz = S .. -S. Each
@@ -372,8 +432,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     // the same momentum at Sz = S + 1 (one more up spin).
     struct Job {
         std::size_t id = 0;                     // its index over the whole call: seeds its samples
-        const Target* src = nullptr; Subspace sub; std::vector<const Target*> targets;
-        std::vector<std::shared_ptr<const ed::ops::MaskedProgram>> programs;   // O to each target
+        const Target* src = nullptr; Subspace sub;
+        // Each target sector a probe reaches: A and B as rows of it (the same program for an
+        // autocorrelation).
+        struct Reach {
+            const Target* t = nullptr;
+            std::shared_ptr<const ed::ops::MaskedProgram> A, B;
+            std::size_t probe = 0;
+        };
+        std::vector<Reach> reaches;
         // The spin tower the samples start in (P_S of a Gaussian), on the bare H: the levels outside it
         // carry roundoff weight, and the kernel drops them (FtlmCrossIrrepOptions::min_weight).
         std::shared_ptr<const ed::symmetry::LowdinS2Projector> tower;
@@ -408,9 +475,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         for (const Subspace& t : targets_of(source_subs[si], shifts, n_sites)) use(t);
     }
 
-    // One source: FTLM against each reachable target with the same samples (seeded from the
-    // source's index, so the result does not depend on scheduling). A source O annihilates still
-    // weighs in the partition function: `kernel(nullptr)` runs it against a zero O.
+    // One source: FTLM against each target a probe reaches, with the same samples (seeded from the
+    // source's index, so the result does not depend on scheduling). A source the probes annihilate
+    // still weighs in the partition function: `kernel(nullptr)` runs it against a zero operator.
     auto options = [&](const Job& j) {
         ed::observables::FtlmCrossIrrepOptions fo;
         fo.krylov_dim  = d.krylov;
@@ -431,23 +498,25 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         sh.dim    = j.src->rd->reps.size();
         sh.krylov = d.krylov;
         sh.dim_target = sh.dim;                 // the zero-O run when nothing is reached
-        for (const Target* t : j.targets) sh.dim_target = std::max<std::uint64_t>(sh.dim_target, t->rd->reps.size());
+        for (const auto& x : j.reaches) sh.dim_target = std::max<std::uint64_t>(sh.dim_target, x.t->rd->reps.size());
         return sh;
     };
     auto collect = [&](const Job& j, auto&& kernel) {
         Source src;
+        src.S.assign(P, {});
+        for (auto& sp : src.S)
+            for (double T : d.temperatures) sp[T].assign(nW, Complex(0, 0));
         bool any = false;
-        for (std::size_t k = 0; k < j.targets.size(); ++k) {
-            auto r = kernel(j.targets[k], k);
-            if (!any) { src.Z = r.Z; src.emin = r.E_min; any = true;
-                        for (double T : d.temperatures) src.S[T].assign(nW, 0.0); }
+        for (const auto& x : j.reaches) {
+            auto r = kernel(&x);
+            if (!any) { src.Z = r.Z; src.emin = r.E_min; any = true; }
+            auto& sp = src.S[x.probe];
             for (double T : d.temperatures)
-                for (std::size_t w = 0; w < nW; ++w) src.S[T][w] += r.S_real.at(T)[w];
+                for (std::size_t w = 0; w < nW; ++w) sp[T][w] += Complex(r.S_real.at(T)[w], r.S_imag.at(T)[w]);
         }
         if (!any) {
-            auto r = kernel(nullptr, std::size_t{0});
+            auto r = kernel(nullptr);
             src.Z = r.Z; src.emin = r.E_min;
-            for (double T : d.temperatures) src.S[T].assign(nW, 0.0);
         }
         return src;
     };
@@ -457,16 +526,20 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         const ed::LinearOperator& Hs = *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
         auto& be = ed::matvec::default_cpu_backend();
-        return collect(j, [&](const Target* t, std::size_t k) {
-            if (!t) {
+        return collect(j, [&](const Job::Reach* x) {
+            if (!x) {
                 auto zero = [](const Complex*, Complex* o, std::size_t nn) { std::fill(o, o + nn, Complex(0, 0)); };
-                return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, dim_src, dim_src,
+                return ed::observables::ftlm_dynamics_kernel(be, H_src, H_src, zero, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, fo);
             }
-            const CrossSectorMatVec obs(j.programs[k], j.src->rd, t->rd);
+            const Target* t = x->t;
+            const CrossSectorMatVec a(x->A, j.src->rd, t->rd);
+            std::optional<CrossSectorMatVec> b;
+            if (x->B != x->A) b.emplace(x->B, j.src->rd, t->rd);
             auto H_dst = [t](const Complex* in, Complex* o, std::size_t nn) { t->H->apply(in, o, nn); };
-            auto O_ap  = [&obs](const Complex* in, Complex* o, std::size_t nn) { obs.apply(in, o, nn); };
-            return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, O_ap, dim_src, t->rd->reps.size(),
+            auto A_ap  = [&a](const Complex* in, Complex* o, std::size_t nn) { a.apply(in, o, nn); };
+            auto B_ap  = [&a, &b](const Complex* in, Complex* o, std::size_t nn) { (b ? *b : a).apply(in, o, nn); };
+            return ed::observables::ftlm_dynamics_kernel(be, H_src, H_dst, A_ap, B_ap, dim_src, t->rd->reps.size(),
                                                          d.temperatures, d.omega, fo);
         });
     };
@@ -504,17 +577,19 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             f.batch_width = width;
             return f;
         };
-        return collect(j, [&](const Target* t, std::size_t k) {
-            if (!t) {
+        return collect(j, [&](const Job::Reach* x) {
+            if (!x) {
                 auto zero = [&cbe](const Complex*, Complex* o, std::size_t nn) { cbe.fill_zero(o, nn); };
-                return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, dim_src, dim_src,
+                return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_src, zero, zero, dim_src, dim_src,
                                                              d.temperatures, d.omega, batched(src_op, dim_src));
             }
+            const Target* t = x->t;
             const std::size_t dim_dst = t->rd->reps.size();
             t->H->enable_device(true);
             const auto H_dst = t->H->bind_cuda();
-            const auto O_ap = ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *j.programs[k]);
-            return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, O_ap, dim_src, dim_dst,
+            const auto A_ap = ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *x->A);
+            const auto B_ap = x->B == x->A ? A_ap : ed::symmetry::make_cross_matvec_gpu_rep(*j.src->rd, *t->rd, *x->B);
+            return ed::observables::ftlm_dynamics_kernel(cbe, H_src, H_dst, A_ap, B_ap, dim_src, dim_dst,
                                                          d.temperatures, d.omega, batched(*t->H, dim_dst));
         });
 #else
@@ -547,18 +622,22 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
                     s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
             }
-            for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
-                const auto& ts = sectors_of(tsub);
-                const auto Ot = connecting_part(Oc, sub, tsub);
-                auto t_pr = std::chrono::steady_clock::now();
-                for (std::size_t ti = 0; ti < ts.size(); ++ti)
-                    if (auto P = cross_program(Ot, *src.rd, *ts[ti].rd)) {
-                        j.targets.push_back(&ts[ti]);
-                        j.programs.push_back(std::move(P));
+            for (std::size_t p = 0; p < P; ++p)
+                for (const Subspace& tsub : probe_targets(p, sub)) {
+                    const auto& ts = sectors_of(tsub);
+                    const auto Bt = connecting_part(*pr[p].Bc, sub, tsub);
+                    const auto At = pr[p].cross ? connecting_part(*pr[p].Ac, sub, tsub) : Bt;
+                    auto t_pr = std::chrono::steady_clock::now();
+                    for (std::size_t ti = 0; ti < ts.size(); ++ti) {
+                        auto Pb = cross_program(Bt, *src.rd, *ts[ti].rd);
+                        if (!Pb) continue;
+                        auto Pa = pr[p].cross ? cross_program(At, *src.rd, *ts[ti].rd) : Pb;
+                        if (!Pa) continue;
+                        j.reaches.push_back({&ts[ti], std::move(Pa), std::move(Pb), p});
                         reached.insert({Key{tsub.n_up, tsub.sz_parity}, ti});
                     }
-                phase["compile O"] += clock_since(t_pr);
-            }
+                    phase["compile O"] += clock_since(t_pr);
+                }
             j.id = n_jobs++;
             jobs.push_back(std::move(j));
         }
@@ -602,9 +681,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 std::vector<Complex> z(x.size(), Complex(1, 0));
                 jobs[i].tower->project(z.data(), z.size());
             }
-            for (const Target* t : jobs[i].targets) {
-                std::vector<Complex> a(t->rd->reps.size(), Complex(0, 0)), b(a.size());
-                t->H->apply(a.data(), b.data(), a.size());
+            for (const auto& x : jobs[i].reaches) {
+                std::vector<Complex> a(x.t->rd->reps.size(), Complex(0, 0)), b(a.size());
+                x.t->H->apply(a.data(), b.data(), a.size());
             }
         }
         std::exception_ptr failure;
@@ -653,7 +732,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                                  "requested Sz sectors has that momentum");
     phase["total"] += clock_since(t_all);
     out.target_sectors = reached.size();
-    out.S.assign(nT, std::vector<double>(nW, 0.0));
+    out.S.assign(P, std::vector<std::vector<Complex>>(nT, std::vector<Complex>(nW, Complex(0, 0))));
     for (std::size_t it = 0; it < nT; ++it) {
         const double T = d.temperatures[it], beta = 1.0 / T;
         double ref = std::numeric_limits<double>::infinity();
@@ -662,9 +741,11 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         for (const auto& s2 : sources) {
             const double w = std::exp(-beta * (s2.emin - ref));
             Z += w * s2.Z.at(T);
-            for (std::size_t i = 0; i < nW; ++i) out.S[it][i] += w * s2.S.at(T)[i];
+            for (std::size_t p = 0; p < P; ++p)
+                for (std::size_t i = 0; i < nW; ++i) out.S[p][it][i] += w * s2.S[p].at(T)[i];
         }
-        for (auto& x : out.S[it]) x /= Z;
+        for (std::size_t p = 0; p < P; ++p)
+            for (auto& x : out.S[p][it]) x /= Z;
     }
     report();
     return out;

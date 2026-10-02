@@ -511,12 +511,19 @@ void bind_sectors(py::module_& m) {
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
 
     s.def("dynamics",
-          [](const ::Operator& H, const sec::Spec& spec, const ::Operator& O, const sec::DynamicsSpec& d) {
+          [](const ::Operator& H, const sec::Spec& spec,
+             const std::vector<std::pair<const ::Operator*, const ::Operator*>>& probes, const sec::DynamicsSpec& d) {
+              std::vector<sec::Probe> ps;
+              for (const auto& [a, b] : probes) {
+                  if (!a) throw ed::InvalidRequest("dynamics: a probe without its operator A");
+                  ps.push_back({a, b});
+              }
               py::gil_scoped_release nogil;
-              return sec::dynamics(H, spec, O, d);
+              return sec::dynamics(H, spec, ps, d);
           },
-          py::arg("H"), py::arg("spec"), py::arg("O"), py::arg("dynamics"),
-          "S(omega) = <O^dag delta(omega - H + E) O> over the momentum sectors of H.");
+          py::arg("H"), py::arg("spec"), py::arg("probes"), py::arg("dynamics"),
+          "S_AB(omega) = <A^dag delta(omega - H + E) B> over the momentum sectors of H, per (A, B) probe "
+          "(B None: A's autocorrelation); S is [probe][row][omega], complex.");
 
     s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"),
           "A result as named arrays (EigResult.save).");

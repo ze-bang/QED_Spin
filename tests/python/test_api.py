@@ -1611,3 +1611,67 @@ def test_real_blocks_run_in_real_arithmetic(monkeypatch):
         assert "csr-real" in lanes and "csr-real" not in {b["lane"] for b in c.block_stats}
         if vectors:   # the real vectors are eigenvectors: <H> in each level is its energy
             np.testing.assert_allclose(r.expect([H])[:, 0].real, [lv.energy for lv in r.levels], atol=1e-9)
+
+
+def _cross_pair(n):
+    # A: S^z_0 + 0.5 S^z_3; B: S^z_1 + 0.7 S^+_2 S^-_5 (not Hermitian, a cross pair of its own).
+    A = qed.Operator(n)
+    A.add_one_body(qed.OP_SZ, 0, 1.0)
+    A.add_one_body(qed.OP_SZ, 3, 0.5)
+    B = qed.Operator(n)
+    B.add_one_body(qed.OP_SZ, 1, 1.0)
+    B.add_two_body(qed.OP_SPLUS, 2, qed.OP_SMINUS, 5, 0.7)
+    return A, B
+
+
+@pytest.mark.parametrize("T", [None, [0.7, 2.0]])
+def test_cross_correlations_follow_the_polarisation_identity(T):
+    # P6.7 (audit K3-model-scale-04): S_AB = (1/4) sum_k i^-k S_{X_k}, X_k = A + i^k B, through
+    # correlations of one operator. With a Krylov space as large as every sector (and the same samples
+    # at T > 0) both sides are exact, so they agree to roundoff -- sample by sample at T > 0 too, when
+    # S_{X_k} keeps the imaginary part a finite sample gives it: dynamics drops it for an
+    # autocorrelation (real on average), so X_k is paired with an equal copy of itself.
+    n = 8
+    H = _ring(n, 0.3)
+    A, B = _cross_pair(n)
+    omega = np.linspace(-1.0, 4.0, 61)
+    kw = dict(eta=0.2, krylov=80, sym=qed.Symmetry(spatial=_translations(n), point_group=False), seed=3, samples=4)
+    if T is not None:
+        kw["T"] = T
+    sab = qed.dynamics(H, A, omega, B, **kw).S
+    assert np.iscomplexobj(sab)
+    pol = sum(1j ** (-k) * qed.dynamics(H, A + (1j ** k) * B, omega, A + (1j ** k) * B, **kw).S
+              for k in range(4)) / 4
+    np.testing.assert_allclose(sab, pol, atol=1e-9 * np.abs(pol).max())
+    if T is None:   # the ground state and both operators are real here: so is the cross spectrum
+        np.testing.assert_allclose(sab.imag, 0.0, atol=1e-12 * np.abs(sab).max())
+
+
+@pytest.mark.parametrize("T", [None, [1.0]])
+def test_dynamics_probe_axes(T):
+    # P6.7 (audit P5-dynamics-08): several probes in one call share the ground manifold / sources:
+    # a sequence equals the separate calls, and B="all" is the matrix <O_i^dag O_j> with the
+    # autocorrelations on its diagonal (Hermitian over the probe axes at T = 0).
+    n = 8
+    H = _ring(n, 0.3)
+    A, B = _cross_pair(n)
+    omega = np.linspace(-1.0, 4.0, 41)
+    kw = dict(eta=0.2, krylov=80, seed=5, samples=3)
+    if T is not None:
+        kw["T"] = T
+    one = [qed.dynamics(H, X, omega, **kw).S for X in (A, B)]
+    seq = qed.dynamics(H, [A, B], omega, **kw).S
+    assert seq.shape == (2,) + one[0].shape and not np.iscomplexobj(seq)
+    for i in range(2):
+        np.testing.assert_allclose(seq[i], one[i], rtol=1e-10, atol=1e-12)
+    full = qed.dynamics(H, [A, B], omega, "all", **kw).S
+    assert full.shape == (2, 2) + one[0].shape
+    for i in range(2):
+        np.testing.assert_allclose(full[i, i].real, one[i], rtol=1e-10, atol=1e-12)
+    if T is None:   # at T > 0 the sampled trace is Hermitian only on average
+        np.testing.assert_allclose(full[1, 0], np.conj(full[0, 1]), atol=1e-10 * np.abs(full).max())
+    pairs =qed.dynamics(H, [A, B], omega, [B, A], **kw).S
+    np.testing.assert_allclose(pairs[0], full[0, 1], atol=1e-12)
+    np.testing.assert_allclose(pairs[1], full[1, 0], atol=1e-12)
+    with pytest.raises(qed.errors.InvalidRequest):
+        qed.dynamics(H, [A, B], omega, [B], **kw)

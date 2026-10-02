@@ -2,24 +2,25 @@
 // =============================================================================
 // include/ed/dynamics/ftlm_dynamics.h
 //
-// Finite-temperature Lanczos (Jaklic-Prelovsek) for a dynamical correlation between two
-// sectors, on any Backend. O is rectangular: it maps the source sector (dim_src) to a target
-// sector (dim_dst). Per source sector, with R Gaussian samples |r> drawn in the source basis,
-// the Ritz states |psi_i> (energies E_i, first components c_i = <psi_i|r>) of a Lanczos run on
-// H_src from |r>, and a second Lanczos run on H_dst from O|r> for the resolvent,
+// Finite-temperature Lanczos (Jaklic-Prelovsek) for a dynamical correlation <A^dag(t) B> between
+// two sectors, on any Backend. A and B are rectangular: each maps the source sector (dim_src) to a
+// target sector (dim_dst). Per source sector, with R Gaussian samples |r> drawn in the source
+// basis, the Ritz states |psi_i> (energies E_i, first components c_i = <psi_i|r>) of a Lanczos run
+// on H_src from |r>, and a second Lanczos run on H_dst from B|r> for the resolvent,
 //
 //   S(omega, T) = (dim_src / R) sum_r sum_i e^{-beta (E_i - E_min)} c_i
-//                 sum_j <psi_i|O^dag|chi_j><chi_j|O|r> L_eta(omega - (lambda_j - E_i)),
-//   Z(T)        = (dim_src / R) sum_r sum_i e^{-beta (E_i - E_min)} c_i^2,
+//                 sum_j <psi_i|A^dag|chi_j><chi_j|B|r> L_eta(omega - (lambda_j - E_i)),
+//   Z(T)      = (dim_src / R) sum_r sum_i e^{-beta (E_i - E_min)} c_i^2,
 //
 // L_eta a unit Lorentzian. Both are returned UN-normalised (times dim_src, or trace_dim): the
 // caller (the dynamics verb) sums S and Z over source sectors and divides.
 //
 // Every O(dim) step runs on the backend: both Lanczos runs keep their bases in backend memory,
 // O is applied to each source Krylov vector there, and the overlaps W = (O V_H)^dag V_S come from
-// one GEMM. Only the m_H x m_S overlap matrix and the tridiagonals reach the host.
+// one GEMM. Only the m_H x m_S overlap matrix and the tridiagonals reach the host. A = B is the
+// autocorrelation (real); otherwise S is complex.
 //
-//   H_src, H_dst, O_apply: (in, out, n) callables over backend pointers.
+//   H_src, H_dst, A_apply, B_apply: (in, out, n) callables over backend pointers.
 // =============================================================================
 
 #include <ed/krylov/lanczos.h>
@@ -98,8 +99,9 @@ struct FtlmCrossIrrepSectorResult {
 };
 
 
-template <class Backend, class HSrc, class HDst, class OApply>
-FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&& H_dst, OApply&& O_apply,
+template <class Backend, class HSrc, class HDst, class AApply, class BApply>
+FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&& H_dst, AApply&& A_apply,
+                                                BApply&& B_apply,
                                                 std::size_t dim_src, std::size_t dim_dst,
                                                 const std::vector<double>& temperatures,
                                                 const std::vector<double>& omega,
@@ -163,7 +165,7 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         }
 
         auto phi = bk.make_zero_vector(dim_dst);
-        O_apply(r.get(), phi.get(), dim_dst);
+        B_apply(r.get(), phi.get(), dim_dst);
         const double nphi = bk.nrm2(phi.get(), dim_dst);
         // scale-free: unit-vector norm
         if (nphi < 1e-14) return out;                             // O annihilates |r>: no spectral weight
@@ -187,7 +189,7 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
             std::vector<Complex> row(mS);
             for (std::size_t a = 0; a < mH; ++a) {
                 bk.fill_zero(ov.get(), dim_dst);
-                O_apply(kh.basis[a].get(), ov.get(), dim_dst);
+                A_apply(kh.basis[a].get(), ov.get(), dim_dst);
                 bk.dot_many(wb.data(), mS, ov.get(), dim_dst, row.data());
                 for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
             }
