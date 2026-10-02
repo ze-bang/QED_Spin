@@ -6,16 +6,21 @@
 ED_XSEC_CSR_BUDGET_GIB (default 4 GiB), although the merged CSR is |G| x terms times smaller.
 For S^z_q on a Heisenberg chain this refusal happens from N ~ 28 (n_up = N/2, k-sector), after
 which every O apply in T>0 FTLM dynamics (krylov+1 applies per sample) re-walks the orbit.
-Test (scaled down, N=16, translations, n_up=8): run the same T>0 qed.dynamics in two
-subprocesses, once with the default budget (CSR) and once with the budget forced to ~0 (walk),
-same seed; the spectra must agree and the walk run must be much slower. Also prints the
-pre-merge estimate the code would compute for chain28/chain30."""
+
+Test (scaled down, N=16, translations, n_up=8): the same T>0 qed.dynamics in two subprocesses,
+once with the default budget and once with ED_XSEC_CSR_BUDGET_GIB at three times the MERGED CSR
+of S^z_q between two momentum sectors (rows x (1 + 1 group) x 20 B), far below the pre-merge
+stream. Charging the merged CSR builds it in both runs (equal times); charging the pre-merge
+stream refuses it in the second run, which then walks every apply (slower). Spectra must agree.
+Each run takes the fastest of three calls.
+
+(Restated after P3.3: the first version forced the walk with a ~0 budget and timed walk against
+CSR, which measures the speed of the walk, not the budget rule the claim is about.)"""
 import json
+import math
 import os
 import subprocess
 import sys
-import time
-from math import comb
 
 CHILD = r'''
 import json, time, cmath
@@ -35,15 +40,20 @@ for j in range(N):
 t = qed.symmetry.translation(N, 1)
 sym = qed.Symmetry(spatial=[t], sz=N // 2, spin_flip="off", time_reversal="off")
 w = np.linspace(-1, 4, 60)
-t0 = time.time()
-r = qed.dynamics(H, O, w, T=[1.0], sym=sym, krylov=40, samples=4, seed=7)
-dt = time.time() - t0
-print("RESULT " + json.dumps({"dt": dt, "S": [float(x) for x in np.asarray(r.S).ravel()]}))
+dts = []
+for _ in range(3):
+    t0 = time.time()
+    r = qed.dynamics(H, O, w, T=[1.0], sym=sym, krylov=40, samples=4, seed=7)
+    dts.append(time.time() - t0)
+print("RESULT " + json.dumps({"dt": min(dts), "S": [float(x) for x in np.asarray(r.S).ravel()]}))
 '''
+
+N = 16
 
 
 def run(budget):
     env = dict(os.environ)
+    env.pop("ED_XSEC_CSR_BUDGET_GIB", None)
     if budget is not None:
         env["ED_XSEC_CSR_BUDGET_GIB"] = budget
     try:
@@ -56,28 +66,25 @@ def run(budget):
     return None, f"rc={p.returncode} {p.stderr[-200:]!r}"
 
 
-def est_gib(n):
-    d = comb(n, n // 2) / n
-    return d * n * n * 24 / 2 ** 30
+rows = math.comb(N, N // 2) // N + N                     # rows of the largest momentum sector (bound)
+merged = rows * 2 * 20 + (rows + 1) * 8                   # one diagonal group: <= 2 entries per row
+premerge = math.comb(N, N // 2) // N * N * N * 24         # the unmerged stream the claim describes
+budget = 3 * merged / 2 ** 30
+dflt, e1 = run(None)
+tight, e2 = run(f"{budget:.3e}")
+info = (f"merged CSR <= {merged / 1024:.1f} KiB, pre-merge stream {premerge / 1024:.0f} KiB, budget {3 * merged / 1024:.1f} KiB")
+if dflt is None or tight is None:
+    print(f"REPRO: INCONCLUSIVE child failed: default={e1} tight={e2}; {info}")
+    raise SystemExit(0)
+import numpy as np  # noqa: E402
 
-
-csr, e1 = run(None)
-walk, e2 = run("1e-9")
-ests = f"pre-merge est: chain24 {est_gib(24):.1f} GiB, chain28 {est_gib(28):.1f} GiB, chain30 {est_gib(30):.1f} GiB (budget 4)"
-if csr is None or walk is None:
-    if walk is None and e2 == "timeout" and csr is not None:
-        print(f"REPRO: CONFIRMED walk run exceeded 125 s while CSR run took {csr['dt']:.2f} s; {ests}")
-    else:
-        print(f"REPRO: INCONCLUSIVE child failed: csr={e1} walk={e2}")
-    sys.exit(0)
-import numpy as np
-a, b = np.array(csr["S"]), np.array(walk["S"])
+a, b = np.array(dflt["S"]), np.array(tight["S"])
 diff = float(np.max(np.abs(a - b)) / max(np.max(np.abs(a)), 1e-300))
-ratio = walk["dt"] / max(csr["dt"], 1e-9)
-info = f"N=16 T=1 krylov=40 samples=4: csr {csr['dt']:.2f} s, walk {walk['dt']:.2f} s, ratio {ratio:.1f}x, rel diff {diff:.1e}; {ests}"
-if diff < 1e-6 and ratio > 3:
-    print("REPRO: CONFIRMED " + info)
+ratio = tight["dt"] / max(dflt["dt"], 1e-9)
+info = f"default {dflt['dt']:.3f} s, budget 3x merged {tight['dt']:.3f} s, ratio {ratio:.2f}, rel diff {diff:.1e}; {info}"
+if diff < 1e-6 and ratio > 2.0:
+    print("REPRO: CONFIRMED a budget above the merged CSR still refuses it: " + info)
 elif diff < 1e-6:
-    print("REPRO: NOT_REPRODUCED " + info)
+    print("REPRO: NOT_REPRODUCED the CSR is charged at its merged size: " + info)
 else:
-    print("REPRO: INCONCLUSIVE results differ " + info)
+    print("REPRO: INCONCLUSIVE results differ: " + info)

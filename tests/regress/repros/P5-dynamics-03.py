@@ -5,10 +5,17 @@
 (dim_src x |G| x n_terms x 24 B), not on the merged CSR (about one nonzero per column for S^z_q).
 Once refused, every O apply in T>0 dynamics re-runs the full orbit walk, so the O part costs
 (mH+1) x samples walks instead of one.  At N = 26 (chain, translations, n_up = 13) the default
-budget is already exceeded.  Test: chain18 Heisenberg, translations only, sz = 9, O = S^z_q;
-qed.dynamics(T=[1]) with the default budget (CSR built) vs ED_XSEC_CSR_BUDGET_GIB tiny (forced
-refusal = what N >= 26 gets by default).  Same seed -> same spectrum; CONFIRMED when the refused
-run is >= 3x slower with matching results."""
+budget is already exceeded.
+
+Test: chain18 Heisenberg, translations only, sz = 9, O = S^z_q; qed.dynamics(T=[1]) with the
+default budget vs ED_XSEC_CSR_BUDGET_GIB at three times the MERGED CSR (rows x (1 + 1 group) x
+20 B), which is ~N^2/3 times below the pre-merge stream: a library that charges the merged CSR
+builds it in both runs (equal times), one that charges the pre-merge stream refuses it in the
+second run and walks (slower). Same seed -> same spectrum; CONFIRMED when the budgeted run is
+>= 2x slower with matching results. Each run takes the fastest of three calls.
+
+(Restated after P3.3: the first version forced a refusal with a tiny budget and timed the walk
+against the CSR, which measures the walk, not the budget rule.)"""
 import json, math, os, subprocess, sys, time
 
 N, NUP, NQ = 18, 9, 3
@@ -26,10 +33,12 @@ for j in range(N):
 t = qed.symmetry.translation(N, 1)
 sym = qed.Symmetry(spatial=[t], point_group=False, sz=NUP, spin_flip="off", time_reversal="off")
 w = np.linspace(-2, 4, 121)
-t0 = time.time()
-r = qed.dynamics(H, O, w, eta=0.1, T=[1.0], krylov=30, samples=2, seed=11, sym=sym)
-dt = time.time() - t0
-print("RESULT_JSON:" + json.dumps({"t": dt, "S": [float(x) for x in r.S[0]]}), flush=True)
+ts = []
+for _ in range(3):
+    t0 = time.time()
+    r = qed.dynamics(H, O, w, eta=0.1, T=[1.0], krylov=30, samples=2, seed=11, sym=sym)
+    ts.append(time.time() - t0)
+print("RESULT_JSON:" + json.dumps({"t": min(ts), "S": [float(x) for x in r.S[0]]}), flush=True)
 ''' % (N, NUP, NQ)
 
 
@@ -45,23 +54,23 @@ def run(budget):
     raise RuntimeError(f"child rc={p.returncode}: {p.stderr[-400:]}")
 
 
-def est_gib(n, nup):
-    dim = math.comb(n, nup) / n
-    return dim * n * n * 24 / 2**30
-
-
+rows = math.comb(N, NUP) // N + N
+merged = rows * 2 * 20 + (rows + 1) * 8
+premerge = math.comb(N, NUP) // N * N * N * 24
 try:
-    a = run(None)       # default 4 GiB: CSR built (est at N=18 is ~0.02 GiB)
-    b = run(1e-6)       # forced refusal: per-apply orbit walk
+    a = run(None)                              # default 4 GiB
+    b = run(f"{3 * merged / 2**30:.3e}")       # three times the merged CSR
     import numpy as np
     Sa, Sb = np.array(a["S"]), np.array(b["S"])
     rel = float(np.max(np.abs(Sa - Sb)) / max(np.max(np.abs(Sa)), 1e-300))
     ratio = b["t"] / max(a["t"], 1e-9)
-    info = (f"t_csr={a['t']:.2f}s t_walk={b['t']:.2f}s ratio={ratio:.1f} maxrel={rel:.1e} "
-            f"est_N24={est_gib(24,12):.2f}GiB est_N26={est_gib(26,13):.2f}GiB (budget 4)")
-    if ratio >= 3 and rel < 1e-6 and est_gib(26, 13) > 4:
+    info = (f"t_default={a['t']:.3f}s t_budget={b['t']:.3f}s ratio={ratio:.2f} maxrel={rel:.1e} "
+            f"merged<={merged / 1024:.0f}KiB premerge={premerge / 1024:.0f}KiB budget={3 * merged / 1024:.0f}KiB")
+    if ratio >= 2 and rel < 1e-6:
         print("REPRO: CONFIRMED " + info)
-    else:
+    elif rel < 1e-6:
         print("REPRO: NOT_REPRODUCED " + info)
+    else:
+        print("REPRO: INCONCLUSIVE results differ " + info)
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:200]}")
