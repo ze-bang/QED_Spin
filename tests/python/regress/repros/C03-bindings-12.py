@@ -3,7 +3,9 @@
 # SECONDS: 60
 """Claim: qed.load_eigs trusts the arrays of the .npz: an out-of-range level_vector, a truncated
 vector_offset or out-of-range basis permutation entries are used unchecked (out-of-bounds reads,
-a stack write in build_perm_lut) instead of raising ValueError."""
+a stack write in build_perm_lut) instead of raising ValueError.
+Restated (P4.3): a ValueError subclass counts (qed.errors.InvalidRequest since the refusals are qed
+errors); the class name was compared as a string."""
 import os
 import tempfile
 import subprocess
@@ -35,7 +37,7 @@ for name, arrs in variants.items():
     path = os.path.join(OUT, name.replace(" ", "_").replace("=", "") + ".npz")
     np.savez(path, **arrs)
     code = ("import qed\ntry:\n    r=qed.load_eigs(%r)\n    v=r.vectors()\n    print('RETURNED', len(v))\n"
-            "except Exception as e:\n    print('RAISED', type(e).__name__, e)\n" % path)
+            "except Exception as e:\n    print('RAISED', 'ValueError' if isinstance(e, ValueError) else type(e).__name__, type(e).__name__, e)\n" % path)
     try:
         p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
         res[name] = (p.returncode, ((p.stdout.strip().splitlines() or [""])[-1])[:120])
