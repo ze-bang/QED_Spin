@@ -71,6 +71,64 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
     return rd;
 }
 
+ed::symmetry::RepSectorData
+group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
+                              int n_sites, int n_up, bool flip, int d, const std::vector<Complex>& D) {
+    const std::size_t Gx = (flip ? 2 : 1) * perms.size();
+    const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
+    if (d < 1 || d > 255 || D.size() != Gx * dd)
+        throw std::invalid_argument("group sector: an irrep of dimension d needs |G| d x d matrices (2|G| with flip)");
+    std::vector<Complex> chi(Gx, Complex(0.0, 0.0));   // the characters, for the label and 1-dim readers
+    for (std::size_t g = 0; g < Gx; ++g)
+        for (int i = 0; i < d; ++i) chi[g] += D[g * dd + static_cast<std::size_t>(i) * static_cast<std::size_t>(d + 1)];
+    if (d == 1) return group_sector_from_table(tab, perms, n_sites, n_up, flip, chi);
+    // The 1-dim fields come from the shared construction (the perms and masks); the reps are redone.
+    ed::symmetry::RepSectorData rd = group_sector_from_table(tab, perms, n_sites, n_up, flip,
+                                                             std::vector<Complex>(Gx, Complex(1.0, 0.0)));
+    rd.characters = chi;
+    rd.irrep_dim  = d;
+    rd.irrep_D    = D;
+    // Per stabiliser class: Mt = sum_{s in Stab} D(s)* is |Stab| times a projector; its eigenvectors
+    // of eigenvalue |Stab| scaled by 1/sqrt(|Stab|) give C with C^dag Mt C = I.
+    const std::size_t n_class = tab.stab_elems.size();
+    rd.class_rank.assign(n_class, 0);
+    rd.class_C.assign(n_class * dd, Complex(0.0, 0.0));
+    for (std::size_t c = 0; c < n_class; ++c) {
+        const auto& S = tab.stab_elems[c];
+        Eigen::MatrixXcd M = Eigen::MatrixXcd::Zero(d, d);
+        for (const std::uint16_t s : S)
+            for (int i = 0; i < d; ++i)
+                for (int j = 0; j < d; ++j)
+                    M(i, j) += std::conj(D[static_cast<std::size_t>(s) * dd + static_cast<std::size_t>(i * d + j)]);
+        M = 0.5 * (M + M.adjoint());
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+        const double size = static_cast<double>(S.size());
+        int rank = 0;
+        for (int k = d - 1; k >= 0; --k) {           // eigenvalues ascending: the kept ones are last
+            const double lam = es.eigenvalues()(k);
+            if (!(lam > 0.5 * size)) break;         // 0 or |Stab|: the midpoint separates them
+            for (int i = 0; i < d; ++i)
+                rd.class_C[c * dd + static_cast<std::size_t>(i * d + rank)] = es.eigenvectors()(i, k) / std::sqrt(lam);
+            ++rank;
+        }
+        rd.class_rank[c] = static_cast<std::uint8_t>(rank);
+    }
+    // The representatives that carry the irrep, their classes and the offsets of their states.
+    rd.reps.clear();
+    rd.inv_norms.clear();
+    rd.rep_class.clear();
+    rd.state_offset.assign(1, 0);
+    for (std::size_t i = 0; i < tab.reps.size(); ++i) {
+        const std::uint16_t c = tab.stab_id[i];
+        const std::uint8_t rank = rd.class_rank[c];
+        if (rank == 0) continue;
+        rd.reps.push_back(tab.reps[i]);
+        rd.rep_class.push_back(c);
+        rd.state_offset.push_back(rd.state_offset.back() + rank);
+    }
+    return rd;
+}
+
 void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
                  ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local) {
     const std::size_t n = tab.reps.size();

@@ -94,6 +94,15 @@ struct RepSymmetryBasisPolicy {
     const std::uint64_t* perm_lut     = nullptr;
     int                  perm_lut_bpw = 0;
 
+    // An irrep of dimension d > 1 (rep_sector.h, P6.3): D(g) for every element, and per rep its
+    // stabiliser class (rank and C) and its first state. Null for d = 1.
+    int                  irrep_dim    = 1;
+    const Complex*       irrep_D      = nullptr;   // |G| d x d, row-major
+    const Complex*       class_C      = nullptr;   // per class: d x d, row-major
+    const std::uint8_t*  class_rank   = nullptr;   // per class
+    const std::uint16_t* rep_class    = nullptr;   // per rep
+    const std::uint64_t* state_offset = nullptr;   // per rep, and one past
+
     [[nodiscard]] inline std::uint64_t dim() const noexcept { return dim_; }
 
     [[nodiscard]] inline std::uint64_t state_of(std::uint64_t idx) const noexcept {
@@ -217,6 +226,35 @@ struct RepSymmetryBasisPolicy {
         proj_out = Complex(acc_re * s, acc_im * s);
         return k;
     }
+
+    // The d > 1 form (rep_sector.h): the orbit index k of `state` (or -1) and, into A (d x d,
+    // row-major), A = sum_{g: g state = rep_k} D(g)^T -- the same running-minimum pass.
+    [[nodiscard]] inline std::int64_t
+    index_and_matrix(std::uint64_t state, Complex* A) const noexcept {
+        if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
+        const int d = irrep_dim;
+        const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
+        std::uint64_t rb = ~std::uint64_t{0};
+        for (int g = 0; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            if (img > rb) continue;
+            if (img < rb) {
+                rb = img;
+                for (std::size_t e = 0; e < dd; ++e) A[e] = Complex(0.0, 0.0);
+            }
+            const Complex* Dg = irrep_D + static_cast<std::size_t>(g) * dd;
+            for (int i = 0; i < d; ++i)
+                for (int j = 0; j < d; ++j) A[i * d + j] += Dg[j * d + i];
+        }
+        return index_of_rep(rb);
+    }
+
+    /// d > 1: rep k's rank, its class's C (d x d, row-major; columns >= rank zero) and its first state.
+    [[nodiscard]] inline int rank_of(std::uint64_t k) const noexcept { return class_rank[rep_class[k]]; }
+    [[nodiscard]] inline const Complex* C_of(std::uint64_t k) const noexcept {
+        return class_C + static_cast<std::size_t>(rep_class[k]) * static_cast<std::size_t>(irrep_dim * irrep_dim);
+    }
+    [[nodiscard]] inline std::uint64_t first_state_of(std::uint64_t k) const noexcept { return state_offset[k]; }
 
     // ----- Trait surface --------------------------------------------------
     // ``is_rep_symmetry`` selects the dedicated rep-symmetry kernel + forces

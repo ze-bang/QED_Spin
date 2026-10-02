@@ -28,6 +28,8 @@
 
 #include "engine/internal.h"   // RepSectorMatVec
 
+#include <ed/basis/irreps.h>
+#include <ed/basis/orbit_table.h>
 #include <ed/basis/rep_sector.h>
 #include <ed/core/select_backend.h>
 #include "common/model_records.h"
@@ -44,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -879,4 +882,157 @@ TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups
             }
         }
     }
+}
+
+// ---- d-dimensional irreps (P6.3) ----------------------------------------------------------------
+
+namespace {
+
+// The orbit table of a ring group at fixed n_up, built directly: reps (smallest image) and their
+// deduplicated stabilisers.
+ed::symmetry::OrbitTable ring_table(const RepSectorData& probe, int n_up) {
+    const auto pol = probe.make_policy();
+    ed::symmetry::OrbitTable tab;
+    std::map<std::vector<std::uint16_t>, std::uint16_t> ids;
+    for (std::uint64_t s = 0; s <= kAll; ++s) {
+        if (__builtin_popcountll(s) != n_up) continue;
+        bool is_rep = true;
+        std::vector<std::uint16_t> stab;
+        for (int g = 0; g < probe.group_size && is_rep; ++g) {
+            const std::uint64_t img = pol.apply_perm(s, g);
+            if (img < s) is_rep = false;
+            if (img == s) stab.push_back(static_cast<std::uint16_t>(g));
+        }
+        if (!is_rep) continue;
+        const auto [it, fresh] = ids.try_emplace(stab, static_cast<std::uint16_t>(tab.stab_elems.size()));
+        if (fresh) tab.stab_elems.push_back(stab);
+        tab.reps.push_back(s);
+        tab.stab_id.push_back(it->second);
+    }
+    return tab;
+}
+
+// D_N on the ring: its permutations, a sector-less probe for apply_perm, and its irreps.
+struct Dihedral {
+    std::vector<std::vector<int>> perms;
+    RepSectorData probe;
+    ed::symmetry::GroupIrreps gi;
+    Dihedral() {
+        for (const auto& e : ring_group(/*dihedral=*/true, /*with_flip=*/false)) perms.push_back(e.perm);
+        probe.n_sites = N;
+        probe.group_size = static_cast<int>(perms.size());
+        for (const auto& p : perms) probe.perms_flat.insert(probe.perms_flat.end(), p.begin(), p.end());
+        gi = ed::symmetry::decompose_irreps(perms, N);
+    }
+    std::vector<Cx> D(const ed::symmetry::IrrepData& ir) const {
+        std::vector<Cx> out;
+        for (const auto& M : ir.matrices) out.insert(out.end(), M.begin(), M.end());
+        return out;
+    }
+};
+
+// The sector's states as dense vectors over the 2^N basis:
+// |r; a> = sqrt(d/|G|) sum_j C[j][a] sum_g D(g)*_{0j} |g r>.
+std::vector<std::vector<Cx>> partner0_vectors(const RepSectorData& rd, const RepSectorData& probe) {
+    const auto pol = probe.make_policy();
+    const int d = rd.irrep_dim;
+    const std::size_t dd = static_cast<std::size_t>(d * d), nG = static_cast<std::size_t>(probe.group_size);
+    std::vector<std::vector<Cx>> vecs;
+    for (std::size_t r = 0; r < rd.reps.size(); ++r) {
+        const std::size_t c = rd.rep_class[r];
+        for (int a = 0; a < rd.class_rank[c]; ++a) {
+            std::vector<Cx> v(kAll + 1, Cx(0.0, 0.0));
+            for (int j = 0; j < d; ++j) {
+                const Cx Cja = rd.class_C[c * dd + static_cast<std::size_t>(j * d + a)];
+                for (std::size_t g = 0; g < nG; ++g)
+                    v[pol.apply_perm(rd.reps[r], static_cast<int>(g))] +=
+                        std::sqrt(static_cast<double>(d) / static_cast<double>(nG)) * Cja
+                        * std::conj(rd.irrep_D[g * dd + static_cast<std::size_t>(j)]);
+            }
+            vecs.push_back(std::move(v));
+        }
+    }
+    return vecs;
+}
+
+}  // namespace
+
+TEST_CASE("rep sectors: every irrep of D_N gives orthonormal partner-0 states that tile the space",
+          "[row_walk][irrep]") {
+    const Dihedral G;
+    REQUIRE_FALSE(G.gi.is_abelian());
+    for (int n_up : {N / 2, N / 2 - 1}) {
+        const auto tab = ring_table(G.probe, n_up);
+        std::uint64_t tiled = 0, binom = 0;
+        for (std::uint64_t s = 0; s <= kAll; ++s) binom += __builtin_popcountll(s) == n_up;
+        for (const auto& ir : G.gi.irreps) {
+            const RepSectorData rd =
+                ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir));
+            INFO("n_up " << n_up << " irrep dim " << ir.dim << " states " << rd.states());
+            tiled += static_cast<std::uint64_t>(ir.dim) * rd.states();
+            if (ir.dim == 1) { REQUIRE(rd.states() == rd.reps.size()); continue; }
+            REQUIRE(rd.irrep_dim == ir.dim);
+            REQUIRE(rd.state_offset.size() == rd.reps.size() + 1);
+            const auto vecs = partner0_vectors(rd, G.probe);
+            REQUIRE(vecs.size() == rd.states());
+            for (std::size_t x = 0; x < vecs.size(); ++x)
+                for (std::size_t y = x; y < vecs.size(); ++y) {
+                    Cx o(0.0, 0.0);
+                    for (std::size_t s = 0; s <= kAll; ++s) o += std::conj(vecs[x][s]) * vecs[y][s];
+                    REQUIRE(std::abs(o - (x == y ? Cx(1.0, 0.0) : Cx(0.0, 0.0))) < 1e-10);
+                }
+        }
+        REQUIRE(tiled == binom);
+    }
+}
+
+TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk][irrep]") {
+    const Dihedral G;
+    int sectors = 0;
+    for (const auto& m : zoo()) {
+        if (!m.dihedral || !m.u1) continue;
+        const MaskedOperator& h = m.H->canonical();
+        const Mat Hd = h.to_dense();
+        const std::size_t Dall = kAll + 1;
+        const double tol = 1e-12 * std::max(1.0, max_abs(Hd));
+        for (int n_up : {N / 2, N / 2 - 1}) {
+            const auto tab = ring_table(G.probe, n_up);
+            for (const auto& ir : G.gi.irreps) {
+                if (ir.dim == 1) continue;
+                RepSectorData rd =
+                    ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir));
+                const std::size_t d = rd.states();
+                if (d == 0) continue;
+                ++sectors;
+                INFO("model " << m.name << " n_up " << n_up << " states " << d);
+                const auto V = partner0_vectors(rd, G.probe);
+                Mat ref(d * d, Cx(0.0, 0.0));            // V^dag H V
+                for (std::size_t b = 0; b < d; ++b) {
+                    std::vector<Cx> hv(Dall, Cx(0.0, 0.0));
+                    for (std::size_t r = 0; r < Dall; ++r)
+                        for (std::size_t c = 0; c < Dall; ++c) hv[r] += Hd[r * Dall + c] * V[b][c];
+                    for (std::size_t a = 0; a < d; ++a)
+                        for (std::size_t r = 0; r < Dall; ++r) ref[a * d + b] += std::conj(V[a][r]) * hv[r];
+                }
+                auto rds = std::make_shared<const RepSectorData>(std::move(rd));
+                {   // the reduced CSR
+                    RepSectorMatVec op(*m.H, *rds);
+                    REQUIRE(op.dim() == d);
+                    const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
+                    CHECK(std::string(op.lane()) == "csr");
+                    CHECK(max_diff(M, ref) <= tol);
+                    CHECK_FALSE(op.has_device_kernel());
+                }
+                {   // the walk
+                    EnvGuard env;
+                    env.set("ED_SYM_SECTOR_CSR_BUDGET_GIB", "0");
+                    RepSectorMatVec op(*m.H, *rds);
+                    const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
+                    CHECK(std::string(op.lane()) == "walk");
+                    CHECK(max_diff(M, ref) <= tol);
+                }
+            }
+        }
+    }
+    REQUIRE(sectors > 0);
 }

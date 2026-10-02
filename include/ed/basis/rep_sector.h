@@ -199,6 +199,26 @@ struct RepSectorData {
     std::shared_ptr<const SharedRankLookup> shared_rank;
     std::vector<std::int32_t>               local_of_shared;  // -1 = cancelled here
 
+    // ---- an irrep of dimension d > 1 (P6.3) -------------------------------------------------
+    // Representative r holds rank(r) <= d states, the partner-0 states
+    //     |r; a> = sqrt(d/|G|) sum_j C_r[j][a] Ptilde_{0j} |r>,   Ptilde_{ij} = sum_g D(g)*_{ij} U(g),
+    // orthonormal because C_r (d x rank, its stabiliser class's) satisfies C_r^dag Mt_r C_r = I with
+    // Mt_r = sum_{s in Stab(r)} D(s)* (|Stab| times a projector; rank(r) = its rank). An operator
+    // entry is conj(h) C_r^dag A(t) C_c with A(t) = sum_{g: g t = rep_c} D(g)^T (sector_rows.h). The
+    // d = 1 sector is the case C = inv_norm, kept in inv_norms; these fields stay empty there.
+    int irrep_dim = 1;
+    std::vector<std::complex<double>> irrep_D;        // per element: D(g), d x d row-major (|G| d^2)
+    std::vector<std::uint8_t>         class_rank;     // per stabiliser class
+    std::vector<std::complex<double>> class_C;        // per class: C, d x d row-major, columns >= rank zero
+    std::vector<std::uint16_t>        rep_class;      // per rep: its stabiliser class
+    std::vector<std::uint64_t>        state_offset;   // per rep, and one past: the index of its first state
+
+    /// The number of basis states: reps for d = 1, the sum of the ranks for d > 1.
+    [[nodiscard]] std::uint64_t states() const noexcept {
+        return irrep_dim == 1 ? static_cast<std::uint64_t>(reps.size())
+                              : (state_offset.empty() ? 0 : state_offset.back());
+    }
+
     [[nodiscard]] bool has_two_level() const noexcept {
         return shared_rank != nullptr && !local_of_shared.empty();
     }
@@ -373,6 +393,14 @@ struct RepSectorData {
         // Flip-extended elements (perm THEN xor).
         if (!flip_masks.empty()) {
             p.flips = flip_masks.data();
+        }
+        if (irrep_dim > 1) {
+            p.irrep_dim    = irrep_dim;
+            p.irrep_D      = irrep_D.data();
+            p.class_C      = class_C.data();
+            p.class_rank   = class_rank.data();
+            p.rep_class    = rep_class.data();
+            p.state_offset = state_offset.data();
         }
         return p;
     }

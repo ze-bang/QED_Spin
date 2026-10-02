@@ -194,13 +194,13 @@ public:
         else if (csr_)
             csr_->spmv(in, out);
         else
-            ed::matvec::sector_gather(rows_->view(), pol_, rd_->reps.size(), in, out);
+            ed::matvec::sector_gather(rows_->view(), pol_, rd_->states(), in, out);
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - t0).count();
         applies_.fetch_add(1, std::memory_order_relaxed);
         apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
     }
-    [[nodiscard]] std::size_t dim() const override { return rd_->reps.size(); }
+    [[nodiscard]] std::size_t dim() const override { return rd_->states(); }
     [[nodiscard]] bool is_hermitian() const override { return true; }
     [[nodiscard]] std::string description() const override {
         return "LittleGroupRepSector(H_k)";
@@ -216,20 +216,20 @@ public:
     void set_csr_budget(std::shared_ptr<ed::planner::CsrBudget> b) noexcept { budget_ = std::move(b); }
     [[nodiscard]] bool has_device_kernel() const override {
 #ifdef WITH_CUDA
-        return device_ok_;
+        return device_ok_ && rd_->irrep_dim == 1;   // the device kernels are 1-dim (d > 1: P7.5)
 #else
         return false;
 #endif
     }
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
+        if (has_device_kernel()) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
 #endif
         return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
     }
     [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
+        if (has_device_kernel()) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
 #endif
         return {};
     }
@@ -267,7 +267,7 @@ public:
     // instead of dim column matvecs: the same entries the walk lane applies; densifying /
     // sandwiching it avoids the materialize() column crawl.
     [[nodiscard]] ed::matvec::ReducedSymmetryCsr<Complex> reduced_csr() const {
-        return ed::matvec::build_sector_csr(rows_->view(), pol_, rd_->reps.size());
+        return ed::matvec::build_sector_csr(rows_->view(), pol_, rd_->states());
     }
 
 private:
@@ -310,9 +310,10 @@ private:
         if (ed::planner::resolved_sym_matvec_repr()
                 != static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr))
             return;
-        const std::uint64_t dim = rd_->reps.size();
+        const std::uint64_t dim = rd_->states();
         if (dim == 0 || dim >= (std::uint64_t{1} << 32)) return;
-        const std::uint64_t terms_per_row = 1 + offdiag_terms_;   // the diagonal, then one per term
+        // The diagonal, then one entry per term -- up to d per term in a sector of a d-dim irrep.
+        const std::uint64_t terms_per_row = 1 + offdiag_terms_ * static_cast<std::uint64_t>(rd_->irrep_dim);
         // The block's budget when the verb gave one, else the default rule.
         const std::uint64_t room = budget_ ? budget_->left() : ed::planner::block_csr_budget_bytes();
         std::uint64_t est = ed::planner::csr_estimate_bytes(dim, terms_per_row);
@@ -347,6 +348,7 @@ private:
     // floor so 4x4 validation runs exercise the same lane.
     void maybe_build_gpu_() const {
         if (!device_ok_ && !force_gpu_) return;
+        if (rd_->irrep_dim > 1) return;   // the device gather is 1-dim (d > 1: P7.5)
         const std::optional<bool> gate = ed::env::tristate("ED_SYM_LG_GPU");
         if (gate.has_value() && !*gate) return;                 // =0 vetoes
         const bool force = force_gpu_ || gate.value_or(false);  // =1 removes the floor
@@ -444,7 +446,11 @@ public:
                       std::shared_ptr<const ed::symmetry::RepSectorData> src,
                       std::shared_ptr<const ed::symmetry::RepSectorData> tgt)
         : rows_(std::move(rows)), src_(std::move(src)), tgt_(std::move(tgt)),
-          src_pol_(src_->make_policy()), tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {}
+          src_pol_(src_->make_policy()), tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {
+        // Cross rows are written for 1-dim sectors; a sector of a d > 1 irrep takes them with P6.3 step 6.
+        if (src_->irrep_dim > 1 || tgt_->irrep_dim > 1)
+            throw ed::Unsupported("a cross-sector operator on a sector of an irrep of dimension > 1");
+    }
 
     [[nodiscard]] std::size_t rows() const noexcept { return tgt_->reps.size(); }
     [[nodiscard]] std::size_t cols() const noexcept { return src_->reps.size(); }
@@ -1002,6 +1008,13 @@ group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n
 [[nodiscard]] ed::symmetry::RepSectorData
 group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
                         int n_sites, int n_up, bool flip, const std::vector<Complex>& characters);
+/// The sector of an irrep of dimension d (P6.3): D holds D(g) for every element (|G| d x d
+/// row-major, 2|G| with flip, in the table's element order); per stabiliser class its rank and C
+/// (rep_sector.h), and the representatives of nonzero rank with their state offsets. d = 1 is
+/// group_sector_from_table on the traces.
+[[nodiscard]] ed::symmetry::RepSectorData
+group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
+                              int n_sites, int n_up, bool flip, int d, const std::vector<Complex>& D);
 /// Re-express v (sector g, group G) in sector k of a subgroup (conj convention, norm kept); both sectors must
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
 [[nodiscard]] std::vector<Complex>
