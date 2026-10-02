@@ -199,6 +199,10 @@ if(BUILD_ED_TESTS)
     # The symmetry verdicts on the canonical terms (invariance.h): flip, conjugation, Sz content,
     # SU(2), permutations, against the dense truth.
     ed_add_test(test_invariance                 tests/unit/test_invariance.cpp)
+    # Every lane that applies H (full-space gather, scatter, CSR; rep-sector CSR, walks, device
+    # gather) against the dense block of its canonical terms.
+    ed_add_test(test_row_walk                   tests/unit/test_row_walk.cpp)
+    target_include_directories(test_row_walk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # engine/internal.h
 
     # -------------------------------------------------------------------------
     # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU
