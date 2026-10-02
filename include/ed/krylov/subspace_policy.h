@@ -17,7 +17,8 @@
 // The memory cap is what makes the footprint PREDICTABLE: m·N·16 never exceeds
 // the budget the caller passed, so a large `requested`/`max_iter` cannot
 // silently blow past available memory. `max_vectors == 0` means "no memory cap"
-// (callers that genuinely want the unbounded behaviour, e.g. tiny problems).
+// (callers that genuinely want the unbounded behaviour, e.g. tiny problems). The block lanes
+// derive `max_vectors` from the working set in core/footprint.h.
 // =============================================================================
 
 #include <algorithm>
@@ -38,21 +39,6 @@ namespace ed::krylov {
         m = static_cast<std::size_t>(global_dim);
     if (m < nev + 1) m = nev + 1;                 // need at least nev+1 to extract nev
     return m;
-}
-
-// Convert an available-byte budget into a count of resident length-N complex
-// vectors, reserving `reserve_vecs` for working buffers and applying a safety
-// fraction. Returns 0 (== "no cap") when N or the budget is degenerate.
-[[nodiscard]] inline std::uint64_t krylov_vector_budget(std::uint64_t avail_bytes,
-                                                        std::uint64_t local_n,
-                                                        double        safety = 0.5,
-                                                        std::uint64_t reserve_vecs = 8) {
-    if (local_n == 0 || avail_bytes == 0) return 0;
-    const double per_vec = static_cast<double>(local_n) * 16.0;  // complex<double>
-    const double usable  = static_cast<double>(avail_bytes) * safety
-                           - static_cast<double>(reserve_vecs) * per_vec;
-    if (usable <= per_vec) return 1;               // degenerate: at least 1
-    return static_cast<std::uint64_t>(usable / per_vec);
 }
 
 }  // namespace ed::krylov

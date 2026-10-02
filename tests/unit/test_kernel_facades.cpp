@@ -132,7 +132,6 @@ TEST_CASE("krylov::krylov_schur_kernel degeneracy probe recovers skipped copies"
 TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap)",
           "[kernel-facade][subspace]") {
     using ed::krylov::krylov_subspace_dim;
-    using ed::krylov::krylov_vector_budget;
     // floor = 2k+20
     REQUIRE(krylov_subspace_dim(1, 0, 0, 0)   == 22);
     REQUIRE(krylov_subspace_dim(4, 0, 0, 0)   == 28);
@@ -144,10 +143,6 @@ TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap
     REQUIRE(krylov_subspace_dim(1, 200, 30, 0) == 30);
     // never below nev+1
     REQUIRE(krylov_subspace_dim(5, 1, 0, 2)   == 6);
-    // budget: 16 GiB, N=1e8 (1.6 GB/vec), 50% safety -> ~5 resident vectors
-    const auto vb = krylov_vector_budget(16ull << 30, 100'000'000ull, 0.5, 0);
-    REQUIRE(vb >= 4);
-    REQUIRE(vb <= 6);
 }
 
 TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",

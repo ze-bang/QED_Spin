@@ -816,8 +816,8 @@ star_partition(const EngineContext& cx, bool tr_on);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 [[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
 
-/// The memory policy of the lanes on one backend, for any vector Scalar (P4.7's footprint.h
-/// and P7.3's resident basis replace it).
+/// The memory the lanes on one backend may use, for any vector Scalar; what they need is
+/// core/footprint.h (P7.3's resident basis replaces the device row).
 template <class B> struct LanePolicy;
 template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
     /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate
@@ -830,7 +830,12 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
 };
 #ifdef WITH_CUDA
 template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> {
-    static std::uint64_t ks_budget_bytes() { return 0; }    // no cap, as the device lane had none
+    /// Bytes the Krylov-Schur working set may use on the device: its free memory, queried
+    /// afresh (0: no cap -- ED_MEM_GUARD_OFF, or the device cannot be queried).
+    static std::uint64_t ks_budget_bytes() {
+        if (ed::core::mem_guard_off()) return 0;
+        return static_cast<std::uint64_t>(ed::core::available_device_bytes(/*fresh=*/true).value_or(0));
+    }
     static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector is always two-pass
 };
 #endif

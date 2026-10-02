@@ -40,7 +40,7 @@
   {"id":"C09-matvec-sym-01","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":30},
   {"id":"C09-matvec-sym-03","rep":"C03-bindings-02","sev":"medium","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C10-krylov-02","rep":"C10-krylov-02","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},
-  {"id":"C10-krylov-06","rep":"C10-krylov-06","sev":"medium","axis":"robustness","status":"open","dev":"gpu","seconds":240},
+  {"id":"C10-krylov-06","rep":"C10-krylov-06","sev":"medium","axis":"robustness","status":"fixed","dev":"gpu","seconds":240},
   {"id":"C10-krylov-08","rep":"C10-krylov-08","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":60},
   {"id":"C11-thermal-01","rep":"C11-thermal-01","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":90},
   {"id":"C11-thermal-03","rep":"C11-thermal-03","sev":"high","axis":"correctness","status":"fixed","dev":"cpu","seconds":60},

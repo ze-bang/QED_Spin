@@ -7,6 +7,8 @@
 
 #include "internal.h"
 
+#include <ed/core/footprint.h>
+
 #include <algorithm>
 #include <numeric>
 #include <optional>
@@ -217,25 +219,64 @@ inline std::size_t leading_block(const std::vector<double>& alpha, const std::ve
 // higher one); and after locking, a fresh start deflated against the locked set finds
 // the further copies of a degenerate level.
 //
-// Budgets. The per-cycle basis (m length-nb vectors) is capped by
-// LanePolicy<B>::ks_budget_bytes() (the host: the RAM this job may still allocate,
-// cgroup-aware); a cap too small to hold k + 8 vectors is a clean refusal, never a
-// silent fall-back to the ghost-prone scan. The total iteration budget is
-// max(200k, 2000), spent as restart cycles.
+// The GS vector keeps its basis (up to kLgGsSmallMaxIter vectors, or max_iter) only when that
+// fits in half the memory lane B may still allocate; else the two passes, which need none. The
+// result is the same certified vector.
+template <class B>
+static bool gs_kept_basis_fits(std::uint64_t n, std::uint64_t max_iter) {
+    const std::uint64_t avail = LanePolicy<B>::ks_budget_bytes();
+    if (avail == 0) return true;
+    ed::core::Shape s;
+    s.dim    = n;
+    s.krylov = static_cast<std::size_t>(max_iter > 0 ? max_iter : kLgGsSmallMaxIter);
+    return static_cast<double>(ed::core::footprint(ed::core::Path::GsKeptBasis, s).host)
+           <= 0.5 * static_cast<double>(avail);
+}
+
+// The Krylov-Schur working set at cycle length m on lane B (core/footprint.h): the part that
+// lives where the lane's vectors live.
+template <class B>
+static std::uint64_t ks_lane_bytes(std::uint64_t nb, std::size_t k, std::size_t m) {
+    ed::core::Shape s;
+    s.dim    = nb;
+    s.k      = k;
+    s.krylov = m;
+    s.device = !ed::matvec::is_cpu_backend_v<B>;
+    const ed::core::Footprint f = ed::core::footprint(ed::core::Path::KrylovSchur, s);
+    return s.device ? f.device : f.host;
+}
+
+// The longest cycle whose working set fits in 90% of the memory lane B may still allocate
+// (LanePolicy<B>::ks_budget_bytes(): the host's RAM, cgroup-aware, or the device's free
+// memory); 0: no cap (ED_MEM_GUARD_OFF, or the memory cannot be queried).
+template <class B>
+static std::uint64_t ks_cycle_cap(std::uint64_t nb, std::size_t k) {
+    const std::uint64_t avail = LanePolicy<B>::ks_budget_bytes();
+    if (avail == 0 || nb == 0) return 0;
+    const double fixed = static_cast<double>(ks_lane_bytes<B>(nb, k, 0));
+    const double per   = static_cast<double>(ks_lane_bytes<B>(nb, k, 1)) - fixed;
+    const double room  = 0.9 * static_cast<double>(avail) - fixed;
+    return room < per ? 1 : static_cast<std::uint64_t>(room / per);
+}
+
+// Budgets. The cycle (m length-nb vectors, held twice while the degeneracy probe runs) is capped
+// by ks_cycle_cap; a cap below k + 8 vectors is a clean refusal, never a silent fall-back to the
+// ghost-prone scan. The total iteration budget is max(200k, 2000), spent as restart cycles.
 template <class B>
 static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::size_t k, bool vectors,
                                        std::uint64_t max_iter) {
     const std::size_t nb = H.dim();
-    const std::uint64_t cap = ed::krylov::krylov_vector_budget(
-        LanePolicy<B>::ks_budget_bytes(), nb, /*safety=*/0.5, /*reserve_vecs=*/8);
+    // Bound first: the device lane builds its mirror of H here, which the cap then sees.
+    CountedH Hc{H.bind<B>()};
+    const std::uint64_t cap = ks_cycle_cap<B>(nb, k);
     if (cap > 0 && cap < k + 8) {
-        throw std::runtime_error(
+        throw ed::ResourceLimit(
             "little_group: " + std::to_string(k) + " levels of a block of dimension "
-            + std::to_string(nb) + " need at least " + std::to_string(k + 8)
-            + " resident Krylov vectors (" + std::to_string((k + 8) * nb * 16 >> 20)
-            + " MiB); only " + std::to_string(cap) + " fit in the memory this job may "
-            "still allocate. Ask for fewer levels (k = 1 uses a basis-free scan) or more "
-            "memory.");
+            + std::to_string(nb) + " need a Krylov cycle of at least " + std::to_string(k + 8)
+            + " vectors (" + std::to_string(ks_lane_bytes<B>(nb, k, k + 8) >> 20)
+            + " MiB in all); only a cycle of " + std::to_string(cap) + " fits in the memory "
+            + (ed::matvec::is_cpu_backend_v<B> ? "this job may still allocate" : "free on the device")
+            + ". Ask for fewer levels (k = 1 uses a basis-free scan) or more memory.");
     }
     // Default max(200k, 2000): each cycle restarts from ONE Ritz vector, so many
     // levels need many cycles (k = 10 left a block unconverged at the scan's 400).
@@ -256,7 +297,6 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     const double scale = ed::numerics::scale_or_one(H.norm_bound());
     const double tol = ed::numerics::kLockRel * scale;
 
-    CountedH Hc{H.bind<B>()};
     auto v0 = staged_seed(be, nb, 0x51ED0B70ULL);   // same stream as the k = 1 scan
     ed::krylov::KrylovSchurOptions o;
     o.num_eigs             = k;
@@ -585,7 +625,7 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
         u.assign(n, Complex(0, 0));
         for (std::size_t i = 0; i < n; ++i)
             u[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), 0);
-    } else if (n > kept_basis_max_dim) {
+    } else if (n > kept_basis_max_dim || !gs_kept_basis_fits<B>(n, max_iter)) {
         auto pr = gs_two_pass(be, Hc, n, max_iter, gs_resid_tol(H));
         g.applies = Hc.applies;
         if (!pr) return g;
