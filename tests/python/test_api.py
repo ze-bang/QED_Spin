@@ -954,6 +954,16 @@ def test_dense_max_dim_is_the_thermal_crossover():
         qed.thermal(H, T, method="ftlm", sym=sym, dense_max_dim=-5)
 
 
+def test_eigs_counts_blocks_of_two_states_as_dense():
+    # Blocks of one or two states are solved densely whatever the crossover, and counted so.
+    H = _ring(2)
+    sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")   # Sz blocks of 1, 2, 1 states
+    for vectors in (False, True):
+        r = qed.eigs(H, 4, sym=sym, vectors=vectors, prune=False, dense_max_dim=0)
+        assert r.placement["host_dense"] == 3 and r.placement["host_krylov"] == 0
+        np.testing.assert_allclose(r.energies, qed.eigs(H, 4, sym=sym).energies, atol=1e-14)
+
+
 # ---------------------------------------------------------------------------
 # The Krylov lanes at toy dimensions: dense_max_dim=0 sends every block above dimension 2
 # to the lanes the device runs (P2.4), so their answers must equal a dense numpy reference.

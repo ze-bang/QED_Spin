@@ -113,10 +113,6 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, b
     return r;
 }
 
-// The pruning estimate of a block above the dense crossover, on the lane place() chooses for
-// it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
-// is never trusted to prune; -inf when the estimate failed). A block the transitional
-// small-block rule keeps on the host is solved exactly.
 // The bytes a kept star holds: its sectors' representatives and norms, and the reduced CSRs its
 // operators built.
 std::uint64_t star_bytes(const StarBuild& sb) {
@@ -127,6 +123,10 @@ std::uint64_t star_bytes(const StarBuild& sb) {
     return b;
 }
 
+// The pruning estimate of a block above the dense crossover, on the lane place() chooses for
+// it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
+// is never trusted to prune; -inf when the estimate failed). A block the transitional
+// small-block rule keeps on the host is solved exactly.
 double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
     const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
@@ -358,8 +358,10 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
                 const auto t0 = std::chrono::steady_clock::now();
                 // The same lanes on every device: dense below the crossover, else the certified
-                // Krylov lanes on the backend place() chooses.
-                const bool dense = dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors);
+                // Krylov lanes on the backend place() chooses. A block of one or two states is dense
+                // whatever the crossover (the Krylov lanes would solve it densely too) and counted so.
+                const bool dense = dim <= 2
+                    || dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors);
                 const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
                 const std::size_t w = static_cast<std::size_t>(want);
                 BlockSolution sol = lane == ed::Lane::HostDense
@@ -450,7 +452,10 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 if (s.two_S < 0)
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
-                if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load()); continue; }
+                if (!prune || dim <= std::max<std::size_t>(floor_, 2)) {
+                    solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load());
+                    continue;
+                }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device), nullptr, bi, cx.tr, 0.0});
