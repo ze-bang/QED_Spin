@@ -532,6 +532,36 @@ TEST_CASE("rep sectors: too many distinct values fall back to full values, bit f
     CHECK(std::memcmp(csr.val.data(), ref.val.data(), ref.val.size() * sizeof(Cx)) == 0);
 }
 
+TEST_CASE("rep sectors: the bucket lookup finds what the binary search finds", "[row_walk]") {
+    // P6.1 step 7: a sector without a rank table looks a representative up in one bucket of its
+    // sorted reps; every state of every sector must map to the same index (or -1) either way.
+    int sectors = 0;
+    for (bool dihedral : {false, true})
+        for (bool with_flip : {false, true}) {
+            const auto G = ring_group(dihedral, with_flip);
+            for (const auto& chi : characters(G, dihedral, with_flip))
+                for (int n_up : with_flip ? std::vector<int>{N / 2, -1} : std::vector<int>{N / 2, N / 2 - 1, -1}) {
+                    RepSectorData plain = make_sector(G, chi, n_up);
+                    if (plain.reps.empty()) continue;
+                    RepSectorData bucketed = plain;
+                    bucketed.build_buckets();
+                    REQUIRE_FALSE(bucketed.bucket_off.empty());
+                    ++sectors;
+                    const auto p0 = plain.make_policy(), p1 = bucketed.make_policy();
+                    for (std::uint64_t st = 0; st <= kAll; ++st) {
+                        INFO("n_up " << n_up << " state " << st);
+                        REQUIRE(p1.index_of(st) == p0.index_of(st));
+                        REQUIRE(p1.index_of_rep(st) == p0.index_of_rep(st));
+                    }
+                }
+        }
+    CHECK(sectors >= 12);
+    RepSectorData with_table = make_sector(ring_group(false, false), std::vector<Cx>(N, Cx(1.0, 0.0)), N / 2);
+    with_table.build_rank_table();
+    with_table.build_buckets();
+    CHECK(with_table.bucket_off.empty());   // the rank table answers in O(1)
+}
+
 TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly", "[row_walk]") {
     std::vector<MaskedOperator> ops;
     for (const auto& m : zoo()) ops.push_back(m.H->canonical());

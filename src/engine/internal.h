@@ -359,6 +359,7 @@ private:
     own_with_lut(ed::symmetry::RepSectorData rd) {
         auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
         p->build_perm_lut();
+        p->build_buckets();
         return p;
     }
     std::shared_ptr<const ed::ops::MaskedProgram>  rows_;    // the operator's row program

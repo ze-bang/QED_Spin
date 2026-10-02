@@ -250,6 +250,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         const int jj = pair_of[static_cast<std::size_t>(ii)];
         if (jj >= 0 && jj < ii) continue;                   // partner solved
         sp->build_perm_lut();
+        sp->build_buckets();
         auto impl = std::make_shared<BlockData>();
         impl->tag              = base_tag;
         impl->tag.irrep        = ii;

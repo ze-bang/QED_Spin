@@ -256,6 +256,46 @@ struct RepSectorData {
         }
     }
 
+    // Rank buckets: the reps whose key -- the combinadic rank at fixed Sz, the state itself
+    // otherwise -- falls in each run of 2^bucket_shift keys above bucket_base, as offsets into
+    // `reps`. The keys ascend with the reps, so a lookup searches one bucket (a rep or two)
+    // instead of all the reps (25 dependent cache misses at tri36 Gamma's 2.1e7). At most 2^24
+    // buckets (64 MB) over the keys the reps occupy; for a sector without a rank table.
+    std::vector<std::uint32_t> bucket_off;   // n_buckets + 1 offsets
+    std::uint64_t              bucket_base  = 0;
+    int                        bucket_shift = 0;
+
+    [[nodiscard]] std::uint64_t key_of(std::uint64_t s) const noexcept {
+        return n_up < 0 ? s : static_cast<std::uint64_t>(ed::core::combinadic::rank_state(s, n_sites, n_up, binom));
+    }
+
+    void build_buckets() {
+        if (!bucket_off.empty() || reps.empty() || n_sites <= 0 || n_sites > 63) return;
+        if (has_two_level() || has_rank_table()) return;       // a rank table answers in O(1)
+        if (reps.size() >= (std::uint64_t{1} << 32)) return;   // uint32 offsets
+        if (n_up >= 0) binom.resize(n_sites);
+        const std::uint64_t lo = key_of(reps.front()), span = key_of(reps.back()) - lo + 1;
+        int bits = 0;                                          // buckets: ~ one per rep, at most 2^24
+        while ((std::uint64_t{1} << bits) < reps.size() && bits < 24) ++bits;
+        int key_bits = 0;
+        while (key_bits < 63 && (std::uint64_t{1} << key_bits) < span) ++key_bits;
+        bucket_base  = lo;
+        bucket_shift = std::max(0, key_bits - bits);
+        const std::uint64_t nb = ((span - 1) >> bucket_shift) + 1;
+        bucket_off.resize(static_cast<std::size_t>(nb + 1));
+        const auto bucket = [this](std::uint64_t s) { return (key_of(s) - bucket_base) >> bucket_shift; };
+        // Every bucket's offset is written once: by the first rep at or past it.
+        #pragma omp parallel for schedule(static)
+        for (long long ii = 0; ii < static_cast<long long>(reps.size()); ++ii) {
+            const auto i = static_cast<std::size_t>(ii);
+            const std::uint64_t b = bucket(reps[i]);
+            const std::uint64_t from = i == 0 ? 0 : bucket(reps[i - 1]) + 1;
+            for (std::uint64_t c = from; c <= b; ++c) bucket_off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(i);
+        }
+        for (std::uint64_t c = bucket(reps.back()) + 1; c <= nb; ++c)
+            bucket_off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(reps.size());
+    }
+
     // Build the byte-decomposition LUT for N≤64. Idempotent / no-op when
     // already built or when n_sites > 64. See ``perm_lut_data`` for layout.
     void build_perm_lut() {
@@ -318,6 +358,12 @@ struct RepSectorData {
         } else if (has_rank_table()) {
             p.rep_index_of_rank = rep_index_of_rank.data();
             p.binom             = &binom;
+        } else if (!bucket_off.empty()) {
+            p.bucket_off   = bucket_off.data();
+            p.n_buckets    = bucket_off.size() - 1;
+            p.bucket_base  = bucket_base;
+            p.bucket_shift = bucket_shift;
+            p.binom        = &binom;
         }
         // Fast apply_perm: byte-decomposition LUT (ceil(N/8) lookups vs N iters).
         if (!perm_lut_data.empty()) {

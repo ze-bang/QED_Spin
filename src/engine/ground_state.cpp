@@ -43,6 +43,7 @@ share_rep_sector(ed::symmetry::RepSectorData rd)
 {
     auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
     p->build_perm_lut();
+    p->build_buckets();
     return p;
 }
 

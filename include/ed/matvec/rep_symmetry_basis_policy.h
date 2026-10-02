@@ -79,6 +79,13 @@ struct RepSymmetryBasisPolicy {
     const std::int32_t* shared_rank_of  = nullptr;  // C(N,n_up) entries, shared
     const std::int32_t* local_of_shared = nullptr;  // per sector, shared-rep count
 
+    // Rank buckets (RepSectorData::build_buckets): offsets into `reps` of the reps whose key (rank
+    // at fixed Sz, else the state) lies in each run of 2^bucket_shift keys above bucket_base.
+    const std::uint32_t* bucket_off   = nullptr;   // n_buckets + 1 offsets
+    std::uint64_t        n_buckets    = 0;
+    std::uint64_t        bucket_base  = 0;
+    int                  bucket_shift = 0;
+
     // Optional byte-decomposition LUT for fast apply_perm (N <= 64).
     // When non-null, replaces the N-iteration scalar bit-scatter loop with
     // ``perm_lut_bpw`` table lookups (5 for N=36). Pointer into
@@ -154,12 +161,22 @@ struct RepSymmetryBasisPolicy {
             const std::int32_t k = rep_index_of_rank[r];
             return (k < 0) ? -1 : static_cast<std::int64_t>(k);
         }
-        // Binary search the sorted representative array.
+        // One bucket of the sorted reps, else all of them.
         const std::uint64_t* first = reps;
         const std::uint64_t* last  = reps + dim_;
+        if (bucket_off != nullptr) {
+            if (n_up >= 0 && __builtin_popcountll(rb) != n_up) return -1;
+            const std::uint64_t key = (n_up < 0) ? rb
+                : static_cast<std::uint64_t>(ed::core::combinadic::rank_state(rb, n_sites, n_up, *binom));
+            if (key < bucket_base) return -1;
+            const std::uint64_t b = (key - bucket_base) >> bucket_shift;
+            if (b >= n_buckets) return -1;
+            first = reps + bucket_off[b];
+            last  = reps + bucket_off[b + 1];
+        }
         const std::uint64_t* it    = std::lower_bound(first, last, rb);
         if (it == last || *it != rb) return -1;
-        return static_cast<std::int64_t>(it - first);
+        return static_cast<std::int64_t>(it - reps);
     }
 
     [[nodiscard]] inline std::int64_t index_of(std::uint64_t state) const noexcept {
