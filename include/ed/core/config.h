@@ -17,11 +17,15 @@
 //
 // Reading a variable. Use the typed accessors; they define ONE meaning of "set":
 //   flag      unset or "" -> the default; "0", "false", "off", "no" -> false;
-//             anything else -> true.   (Presence alone never enables a flag:
-//             FOO=0 means off.)
+//             "1", "true", "on", "yes" or another integer -> true (any case).
+//             (Presence alone never enables a flag: FOO=0 means off.)
 //   tristate  unset or "" -> nullopt (the engine decides); otherwise as flag.
-//   integer / real   unset, "" or unparsable -> the default.
+//   integer / real   unset or "" -> the default; the whole value must parse ("8GB" does not).
 //   text      unset -> the default; "" is returned as "".
+// A set value that does not parse as its kind is refused: malformed() lists them, and the
+// Python package (at import) and every ed::sectors verb (before any work) raise on it. The
+// accessors themselves never throw (they run deep inside the engine) and fall back to the
+// default, which the up-front check makes unreachable.
 // Accessors read the environment on every call (tests toggle gates without
 // restarting the process). A caller that needs a value fixed for the process
 // lifetime caches it in a function-local static, and says so in its row.
@@ -31,7 +35,9 @@
 // consulted only when the corresponding option is unset.
 // =============================================================================
 
+#include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -124,6 +130,36 @@ inline const std::vector<Row>& rows() {
     return tristate(name).value_or(dflt);
 }
 
+/// Strict parses: the whole value, trailing blanks allowed.
+[[nodiscard]] inline bool parses_flag(const char* v) {
+    std::string s(v);
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* w : {"0", "1", "false", "true", "off", "on", "no", "yes"})
+        if (s == w) return true;
+    errno = 0;
+    char* end = nullptr;
+    (void)std::strtoll(v, &end, 10);
+    if (errno != 0 || end == v) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    return *end == '\0';
+}
+[[nodiscard]] inline bool parses_integer(const char* v) {
+    errno = 0;
+    char* end = nullptr;
+    (void)std::strtoll(v, &end, 10);
+    if (errno != 0 || end == v) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    return *end == '\0';
+}
+[[nodiscard]] inline bool parses_real(const char* v) {
+    errno = 0;
+    char* end = nullptr;
+    const double x = std::strtod(v, &end);
+    if (errno != 0 || end == v || !std::isfinite(x)) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    return *end == '\0';
+}
+
 [[nodiscard]] inline long long integer(const char* name, long long dflt) {
     const char* v = std::getenv(name);
     if (v == nullptr || v[0] == '\0') return dflt;
@@ -153,6 +189,25 @@ inline const std::vector<Row>& rows() {
     std::vector<std::pair<std::string, std::string>> out;
     for (const auto& r : rows())
         if (const char* v = std::getenv(r.name)) out.emplace_back(r.name, v);
+    return out;
+}
+
+/// "NAME=value" for every set registered variable whose value does not parse as its kind
+/// (flag / tristate / integer / real), in table order; empty when all parse.
+[[nodiscard]] inline std::vector<std::string> malformed() {
+    std::vector<std::string> out;
+    for (const auto& r : rows()) {
+        const char* v = std::getenv(r.name);
+        if (v == nullptr || v[0] == '\0') continue;
+        bool ok = true;
+        switch (r.kind) {
+            case Kind::Flag: case Kind::Tristate: ok = parses_flag(v); break;
+            case Kind::Integer: ok = parses_integer(v); break;
+            case Kind::Real: ok = parses_real(v); break;
+            default: break;
+        }
+        if (!ok) out.push_back(std::string(r.name) + "=" + v);
+    }
     return out;
 }
 

@@ -3,6 +3,7 @@
 // =============================================================================
 #include "validate.h"
 
+#include <ed/core/config.h>
 #include <ed/core/errors.h>
 #include <ed/ops/invariance.h>
 
@@ -26,7 +27,16 @@ std::string num(double x) {
 
 }  // namespace
 
+void validate_environment(const char* verb) {
+    const auto bad = ed::env::malformed();
+    if (bad.empty()) return;
+    std::string list;
+    for (const auto& b : bad) list += (list.empty() ? "" : ", ") + b;
+    refuse(verb, "environment variable(s) whose value does not parse as its kind: " + list);
+}
+
 void validate_hamiltonian(const ::Operator& H, const char* verb) {
+    validate_environment(verb);
     const auto n = H.getNumBits();
     if (n < 1 || n > 63) refuse(verb, "H acts on " + std::to_string(n) + " sites; 1..63 are supported");
     if (!ed::ops::hermitian(H.canonical()))

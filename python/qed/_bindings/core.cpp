@@ -445,6 +445,9 @@ PYBIND11_MODULE(_core, m) {
     m.def("env_unknown", [] { return ed::env::unknown(); },
           "ED_* / QED_* names present in the environment that the registry does not "
           "declare. Nothing reads them: almost always a misspelt variable.");
+    m.def("env_malformed", [] { return ed::env::malformed(); },
+          "'NAME=value' for every set registered variable whose value does not parse as its "
+          "kind (flag, integer, real); the verbs refuse to run with any.");
     m.def("env_names", [] {
               std::vector<std::string> out;
               for (const auto& r : ed::env::rows()) out.emplace_back(r.name);

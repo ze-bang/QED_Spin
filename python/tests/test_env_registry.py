@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 import qed
 
 
@@ -71,3 +73,22 @@ def test_removed_knobs_are_reported():
 def test_strict_mode_reads_false_words_as_off():
     r = _import_qed({"ED_SYM_LG_ONLY_KO": "3", "ED_ENV_STRICT": "false"})
     assert r.returncode == 0 and "imported" in r.stdout
+
+
+def test_a_malformed_value_is_refused(monkeypatch):
+    # "8GB" read as 8 and "maybe" read as true used to change a run silently: every verb now
+    # refuses to run until each set registered variable parses as its kind.
+    b = qed.input.HamiltonianBuilder(4)
+    H = b.heisenberg([(i, (i + 1) % 4) for i in range(4)]).to_operator()
+    for name, value in (("ED_SYM_SECTOR_CSR_BUDGET_GIB", "8GB"), ("ED_SYM_PROFILE", "maybe"),
+                        ("ED_CSR_DIM_MAX", "1e3"), ("ED_XSEC_CSR_BUDGET_GIB", "inf")):
+        monkeypatch.setenv(name, value)
+        assert f"{name}={value}" in qed._core.env_malformed()
+        with pytest.raises(qed.errors.InvalidRequest, match=name):
+            qed.eigs(H, 1)
+        monkeypatch.delenv(name)
+    for name, value in (("ED_SYM_SECTOR_CSR_BUDGET_GIB", " 8 "), ("ED_SYM_PROFILE", "Off"),
+                        ("ED_CSR_DIM_MAX", "1000"), ("ED_SYM_LG_GPU", "0")):
+        monkeypatch.setenv(name, value)
+    assert qed._core.env_malformed() == []
+    qed.eigs(H, 1)

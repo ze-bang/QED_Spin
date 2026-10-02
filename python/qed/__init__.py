@@ -84,6 +84,13 @@ def _check_environment() -> None:
     import difflib
     import warnings
 
+    malformed = list(_core.env_malformed())
+    if malformed:
+        msg = ("qed: environment variable(s) whose value does not parse: " + ", ".join(malformed)
+               + ". Every verb refuses to run until they are fixed; see qed.debug_env().")
+        if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
+            raise RuntimeError(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
     unknown = list(_core.env_unknown())
     if not unknown:
         return

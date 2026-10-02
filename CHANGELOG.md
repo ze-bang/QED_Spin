@@ -31,6 +31,17 @@ Breaking changes so far:
   <O> do not change; of a flip-mirrored pair of sectors the Sz >= 0 one is solved, as before,
   and a spin-S tower is solved at its Sz = +S member. `EigResult.save` writes format 2 and
   `load_eigs` refuses a format-1 file (its states meant the opposite).
+- **Requests are validated before any work** (`qed.errors.InvalidRequest`, a ValueError, naming
+  the bad input): a non-Hermitian H (relative to its largest coefficient), `Symmetry(sz=...)`
+  that is not a non-negative int or exceeds N (a negative sz meant every sector, `True` meant
+  1), an observable that is None or acts on other sites (None crashed the interpreter),
+  `dynamics` with `eta <= 0`, `krylov` or `samples` < 1, a negative `degeneracy_tol` or
+  `T=[]` (it ran T = 0), non-finite temperatures or frequencies, a damaged `load_eigs` file
+  (it was read out of bounds). `EigResult.vectors(basis="sz", n_up=...)` under `total_spin`
+  returns the tower's members at every Sz in -S..S (it returned none below Sz = S) and lets
+  every error but "no component in this sector" through (they came back as an empty list).
+  Environment variables parse strictly: "8GB", "inf" or "maybe" are refused (they were read
+  as 8, inf and true); `import qed` warns (raises under `ED_ENV_STRICT`) and every verb raises.
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.

@@ -14,7 +14,11 @@
 
 namespace ed::sectors::detail {
 
-/// H acts on 1..63 sites and is Hermitian relative to its largest coefficient.
+/// Every set registered environment variable parses as its kind (ed::env::malformed).
+void validate_environment(const char* verb);
+
+/// H acts on 1..63 sites and is Hermitian relative to its largest coefficient (and the
+/// environment is valid: every verb calls this first).
 void validate_hamiltonian(const ::Operator& H, const char* verb);
 
 /// The Spec's labels name sectors of n_sites sites: n_up in -1..N, sz_parity and the toggles
