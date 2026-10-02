@@ -8,7 +8,6 @@
 set(ED_ENGINE_SOURCES
     src/parallel/numa.cpp
     src/parallel/thread_budget.cpp
-    src/matvec/cpu_backend_instantiations.cpp
     src/ops/algebra.cpp
     src/ops/invariance.cpp
     src/ops/program.cpp

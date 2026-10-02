@@ -175,13 +175,6 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_casimir_projector          tests/unit/test_casimir_projector.cpp)
     # Numerical irrep decomposition (non-abelian symmetry engine)
     ed_add_test(test_irreps                     tests/unit/test_irreps.cpp)
-    # The CPU on-the-fly representative SpMV (make_cpu_rep_symmetry_backend +
-    # CpuMatVecBackend<RepSymmetryBasisPolicy> + apply_terms_rep_symmetry)
-    # reproduces an independent full-space reference (H applied to the
-    # expanded symmetric states) in every momentum sector of the
-    # Heisenberg Z_N ring, N=6/8; GATHER, SCATTER, rank-table, two-level
-    # lookup and reduced-CSR forms agree.
-    ed_add_test(test_rep_symmetry_backend       tests/unit/test_rep_symmetry_backend.cpp)
     ed_add_test(test_dssf_operator_spec         tests/unit/test_dssf_operator_spec.cpp)
     target_compile_definitions(test_dssf_operator_spec PRIVATE
         ED_TEST_POSITIONS_4SITE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/positions_4site.dat"

@@ -51,7 +51,6 @@
 #include <omp.h>
 #endif
 #include <ed/matvec/reduced_csr.h>     // ReducedSymmetryCsr
-#include <ed/matvec/term_storage.h>
 #include <ed/basis/compiled_group.h>
 #include <ed/basis/irreps.h>
 #include <ed/basis/orbit_table.h>

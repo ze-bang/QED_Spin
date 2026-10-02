@@ -72,8 +72,6 @@ struct Row {
       "Full-space Operator.apply only: =1 always assemble CSR, =0 never (matrix-free), unset -> the dim cutoff")\
     X("ED_CSR_DIM_MAX", Integer, "krylov", "the caller's default cutoff",\
       "Full-space Operator.apply only: dim below which the assembled CSR is preferred over matrix-free")\
-    X("ED_MATVEC_SCATTER", Flag, "krylov", "false (gather kernel)",            \
-      "=1 uses the atomic-scatter SpMV kernel instead of the lock-free row gather (for bisection)")\
     X("ED_LANCZOS_KERNEL_PROFILE", Flag, "krylov", "false",                    \
       "=1 logs per-bucket us timers inside lanczos_kernel at Info")\
     X("ED_XSEC_CSR_BUDGET_GIB", Real, "thermal", "4.0",                        \

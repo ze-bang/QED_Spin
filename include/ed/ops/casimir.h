@@ -35,7 +35,6 @@
 
 #include <ed/ops/operator.h>
 #include <ed/matvec/linear_operator.h>
-#include <ed/matvec/term_storage.h>
 
 namespace ed::ops {
 

@@ -2,25 +2,20 @@
 // =============================================================================
 // include/ed/ops/operator.h
 //
-// Operator: full-Hilbert-space quantum operator class.
+// Operator: a spin-1/2 operator on n_bits sites -- its term records (one-, two- and
+// three-body products of S+, S-, S^z) and canonical terms on more sites -- and its action on
+// the full 2^N space. Implements ``ed::LinearOperator``, so solvers consume Operator and the
+// symmetry-adapted operators through one polymorphic surface.
 //
-// Represents operators as lists of one/two/three-body spin terms stored
-// in branch-free Structure-of-Arrays (``ed::matvec::TermStorage``) for
-// vectorised SpMV. Implements ``ed::LinearOperator``, so solvers consume
-// Operator and symmetry-adapted operators through one polymorphic surface.
-//
-// Public API surface
-// ------------------
-//   * Construction:        Operator(n_bits, spin_l)
-//   * Term mutation:       addOneBodyTerm / addTwoBodyTerm / addThreeBodyTerm
-//   * Matvec:              apply (routes through CpuMatVecBackend)
-//   * Properties:          isReal, dim, is_hermitian
-//
-// Depends on: bits.h, ed::matvec subsystem, Eigen.
+//   * Construction:   Operator(n_bits, spin_l)
+//   * Terms:          addOneBodyTerm / addTwoBodyTerm / addThreeBodyTerm / add_record /
+//                     add_extra_term; records(), three_body_records(), extra_terms()
+//   * What they mean: canonical() (invariance.h), row_program() (row_walk.h)
+//   * Matvec:         apply (the row walk, or the CSR assembled from it)
+//   * Properties:     isReal, dim, is_hermitian
 // =============================================================================
 
 #include <algorithm>
-#include <atomic>
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
@@ -34,11 +29,6 @@
 #include <Eigen/Sparse>
 #include <ed/basis/bits.h>
 #include <ed/matvec/linear_operator.h>
-#include <ed/matvec/basis_policy.h>
-#include <ed/matvec/matvec_backend.h>
-#include <ed/matvec/term_kernels.h>
-#include <ed/matvec/term_kernels_assemble.h>
-#include <ed/matvec/term_storage.h>
 #include <ed/core/config.h>        // ed::env (ED_CSR_FORCE, ED_CSR_DIM_MAX)
 #include <ed/matvec/reduced_csr.h>  // the full-space CSR
 #include <ed/ops/invariance.h>     // canonical terms, verdicts
@@ -54,54 +44,23 @@ using Complex = std::complex<double>;
 class Operator : public ed::LinearOperator {
 public:
     // ========================================================================
-    // Term storage.
-    //
-    // Layout
-    // ------
-    // The canonical, single-source-of-truth term list lives in
-    // ``transform_data_`` (one/two-body) and ``three_body_data_``
-    // (three-body), both AoS vectors. The hot SpMV path needs Structure-
-    // of-Arrays for branch-free vectorisation, so we maintain a derived
-    // ``terms_`` cache (``ed::matvec::TermStorage``) that splits the AoS
-    // into six SoA bins (diag_one_body, offdiag_one_body, diag_two_body,
-    // mixed_two_body, offdiag_two_body, three_body). ``terms_`` is
-    // ``mutable``; it is regenerated from the AoS by
-    // ``commitPendingTransforms()`` whenever ``terms_fresh_`` is false.
-    //
-    // Cache freshness
-    // ---------------
-    // The SoA cache is gated by ``terms_fresh_``, which is reset by
-    // ``invalidateMatrixCaches()``, so a term added after an invalidation
-    // is always picked up by the next ``apply()``.
-    //
-    // API
-    // ---
-    // The preferred public mutation surface is the typed setters
-    // ``addOneBodyTerm`` / ``addTwoBodyTerm`` / ``addThreeBodyTerm``.
-    // Direct pushes into
-    // ``transform_data_`` / ``three_body_data_`` are also supported --
-    // they update the canonical AoS, and the SoA cache is rebuilt
-    // automatically on the next apply.
-    //
-    // Type aliases (``Operator::DiagonalOneBody`` et al.) name the SoA
-    // bin record types; the SoA bins live on ``terms_``.
-    // External code that reads the SoA directly does so via
-    // ``op.getTerms()`` (returns a fresh const reference after
-    // implicitly calling ``commitPendingTransforms()``); the size-
-    // tracking guard inside ``commitPendingTransforms`` makes this
-    // safe even when the caller pushed into ``transform_data_``
-    // directly between accesses.
+    // Terms: the records, in insertion order (what the builders and the bindings add), and
+    // the canonical terms on four or more sites that no record holds. canonical() is the
+    // operator they describe; every matvec walks the program compiled from it.
     // ========================================================================
 
-    using DiagonalOneBody       = ed::matvec::DiagOneBody;
-    using OffDiagonalOneBody    = ed::matvec::OffDiagOneBody;
-    using DiagonalTwoBody       = ed::matvec::DiagTwoBody;
-    using MixedTwoBody          = ed::matvec::MixedTwoBody;
-    using OffDiagonalTwoBody    = ed::matvec::OffDiagTwoBody;
-    using ThreeBodyTransformData = ed::matvec::ThreeBodyTerm;
+    /// Three-body record (op_1 site_1)(op_2 site_2)(op_3 site_3), op_1 acting first.
+    struct ThreeBodyTransformData {
+        std::uint8_t  op_type_1{0};      ///< 0 = S+, 1 = S-, 2 = Sz
+        std::uint64_t site_index_1{0};
+        std::uint8_t  op_type_2{0};
+        std::uint64_t site_index_2{0};
+        std::uint8_t  op_type_3{0};
+        std::uint64_t site_index_3{0};
+        Complex       coefficient{0.0, 0.0};
+    };
 
-    /// AoS one/two-body term record; the canonical term shape read by all
-    /// AoS consumers.
+    /// One- or two-body record (op site)(op_2 site_2), op_2 acting first.
     struct TransformData {
         uint8_t op_type{0};         ///< 0 = S+, 1 = S-, 2 = Sz
         uint64_t site_index{0};
@@ -112,9 +71,8 @@ public:
     };
 
 private:
-    /// The term records in insertion order: what the kernels read (through the SoA bins
-    /// below) until the walk runs on the canonical terms (P3.2). They change only through
-    /// add_record and the typed setters, which validate every factor.
+    /// The term records in insertion order. They change only through add_record and the typed
+    /// setters, which validate every factor.
     std::vector<TransformData>           transform_data_;
     std::vector<ThreeBodyTransformData>  three_body_data_;
     /// Canonical terms on four or more sites, which no record can hold: part of canonical()
@@ -122,14 +80,6 @@ private:
     std::vector<ed::ops::MaskedTerm>     extra_terms_;
 
 public:
-
-    /// SoA cache derived from ``transform_data_`` / ``three_body_data_``.
-    /// Regenerated on demand by ``commitPendingTransforms()`` whenever
-    /// ``terms_fresh_`` is false. The matvec backend reads from these
-    /// SoA bins on every apply; external code that wants the SoA view
-    /// must call ``commitPendingTransforms()`` first.
-    mutable ed::matvec::TermStorage terms_;
-
     // ------------------------------------------------------------------
     // Records: read them, append one (validated), or use the typed setters.
     // ------------------------------------------------------------------
@@ -240,61 +190,11 @@ public:
         invalidateMatrixCaches();
     }
 
-    /**
-     * Rebuild the SoA cache ``terms_`` from the canonical AoS storage.
-     * Skips work when the cache is already in sync (``terms_fresh_`` and
-     * AoS sizes match what was committed last time).
-     *
-     * Called by getTerms() before a symmetry sector's matvec copies the bins. The record
-     * counts are compared as well as ``terms_fresh_``, a second guard behind add_record's
-     * eager invalidation.
-     */
-    void commitPendingTransforms() const {
-        const std::size_t aos_n  = transform_data_.size();
-        const std::size_t aos3_n = three_body_data_.size();
-        // Double-checked locking: the fast path is one acquire load per
-        // read; the rebuild is serialized (getTerms() can be reached from inside OMP
-        // parallel regions, and an unsynchronised first rebuild would drop terms). The release store of ``terms_fresh_`` is last,
-        // so a reader that passes the acquire check sees the fully built SoA.
-        if (terms_fresh_.load(std::memory_order_acquire) &&
-            aos_n  == terms_committed_aos_size_ &&
-            aos3_n == terms_committed_three_aos_size_) {
-            return;
-        }
-        auto* self = const_cast<Operator*>(this);
-        std::lock_guard<std::mutex> lock(self->terms_commit_mutex_);
-        if (terms_fresh_.load(std::memory_order_acquire) &&
-            aos_n  == terms_committed_aos_size_ &&
-            aos3_n == terms_committed_three_aos_size_) {
-            return;  // another thread committed while we waited
-        }
-        self->terms_.clear();
-        // ``classify_route`` is the single source of truth for the
-        // op_type -> {diag,offdiag,mixed} x {one,two}body decision tree;
-        // every backend that bins terms should call it so classification
-        // is identical across backends.
-        ed::matvec::TermStorage::classify_route(
-            self->terms_,
-            self->transform_data_,
-            self->three_body_data_,
-            [](const Complex& c) { return c; });
-        self->terms_committed_aos_size_       = aos_n;
-        self->terms_committed_three_aos_size_ = aos3_n;
-        hermitian_check_done_ = false;
-        self->terms_fresh_.store(true, std::memory_order_release);
-        self->real_check_done_ = false;
-    }
-
-    /// Invalidate ALL caches derived from the term list (``isReal()``, the SoA ``terms_``,
-    /// the canonical terms and the full-space lane with its CSR). Cheap; safe to call from any term-list mutator.
-    /// Resetting ``terms_fresh_`` here guarantees that terms added after
-    /// this call reach the next ``apply()``.
+    /// Invalidate every cache derived from the terms (isReal(), is_hermitian(), the canonical
+    /// terms, the row program and the full-space lane with its CSR). Cheap; every mutator calls it.
     virtual void invalidateMatrixCaches() {
-        real_check_done_                = false;
-        hermitian_check_done_           = false;
-        terms_fresh_                    = false;
-        terms_committed_aos_size_       = 0;
-        terms_committed_three_aos_size_ = 0;
+        real_check_done_      = false;
+        hermitian_check_done_ = false;
         canonical_.reset();
         row_program_.reset();
         lane_.reset();
@@ -302,15 +202,6 @@ public:
 
     uint64_t getNumBits() const { return n_bits_; }
     float    getSpin()    const { return spin_l_; }
-
-    /// SoA-binned term cache (rebuilt from the canonical AoS storage if stale).
-    /// Public so an alternative-basis matvec backend (the representative-basis
-    /// symmetry sector, for one) can be built over the SAME terms as the
-    /// operator's own matvec.
-    const ed::matvec::TermStorage& getTerms() const {
-        commitPendingTransforms();
-        return terms_;
-    }
 
     // -------------------------------------------------------------------
     // LinearOperator interface: dim() / is_hermitian() /
@@ -320,11 +211,7 @@ public:
         return static_cast<std::size_t>(1ULL << n_bits_);
     }
     [[nodiscard]] bool is_hermitian() const override {
-        // H^dagger == H on the canonical terms (invariance.h), cached until the term list changes. Every solver lane assumes
-        // Hermiticity (the rep kernels apply H^dagger; Lanczos tridiagonalises
-        // the symmetric part silently), so input validation can refuse
-        // non-Hermitian input up front instead of returning numbers.
-        commitPendingTransforms();
+        // H^dagger == H on the canonical terms (invariance.h), cached until the terms change.
         if (!hermitian_check_done_) {
             hermitian_cached_      = ed::ops::hermitian(canonical());
             hermitian_check_done_  = true;
@@ -351,12 +238,8 @@ public:
           transform_data_(other.transform_data_),
           three_body_data_(other.three_body_data_),
           extra_terms_(other.extra_terms_),
-          terms_(other.terms_),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
-          terms_fresh_(other.terms_fresh_.load()),
-          terms_committed_aos_size_(other.terms_committed_aos_size_),
-          terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
           real_cache_(other.real_cache_) {}
 
@@ -365,12 +248,8 @@ public:
           transform_data_(std::move(other.transform_data_)),
           three_body_data_(std::move(other.three_body_data_)),
           extra_terms_(std::move(other.extra_terms_)),
-          terms_(std::move(other.terms_)),
           n_bits_(other.n_bits_),
           spin_l_(other.spin_l_),
-          terms_fresh_(other.terms_fresh_.load()),
-          terms_committed_aos_size_(other.terms_committed_aos_size_),
-          terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
           real_cache_(other.real_cache_) {
         other.invalidateMatrixCaches();
@@ -383,10 +262,6 @@ public:
             transform_data_                  = other.transform_data_;
             three_body_data_                 = other.three_body_data_;
             extra_terms_                     = other.extra_terms_;
-            terms_                           = other.terms_;
-            terms_fresh_                     = other.terms_fresh_.load();
-            terms_committed_aos_size_        = other.terms_committed_aos_size_;
-            terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
@@ -403,10 +278,6 @@ public:
             transform_data_                  = std::move(other.transform_data_);
             three_body_data_                 = std::move(other.three_body_data_);
             extra_terms_                     = std::move(other.extra_terms_);
-            terms_                           = std::move(other.terms_);
-            terms_fresh_                     = other.terms_fresh_.load();
-            terms_committed_aos_size_        = other.terms_committed_aos_size_;
-            terms_committed_three_aos_size_  = other.terms_committed_three_aos_size_;
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
@@ -464,22 +335,6 @@ protected:
     // -------------------------------------------------------------------
     uint64_t n_bits_;
     float    spin_l_;
-
-    /// Freshness flag for the SoA cache ``terms_``. Set by
-    /// ``commitPendingTransforms()`` on rebuild; cleared by
-    /// ``invalidateMatrixCaches()``.
-    // Atomic + paired with ``terms_commit_mutex_`` (see commitPendingTransforms).
-    mutable std::atomic<bool> terms_fresh_{false};
-    mutable std::mutex terms_commit_mutex_;
-
-    /// AoS-vector sizes recorded at the last ``commitPendingTransforms()``
-    /// call. Used to detect direct ``transform_data_`` / ``three_body_data_``
-    /// pushes that bypass ``invalidateMatrixCaches()`` (the typical pattern
-    /// from Python bindings and fixture builders).
-    /// On the next commit we compare these to the live sizes and rebuild
-    /// the SoA if they differ -- this is what keeps direct pushes safe.
-    mutable std::size_t terms_committed_aos_size_       = 0;
-    mutable std::size_t terms_committed_three_aos_size_ = 0;
 
     // Caches for ``isReal()`` / ``is_hermitian()``. Invalidated by
     // ``invalidateMatrixCaches()``.

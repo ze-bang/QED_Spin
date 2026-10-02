@@ -10,7 +10,7 @@
 //   rep sectors  RepSectorMatVec: reduced CSR (the default lane), the walk (CSR budget 0),
 //                reduced_csr() itself, and the device gather on host pointers when a CUDA
 //                device is present; the walk is the same bit for bit whether a sector looks
-//                states up through a rank table or by binary search.
+//                states up through a rank table, a shared two-level table, or by bisection.
 //
 // Operators: Hermitian models on an 8-site ring, built through the builder and through raw
 // records whose same-site products and cancelling S+S+ / S-S- pairs the lanes must
@@ -391,12 +391,25 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
                             const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
                             CHECK(std::string(op.lane()) == "walk");
                             CHECK(max_diff(M, ref) <= tol);
-                            if (n_up >= 0) {   // the same walk through an O(1) rank table
+                            if (n_up >= 0) {   // the same walk through an O(1) rank table, and two-level
                                 RepSectorData ranked = *rds;
                                 ranked.build_rank_table();
                                 RepSectorMatVec op2(*m.H, std::make_shared<const RepSectorData>(std::move(ranked)));
                                 const Mat M2 = columns(d, [&](const Cx* in, Cx* out) { op2.apply(in, out, d); });
                                 CHECK(max_diff(M2, M) == 0.0);
+                                // two-level: one rank table over every orbit of (G, n_up) (the trivial
+                                // irrep keeps them all) and this sector's remap into it
+                                const auto all = make_sector(G, std::vector<Cx>(G.size(), Cx(1.0, 0.0)), n_up);
+                                RepSectorData two = *rds;
+                                two.shared_rank = ed::symmetry::make_shared_rank_lookup(all.reps, N, n_up);
+                                two.local_of_shared.assign(all.reps.size(), -1);
+                                for (std::size_t gi = 0, local = 0; gi < all.reps.size(); ++gi)
+                                    if (local < two.reps.size() && two.reps[local] == all.reps[gi])
+                                        two.local_of_shared[gi] = static_cast<std::int32_t>(local++);
+                                REQUIRE(two.has_two_level());
+                                RepSectorMatVec op3(*m.H, std::make_shared<const RepSectorData>(std::move(two)));
+                                const Mat M3 = columns(d, [&](const Cx* in, Cx* out) { op3.apply(in, out, d); });
+                                CHECK(max_diff(M3, M) == 0.0);
                             }
                         }
                         if (device) {

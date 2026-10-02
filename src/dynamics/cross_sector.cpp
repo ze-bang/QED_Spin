@@ -18,7 +18,6 @@
 
 #include <ed/core/config.h>
 #include <ed/basis/bits.h>                       // popcount
-#include <ed/matvec/symmetry_matvec_backend.h>   // rep_policy_from
 
 #include <algorithm>
 #include <cstdint>
@@ -98,8 +97,8 @@ CrossSectorOrbitObservable::CrossSectorOrbitObservable(
                                   * static_cast<double>(Gd));
     // Build the POD policy views once; the inner loops regenerate the orbit /
     // projection arithmetically through these.
-    src_pol_ = ed::matvec::rep_policy_from(*src_.rd);
-    dst_pol_ = ed::matvec::rep_policy_from(*dst_.rd);
+    src_pol_ = src_.rd->make_policy();
+    dst_pol_ = dst_.rd->make_policy();
     if (G > 256) {
         throw std::invalid_argument(
             "CrossSectorOrbitObservable: rep-lane refs support group_size "

@@ -126,6 +126,12 @@ C++ API (installed headers; nothing in Python changes):
   `<ed/ops/time_reversal.h>`, `hamiltonian_is_spin_flip_symmetric` / `sz_axis_of` (`spin_flip.h`
   keeps `flip_subspace_admissible`) and `TermStorage::is_hermitian`; `<ed/ops/invariance.h>`
   replaces them, and `ed::sectors::SzContent` is `ed::ops::SzContent`.
+- **One row walk applies every operator** (`<ed/ops/row_walk.h>` over `ed::ops::compile_operator`,
+  `<ed/matvec/sector_rows.h>` for symmetry sectors, one device kernel). Gone: the six term bins
+  (`<ed/matvec/term_storage.h>`, `TermStorage`, `classify_route`, `Operator::getTerms`), the
+  kernels over them (`term_gate_math.h`, `term_kernels*.h`, `<ed/gpu/term_kernels.cuh>`), the
+  `CpuMatVecBackend` (`matvec_backend.h`, `symmetry_matvec_backend.h`) and the scatter kernels
+  with `ED_MATVEC_SCATTER`. `Operator::ThreeBodyTransformData` is a plain record struct.
 - `Operator::apply` (the full 2^N space, Python `Operator.apply`) runs on the row walk over the
   canonical terms (`<ed/ops/row_walk.h>`): rows of H from the program of H^dagger, assembled once
   into a CSR when `ED_CSR_FORCE` / `ED_CSR_DIM_MAX` allow, else walked per apply. Its scatter
