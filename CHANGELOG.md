@@ -41,6 +41,10 @@ Breaking changes so far:
   exact (same-site products reduced by the spin-1/2 algebra). A result with a term on four or
   more sites raises `qed.errors.Unsupported` for now. Op types outside S+, S-, S^z and sites
   outside the operator are refused when a term is added.
+- **Fixed: GPU solves of two operators that differ only in tiny or huge couplings** (all
+  below ~5e-10, or above ~9e9) in one process: the device-mirror cache compared coefficients
+  rounded to 1e-9, so the second solve reused the first operator's couplings. The cache now
+  compares every term exactly.
 - **Lattices.** The pyrochlore down tetrahedra are corrected. Nearest-neighbour bonds keep
   their orientation (`Bond` no longer swaps i < j), the second- and third-neighbour lists
   are distance shells, and `from_cluster_file` parses strictly.

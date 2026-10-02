@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -384,7 +385,14 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
     // dim-equal parity/flip pair). Key on the sector's own content: the
     // per-sector characters (unique per irrep), the rep-list signature
     // (n_up / size / samples), spin, and the term footprint.
-    auto content_key = [](const ed::symmetry::RepSectorData& r,
+    // Doubles enter the keys by their exact bit pattern: a rounded value (llround(c * 1e9))
+    // let operators whose coefficients agree to 1e-9, or overflow alike, share one mirror.
+    auto bits = [](double x) {
+        std::uint64_t u;
+        std::memcpy(&u, &x, sizeof u);
+        return u;
+    };
+    auto content_key = [&bits](const ed::symmetry::RepSectorData& r,
                           const ed::matvec::TermStorage& t, double sl) {
         std::uint64_t h = 1469598103934665603ULL;
         // Avalanche every word (splitmix64 finalizer) BEFORE the FNV fold:
@@ -410,48 +418,41 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
             mix(r.reps.back());
         }
         for (const auto& c : r.characters) {   // per-irrep, uniquely identifies k
-            mix(static_cast<std::uint64_t>(std::llround(c.real() * 1e9)));
-            mix(static_cast<std::uint64_t>(std::llround(c.imag() * 1e9)));
+            mix(bits(c.real()));
+            mix(bits(c.imag()));
         }
         if (!r.flip_masks.empty()) mix(r.flip_masks.front());
-        mix(static_cast<std::uint64_t>(std::llround(sl * 1e6)));
+        mix(bits(sl));
         mix(t.diag_one_body.size());    mix(t.offdiag_one_body.size());
         mix(t.diag_two_body.size());    mix(t.mixed_two_body.size());
         mix(t.offdiag_two_body.size()); mix(t.three_body.size());
-        if (!t.offdiag_two_body.empty())
-            mix(static_cast<std::uint64_t>(
-                std::llround(t.offdiag_two_body.back().coefficient.real() * 1e9)));
+        if (!t.offdiag_two_body.empty()) mix(bits(t.offdiag_two_body.back().coefficient.real()));
         return h;
     };
-    // FULL term-content signature. The sector fingerprint below identifies
-    // the rep basis but NOT the operator terms -- fine when one operator
-    // (H) is mirrored per sector, WRONG when several operators share a
-    // sector (e.g. a q-mesh of transverse probes O_q on the GS sector): a
-    // content_key collision would reuse the first operator's device mirror.
-    // This hashes EVERY term field (sites, op types, coeffs) so distinct
-    // operators never alias.
-    auto term_signature = [](const ed::matvec::TermStorage& t) {
-        std::uint64_t h = 1469598103934665603ULL;
-        auto mix = [&h](std::uint64_t v) {
-            v += 0x9E3779B97F4A7C15ULL;
-            v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9ULL;
-            v = (v ^ (v >> 27)) * 0x94D049BB133111EBULL;
-            v ^= v >> 31; h ^= v; h *= 1099511628211ULL;
-        };
-        auto mixc = [&](const std::complex<double>& c) {
-            mix(static_cast<std::uint64_t>(std::llround(c.real() * 1e9)));
-            mix(static_cast<std::uint64_t>(std::llround(c.imag() * 1e9)));
-        };
-        for (const auto& d : t.diag_one_body)   { mix(d.site_index); mixc(d.coefficient); }
-        for (const auto& o : t.offdiag_one_body){ mix(o.site_index); mix(o.op_type); mixc(o.coefficient); }
-        for (const auto& d : t.diag_two_body)   { mix(d.site_index_1); mix(d.site_index_2); mixc(d.coefficient); }
-        for (const auto& m : t.mixed_two_body)  { mix(m.sz_site); mix(m.flip_site); mix(m.flip_op_type); mixc(m.coefficient); }
-        for (const auto& o : t.offdiag_two_body){ mix(o.site_index_1); mix(o.site_index_2); mix(o.op_type_1); mix(o.op_type_2); mixc(o.coefficient); }
-        for (const auto& b : t.three_body)      { mix(b.site_index_1); mix(b.site_index_2); mix(b.site_index_3);
-                                                  mix(b.op_type_1); mix(b.op_type_2); mix(b.op_type_3); mixc(b.coefficient); }
-        return h;
+    // The operator terms, word for word. The sector fingerprint below identifies the rep
+    // basis but NOT the operator terms -- fine when one operator (H) is mirrored per sector,
+    // WRONG when several operators share a sector (e.g. a q-mesh of transverse probes O_q
+    // on the GS sector). Every term field (bin sizes, sites, op types, coefficient bits) is
+    // kept in the slot and compared exactly, so distinct operators never share a mirror.
+    auto term_words = [&bits](const ed::matvec::TermStorage& t) {
+        std::vector<std::uint64_t> w;
+        w.push_back(t.diag_one_body.size());    w.push_back(t.offdiag_one_body.size());
+        w.push_back(t.diag_two_body.size());    w.push_back(t.mixed_two_body.size());
+        w.push_back(t.offdiag_two_body.size()); w.push_back(t.three_body.size());
+        auto c = [&](const std::complex<double>& z) { w.push_back(bits(z.real())); w.push_back(bits(z.imag())); };
+        for (const auto& d : t.diag_one_body)   { w.push_back(d.site_index); c(d.coefficient); }
+        for (const auto& o : t.offdiag_one_body){ w.push_back(o.site_index); w.push_back(o.op_type); c(o.coefficient); }
+        for (const auto& d : t.diag_two_body)   { w.push_back(d.site_index_1); w.push_back(d.site_index_2); c(d.coefficient); }
+        for (const auto& m : t.mixed_two_body)  { w.push_back(m.sz_site); w.push_back(m.flip_site);
+                                                  w.push_back(m.flip_op_type); c(m.coefficient); }
+        for (const auto& o : t.offdiag_two_body){ w.push_back(o.site_index_1); w.push_back(o.site_index_2);
+                                                  w.push_back(o.op_type_1); w.push_back(o.op_type_2); c(o.coefficient); }
+        for (const auto& b : t.three_body)      { w.push_back(b.site_index_1); w.push_back(b.site_index_2);
+                                                  w.push_back(b.site_index_3); w.push_back(b.op_type_1);
+                                                  w.push_back(b.op_type_2); w.push_back(b.op_type_3); c(b.coefficient); }
+        return w;
     };
-    const std::uint64_t terms_sig = term_signature(terms);
+    const std::vector<std::uint64_t> terms_w = term_words(terms);
     // Registry entries carry a FULL fingerprint of what the mirror encodes:
     // reuse must never depend on hash quality (a silent wrong-mirror hit is
     // wrong PHYSICS with correct-looking norms). The fingerprint covers
@@ -462,7 +463,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         int                                       n_up;
         double                                    spin;
         std::uint64_t                             reps_sig[4];
-        std::uint64_t                             terms_sig;
+        std::vector<std::uint64_t>                terms;
         std::vector<std::complex<double>>         chi;
         std::vector<int>                          perms;
         std::vector<std::uint64_t>                flips;
@@ -470,9 +471,9 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
     };
     auto fingerprint_matches = [](const MirrorSlot& s,
                                   const ed::symmetry::RepSectorData& r,
-                                  double sl, std::uint64_t tsig) {
+                                  double sl, const std::vector<std::uint64_t>& tw) {
         return s.n_up == r.n_up && s.spin == sl
-            && s.terms_sig == tsig            // operator terms, not just sector
+            && s.terms == tw                  // operator terms, not just sector
             && s.reps_sig[0] == r.reps.size()
             && s.reps_sig[1] == (r.reps.empty() ? 0 : r.reps.front())
             && s.reps_sig[2] == (r.reps.empty() ? 0
@@ -499,7 +500,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
         for (auto it = bucket.begin(); it != bucket.end();) {
             auto locked = it->mirror.lock();
             if (!locked) { it = bucket.erase(it); continue; }   // expired
-            if (fingerprint_matches(*it, rep, spin_l, terms_sig)) {
+            if (fingerprint_matches(*it, rep, spin_l, terms_w)) {
                 mirror = std::move(locked);
                 break;
             }
@@ -515,7 +516,7 @@ acquire_rep_mirror(const ed::symmetry::RepSectorData& rep,
             s.reps_sig[2] = rep.reps.empty() ? 0
                               : rep.reps[rep.reps.size() / 2];
             s.reps_sig[3] = rep.reps.empty() ? 0 : rep.reps.back();
-            s.terms_sig   = terms_sig;
+            s.terms       = terms_w;
             s.chi         = rep.characters;
             s.perms       = rep.perms_flat;
             s.flips       = rep.flip_masks;
