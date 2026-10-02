@@ -20,7 +20,7 @@
 //                     Backend-templated lanes (scan, Krylov-Schur, GS vector, estimate)
 //   stars.cpp         per-star block construction (build_star_blocks)
 //   group_sector.cpp  full-little-group sectors for 1-dim irreps (build_star_blocks fast path)
-//   blocks.cpp        LittleGroupBlock handle
+//   blocks.cpp        lift_to_rep (a block vector in its momentum sector's rep basis)
 //   ground_state.cpp  streamed k-sectors, shared sector data
 //   walk.h            the star walk and block operators of the ed::sectors verbs
 //   eigs.cpp          subspaces, eigs, spectrum, multiplet
@@ -28,11 +28,11 @@
 //   oftlm.cpp         OFTLM (declared in ed/thermal/ftlm.h)
 // =============================================================================
 
-#include <ed/sectors/little_group.h>
+#include "options.h"
 #include <ed/core/config.h>      // typed environment accessors
 #include <ed/core/errors.h>      // ed::InvalidRequest
 #include <ed/core/log.h>         // ED_LOG
-#include <ed/sectors/blocks.h>   // owned block handles
+#include <ed/sectors/sectors.h>  // LittleGroupBlockTag
 
 #include <ed/basis/bits.h>                       // applyPermutation
 #include <ed/matvec/linear_operator.h>           // blocks ARE LinearOperators
@@ -88,6 +88,8 @@
 #include <tuple>
 
 namespace ed::solvers {
+
+struct BlockData;   // one (star, irrep) block; defined below the lg_detail types it holds
 
 using Complex = std::complex<double>;
 
@@ -682,7 +684,7 @@ struct FlipEngagement {
 // pass nullptr when not profiling.
 // -----------------------------------------------------------------------------
 struct StarBuild {
-    std::vector<std::shared_ptr<LittleGroupBlock::Impl>> blocks;
+    std::vector<std::shared_ptr<BlockData>> blocks;
     LittleGroupStarInfo               info;
     std::shared_ptr<RepSectorMatVec>  hk;   // null <=> empty sector
     double t_orbit = 0.0;   // seconds in the star's own orbit table (group-sector path)
@@ -861,12 +863,10 @@ build_star_blocks(const ::Operator&         op,
 }  // namespace lg_detail
 
 // =============================================================================
-// LittleGroupBlock -- the owned handle over one (star, irrep) block.
-// Impl references the engine-private concrete types above; the pimpl keeps them
-// off the public surface. `pop == nullptr` marks the plain fallback-floor
+// BlockData -- one (star, irrep) block. `pop == nullptr` marks the plain fallback-floor
 // block, whose operator IS the star's H_k0.
 // =============================================================================
-struct LittleGroupBlock::Impl {
+struct BlockData {
     LittleGroupBlockTag                   tag;
     std::shared_ptr<lg_detail::RepSectorMatVec>      hk;    // shared across the star's blocks
     std::shared_ptr<const lg_detail::SparseColumns>  W;     // null => plain floor block
@@ -880,11 +880,15 @@ struct LittleGroupBlock::Impl {
 
 namespace lg_detail {
 // The operator a block is solved with: group sector, isotypic sandwich, or the plain k-sector.
-[[nodiscard]] inline const ed::LinearOperator& block_mv(const LittleGroupBlock::Impl& b) {
+[[nodiscard]] inline const ed::LinearOperator& block_mv(const BlockData& b) {
     if (b.gop) return *b.gop;
     if (b.pop) return *b.pop;
     return *b.hk;
 }
+
+// A block-coordinate vector lifted to the momentum sector's rep basis, u = W_sigma v (a copy
+// for plain blocks; a group-sector block is re-expressed in the k-sector). Norms are kept.
+[[nodiscard]] std::vector<Complex> lift_to_rep(const BlockData& b, const Complex* v);
 
 // group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, stars.cpp).
 [[nodiscard]] ed::symmetry::OrbitTable

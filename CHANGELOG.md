@@ -187,8 +187,11 @@ C++ API (installed headers; nothing in Python changes):
     `*_kernel.h` names);
   - `dynamics/`: `cf.h` and `ftlm_dynamics.h` (`observables/*_kernel.h`), `cross_sector.h`
     (`dssf/cross_sector_orbit_observable.h`);
-  - `sectors/`: `blocks.h` (`solvers/little_group_blocks.h`), `little_group.h`
-    (`solvers/little_group_solve.h`).
+  - `sectors/sectors.h` holds `ed::solvers::LittleGroupBlockTag` (was
+    `solvers/little_group_blocks.h`). The rest of `solvers/little_group_*.h` is engine-private
+    (`src/engine/options.h`): `LittleGroupOptions` (without its never-set `verbose`),
+    `LittleGroupStarInfo`, `little_group_k_sectors_stream`, `share_rep_sector`; the
+    `LittleGroupBlock` handle is gone (its one method is the engine's `lift_to_rep`).
 
   The engine's sources are `src/engine/` (the former `src/solvers/little_group/lg_*.cpp` and
   `src/solvers/cpu/oftlm.cpp`), `src/basis/`, `src/dynamics/` and `src/gpu/`.

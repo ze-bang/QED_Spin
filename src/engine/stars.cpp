@@ -245,7 +245,7 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
         const int jj = pair_of[static_cast<std::size_t>(ii)];
         if (jj >= 0 && jj < ii) continue;                   // partner solved
         sp->build_perm_lut();
-        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+        auto impl = std::make_shared<BlockData>();
         impl->tag              = base_tag;
         impl->tag.irrep        = ii;
         impl->tag.irrep_dim    = 1;
@@ -321,7 +321,7 @@ build_star_blocks(const ::Operator&         op,
             ED_LOG(Info, "[little_group plan] star k0=%d k_raw=%d flip=%d |star|=%d dim=%llu",
                    k0, k0 % cx.n_irr_raw, info.flip_parity, m_star, static_cast<unsigned long long>(dim_k));
         if (dim_k == 0) return sb;
-        const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
+        const bool diag = ed::env::flag("ED_SYM_PROFILE", false)
                           || ed::logging::enabled(ed::logging::Level::Debug);
         if (try_group_path(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb, w_irreps, group_covered,
                            profile ? t_isotypic : nullptr)
@@ -423,7 +423,7 @@ build_star_blocks(const ::Operator&         op,
     // big?" is answerable from the log; with a non-trivial co-group the
     // reason is also kept in info.declined.
     const bool lg_diag = [&] {
-        return ed::env::flag("ED_SYM_PROFILE", false) || opt.verbose
+        return ed::env::flag("ED_SYM_PROFILE", false)
             || ed::logging::enabled(ed::logging::Level::Debug);
     }();
     auto decline = [&](const std::string& why) {
@@ -543,7 +543,7 @@ build_star_blocks(const ::Operator&         op,
                         if (jj >= 0 && jj < ii) continue;  // partner solved
                         const int mult = (jj > ii) ? 2 * m_star * d : m_star * d;
                         auto Wsp = std::make_shared<const SparseColumns>(std::move(W));
-                        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+                        auto impl = std::make_shared<BlockData>();
                         impl->tag              = base_tag;
                         impl->tag.irrep        = ii;
                         impl->tag.irrep_dim    = d;
@@ -605,7 +605,7 @@ build_star_blocks(const ::Operator&         op,
                     return co_group_char(trivial_elems(), trivial_chars(), aliases, i); }))
                 return sb;
         }
-        auto impl = std::make_shared<LittleGroupBlock::Impl>();
+        auto impl = std::make_shared<BlockData>();
         impl->tag              = base_tag;   // irrep = -1, irrep_dim = 1
         impl->tag.dim          = hk.dim();
         impl->tag.multiplicity = static_cast<std::uint64_t>(m_star);

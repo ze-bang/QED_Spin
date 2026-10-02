@@ -1,6 +1,7 @@
 #pragma once
 // =============================================================================
-// include/ed/sectors/little_group.h
+// src/engine/options.h -- PRIVATE to the engine: the options of one subspace's walk and what each
+// star reports, behind the ed::sectors verbs.
 //
 // FACTORIZED non-abelian reduction via little co-groups: never stores
 // symmetry-adapted amplitudes over the full space, so it scales to large N.
@@ -55,7 +56,6 @@ using CharConstraint = std::vector<std::pair<int, std::complex<double>>>;
 struct LittleGroupOptions {
     int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
     int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
-    bool verbose       = false;
     /// Spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the
     /// little co-group). SymToggle convention: -1 auto (engage when

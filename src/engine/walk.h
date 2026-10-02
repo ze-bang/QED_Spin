@@ -61,7 +61,7 @@ struct BlockOp {
 
 inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const ed::solvers::lg_detail::StarBuild& sb,
-                              const std::shared_ptr<ed::solvers::LittleGroupBlock::Impl>& bi,
+                              const std::shared_ptr<ed::solvers::BlockData>& bi,
                               const std::shared_ptr<::Operator>& s2_carrier,
                               Device device = Device::Cpu) {
     using namespace ed::solvers::lg_detail;
@@ -294,7 +294,7 @@ private:
 /// basis the block's H acts on; with `device` it may bind to a CUDA backend.
 inline std::shared_ptr<const ed::LinearOperator>
 block_observable(const ::Operator& A, const ed::solvers::lg_detail::StarBuild& sb,
-                 const std::shared_ptr<ed::solvers::LittleGroupBlock::Impl>& bi, bool device) {
+                 const std::shared_ptr<ed::solvers::BlockData>& bi, bool device) {
     using namespace ed::solvers::lg_detail;
     auto rep = std::make_shared<RepSectorMatVec>(A, bi->gop ? bi->gsec : sb.hk->rep_data_ptr());
     if (bi->W) return std::make_shared<ProjectedBlockOp>(rep, bi->W);

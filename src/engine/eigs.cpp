@@ -90,7 +90,7 @@ void require_normal(const Spec& s, int n_sites) {
 
 // What place() needs to know about one eigs block: its size, whether the verb solves it densely,
 // the levels owed, and whether its operator has a device kernel (a refusal names the block).
-ed::BlockRequest eigs_request(const detail::BlockOp& bop, const LittleGroupBlock::Impl& bi, bool dense,
+ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, bool dense,
                               std::uint64_t want) {
     ed::BlockRequest r;
     r.task  = ed::Task::Eigs;
@@ -107,7 +107,7 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const LittleGroupBlock
 // The pruning estimate of a block above the dense crossover, on the lane place() chooses for
 // it: an upper bound on its lowest level (-inf when the estimate failed: never pruned). A block
 // the transitional small-block rule keeps on the host is solved exactly.
-double prune_estimate(const detail::BlockOp& bop, const LittleGroupBlock::Impl& bi, Device device) {
+double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
     const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
     if (lane == ed::Lane::HostDense) {
@@ -271,7 +271,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     // Solve one block and append its rows.
     auto solve_block = [&](const Subspace& sub, StarBuild& sb,
-                           const std::shared_ptr<LittleGroupBlock::Impl>& bi, double context_orbit_s) {
+                           const std::shared_ptr<BlockData>& bi, double context_orbit_s) {
                 const std::size_t dim = bi->tag.dim;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 if (!bop.op) return;
@@ -340,7 +340,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                             bv.amplitudes = std::move(vv[i]);
                         } else {                                     // W or plain block: k-sector basis
                             bv.basis      = sb.hk->rep_data_ptr();
-                            bv.amplitudes = LittleGroupBlock(bi).lift_to_rep(vv[i].data());
+                            bv.amplitudes = lift_to_rep(*bi, vv[i].data());
                         }
                         double n2 = 0.0;
                         for (const auto& c : bv.amplitudes) n2 += std::norm(c);

@@ -27,7 +27,6 @@
 
 #include <ed/core/device.h>
 #include <ed/ops/operator.h>
-#include <ed/sectors/blocks.h>
 #include <ed/basis/rep_sector.h>
 
 #include <complex>
@@ -37,6 +36,33 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace ed::solvers {
+
+// -----------------------------------------------------------------------------
+// One block's quantum-number tag. `k0` / `k_raw` are ENGINE-INTERNAL irrep
+// indices -- k_raw is NOT the physical momentum; decode momenta through the
+// abelian irrep characters chi_k (EngineContext::giA in the engine).
+// -----------------------------------------------------------------------------
+struct LittleGroupBlockTag {
+    int n_up      = -1;   ///< fixed-Sz subspace (-1 = none)
+    int sz_parity = -1;   ///< Sz-parity half (-1 = none)
+    int k0        = -1;   ///< extended irrep index (k_raw + flip_parity * n_irr_raw)
+    int k_raw     = -1;   ///< raw abelian irrep index (NOT the momentum)
+    int flip_parity = -1; ///< 0 = (k,+), 1 = (k,-), -1 = flip axis off
+    int irrep     = -1;   ///< little-co-group irrep index; -1 = plain floor block
+    int irrep_dim = 1;    ///< d_sigma
+    int star_size = 1;    ///< |star| (residue orbit of momenta)
+    bool tr_folded = false; ///< sigma* partner folded in (multiplicity doubled)
+
+    std::uint64_t dim          = 0; ///< block operator dimension (m_sigma or dim_k0)
+    /// How many times this block's spectrum appears in the subspace:
+    /// star_size * irrep_dim * (tr_folded ? 2 : 1). NEVER includes the Sz
+    /// flip-transport mirror -- that axis lives in the subspace sweep.
+    std::uint64_t multiplicity = 1;
+};
+
+}  // namespace ed::solvers
 
 namespace ed::sectors {
 
