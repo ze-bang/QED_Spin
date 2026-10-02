@@ -36,7 +36,7 @@
 
 #include <ed/basis/bits.h>                       // applyPermutation
 #include <ed/matvec/linear_operator.h>           // blocks ARE LinearOperators
-#include <ed/matvec/symmetry_matvec_backend.h>   // make_cpu_rep_symmetry_backend
+#include <ed/matvec/sector_rows.h>     // the sector lanes on the row walk
 #include <ed/matvec/cpu_backend.h>               // CpuBackend for the GS Lanczos
 #include <ed/krylov/lanczos.h>                   // keep_basis Ritz-vector GS
 #include <ed/krylov/krylov_schur.h>              // multi-level blocks: locked KS
@@ -50,7 +50,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#include <ed/matvec/reduced_csr.h>     // build_reduced_symmetry_csr_rep
+#include <ed/matvec/reduced_csr.h>     // ReducedSymmetryCsr
 #include <ed/matvec/term_storage.h>
 #include <ed/basis/compiled_group.h>
 #include <ed/basis/irreps.h>
@@ -149,16 +149,13 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 }
 
 // -----------------------------------------------------------------------------
-// H restricted to one abelian momentum sector, MATRIX-FREE: the CSR-free rep
-// kernel over an in-memory RepSectorData (reps + 1/norms + chi_k + A perms).
+// An operator on one symmetry sector (RepSectorData: reps + 1/norms + characters + group
+// perms), its rows from the row walk of the operator's program (sector_rows.h): the
+// reduced CSR when it fits the budget, else the walk per apply, or the device gather.
 // Memory O(#reps), never O(2^N).
 // -----------------------------------------------------------------------------
 class RepSectorMatVec final : public ed::LinearOperator {
 public:
-    using TV = ed::matvec::TermViewT<
-        ::Operator::DiagonalOneBody,    ::Operator::OffDiagonalOneBody,
-        ::Operator::DiagonalTwoBody,    ::Operator::MixedTwoBody,
-        ::Operator::OffDiagonalTwoBody, ::Operator::ThreeBodyTransformData>;
 
     RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd,
                     bool force_gpu = false)
@@ -173,22 +170,15 @@ public:
                     std::shared_ptr<const ed::symmetry::RepSectorData> rd,
                     bool force_gpu = false)
         : rd_(std::move(rd)),
+          rows_(op.row_program()),
+          pol_(rd_->make_policy()),
           terms_(op.getTerms()),
+          spin_(static_cast<double>(op.getSpin())),
           force_gpu_(force_gpu)
     {
-        tv_.diag_one    = &terms_.diag_one_body;
-        tv_.offdiag_one = &terms_.offdiag_one_body;
-        tv_.diag_two    = &terms_.diag_two_body;
-        tv_.mixed_two   = &terms_.mixed_two_body;
-        tv_.offdiag_two = &terms_.offdiag_two_body;
-        tv_.three_body  = &terms_.three_body;
-        tv_.spin_l      = static_cast<double>(op.getSpin());
-        tv_.is_real     = false;   // momentum phases are complex
-        backend_ = ed::matvec::make_cpu_rep_symmetry_backend<
-            ::Operator::DiagonalOneBody,    ::Operator::OffDiagonalOneBody,
-            ::Operator::DiagonalTwoBody,    ::Operator::MixedTwoBody,
-            ::Operator::OffDiagonalTwoBody, ::Operator::ThreeBodyTransformData>(
-            *rd_);
+        for (std::size_t g = 0; g < rows_->n_groups(); ++g)
+            if (rows_->group_flip[g] != 0)
+                offdiag_terms_ += rows_->vsub_tbegin[rows_->group_vbegin[g + 1]] - rows_->vsub_tbegin[rows_->group_vbegin[g]];
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
@@ -201,7 +191,7 @@ public:
         else if (csr_)
             csr_->spmv(in, out);
         else
-            backend_->apply_complex(&tv_, in, out, n);
+            ed::matvec::sector_gather(rows_->view(), pol_, rd_->reps.size(), in, out);
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - t0).count();
         applies_.fetch_add(1, std::memory_order_relaxed);
@@ -225,13 +215,13 @@ public:
     }
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, tv_.spin_l, terms_);
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, spin_, terms_);
 #endif
         return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
     }
     [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
 #ifdef WITH_CUDA
-        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, tv_.spin_l, terms_);
+        if (device_ok_) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, spin_, terms_);
 #endif
         return {};
     }
@@ -242,17 +232,11 @@ public:
         return *rd_;
     }
 
-    // The reduced sector matrix H_k assembled DIRECTLY from the rep policy
-    // -- O(|G|*nnz), PARALLEL over rows -- instead of dim column matvecs. This
-    // is the same matrix element the gather backend applies; densifying /
+    // The sector matrix assembled DIRECTLY from the row walk -- PARALLEL over rows --
+    // instead of dim column matvecs: the same entries the walk lane applies; densifying /
     // sandwiching it avoids the materialize() column crawl.
     [[nodiscard]] ed::matvec::ReducedSymmetryCsr<Complex> reduced_csr() const {
-        return ed::matvec::build_reduced_symmetry_csr_rep<
-            ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
-                rd_->make_policy(), tv_.spin_l,
-                terms_.diag_one_body, terms_.offdiag_one_body,
-                terms_.diag_two_body, terms_.mixed_two_body,
-                terms_.offdiag_two_body, terms_.three_body);
+        return ed::matvec::build_sector_csr(rows_->view(), pol_, rd_->reps.size());
     }
 
 private:
@@ -288,8 +272,8 @@ private:
     // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 /
     // ED_SYM_REP=0 fall back to the gather walk) and (b) an UPPER-BOUND
     // memory estimate fits the budget (ED_SYM_SECTOR_CSR_BUDGET_GIB,
-    // default 8; each off-diagonal term contributes at most one entry
-    // per source row). col_idx is uint32, so > 2^32-row sectors always
+    // default 8; each off-diagonal canonical term contributes at most one entry
+    // per row). col_idx is uint32, so > 2^32-row sectors always
     // stay on the gather walk.
     void maybe_build_csr_() const {
         if (ed::planner::resolved_sym_matvec_repr()
@@ -297,21 +281,11 @@ private:
             return;
         const std::uint64_t dim = rd_->reps.size();
         if (dim == 0 || dim >= (std::uint64_t{1} << 32)) return;
-        const std::uint64_t terms_per_row =
-            1  // fused diagonal
-            + terms_.offdiag_one_body.size()
-            + terms_.mixed_two_body.size()
-            + terms_.offdiag_two_body.size()
-            + terms_.three_body.size();
+        const std::uint64_t terms_per_row = 1 + offdiag_terms_;   // the diagonal, then one per term
         if (!ed::planner::sector_csr_within_budget(dim, terms_per_row)) {
             // The bound puts every term on every row; most terms vanish on most states
             // (a J1-J2 chain fills about a quarter), so measure the fill before declining.
-            const double fill = ed::matvec::sampled_reduced_symmetry_row_length<
-                ed::matvec::basis::RepSymmetryBasisPolicy, Complex>(
-                    rd_->make_policy(), tv_.spin_l,
-                    terms_.diag_one_body, terms_.offdiag_one_body,
-                    terms_.diag_two_body, terms_.mixed_two_body,
-                    terms_.offdiag_two_body, terms_.three_body);
+            const double fill = ed::matvec::sampled_sector_row_length(rows_->view(), pol_, dim);
             const auto per_row = static_cast<std::uint64_t>(std::ceil(1.1 * fill)) + 1;
             if (per_row >= terms_per_row || !ed::planner::sector_csr_within_budget(dim, per_row))
                 return;
@@ -345,7 +319,7 @@ private:
         try {
             const auto t0 = std::chrono::steady_clock::now();
             gpu_fn_ = ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
-                *rd_, tv_.spin_l, terms_);
+                *rd_, spin_, terms_);
             gpu_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (ed::env::flag("ED_SYM_PROFILE", false)) {
                 ED_LOG(Info,
@@ -370,9 +344,11 @@ private:
         p->build_perm_lut();
         return p;
     }
-    ed::matvec::TermStorage                        terms_;
-    TV                                             tv_{};
-    std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
+    std::shared_ptr<const ed::ops::MaskedProgram>  rows_;    // the operator's row program
+    ed::matvec::basis::RepSymmetryBasisPolicy      pol_;     // views into *rd_
+    std::uint64_t                                  offdiag_terms_ = 0;
+    ed::matvec::TermStorage                        terms_;   // the device lane's bins (until it walks too)
+    double                                         spin_ = 0.5;
     mutable std::once_flag                         csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
     mutable std::once_flag                         gpu_once_;

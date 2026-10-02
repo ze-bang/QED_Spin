@@ -7,9 +7,10 @@
 //
 //   full space   Operator::apply: the row walk and the CSR assembled from it, each on a real
 //                and a complex input;
-//   rep sectors  RepSectorMatVec: reduced CSR (the default lane), the gather walk (CSR
-//                budget 0), the scatter walk, reduced_csr() itself, and the device
-//                gather on host pointers when a CUDA device is present.
+//   rep sectors  RepSectorMatVec: reduced CSR (the default lane), the walk (CSR budget 0),
+//                reduced_csr() itself, and the device gather on host pointers when a CUDA
+//                device is present; the walk is the same bit for bit whether a sector looks
+//                states up through a rank table or by binary search.
 //
 // Operators: Hermitian models on an 8-site ring, built through the builder and through raw
 // records whose same-site products and cancelling S+S+ / S-S- pairs the lanes must
@@ -330,7 +331,7 @@ TEST_CASE("full space: the walk and the CSR, on real and complex inputs, are H",
     }
 }
 
-TEST_CASE("rep sectors: CSR, gather walk, scatter walk and device gather are the block of H", "[row_walk]") {
+TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_walk]") {
     const bool device = ed::have_cuda();
     int sectors = 0;
     for (const auto& m : zoo()) {
@@ -368,15 +369,20 @@ TEST_CASE("rep sectors: CSR, gather walk, scatter walk and device gather are the
                             const Mat C = columns(d, [&](const Cx* in, Cx* out) { csr.spmv(in, out); });
                             CHECK(max_diff(C, ref) <= tol);
                         }
-                        for (const char* scatter : {"0", "1"}) {   // the walk: no CSR fits a budget of 0
+                        {   // the walk: no CSR fits a budget of 0
                             EnvGuard env;
                             env.set("ED_SYM_SECTOR_CSR_BUDGET_GIB", "0");
-                            env.set("ED_MATVEC_SCATTER", scatter);
                             RepSectorMatVec op(*m.H, rds);
                             const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
-                            INFO("scatter " << scatter);
                             CHECK(std::string(op.lane()) == "walk");
                             CHECK(max_diff(M, ref) <= tol);
+                            if (n_up >= 0) {   // the same walk through an O(1) rank table
+                                RepSectorData ranked = *rds;
+                                ranked.build_rank_table();
+                                RepSectorMatVec op2(*m.H, std::make_shared<const RepSectorData>(std::move(ranked)));
+                                const Mat M2 = columns(d, [&](const Cx* in, Cx* out) { op2.apply(in, out, d); });
+                                CHECK(max_diff(M2, M) == 0.0);
+                            }
                         }
                         if (device) {
                             RepSectorMatVec op(*m.H, rds, /*force_gpu=*/true);

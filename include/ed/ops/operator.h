@@ -161,6 +161,15 @@ public:
         return *canonical_;
     }
 
+    /// What the row walks read (row_walk.h): the program of the ADJOINT's canonical terms, so
+    /// a row of H is the conjugated walk; built on first use and kept until the records change.
+    [[nodiscard]] std::shared_ptr<const ed::ops::MaskedProgram> row_program() const {
+        std::lock_guard<std::mutex> lock(row_program_mutex_);
+        if (!row_program_)
+            row_program_ = std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_operator(canonical().dagger()));
+        return row_program_;
+    }
+
     /// Append a one-body term (op_type, site, coeff) to the canonical AoS
     /// storage and invalidate the SoA cache. ``op_type``: 0 = S+, 1 = S-,
     /// 2 = Sz.
@@ -271,6 +280,7 @@ public:
         terms_committed_aos_size_       = 0;
         terms_committed_three_aos_size_ = 0;
         canonical_.reset();
+        row_program_.reset();
         lane_.reset();
     }
 
@@ -361,6 +371,7 @@ public:
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
+            row_program_.reset();
             lane_.reset();
         }
         return *this;
@@ -379,6 +390,7 @@ public:
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
+            row_program_.reset();
             lane_.reset();
             other.invalidateMatrixCaches();
         }
@@ -403,7 +415,7 @@ public:
             lane->csr.spmv(in, out);
             return;
         }
-        const auto view = lane->rows.view();
+        const auto view = lane->rows->view();
         #pragma omp parallel for schedule(static)
         for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
             Complex acc(0.0, 0.0);
@@ -459,7 +471,7 @@ protected:
     // The full-space lane: the program apply() walks and, when assembled, its CSR. Built
     // on first use, immutable, reset with the other caches.
     struct FullSpaceLane {
-        ed::ops::MaskedProgram                   rows;      // compile_operator(H^dagger)
+        std::shared_ptr<const ed::ops::MaskedProgram> rows;   // row_program()
         bool                                     use_csr = false;
         ed::matvec::ReducedSymmetryCsr<Complex>  csr;
     };
@@ -470,13 +482,13 @@ protected:
         std::lock_guard<std::mutex> lock(lane_mutex_);
         if (lane_) return lane_;
         auto L = std::make_shared<FullSpaceLane>();
-        L->rows = ed::ops::compile_operator(canonical().dagger());
+        L->rows = row_program();
         const std::uint64_t dim = 1ULL << n_bits_;
         const std::optional<bool> force = ed::env::tristate("ED_CSR_FORCE");
         const long long cut = ed::env::integer("ED_CSR_DIM_MAX", 0);
         const std::uint64_t cutoff = cut > 0 ? static_cast<std::uint64_t>(cut) : (std::uint64_t{1} << 20);
         L->use_csr = dim < (std::uint64_t{1} << 32) && force.value_or(dim <= cutoff);
-        if (L->use_csr) assemble_rows_(L->rows, dim, L->csr);
+        if (L->use_csr) assemble_rows_(*L->rows, dim, L->csr);
         lane_ = std::move(L);
         return lane_;
     }
@@ -512,6 +524,8 @@ protected:
     // The canonical terms (canonical()), immutable once built; reset with the other caches.
     mutable std::shared_ptr<const ed::ops::MaskedOperator> canonical_;
     mutable std::mutex canonical_mutex_;
+    mutable std::shared_ptr<const ed::ops::MaskedProgram> row_program_;
+    mutable std::mutex row_program_mutex_;
 
     void check_factor_(uint8_t op, uint64_t site) const {
         if (op > 2)
