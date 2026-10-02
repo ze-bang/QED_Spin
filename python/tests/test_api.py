@@ -597,6 +597,32 @@ def test_a_multiplet_expands_to_every_sz_member():
             np.testing.assert_allclose(Hd @ v, float(lvl.energy) * v, atol=1e-9)
 
 
+def test_sz_basis_vectors_under_total_spin():
+    # Audits C01-pyapi-09 / C03-bindings-09: under total_spin = 1 the levels are solved at Sz = +1;
+    # vectors(basis='sz') gives the tower members at Sz = 0 and -1 as well (they were empty), a
+    # sector outside the tower is empty, and an impossible n_up raises instead of returning [].
+    n = 8
+    H = _ring(n)
+    Hd = _dense(H, n)
+    r = qed.eigs(H, 3, sym=qed.Symmetry(spatial=None, total_spin=1), vectors=True)
+    counts = []
+    for n_up in (n // 2 + 1, n // 2, n // 2 - 1):
+        sector = [s for s in range(1 << n) if bin(s).count("1") == n_up]
+        vs = r.vectors(basis="sz", n_up=n_up)
+        counts.append(len(vs))
+        Hs = Hd[np.ix_(sector, sector)]
+        levels = [float(L.energy) for L in r.levels]
+        for v in vs:
+            v = np.asarray(v, complex)
+            E = float(np.real(np.vdot(v, Hs @ v)))
+            np.testing.assert_allclose(Hs @ v, E * v, atol=1e-9)
+            assert min(abs(E - e) for e in levels) < 1e-9
+    assert counts[0] > 0 and counts[0] == counts[1] == counts[2]
+    assert r.vectors(basis="sz", n_up=0) == []
+    with pytest.raises(qed.errors.InvalidRequest):
+        r.vectors(basis="sz", n_up=99)
+
+
 def test_thermal_under_total_spin_counts_whole_multiplets():
     # Every S = 1 multiplet has Sz = -1, 0, 1 in equal parts: M = 0 and chi = beta S(S+1)/(3N)
     # (they came out as M = S, chi = 0), and the run says it is a restricted ensemble.

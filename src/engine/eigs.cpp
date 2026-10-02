@@ -560,13 +560,31 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
                                  + std::to_string(n_sites));
     require_normal(s, n_sites);          // a loaded result never went through the walk
     const int sector_nup = v.basis->n_up;
-    if (n_up >= 0 && sector_nup != n_up && !(level.mirror == 2 && sector_nup == n_sites - n_up))
-        throw std::invalid_argument("multiplet: the level has no component in Sz sector n_up");
+    // A spin-S level is solved at its Sz = +S member (n_up = sector_nup); its members at
+    // Sz = S - m follow by m applications of total S-.
+    const bool lowered = s.two_S > 0 && n_up >= 0 && sector_nup >= 0 && n_up < sector_nup
+                         && n_up >= sector_nup - s.two_S;
+    const bool mirrored = !lowered && n_up >= 0 && sector_nup >= 0 && sector_nup != n_up;
+    if (n_up >= 0 && sector_nup != n_up && !lowered && !(level.mirror == 2 && sector_nup == n_sites - n_up))
+        throw ed::EmptySelection("multiplet: the level has no component in the Sz sector n_up = "
+                                 + std::to_string(n_up));
     const std::uint64_t mask = (n_sites >= 64) ? ~std::uint64_t{0} : ((std::uint64_t{1} << n_sites) - 1);
-    // Start from the vector itself, or its flip image when the caller asked for the mirror sector.
+    // Start from the vector itself, its flip image when the caller asked for the mirror sector,
+    // or its tower member at the asked Sz.
     std::vector<Complex> seed;
-    const bool mirrored = n_up >= 0 && sector_nup >= 0 && sector_nup != n_up;
-    if (!mirrored) {
+    if (lowered) {
+        seed = expand(*v.basis, v.amplitudes, sector_nup);
+        for (int m = sector_nup; m > n_up; --m) {           // total S- clears one up spin
+            const auto from = sz_states(n_sites, m);
+            std::vector<Complex> next(binomial(n_sites, m - 1), Complex(0, 0));
+            for (std::size_t i = 0; i < from.size(); ++i) {
+                if (seed[i] == Complex(0, 0)) continue;
+                for (int b = 0; b < n_sites; ++b)
+                    if ((from[i] >> b) & 1u) next[state_index(from[i] & ~(std::uint64_t{1} << b), m - 1)] += seed[i];
+            }
+            seed.swap(next);
+        }
+    } else if (!mirrored) {
         seed = expand(*v.basis, v.amplitudes, n_up);
     } else {
         const auto own = expand(*v.basis, v.amplitudes, sector_nup);

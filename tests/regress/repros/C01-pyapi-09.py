@@ -25,7 +25,10 @@ try:
         v = np.asarray(v)
         nset = np.array([bin(i).count("1") for i in range(v.size)])
         pops.append(sorted({int(k) for k in nset[np.abs(v) > 1e-8]}))
-    bogus = len(r.vectors(basis="sz", n_up=99))
+    try:
+        bogus = len(r.vectors(basis="sz", n_up=99))
+    except Exception as ex:          # restated after P4.4: an impossible n_up raises (C03-bindings-09)
+        bogus = f"raised {type(ex).__name__}"
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE raised {type(ex).__name__}: {ex}")
     raise SystemExit(0)

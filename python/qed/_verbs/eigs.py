@@ -7,7 +7,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from .. import _core, _log
-from ..errors import InvalidRequest
+from ..errors import EmptySelection, InvalidRequest
 from . import _device
 from .symmetry import Labelled, Symmetry
 
@@ -66,8 +66,8 @@ class EigResult(Labelled):
                 break
             try:
                 vs = self._raw.multiplet(self._spec, i, want)
-            except ValueError:
-                continue                     # no component in this Sz sector
+            except EmptySelection:
+                continue                     # no component in this Sz sector; anything else raises
             out.extend(vs[: self.k - len(out)])
         return out
 
