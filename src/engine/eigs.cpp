@@ -222,10 +222,11 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
     if (s.spin_flip == 1 && !flip_sym)
         throw std::invalid_argument("sectors: spin_flip='require', but H is not spin-flip symmetric");
     // The Sz -> -Sz pairing of subspaces: the spin flip, or -- for an H that is not real, where K
-    // does not fold inside a sector -- time reversal Theta (which also takes k to -k).
+    // does not fold inside a sector -- time reversal Theta, which also takes k to -k and sigma to
+    // sigma*: not under a selection, whose ensemble it would not keep (walk() drops it there too).
     const bool fold  = flip_sym && s.spin_flip != 0;
-    const bool theta = !fold && s.time_reversal != 0 && !ed::ops::conjugation_invariant(h)
-                       && ed::ops::theta_invariant(h);
+    const bool theta = !fold && s.time_reversal != 0 && !detail::has_selection(s)
+                       && !ed::ops::conjugation_invariant(h) && ed::ops::theta_invariant(h);
     const bool pairs = fold || theta;
 
     std::vector<Subspace> out;
@@ -452,11 +453,12 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
             ++res.pruned_blocks;
             continue;
         }
-        Spec star = s;
-        star.only_k0 = {c.k0};
+        // The survivor's star alone, under the caller's Spec: the same symmetries as the estimate
+        // walk (a k0 selection of its own would drop time reversal Theta).
         const Subspace& sub = subs[c.sub];
-        const LittleGroupOptions opt = detail::engine_options(star, sub);
-        detail::walk(H, n_sites, star, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
+        LittleGroupOptions opt = detail::engine_options(s, sub);
+        opt.only_k0 = {c.k0};
+        detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks)
                 if (bi->tag.irrep == c.irrep && bi->tag.flip_parity == c.flip)
                     solve_block(sub, sb, bi, cx);

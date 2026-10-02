@@ -436,12 +436,15 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
     EngineContext cx;
     bool tr_on = false;
     make_engine_context(H, abelian_or_identity(s, n_sites), s.residues, n_sites, opt, cx, tr_on);
-    // A co-group character names sigma alone; time reversal would fold sigma* into its block.
-    if (!s.only_irrep_chars.empty()) {
+    // A co-group character names sigma alone; time reversal would fold sigma* into its block. Theta
+    // also changes Sz: under any selection the selected sectors are not its image of themselves.
+    if (!s.only_irrep_chars.empty() || (cx.tr == ed::solvers::Antiunitary::Theta && has_selection(s))) {
         tr_on = false;
         cx.tr = ed::solvers::Antiunitary::None;
     }
-    const std::set<int> only(s.only_k0.begin(), s.only_k0.end());
+    // The stars to walk: engine_options() copies the Spec's k0 selection; eigs narrows it to one
+    // survivor's star without changing what the caller selected.
+    const std::set<int> only(opt.only_k0.begin(), opt.only_k0.end());
     auto momentum_of = [&](int k_ext) -> const std::vector<Complex>& {
         return cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
     };

@@ -254,6 +254,14 @@ def test_time_reversal_theta_folds_an_h_that_is_not_real(n):
     thb = qed.thermal(H, Ts, method="exact", sym=off, observables=Os)
     np.testing.assert_allclose(tha.lnZ, thb.lnZ, rtol=1e-12)
     np.testing.assert_allclose(tha.O, thb.O, atol=1e-10)
+    # a selection is not closed under (n, k) -> (N - n, -k), so Theta is not used under one: the
+    # selected ensemble is what was named (fuzz cases 1-119, 2-21 at 33805d2)
+    for m in (1, 3):
+        sel = {tuple(T): Fraction(m, n)}
+        x = qed.thermal(H, Ts, method="exact", sym=on.select(momentum=sel), observables=Os)
+        y = qed.thermal(H, Ts, method="exact", sym=off.select(momentum=sel), observables=Os)
+        np.testing.assert_allclose(x.lnZ, y.lnZ, rtol=1e-12)
+        np.testing.assert_allclose(x.O, y.O, atol=1e-10)
 
 
 def test_time_reversal_require_refuses_an_h_without_k_or_theta():

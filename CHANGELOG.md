@@ -74,7 +74,8 @@ Breaking changes so far:
   `trace_dim`.
 - **Time reversal is K or Theta.** For an H that is not real, `time_reversal` uses
   Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a) when H has it: it pairs (Sz, k) with (-Sz,
-  -k) and, at Sz = 0, folds k with -k (up to 2x fewer blocks; Kramers pairs for odd N). Such
+  -k) and, at Sz = 0, folds k with -k (up to 2x fewer blocks; Kramers pairs for odd N); it is
+  not used under a selection, whose sectors it would not map to themselves. Such
   models (DM, Kitaev-Gamma) were refused under `time_reversal="require"` and never folded.
   `EigResult.time_reversal` / `SpectrumResult.time_reversal` (`"K"`, `"theta"` or None)
   replace the C++ `tr_engaged`, and `Level.fold` names each level's pairing; `vectors()`,

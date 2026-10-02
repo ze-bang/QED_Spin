@@ -17,8 +17,9 @@ into the engine's :class:`qed._core.sectors.Spec`:
 * ``spin_flip`` / ``time_reversal`` -- ``"auto"`` (use when H has it), ``"off"``,
   ``"require"`` (fail when H lacks it). Time reversal is an antiunitary map that pairs
   momentum k with -k: complex conjugation K in the S^z basis for a real H, else
-  Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a), which also pairs Sz with -Sz. Results
-  name the one used (``time_reversal``: ``"K"``, ``"theta"`` or None).
+  Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a), which also pairs Sz with -Sz and is not
+  used under a :meth:`select` (it would add sectors the selection did not name). Results name
+  the one used (``time_reversal``: ``"K"``, ``"theta"`` or None).
 * ``point_group`` -- ``False`` keeps only the abelian part.
 * ``total_spin`` -- a number S restricts to total spin S. H must be SU(2) symmetric, up to
   a uniform field along z: without the field each level counts 2S + 1 times (one multiplet);
