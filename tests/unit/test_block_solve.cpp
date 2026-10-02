@@ -628,6 +628,16 @@ TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]
     ed_tests::DenseOperator D(ed_tests::apply_to_dense([H = sz_sector(10, true, 5)](const Complex* in, Complex* o, int n) {
         H->apply(in, o, static_cast<std::size_t>(n));
     }, 252));
+    // Six levels of 252 states take several thick-restart cycles (m = 48): the restart rewrites the
+    // basis columns in place, which the device's staged copies must follow.
+    const auto c6 = lg::solve_block_lowest(cpu, D, 6), g6 = lg::solve_block_lowest(gpu, D, 6);
+    REQUIRE(c6.converged);
+    REQUIRE(g6.converged);
+    REQUIRE(c6.values.size() == g6.values.size());
+    for (std::size_t i = 0; i < c6.values.size(); ++i) REQUIRE(std::abs(c6.values[i] - g6.values[i]) < 1e-9);
+    const auto gk = lg::solve_gs_vector(gpu, D, /*kept_basis_max_dim=*/D.dim());
+    REQUIRE(gk.certified);
+    REQUIRE(std::abs(gk.energy - c6.values[0]) < 1e-9);
     REQUIRE_FALSE(lg::solve_block_lowest(gpu, D, 1, 4).converged);
     REQUIRE_FALSE(lg::solve_block_lowest(gpu, D, 3, 4).converged);
     REQUIRE_FALSE(lg::solve_block_eigenpairs(gpu, D, 1, 4).converged);

@@ -264,11 +264,13 @@ public:
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;
+        forget_written_(p, n);
         cuda_backend_detail::check_cuda(
             cudaMemset(p, 0, n * sizeof(Complex)), "cudaMemset");
     }
     void copy(const Complex* src, Complex* dst, std::size_t n) const override {
         if (n == 0) return;
+        forget_written_(dst, n);
         cuda_backend_detail::check_cuda(
             cudaMemcpy(dst, src, n * sizeof(Complex),
                        cudaMemcpyDeviceToDevice),
@@ -278,6 +280,7 @@ public:
                         Complex* device_dst,
                         std::size_t n) const override {
         if (n == 0) return;
+        forget_written_(device_dst, n);
         cuda_backend_detail::check_cuda(
             cudaMemcpy(device_dst, host_src, n * sizeof(Complex),
                        cudaMemcpyHostToDevice),
@@ -299,6 +302,7 @@ public:
     void axpy(Complex alpha, const Complex* x, Complex* y,
               std::size_t n) const override {
         if (n == 0) return;
+        forget_written_(y, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
             cublasZaxpy(handle_, as_blas_int(n), &a,
@@ -308,6 +312,7 @@ public:
     }
     void scale(Complex alpha, Complex* x, std::size_t n) const override {
         if (n == 0) return;
+        forget_written_(x, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
             cublasZscal(handle_, as_blas_int(n), &a,
@@ -350,6 +355,7 @@ public:
     void axpby(Complex alpha, const Complex* x,
                Complex beta,  Complex* y, std::size_t n) const override {
         if (n == 0) return;
+        forget_written_(y, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
         cuda_backend_detail::check_cublas(
@@ -433,6 +439,7 @@ public:
         ensure_staging_(n, num_basis);
         ensure_coeffs_(num_basis);
         stage_basis_(basis, num_basis, n);
+        forget_written_(v, n);
 
         // Stage alphas (host -> device).
         cuda_backend_detail::check_cuda(
@@ -468,6 +475,7 @@ public:
               Complex beta,
               Complex* C, std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
+        forget_written_(C, ldc * (n - 1) + m);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
         cuda_backend_detail::check_cublas(
@@ -581,6 +589,21 @@ private:
     void forget_staged_(const Complex* p) const noexcept {
         const auto it = std::find(staging_fingerprint_.begin(), staging_fingerprint_.end(), p);
         staging_fingerprint_.erase(it, staging_fingerprint_.end());
+    }
+    // A write through the backend to memory a staged column mirrors makes that column stale, and
+    // with it every column staged after it: the Krylov-Schur restart rewrites its basis columns in
+    // place, the GS vector lane its seed. (A kernel writing outside the backend -- an operator's
+    // apply -- never targets a staged vector: the lanes apply into scratch and copy.)
+    void forget_written_(const Complex* p, std::size_t count) const noexcept {
+        if (staging_fingerprint_.empty() || count == 0) return;
+        const Complex* end = p + count;
+        for (std::size_t k = 0; k < staging_fingerprint_.size(); ++k) {
+            const Complex* c = staging_fingerprint_[k];
+            if (c < end && p < c + staging_n_) {
+                staging_fingerprint_.resize(k);
+                return;
+            }
+        }
     }
 };
 
