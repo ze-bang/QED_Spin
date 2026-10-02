@@ -92,3 +92,11 @@ def test_a_malformed_value_is_refused(monkeypatch):
         monkeypatch.setenv(name, value)
     assert qed._core.env_malformed() == []
     qed.eigs(H, 1)
+
+
+def test_footprint_binding_is_the_engine_estimate():
+    # The calibration reads the guards' own estimate (ed/core/footprint.h).
+    assert qed._core.footprint("ftlm", 1000) == (5 * 16 * 1000, 0)
+    assert qed._core.footprint("ftlm_kept", 1000, krylov=100, width=2, device=True) == (2 * 16000, 2 * 205 * 16000)
+    with pytest.raises(qed.errors.InvalidRequest):
+        qed._core.footprint("nonsense", 10)

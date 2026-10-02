@@ -22,6 +22,7 @@
 #include <ed/core/config.h>
 #include <ed/ops/construct_ham.h>
 #include <ed/core/errors.h>
+#include <ed/core/footprint.h>
 #include <ed/core/interrupt.h>
 #include <ed/core/log.h>
 #include <ed/core/select_backend.h>
@@ -471,6 +472,29 @@ PYBIND11_MODULE(_core, m) {
           "True when this build was compiled with CUDA (a device may still be absent).");
     m.def("cuda_device_count", &cuda_device_count,
           "Visible CUDA devices: 0 on a CPU build or when cudaGetDeviceCount fails.");
+    m.def("footprint", [](const std::string& path, std::uint64_t dim, std::size_t krylov, std::size_t k,
+                          std::size_t width, bool device, bool tower, std::uint64_t dim_target) {
+              using ed::core::Path;
+              static const std::pair<const char*, Path> names[] = {
+                  {"ftlm", Path::FtlmSample}, {"ftlm_kept", Path::FtlmSampleKept}, {"mtpq", Path::Mtpq},
+                  {"krylov_schur", Path::KrylovSchur}, {"gs_kept", Path::GsKeptBasis},
+                  {"gs_two_pass", Path::GsTwoPass}, {"dense_values", Path::DenseValues},
+                  {"dense_vectors", Path::DenseVectors}, {"multiplet", Path::Multiplet},
+                  {"dynamics_ftlm", Path::DynamicsFtlm}};
+              for (const auto& [name, p] : names)
+                  if (path == name) {
+                      ed::core::Shape s;
+                      s.dim = dim; s.krylov = krylov; s.k = k; s.width = width; s.device = device;
+                      s.tower = tower; s.dim_target = dim_target;
+                      const ed::core::Footprint f = ed::core::footprint(p, s);
+                      return std::make_pair(f.host, f.device);
+                  }
+              throw ed::InvalidRequest("footprint: unknown path '" + path + "'");
+          },
+          py::arg("path"), py::arg("dim"), py::arg("krylov") = 0, py::arg("k") = 0, py::arg("width") = 1,
+          py::arg("device") = false, py::arg("tower") = false, py::arg("dim_target") = 0,
+          "(host, device) bytes of one solver path's working set (ed/core/footprint.h): the estimate "
+          "every memory guard uses. Internal: for calibration and tests.");
 
     // Log bridge (ed/core/log.h). Python owns the configuration; see python/qed/_log.py.
     m.def("log_configure", [](int level, int fd) {
