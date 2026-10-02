@@ -222,17 +222,22 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
     const std::uint64_t nnz = csr.row_ptr[dim];
     const bool narrow = csr.dict.size() <= 256;
+    // The dictionary when it is the smaller form (a tiny sector stores its few values directly).
+    const bool full = csr.dict.size() * sizeof(SectorComplex) + nnz * (narrow ? 1 : 2) >= nnz * sizeof(SectorComplex);
+    if (full) csr.dict.clear();
     csr.col_idx.resize(nnz);
-    if (narrow) csr.id8.resize(nnz);
-    else        csr.id16.resize(nnz);
+    if (full)        csr.val.resize(nnz);
+    else if (narrow) csr.id8.resize(nnz);
+    else             csr.id16.resize(nnz);
     // first touch in spmv's static row partition
     #pragma omp parallel for schedule(static) if(dim > (1ULL << 16))
     for (long long ir = 0; ir < static_cast<long long>(dim); ++ir)
         for (std::uint64_t e = csr.row_ptr[static_cast<std::uint64_t>(ir)]; e < csr.row_ptr[static_cast<std::uint64_t>(ir) + 1];
              ++e) {
             csr.col_idx[e] = 0;
-            if (narrow) csr.id8[e] = 0;
-            else        csr.id16[e] = 0;
+            if (full)        csr.val[e] = SectorComplex(0.0, 0.0);
+            else if (narrow) csr.id8[e] = 0;
+            else             csr.id16[e] = 0;
         }
     #pragma omp parallel for schedule(dynamic, 1)
     for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
@@ -241,8 +246,9 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
         const std::uint64_t e0 = csr.row_ptr[first_row(static_cast<std::uint64_t>(c))];
         std::copy(slab.col.begin(), slab.col.end(), csr.col_idx.begin() + static_cast<std::ptrdiff_t>(e0));
         for (std::size_t i = 0; i < slab.id.size(); ++i) {
-            if (narrow) csr.id8[e0 + i] = static_cast<std::uint8_t>(map[slab.id[i]]);
-            else        csr.id16[e0 + i] = static_cast<std::uint16_t>(map[slab.id[i]]);
+            if (full)        csr.val[e0 + i] = slab.values[slab.id[i]];
+            else if (narrow) csr.id8[e0 + i] = static_cast<std::uint8_t>(map[slab.id[i]]);
+            else             csr.id16[e0 + i] = static_cast<std::uint16_t>(map[slab.id[i]]);
         }
         slab = Slab{};
     }

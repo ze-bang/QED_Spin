@@ -479,14 +479,14 @@ TEST_CASE("rep sectors: the one-pass CSR is the two-pass CSR bit for bit", "[row
                         INFO("threads " << threads);
                         CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
                         CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
-                        CHECK(csr.dictionary());
+                        if (ref.nnz() >= 64) CHECK(csr.dictionary());   // a tiny one stores its values
                         bool same_bits = true;
                         for (std::uint64_t e = 0; e < ref.nnz() && same_bits; ++e) {
                             const Cx a = csr.value(e), b = ref.val[e];
                             same_bits = std::memcmp(&a, &b, sizeof(Cx)) == 0;
                         }
                         CHECK(same_bits);
-                        CHECK(csr.bytes() < ref.bytes());
+                        CHECK(csr.bytes() <= ref.bytes());
                     }
                 }
         }
