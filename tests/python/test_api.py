@@ -1179,6 +1179,22 @@ def test_a_star_closed_by_time_reversal_is_folded():
     np.testing.assert_allclose(th.O[0], 0.0, atol=1e-10)
 
 
+def test_flip_require_where_a_subspace_is_not_its_own_image():
+    # spin_flip='require' on a flip-symmetric H asserts the symmetry of H; a subspace the flip
+    # maps elsewhere (the Sz = S tower, an explicit sz != N/2) simply does not use it. It raised
+    # "the subspace is not flip-invariant" (audit C04-engine-core-04).
+    n = 8
+    H = _ring(n, 0.3)
+    for sym_kw in (dict(total_spin=1), dict(sz=5), dict(sz="even")):
+        req = qed.eigs(H, 3, sym=qed.Symmetry(spatial=None, spin_flip="require", **sym_kw)).energies
+        auto = qed.eigs(H, 3, sym=qed.Symmetry(spatial=None, spin_flip="auto", **sym_kw)).energies
+        np.testing.assert_allclose(req, auto, atol=1e-10)
+    field = qed.Operator(n)
+    field.add_one_body(qed.OP_SZ, 0, 0.2)
+    with pytest.raises(qed.errors.InvalidRequest, match="spin-flip"):
+        qed.eigs(H + field, 1, sym=qed.Symmetry(spatial=None, sz=5, spin_flip="require"))
+
+
 def test_every_refusal_is_a_qed_error():
     # The fuzzer (P4.3) found refusals that surfaced as builtin ValueError / RuntimeError: those
     # the engine raised as std::invalid_argument, and time_reversal='require' as runtime_error.

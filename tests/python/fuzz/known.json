@@ -2,30 +2,6 @@
  "comment": "Accepted known failures of tests/python/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/python/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
  "accepted": [
   {
-   "name": "flip_require_total_spin",
-   "ledger": "C04-engine-core-04",
-   "why": "spin_flip='require' raises 'the subspace is not flip-invariant' under total_spin S > 0 although H is flip-symmetric",
-   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
-             "request.total_spin": {"absent": false},
-             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
-  },
-  {
-   "name": "flip_require_fixed_sz",
-   "ledger": "C04-engine-core-04",
-   "why": "spin_flip='require' raises 'the subspace is not flip-invariant' for an explicit sz (n_up != N/2) although H is flip-symmetric",
-   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
-             "request.sz": {"re": "^[0-9]+$"},
-             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
-  },
-  {
-   "name": "flip_require_parity_odd_n",
-   "ledger": "C04-engine-core-04",
-   "why": "spin_flip='require' with sz='even'/'odd' and odd N: each half maps to the other under the flip, so every sector is a mirror-1 n_up != N/2 subspace and the engine refuses (the same engine_options downgrade gap)",
-   "match": {"status": ["crash"], "extra.error_class": ["RuntimeError"], "request.spin_flip": ["require"],
-             "request.sz": ["even", "odd"], "model.N": [5, 7, 9, 11],
-             "message": {"re": "spin_flip='require' but the subspace is not flip-invariant"}}
-  },
-  {
    "name": "oftlm_total_spin_refused",
    "ledger": "K1-sym-composition-05",
    "why": "OFTLM (exact_states > 0) is refused under total_spin",

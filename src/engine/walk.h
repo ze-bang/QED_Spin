@@ -36,10 +36,11 @@ engine_options(const Spec& s, const Subspace& sub) {
     ed::solvers::LittleGroupOptions o;
     o.n_up          = sub.n_up;
     o.sz_parity     = sub.sz_parity;
-    // subspaces() already enforced 'require' against H. A subspace the flip maps onto a
-    // different one gets the symmetry through the mirror fold, so inside it the engine
-    // may only engage the flip where the subspace is its own image.
-    o.spin_flip     = (s.spin_flip == 1 && sub.mirror == 2) ? -1 : s.spin_flip;
+    // subspaces() already enforced 'require' against H. Inside a subspace the engine engages
+    // the flip where the subspace is its own image (n_up = N/2, a parity half with N even, the
+    // full space) and not elsewhere: an Sz = S tower, an explicit n_up != N/2 or a mirror pair
+    // (which gets the symmetry through the fold) -- 'auto' there, never a refusal.
+    o.spin_flip     = s.spin_flip == 1 ? -1 : s.spin_flip;
     o.time_reversal = s.time_reversal;
     o.only_k0       = s.only_k0;
     o.only_irrep    = s.only_irrep;
