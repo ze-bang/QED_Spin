@@ -99,9 +99,19 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         if (dev) rep->enable_device(true);   // its device kernel: op->has_device_kernel()
         return b;
     }
+    const auto towers = ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up, sub.sz_parity,
+                                                             bi->tag.flip_parity);
+    if (std::find(towers.begin(), towers.end(), s.two_S) == towers.end()) {
+        b.op.reset();                   // this flip-parity block holds no spin-S state
+        return b;
+    }
     std::shared_ptr<const ed::LinearOperator> s2;
     std::shared_ptr<RepSectorMatVec> s2rep;
-    if (bi->gop) {
+    if (bi->gop && !dev && sub.n_up >= 0 && !bi->gsec->has_flips()) {
+        // On the host, S^2 as S- S+ + Sz(Sz + 1) through the sector one up spin higher (P6.5): ~N
+        // entries a row against ~N^2/4 for the S^2 carrier, which the device lane keeps (its kernel).
+        s2 = std::make_shared<LadderS2>(bi->gsec);
+    } else if (bi->gop) {
         s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, bi->gsec);
         s2rep->set_csr_budget(budget);
     } else {
@@ -109,12 +119,6 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         s2k->set_csr_budget(budget);
         if (bi->W) s2 = std::make_shared<ProjectedBlockOp>(s2k, bi->W);
         else       s2 = s2rep = s2k;
-    }
-    const auto towers = ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up, sub.sz_parity,
-                                                             bi->tag.flip_parity);
-    if (std::find(towers.begin(), towers.end(), s.two_S) == towers.end()) {
-        b.op.reset();                   // this flip-parity block holds no spin-S state
-        return b;
     }
     auto proj = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
     if (dev && s2rep) {                 // H and S^2 on the device: the projected apply runs there

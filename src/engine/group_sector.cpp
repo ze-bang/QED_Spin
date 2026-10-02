@@ -133,6 +133,24 @@ group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::ve
     return rd;
 }
 
+std::shared_ptr<const ed::symmetry::RepSectorData> raised_sector(const ed::symmetry::RepSectorData& src) {
+    if (src.n_up < 0 || src.n_up >= src.n_sites || src.has_flips())
+        throw std::invalid_argument("raised_sector: needs a fixed-Sz sector below n_up = N without the spin flip");
+    const auto N = static_cast<std::size_t>(src.n_sites);
+    std::vector<std::vector<int>> perms(static_cast<std::size_t>(src.group_size));
+    for (std::size_t g = 0; g < perms.size(); ++g)
+        perms[g].assign(src.perms_flat.begin() + static_cast<std::ptrdiff_t>(g * N),
+                        src.perms_flat.begin() + static_cast<std::ptrdiff_t>((g + 1) * N));
+    const auto tab = group_orbit_table(perms, src.n_sites, src.n_up + 1, -1, false);
+    auto up = std::make_shared<ed::symmetry::RepSectorData>(
+        src.irrep_dim == 1
+            ? group_sector_from_table(*tab, perms, src.n_sites, src.n_up + 1, false, src.characters)
+            : group_sector_irrep_from_table(*tab, perms, src.n_sites, src.n_up + 1, false, src.irrep_dim, src.irrep_D));
+    up->build_perm_lut();
+    up->build_buckets();
+    return up;
+}
+
 void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
                  ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local) {
     const std::size_t n = tab.reps.size();

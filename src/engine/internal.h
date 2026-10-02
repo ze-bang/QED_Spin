@@ -456,13 +456,15 @@ public:
                       std::shared_ptr<const ed::symmetry::RepSectorData> tgt)
         : rows_(std::move(rows)), src_(std::move(src)), tgt_(std::move(tgt)),
           src_pol_(src_->make_policy()), tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {
-        // Cross rows are written for 1-dim sectors; a sector of a d > 1 irrep takes them with P6.3 step 6.
-        if (src_->irrep_dim > 1 || tgt_->irrep_dim > 1)
-            throw ed::Unsupported("a cross-sector operator on a sector of an irrep of dimension > 1");
+        // Between sectors of an irrep of dimension d > 1 the rows are blocks (sector_rows.h), written for
+        // two sectors of the SAME irrep (an invariant operator: total S+-, S^2); any other pair refuses.
+        if ((src_->irrep_dim > 1 || tgt_->irrep_dim > 1)
+            && (src_->irrep_dim != tgt_->irrep_dim || src_->irrep_D != tgt_->irrep_D))
+            throw ed::Unsupported("a cross-sector operator between different irreps of dimension > 1");
     }
 
-    [[nodiscard]] std::size_t rows() const noexcept { return tgt_->reps.size(); }
-    [[nodiscard]] std::size_t cols() const noexcept { return src_->reps.size(); }
+    [[nodiscard]] std::size_t rows() const noexcept { return tgt_->states(); }
+    [[nodiscard]] std::size_t cols() const noexcept { return src_->states(); }
 
     /// out (target) = O in (source).
     void apply(const Complex* in, Complex* out, std::size_t n_out) const {
@@ -476,8 +478,10 @@ private:
     void maybe_build_csr_() const {
         const std::uint64_t r = rows();
         if (r == 0 || cols() >= (std::uint64_t{1} << 32)) return;
-        // Exact bound before merging: at most one entry per group and row (index + value).
-        const double est = static_cast<double>(r) * static_cast<double>(1 + rows_->n_groups())
+        // Exact bound before merging: at most one entry per group and row (index + value), d per group
+        // in a sector of an irrep of dimension d.
+        const double est = static_cast<double>(r)
+                               * static_cast<double>(1 + rows_->n_groups() * static_cast<std::size_t>(src_->irrep_dim))
                                * (sizeof(std::uint32_t) + sizeof(Complex))
                            + static_cast<double>(r + 1) * sizeof(std::uint64_t);
         // Shared by the sectors building at once (the concurrent small dynamics sources).
@@ -1024,6 +1028,58 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
 [[nodiscard]] ed::symmetry::RepSectorData
 group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
                               int n_sites, int n_up, bool flip, int d, const std::vector<Complex>& D);
+/// The sector one up spin higher (n_up + 1) of `src`'s group and irrep, where total S+ maps `src`
+/// (a fixed-Sz sector below n_up = N without the flip half, which does not map n_up + 1 to itself).
+[[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> raised_sector(const ed::symmetry::RepSectorData& src);
+
+/// S^2 on a fixed-Sz sector as S- S+ + Sz (Sz + 1), Sz = n_up - N/2 (P6.5): two cross-sector maps
+/// through the sector one up spin higher, about N/2 entries a row each where the S^2 carrier holds
+/// ~N^2/4. Its spectrum is S^2's (j (j + 1) on spin j), so the Lowdin projector takes it as it is.
+/// Host only (the device lane keeps the S^2 carrier, which has a device kernel).
+class LadderS2 final : public ed::LinearOperator {
+public:
+    explicit LadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> sec) : sec_(std::move(sec)) {
+        const int N = sec_->n_sites;
+        const double sz = static_cast<double>(sec_->n_up) - 0.5 * static_cast<double>(N);
+        shift_ = sz * (sz + 1.0);
+        bound_ = 0.5 * static_cast<double>(N) * (0.5 * static_cast<double>(N) + 1.0);
+        if (sec_->n_up >= N) return;                  // no state above: S+ is zero
+        up_ = raised_sector(*sec_);
+        if (up_->states() == 0) return;
+        ed::ops::MaskedOperator plus(N), minus(N);
+        for (int i = 0; i < N; ++i) {
+            plus.add(ed::ops::MaskedOperator::product(N, "+", {i}));
+            minus.add(ed::ops::MaskedOperator::product(N, "-", {i}));
+        }
+        ed::ops::CompileOptions copt;
+        copt.project = false;                         // total S+- commute with the group
+        plus_ = std::make_unique<CrossSectorMatVec>(
+            std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({plus.dagger()}, *up_, *sec_, copt)),
+            sec_, up_);
+        minus_ = std::make_unique<CrossSectorMatVec>(
+            std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({minus.dagger()}, *sec_, *up_, copt)),
+            up_, sec_);
+    }
+
+    void apply(const Complex* in, Complex* out, std::size_t n) const override {
+        for (std::size_t i = 0; i < n; ++i) out[i] = shift_ * in[i];
+        if (!plus_) return;
+        std::vector<Complex> mid(up_->states()), back(n);
+        plus_->apply(in, mid.data(), mid.size());
+        minus_->apply(mid.data(), back.data(), n);
+        for (std::size_t i = 0; i < n; ++i) out[i] += back[i];
+    }
+    [[nodiscard]] std::size_t dim() const override { return sec_->states(); }
+    [[nodiscard]] bool is_hermitian() const override { return true; }
+    /// S^2 <= (N/2)(N/2 + 1).
+    [[nodiscard]] double norm_bound() const override { return bound_; }
+    [[nodiscard]] std::string description() const override { return "LadderS2(S- S+ + Sz(Sz+1))"; }
+
+private:
+    std::shared_ptr<const ed::symmetry::RepSectorData> sec_, up_;
+    std::unique_ptr<CrossSectorMatVec> plus_, minus_;
+    double shift_ = 0.0, bound_ = 0.0;
+};
 /// Re-express v (sector g, group G) in sector k of a subgroup (conj convention, norm kept); both sectors must
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
 [[nodiscard]] std::vector<Complex>

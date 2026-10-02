@@ -33,6 +33,7 @@
 #include <ed/basis/rep_sector.h>
 #include <ed/core/select_backend.h>
 #include "common/model_records.h"
+#include <ed/ops/casimir.h>
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
 #include <ed/ops/program.h>
@@ -1040,4 +1041,30 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
         }
     }
     REQUIRE(sectors > 0);
+}
+
+TEST_CASE("rep sectors: S^2 as S- S+ + Sz(Sz+1) through the raised sector equals the S^2 carrier",
+          "[row_walk][irrep][su2]") {
+    const Dihedral G;
+    const auto s2 = ed::ops::make_S2_carrier(static_cast<std::uint64_t>(N));
+    int checked = 0;
+    for (int n_up : {N / 2, N / 2 + 1, N / 2 + 2, N - 1, N}) {
+        const auto tab = ring_table(G.probe, n_up);
+        for (const auto& ir : G.gi.irreps) {
+            auto rd = std::make_shared<RepSectorData>(
+                ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir)));
+            const std::size_t d = rd->states();
+            if (d == 0) continue;
+            rd->build_perm_lut();
+            rd->build_buckets();
+            INFO("n_up " << n_up << " irrep dim " << ir.dim << " states " << d);
+            const RepSectorMatVec carrier(*s2, std::shared_ptr<const RepSectorData>(rd));
+            const ed::solvers::lg_detail::LadderS2 ladder(rd);
+            const Mat A = columns(d, [&](const Cx* in, Cx* out) { carrier.apply(in, out, d); });
+            const Mat B = columns(d, [&](const Cx* in, Cx* out) { ladder.apply(in, out, d); });
+            CHECK(max_diff(A, B) <= 1e-12 * std::max(1.0, max_abs(A)));
+            ++checked;
+        }
+    }
+    REQUIRE(checked > 0);
 }
