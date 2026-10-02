@@ -57,6 +57,12 @@ struct OrbitTable {
     std::uint64_t content_hash = 0;       // (group, subspace, engine version)
 
     [[nodiscard]] std::size_t size() const noexcept { return reps.size(); }
+    /// Bytes it holds (10 per rep, and the stabiliser sets).
+    [[nodiscard]] std::uint64_t bytes() const noexcept {
+        std::uint64_t b = reps.size() * sizeof(std::uint64_t) + stab_id.size() * sizeof(std::uint16_t);
+        for (const auto& s : stab_elems) b += s.size() * sizeof(std::uint16_t);
+        return b;
+    }
     [[nodiscard]] bool        empty() const noexcept { return reps.empty(); }
 
     [[nodiscard]] const std::vector<std::uint16_t>&

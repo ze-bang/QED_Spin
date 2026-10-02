@@ -511,6 +511,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
                 detail::label(L, sb);
                 const std::size_t id = batch.add(*bop.op);
                 bop.op.reset();                    // keep only the ghost filter past the star
+                bop.projector.reset();
                 entries.push_back({id, L, bop});
             }
         });

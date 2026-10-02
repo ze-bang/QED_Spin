@@ -67,3 +67,11 @@ TEST_CASE("acquire: in-process registry returns the same shared table",
     const auto c = acquire_orbit_table_fixed_sz_compiled(N, 4, cg);
     REQUIRE(c.get() != a.get());
 }
+
+TEST_CASE("orbit table: bytes() counts what the registry budgets", "[symmetry-cache]") {
+    ed::symmetry::OrbitTable t;
+    t.reps = {1, 2, 3};
+    t.stab_id = {0, 0, 1};
+    t.stab_elems = {{0}, {0, 1}};
+    REQUIRE(t.bytes() == 3 * 8 + 3 * 2 + 3 * 2);
+}

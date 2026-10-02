@@ -349,6 +349,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 } else if (t.method == ThermalSpec::Method::Exact) {
                     detail::BlockOp filter = bop;
                     filter.op.reset();
+                    filter.projector.reset();      // only the ghost value outlives the star
                     pending.push_back({batch.add(mv), blocks.size(), filter});
                 } else {
                     // Distinct, reproducible streams per block.

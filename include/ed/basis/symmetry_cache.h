@@ -24,6 +24,7 @@
 #include <utility>
 
 #include <ed/basis/orbit_table.h>
+#include <ed/core/memory.h>
 #include <ed/basis/sym_profile.h>
 
 namespace ed::symmetry {
@@ -33,7 +34,9 @@ namespace detail {
 // ---------------------------------------------------------------------------
 // In-process registry: content-keyed FIFO of the most recent tables.
 // Small (tables are 10 B/rep; 8 entries cover a full multi-Sz sweep loop),
-// mutex-guarded, always on.
+// mutex-guarded, always on. It never holds more than 8 tables, nor -- beyond
+// the newest one -- more than a quarter of the RAM the job may still allocate
+// (a sweep over every Sz sector of a 36-site cluster left ~10 GB resident).
 // ---------------------------------------------------------------------------
 class OrbitTableRegistry {
 public:
@@ -55,6 +58,15 @@ public:
             if (e->content_hash == tab->content_hash) return;
         entries_.push_back(std::move(tab));
         while (entries_.size() > kMaxEntries) entries_.pop_front();
+        if (ed::core::mem_guard_off()) return;
+        const std::uint64_t avail = ed::core::available_ram_bytes();
+        if (avail == 0) return;
+        std::uint64_t held = 0;
+        for (const auto& e : entries_) held += e->bytes();
+        while (entries_.size() > 1 && held > (avail + held) / 4) {   // the held tables are not "available"
+            held -= entries_.front()->bytes();
+            entries_.pop_front();
+        }
     }
 
     /// Drop a poisoned entry (a hit that failed physical verification) so a
