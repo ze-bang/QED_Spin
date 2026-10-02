@@ -160,6 +160,21 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
                         const std::vector<std::pair<int, int>>& pairs,
                         const RepMEOptions& opt);
 
+/// <bra|O|ket> for a ket in sector `src` and a bra in sector `tgt` of ANY two groups (e.g. a
+/// group sector and a momentum sector): the ket's orbit is walked explicitly,
+///     <T;j|O|S;r> = (|G_T| |G_S|)^{-1/2} w_r sum_{g in G_S} conj(chi_S(g)) sum_t proj_T(t) <t|O|U_g s_r>,
+/// with the program of O itself (compile_operator), each image's targets looked up in `tgt`.
+/// O need not be covariant or Hermitian. Cost |G_S| walks per ket representative; for two
+/// sectors of one group compile_program + rep_matrix_elements does without the orbit.
+[[nodiscard]] std::complex<double> orbit_matrix_element(const MaskedProgram& O_program,
+                                                        const ed::symmetry::RepSectorData& src,
+                                                        const ed::symmetry::RepSectorData& tgt,
+                                                        const std::vector<std::complex<double>>& ket,
+                                                        const std::vector<std::complex<double>>& bra);
+
+/// Do two sectors come from the same group (group size, permutations and flip masks)?
+[[nodiscard]] bool same_group(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSectorData& b);
+
 /// True when this is a WITH_CUDA build and a CUDA device is visible.
 [[nodiscard]] bool rep_matrix_elements_gpu_available();
 

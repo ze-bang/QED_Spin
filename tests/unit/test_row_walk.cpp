@@ -623,3 +623,65 @@ TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one g
     }
     CHECK(checked >= 24);
 }
+
+TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups", "[row_walk]") {
+    std::mt19937 rng(20261006);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
+    std::uniform_int_distribution<int> pick_len(1, 4);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    const std::size_t D = kAll + 1;
+    auto rnd_vec = [&](std::size_t d) {
+        std::vector<Cx> v(d);
+        for (auto& x : v) x = Cx(gauss(rng), gauss(rng));
+        return v;
+    };
+    struct Side { bool dihedral, flip; int irrep, n_up; };
+    struct Pair { Side ket, bra; };
+    const Pair pairs[] = {
+        {{false, false, 1, 4}, {true, false, 1, 4}},      // Z_8 k = 1  vs  D_8 A2
+        {{true, false, 2, 4}, {false, false, 0, 3}},      // D_8 B1 (n_up 4)  vs  Z_8 k = 0 (n_up 3)
+        {{false, true, 3, 4}, {false, false, 1, 4}},      // Z_8 x flip  vs  Z_8
+        {{true, true, 5, -1}, {false, false, 2, -1}},     // D_8 x flip  vs  Z_8, full space
+        {{false, false, 2, 4}, {false, false, 6, 4}},     // one group: compare with rep_matrix_elements
+    };
+    for (int trial = 0; trial < 3; ++trial) {
+        MaskedOperator O(N);
+        for (int t = 0; t < 6; ++t) {
+            std::string o;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                o.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(N, o, sites, Cx(gauss(rng), gauss(rng))));
+        }
+        const Mat Od = O.to_dense();
+        const auto P = ed::ops::compile_operator(O);
+        for (const Pair& pr : pairs) {
+            auto sector = [&](const Side& sd) {
+                const auto G = ring_group(sd.dihedral, sd.flip);
+                return make_sector(G, characters(G, sd.dihedral, sd.flip)[static_cast<std::size_t>(sd.irrep)], sd.n_up);
+            };
+            const RepSectorData S = sector(pr.ket), T = sector(pr.bra);
+            if (S.reps.empty() || T.reps.empty()) continue;
+            INFO("trial " << trial << " ket dihedral " << pr.ket.dihedral << " flip " << pr.ket.flip << " bra dihedral "
+                 << pr.bra.dihedral << " flip " << pr.bra.flip);
+            const auto ket = rnd_vec(S.reps.size()), bra = rnd_vec(T.reps.size());
+            const auto ek = ed::sectors::expand(S, ket, -1), eb = ed::sectors::expand(T, bra, -1);
+            Cx ref(0.0, 0.0);
+            for (std::size_t t = 0; t < D; ++t)
+                for (std::size_t s = 0; s < D; ++s)
+                    if (ek[s] != Cx(0.0, 0.0)) ref += std::conj(eb[t]) * Od[t * D + s] * ek[s];
+            const Cx got = ed::ops::orbit_matrix_element(P, S, T, ket, bra);
+            const double tol = 1e-11 * std::max(1.0, std::abs(ref));
+            CHECK(std::abs(got - ref) <= tol);
+            if (ed::ops::same_group(S, T)) {
+                const auto prog = ed::ops::compile_program({O}, S, T);
+                const ed::ops::RepVectorView k{ket.data(), ket.size()}, b{bra.data(), bra.size()};
+                const Cx me = ed::ops::rep_matrix_elements(S, T, prog, {k}, {b}, {{0, 0}})[0];
+                CHECK(std::abs(me - ref) <= tol);
+            }
+        }
+    }
+}

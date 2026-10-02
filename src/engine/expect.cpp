@@ -6,7 +6,6 @@
 
 #include "walk.h"
 
-#include <ed/dynamics/cross_sector.h>
 #include <ed/sectors/expect.h>
 
 #include <array>
@@ -17,16 +16,6 @@ namespace ed::sectors {
 
 using namespace ed::solvers;
 using namespace ed::solvers::lg_detail;
-
-namespace {
-
-Complex dot(const std::vector<Complex>& a, const std::vector<Complex>& b) {
-    Complex d(0, 0);
-    for (std::size_t i = 0; i < a.size(); ++i) d += std::conj(a[i]) * b[i];
-    return d;
-}
-
-}  // namespace
 
 
 std::vector<std::vector<Complex>>
@@ -89,25 +78,28 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
 }
 
 Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
-    if (O.has_extra_terms())
-        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
-                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
-    const int n_sites = r.n_sites;
     if (i >= r.levels.size() || j >= r.levels.size()) throw std::out_of_range("matrix_element: level index");
-    if (!O.three_body_records().empty())
-        throw std::invalid_argument("matrix_element: three-body terms are not supported between sectors");
+    if (static_cast<int>(O.getNumBits()) != r.n_sites)
+        throw ed::InvalidRequest("matrix_element: the operator acts on " + std::to_string(O.getNumBits())
+                                 + " sites, the levels on " + std::to_string(r.n_sites));
     const Level& Li = r.levels[i];
     const Level& Lj = r.levels[j];
     if (Li.vector < 0 || Lj.vector < 0) throw std::invalid_argument("matrix_element: a level has no vector");
-    const BlockVector& vi = r.vectors[static_cast<std::size_t>(Li.vector)];
-    const BlockVector& vj = r.vectors[static_cast<std::size_t>(Lj.vector)];
-    using Ref = ed::dssf::CrossSectorOrbitObservable::OperatorRef;
-    const auto n = static_cast<std::uint64_t>(n_sites);
-    ed::dssf::CrossSectorOrbitObservable obs(Ref::from_rep(*vj.basis, n), 0, Ref::from_rep(*vi.basis, n), 0,
-                                             O.records(), O.getSpin());
-    std::vector<Complex> y(vi.amplitudes.size());
-    obs.apply(vj.amplitudes.data(), y.data(), y.size());
-    return dot(vi.amplitudes, y);
+    const BlockVector& bra = r.vectors[static_cast<std::size_t>(Li.vector)];
+    const BlockVector& ket = r.vectors[static_cast<std::size_t>(Lj.vector)];
+    const auto& src = *ket.basis;
+    const auto& tgt = *bra.basis;
+    // Two sectors of one group: the lambda-projected program, one sweep over the ket's
+    // representatives. Otherwise (a group sector and a momentum sector, two stars' group
+    // sectors, ...) the ket's orbit is walked explicitly.
+    if (ed::ops::same_group(src, tgt) && (src.n_up < 0) == (tgt.n_up < 0)) {
+        const auto prog = ed::ops::compile_program({O.canonical()}, src, tgt);
+        const ed::ops::RepVectorView k{ket.amplitudes.data(), ket.amplitudes.size()};
+        const ed::ops::RepVectorView b{bra.amplitudes.data(), bra.amplitudes.size()};
+        return ed::ops::rep_matrix_elements(src, tgt, prog, {k}, {b}, {{0, 0}})[0];
+    }
+    return ed::ops::orbit_matrix_element(ed::ops::compile_operator(O.canonical()), src, tgt, ket.amplitudes,
+                                         bra.amplitudes);
 }
 
 }  // namespace ed::sectors

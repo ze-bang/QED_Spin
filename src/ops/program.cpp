@@ -3,6 +3,7 @@
 // See include/ed/ops/program.h for the formula and conventions.
 // =============================================================================
 #include <ed/ops/program.h>
+#include <ed/ops/row_walk.h>
 
 #include <ed/basis/rep_sector.h>
 #include <ed/core/log.h>
@@ -140,6 +141,67 @@ MaskedOperator program_operator(const MaskedProgram& P, int n_sites) {
             for (std::uint32_t k = P.vsub_tbegin[vi]; k < P.vsub_tbegin[vi + 1]; ++k)
                 O.add_term({P.group_flip[g], P.vsub_val[vi], P.group_flip[g], P.term_sign[k], P.term_coeff[k]});
     return O;
+}
+
+bool same_group(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSectorData& b) {
+    const auto flips = [](const ed::symmetry::RepSectorData& r) {
+        std::vector<std::uint64_t> f = r.flip_masks;
+        if (f.empty()) f.assign(static_cast<std::size_t>(r.group_size), 0ULL);
+        return f;
+    };
+    return a.group_size == b.group_size && a.n_sites == b.n_sites && a.perms_flat == b.perms_flat
+        && flips(a) == flips(b);
+}
+
+std::complex<double> orbit_matrix_element(const MaskedProgram& P, const ed::symmetry::RepSectorData& src,
+                                          const ed::symmetry::RepSectorData& tgt,
+                                          const std::vector<std::complex<double>>& ket,
+                                          const std::vector<std::complex<double>>& bra) {
+    using C = std::complex<double>;
+    if (src.n_sites != tgt.n_sites) throw std::invalid_argument("orbit_matrix_element: sectors of different sizes");
+    if (ket.size() != src.dim() || bra.size() != tgt.dim())
+        throw std::invalid_argument("orbit_matrix_element: vector length != sector dim");
+    const auto spol = src.make_policy();
+    const auto tpol = tgt.make_policy();
+    const auto view = P.view();
+    const long long dim = static_cast<long long>(src.dim());
+    int n_threads = 1;
+#ifdef _OPENMP
+    n_threads = omp_get_max_threads();
+#endif
+    std::vector<C> partial(static_cast<std::size_t>(n_threads), C(0.0, 0.0));
+#ifdef _OPENMP
+#pragma omp parallel num_threads(n_threads)
+#endif
+    {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        C acc(0.0, 0.0);
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (long long ri = 0; ri < dim; ++ri) {
+            const std::size_t r = static_cast<std::size_t>(ri);
+            if (ket[r] == C(0.0, 0.0)) continue;
+            const C b = ket[r] * src.inv_norms[r];
+            for (int g = 0; g < src.group_size; ++g) {
+                const std::uint64_t u = spol.apply_perm(src.reps[r], g);
+                const C bg = b * std::conj(src.characters[static_cast<std::size_t>(g)]);
+                ed::ops::for_each_connection(view, u, [&](std::uint64_t t, const C& h) {
+                    C proj;
+                    const std::int64_t j = tpol.index_and_projection(t, proj);
+                    if (j < 0) return;
+                    acc += std::conj(bra[static_cast<std::size_t>(j)]) * proj * h * bg;
+                });
+            }
+        }
+        partial[static_cast<std::size_t>(tid)] = acc;
+    }
+    C total(0.0, 0.0);
+    for (const C& p : partial) total += p;
+    return total / std::sqrt(static_cast<double>(src.group_size) * static_cast<double>(tgt.group_size));
 }
 
 using Complex = std::complex<double>;
