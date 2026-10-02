@@ -8,8 +8,10 @@
 #include <Eigen/Eigenvalues>
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
 #include <map>
+#include <numeric>
 #include <random>
 #include <stdexcept>
 #include <vector>
@@ -157,6 +159,89 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     return true;
 }
 
+// e^{2 pi i p / L}, exact at the quarter turns.
+[[nodiscard]] Complex root_of_unity(long long p, long long L) {
+    p %= L;
+    if ((4 * p) % L == 0) {
+        switch ((4 * p) / L) {
+            case 0: return {1.0, 0.0};
+            case 1: return {0.0, 1.0};
+            case 2: return {-1.0, 0.0};
+            default: return {0.0, -1.0};
+        }
+    }
+    const double th = 6.283185307179586476925286766559 * static_cast<double>(p) / static_cast<double>(L);
+    return {std::cos(th), std::sin(th)};
+}
+
+// The characters of an ABELIAN group, exactly: chi(x) = e^{2 pi i phase(x) / L} with L the
+// exponent (the lcm of the element orders) and integer phases. Built one generator at a time:
+// with H the subgroup found so far and g outside it, let m be the least power with g^m in H;
+// every element of <H, g> is h g^k (h in H, 0 <= k < m) exactly once, and each character chi
+// of H extends in exactly m ways, chi'(g) = e^{2 pi i b / L} with m b = phase_chi(g^m) mod L,
+// i.e. b = phase_chi(g^m) / m + j L / m. The trivial character comes first.
+[[nodiscard]] std::vector<IrrepData> abelian_characters(const std::vector<std::vector<int>>& mult, int e) {
+    const int n = static_cast<int>(mult.size());
+    const auto mul = [&mult](int a, int b) {
+        return mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)];
+    };
+    long long L = 1;
+    for (int a = 0; a < n; ++a) {
+        long long ord = 1;
+        for (int x = a; x != e; x = mul(x, a)) ++ord;
+        L = std::lcm(L, ord);
+    }
+    std::vector<int> elems{e};                                  // H, in construction order
+    std::vector<char> in_H(static_cast<std::size_t>(n), 0);
+    in_H[static_cast<std::size_t>(e)] = 1;
+    std::vector<std::vector<long long>> phase{std::vector<long long>(static_cast<std::size_t>(n), 0)};
+    for (int g = 0; g < n; ++g) {
+        if (in_H[static_cast<std::size_t>(g)]) continue;
+        std::vector<int> gk{e};                                  // g^0 .. g^(m-1)
+        int x = g;
+        while (!in_H[static_cast<std::size_t>(x)]) { gk.push_back(x); x = mul(x, g); }
+        const int gm = x;                                        // g^m, in H
+        const long long m = static_cast<long long>(gk.size());
+        std::vector<int> grown;
+        grown.reserve(elems.size() * gk.size());
+        for (std::size_t k = 0; k < gk.size(); ++k)
+            for (int h : elems) grown.push_back(mul(h, gk[k]));
+        std::vector<std::vector<long long>> next;
+        next.reserve(phase.size() * static_cast<std::size_t>(m));
+        for (const auto& chi : phase) {
+            const long long a = chi[static_cast<std::size_t>(gm)];
+            if (a % m != 0) throw std::logic_error("abelian_characters: a character does not extend");
+            for (long long j = 0; j < m; ++j) {
+                const long long b = (a / m + j * (L / m)) % L;
+                std::vector<long long> ext(static_cast<std::size_t>(n), 0);
+                for (std::size_t k = 0; k < gk.size(); ++k)
+                    for (std::size_t i = 0; i < elems.size(); ++i)
+                        ext[static_cast<std::size_t>(grown[k * elems.size() + i])] =
+                            (chi[static_cast<std::size_t>(elems[i])] + static_cast<long long>(k) * b) % L;
+                next.push_back(std::move(ext));
+            }
+        }
+        phase = std::move(next);
+        elems = std::move(grown);
+        for (int y : elems) in_H[static_cast<std::size_t>(y)] = 1;
+    }
+    std::vector<IrrepData> out;
+    out.reserve(phase.size());
+    for (const auto& chi : phase) {
+        IrrepData ir;
+        ir.dim = 1;
+        ir.character.resize(static_cast<std::size_t>(n));
+        ir.matrices.resize(static_cast<std::size_t>(n));
+        for (int a = 0; a < n; ++a) {
+            const Complex c = root_of_unity(chi[static_cast<std::size_t>(a)], L);
+            ir.character[static_cast<std::size_t>(a)] = c;
+            ir.matrices[static_cast<std::size_t>(a)] = {c};
+        }
+        out.push_back(std::move(ir));
+    }
+    return out;
+}
+
 }  // namespace
 
 GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
@@ -238,6 +323,12 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
         ++nclasses;
     }
     gi.num_classes = nclasses;
+
+    // Abelian (every class one element): the characters in closed form.
+    if (nclasses == n) {
+        gi.irreps = abelian_characters(gi.mult, e);
+        return gi;
+    }
 
     // Numerical decomposition; retry a few seeds if a draw is degenerate.
     std::vector<IrrepData> irreps;

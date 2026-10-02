@@ -30,6 +30,13 @@
 //
 // The result is gauge-dependent only up to a unitary within each irrep (the
 // physics — block spectra and d_Γ degeneracies — is gauge-invariant).
+//
+// An ABELIAN group (every conjugacy class one element) skips the eigensolve: its
+// characters are built exactly, as integer phases modulo the group exponent, one
+// generator at a time (irreps.cpp). The trivial character comes first. A large
+// abelian group (|A| ~ 10^3, e.g. many local Z2 swaps) has near-degenerate
+// commutant eigenvalues in every random draw, which the numerical route cannot
+// separate.
 // =============================================================================
 
 #include <complex>

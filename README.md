@@ -50,8 +50,10 @@ and uses everything H has:
   automorphism (`pynauty`) or given as generators. The abelian part gives momenta; the
   point group gives little groups, with one- and higher-dimensional irreps.
 - **Spin flip** and **time reversal**.
-- **Total spin S** (`total_spin=S`) when H is SU(2) symmetric, including with a scalar
-  chirality term.
+
+`auto()` does not use total spin. `Symmetry(total_spin=S)` is an explicit restriction to the
+spin-S multiplets (one tower), for an H that is SU(2) symmetric, including with a scalar
+chirality term; H without SU(2) is refused.
 
 `Symmetry.select(sz=, momentum={T: theta}, irrep_character={R: chi})` restricts any verb
 to some sectors. Each level reports its momentum (`result.momentum(i, translations)`) and

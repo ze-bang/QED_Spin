@@ -118,3 +118,63 @@ TEST_CASE("irreps: D_4 (order 8) has four 1-D and one 2-D irrep", "[irreps][nona
             for (int e = 0; e < 4; ++e) REQUIRE(std::abs(prod[e] - Dab[e]) < 1e-6);
         }
 }
+
+TEST_CASE("irreps: abelian characters are exact homomorphisms", "[irreps][abelian]") {
+    // Z_2 x Z_4 x Z_3 on 2 + 4 + 3 sites: not cyclic in its first factors, order 24.
+    std::vector<int> a(9), b(9), c(9);
+    for (int i = 0; i < 9; ++i) a[i] = b[i] = c[i] = i;
+    a[0] = 1; a[1] = 0;
+    for (int i = 0; i < 4; ++i) b[2 + i] = 2 + (i + 1) % 4;
+    for (int i = 0; i < 3; ++i) c[6 + i] = 6 + (i + 1) % 3;
+    auto G = generate_group({a, b, c});
+    REQUIRE(G.size() == 24);
+    const auto gi = decompose_irreps(G, 9);
+    REQUIRE(gi.irreps.size() == 24);
+    const int n = gi.order;
+    int e = -1;
+    for (int x = 0; x < n && e < 0; ++x) if (gi.mult[x][x] == x) e = x;
+    for (int x = 0; x < n; ++x) REQUIRE(gi.irreps[0].character[x] == Complex(1.0, 0.0));   // trivial first
+    for (const auto& ir : gi.irreps) {
+        REQUIRE(ir.dim == 1);
+        REQUIRE(ir.character[e] == Complex(1.0, 0.0));
+        for (int x = 0; x < n; ++x) {
+            REQUIRE(std::abs(std::abs(ir.character[x]) - 1.0) < 1e-15);
+            REQUIRE(ir.matrices[x].size() == 1);
+            REQUIRE(ir.matrices[x][0] == ir.character[x]);
+            for (int y = 0; y < n; ++y)
+                REQUIRE(std::abs(ir.character[x] * ir.character[y] - ir.character[gi.mult[x][y]]) < 1e-14);
+        }
+    }
+    for (std::size_t p = 0; p < gi.irreps.size(); ++p)
+        for (std::size_t q = 0; q < gi.irreps.size(); ++q) {
+            const Complex ov = char_overlap(gi.irreps[p].character, gi.irreps[q].character);
+            REQUIRE(std::abs(ov - (p == q ? Complex(1, 0) : Complex(0, 0))) < 1e-14);
+        }
+}
+
+TEST_CASE("irreps: (Z_2)^10 gets its 1024 characters exactly", "[irreps][abelian]") {
+    // Ten commuting local swaps: |A| = 1024, whose random commutant eigensolve had
+    // near-degenerate eigenvalues in every draw (audit C06-symmetry-core-03).
+    constexpr int n = 1024;
+    std::vector<std::vector<int>> mult(n, std::vector<int>(n));
+    for (int x = 0; x < n; ++x)
+        for (int y = 0; y < n; ++y) mult[x][y] = x ^ y;
+    const auto gi = ed::symmetry::decompose_irreps_tables(mult);
+    REQUIRE(gi.irreps.size() == static_cast<std::size_t>(n));
+    std::vector<int> seen(n, 0);
+    for (const auto& ir : gi.irreps) {
+        int key = 0;
+        for (int bit = 0; bit < 10; ++bit) {
+            const Complex v = ir.character[1 << bit];
+            REQUIRE((v == Complex(1.0, 0.0) || v == Complex(-1.0, 0.0)));
+            if (v.real() < 0) key |= 1 << bit;
+        }
+        REQUIRE(seen[key]++ == 0);   // distinct
+        int broken = 0;
+        for (int bit = 0; bit < 10; ++bit)
+            for (int y = 0; y < n; ++y)
+                broken += ir.character[(1 << bit) ^ y] != ir.character[1 << bit] * ir.character[y];
+        REQUIRE(broken == 0);
+    }
+    for (int x = 0; x < n; ++x) REQUIRE(gi.irreps[0].character[x] == Complex(1.0, 0.0));
+}
