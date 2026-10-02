@@ -94,9 +94,11 @@ struct Spec {
     bool use_sz        = true;      ///< decompose by Sz / parity when H conserves it
     int  spin_flip     = -1;        ///< -1 auto, 0 off, 1 require
     int  time_reversal = -1;        ///< -1 auto, 0 off, 1 require
-    /// Restrict to total spin S = two_S / 2 (-1: no restriction). H must be SU(2)
-    /// symmetric; the walk runs the Sz = S sector with every block projected onto the
-    /// spin-S tower, and each level counts 2S + 1 times.
+    /// Restrict to total spin S = two_S / 2 (-1: no restriction). H must be SU(2) symmetric,
+    /// up to a uniform field along z. Without the field the walk runs the Sz = S sector with
+    /// every block projected onto the spin-S tower, and each level counts 2S + 1 times; with
+    /// it every Sz member is a level of its own, solved in its Sz sector (n_up and sz_parity
+    /// then pick members).
     int  two_S         = -1;
     std::vector<int> only_k0;       ///< restrict to these star representatives
     std::vector<int> only_irrep;    ///< restrict to these little-group irreps
@@ -118,6 +120,9 @@ struct Subspace {
     int n_up      = -1;
     int sz_parity = -1;
     int mirror    = 1;   ///< 2 when the flip image of this subspace is folded in
+    /// The S^z members each of its levels stands for: 2S + 1 where an SU(2) tower is solved at
+    /// its Sz = S member, else 1.
+    int members   = 1;
 };
 
 [[nodiscard]] std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s);
@@ -186,7 +191,7 @@ struct Level {
     /// block without a co-group decomposition.
     std::vector<std::pair<int, Complex>> irrep_characters;
     int           mirror       = 1;         ///< flip fold of the subspace
-    std::uint64_t multiplicity = 1;         ///< tag.multiplicity x mirror
+    std::uint64_t multiplicity = 1;         ///< tag.multiplicity x mirror x the subspace's members
     int           vector       = -1;        ///< index into EigsResult::vectors, -1 = none
 };
 
@@ -222,7 +227,9 @@ struct EigsResult {
     std::vector<Level>       levels;        ///< ascending, cut so that multiplicities reach k
     std::vector<BlockVector> vectors;
     int                      n_sites = 0;   ///< of the H the result was computed for
-    std::uint64_t            total_dim = 0; ///< sum of dim x multiplicity over the walk
+    /// Sum of dim x multiplicity over the walk; under total_spin the tower's states (2S + 1 per
+    /// multiplet) when nothing is selected, else 0 (a block's tower is counted only by solving it).
+    std::uint64_t            total_dim = 0;
     std::size_t              partial_blocks = 0;  ///< blocks that could not certify their rows
     bool                     complete = true;     ///< no uncertified level can lie below the cut
     bool                     flip_engaged = false;

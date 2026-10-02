@@ -10,6 +10,7 @@
 #include <ed/core/footprint.h>
 #include <ed/core/memory.h>
 #include <ed/sectors/sectors.h>
+#include <ed/basis/su2_dims.h>
 #include <ed/core/interrupt.h>
 #include <ed/ops/casimir.h>
 #include <ed/ops/casimir_projector.h>
@@ -103,8 +104,22 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     b.ghost = wrapped->ghost_shift();
     b.projector = proj;
     b.op = wrapped;
-    b.multiplicity *= static_cast<std::uint64_t>(s.two_S + 1);
+    b.multiplicity *= static_cast<std::uint64_t>(sub.members);
     return b;
+}
+
+/// The S^z members a level stands for: 2S + 1 for a whole SU(2) multiplet solved at its Sz = S
+/// member, else 1 (H in a uniform field: every member is a level of its own).
+inline std::uint64_t members(const Level& L) {
+    const std::uint64_t base = L.tag.multiplicity * static_cast<std::uint64_t>(L.mirror);
+    return base > 0 ? L.multiplicity / base : 1;
+}
+
+/// The states a total-spin restriction over `subs` holds: the members of every multiplet.
+inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites, int two_S) {
+    std::uint64_t members = 0;
+    for (const Subspace& sub : subs) members += static_cast<std::uint64_t>(sub.members);
+    return members * ed::symmetry::multiplet_count(n_sites, two_S);
 }
 
 /// Dense spectra of many blocks: on the host one block at a time, or -- on a device lane --
@@ -117,14 +132,18 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
 /// device solve fails.
 class DenseBatch {
 public:
-    explicit DenseBatch(Device device) : device_(device) {}
+    DenseBatch(Device device, const char* verb) : device_(device), verb_(verb) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
     std::size_t add(const ed::LinearOperator& mv) {
         using namespace ed::solvers::lg_detail;
         const std::size_t id = spectra_.size();
         spectra_.emplace_back();
-        lanes_.push_back(ed::place(device_, {ed::Task::DenseBatch, mv.dim()}));
+        ed::BlockRequest req;
+        req.task = ed::Task::DenseBatch;
+        req.dim  = mv.dim();
+        req.verb = verb_;
+        lanes_.push_back(ed::place(device_, req));
         const std::uint64_t bytes = 16 * mv.dim() * mv.dim();
         if (ed::on_device(lanes_.back())) {
             if (budget_ == 0) budget_ = batch_budget();
@@ -199,6 +218,7 @@ private:
     }
 
     Device device_;
+    const char* verb_;
     std::vector<ed::Lane>             lanes_;
     ed::solvers::LgBlocksPacked       packed_;
     std::vector<std::size_t>          queued_;
@@ -238,10 +258,11 @@ using Keep = ed::ops::SzKeep;
 /// symmetries preserve.
 class Averager {
 public:
-    // Under a total-spin restriction a block holds one member of each multiplet: an O that is not
-    // SU(2) invariant enters through its SU(2)-scalar part, whose expectation is the multiplet
-    // average (and whose thermal trace with the SU(2)-symmetric H is O's).
-    Averager(const Spec& s, int n_sites) : su2_(s.two_S >= 0) {
+    // Where a level stands for a whole multiplet (`multiplets`: total spin with an SU(2)-symmetric
+    // H) an O that is not SU(2) invariant enters through its SU(2)-scalar part, whose expectation
+    // is the multiplet average (and whose thermal trace with that H is O's). In a uniform field
+    // every member is a level of its own and O enters as it is.
+    Averager(const Spec& s, int n_sites, bool multiplets) : su2_(multiplets) {
         std::vector<Perm> gens = abelian_or_identity(s, n_sites);
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);

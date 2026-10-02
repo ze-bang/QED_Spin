@@ -162,6 +162,17 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
     return out;
 }
 
+// A dynamics block's placement request: its sectors are k-sector RepSectorMatVecs, which always
+// have a device kernel. Fields by name -- a positional list silently shifted when one was added.
+ed::BlockRequest dynamics_request(ed::Task task, std::uint64_t dim) {
+    ed::BlockRequest r;
+    r.task = task;
+    r.dim  = dim;
+    r.device_kernel = true;
+    r.verb = "dynamics";
+    return r;
+}
+
 // Same momentum: the characters of the (shared) abelian group agree.
 bool same_momentum(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSectorData& b) {
     if (a.group_size != b.group_size) return false;
@@ -224,6 +235,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     if (s.time_reversal == 1 && !ed::ops::conjugation_invariant(H.canonical()))
         throw ed::InvalidRequest("dynamics: time_reversal='require', but H has complex coefficients");
     const Spec u = unfolded(s);
+    // Under total_spin with an SU(2)-symmetric H a level stands for a whole multiplet, solved at
+    // its Sz = S member; in a uniform field every member is a level of its own (subspaces()
+    // lists their Sz sectors).
+    const bool whole = s.two_S >= 0 && subspaces(H, u).front().members > 1;
     const std::vector<Perm> A = detail::abelian_or_identity(u, n_sites);
     const ed::ops::MaskedOperator& Oc = O.canonical();
     const auto shifts = n_up_shifts(Oc);
@@ -269,13 +284,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         const double window = d.degeneracy_tol * ed::numerics::scale_or_one(H.norm_bound());
         const auto manifold = ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0,
                                               out.placement);
-        // With a spin tower the solve returns the Sz = S member of each multiplet; the other
-        // members follow by total S- (normalised), each in the same momentum sector one Sz lower.
+        // With whole multiplets the solve returns the Sz = S member of each; the other members
+        // follow by total S- (normalised), each in the same momentum sector one Sz lower.
         std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)
         const auto s_minus = total_s_minus(n_sites);
         for (const auto& [L, v] : manifold) {
             states.push_back({v, L.tag.sz_parity});
-            for (int m = 0; m < s.two_S; ++m) {
+            for (int m = 0; whole && m < s.two_S; ++m) {
                 const BlockVector& x = states.back().first;
                 std::shared_ptr<const ed::symmetry::RepSectorData> below;
                 stream_sectors({x.basis->n_up - 1, -1, 1}, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
@@ -339,7 +354,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                     ed::observables::CfSpectralResult r;
                     auto t_cf = std::chrono::steady_clock::now();
                     // Target sectors are k-sector RepSectorMatVecs: they always have a device kernel.
-                    const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsCf, n, false, 1, true, "dynamics"});
+                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, n));
                     if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
                         Ht->enable_device(true);
@@ -391,9 +406,14 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     };
     std::vector<Subspace> source_subs = subspaces(H, u);
     std::shared_ptr<::Operator> s2c;
-    const int n0 = source_subs.front().n_up;
+    // n0: the tower's Sz = S sector. A whole multiplet's other members are sources in their own
+    // Sz sectors, each counted once.
+    const int n0 = s.two_S >= 0 ? ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S) : source_subs.front().n_up;
     if (s.two_S >= 0) {
-        for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 - m, -1, 1});
+        if (whole) {
+            source_subs.front().members = 1;
+            for (int m = 1; m <= s.two_S; ++m) source_subs.push_back({n0 - m, -1, 1});
+        }
         s2c = detail::s2_carrier_for(u, n_sites);
     }
     // Sector dimensions per momentum (its characters on A) at Sz = S and S + 1, measured once by
@@ -569,7 +589,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
             if (s.two_S >= 0) {
                 j.tower_dim = tower_dim_of(src);
                 if (j.tower_dim == 0) continue;
-                if (sub.n_up == n0) multiplets += j.tower_dim;
+                if (si == 0) multiplets += j.tower_dim;   // one member of each multiplet per Sz sector
                 j.s2    = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
                     j.s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
@@ -594,7 +614,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
 
         if (si == 0 && s.two_S >= 0 && u.only_momentum.empty()
-            && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))   // all at Sz = S: known now
+            && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))   // all in the first sector: known now
             throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
                                      + std::to_string(s.two_S) + "/2 multiplets, expected "
                                      + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
@@ -604,7 +624,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         std::vector<std::size_t> host_jobs, device_jobs;
         for (std::size_t i = 0; i < jobs.size(); ++i) {
             const std::size_t dim = jobs[i].src->rd->reps.size();
-            const ed::Lane lane = ed::place(d.device, {ed::Task::DynamicsFtlm, dim, false, 1, true, "dynamics"});
+            const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsFtlm, dim));
             (ed::on_device(lane) ? device_jobs : host_jobs).push_back(i);
             out.placement.add(lane);
         }

@@ -13,6 +13,7 @@
 #include <ed/ops/algebra.h>
 
 #include <complex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,10 @@ enum class SzContent { U1, Parity, None };
 
 /// [H, S^a_tot] = 0 for a = +, -, z: full spin-rotation invariance.
 [[nodiscard]] bool su2_invariant(const MaskedOperator& H, double rtol = kInvarianceRtol);
+
+/// The h for which H - h S^z_tot is SU(2) invariant (0 when H is), else nullopt: an
+/// SU(2)-symmetric H in a uniform field along z keeps S^2 and S^z as good quantum numbers.
+[[nodiscard]] std::optional<double> su2_field(const MaskedOperator& H, double rtol = kInvarianceRtol);
 
 /// The SU(2)-scalar part of O: its average over every global spin rotation,
 /// int dR U_R O U_R^dagger, whose expectation in a spin multiplet is the multiplet average of O

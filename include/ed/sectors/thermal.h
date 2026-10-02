@@ -46,6 +46,8 @@ struct ThermalCurves {
     std::vector<double> M, chi;          ///< empty unless H conserves Sz
     std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables
     double        e0        = 0.0;       ///< lowest energy seen (exact: the ground state)
+    /// States in the ensemble: block dimension x multiplicity summed over the blocks; under a
+    /// total-spin restriction the tower's states (2S + 1 per multiplet).
     std::uint64_t total_dim = 0;
     std::size_t   blocks    = 0;
     std::size_t   device_blocks = 0;   ///< blocks sampled on a GPU

@@ -65,6 +65,20 @@ Breaking changes so far:
   average over all spin rotations: S^z_i S^z_j enters as S_i.S_j / 3), whose expectation is the
   multiplet average; they refused it. `spin_flip='require'` with `total_spin` or an explicit
   `sz` != N/2 no longer refuses a flip-symmetric H.
+- **`total_spin` composes with OFTLM and a uniform field.** `thermal(method="ftlm",
+  exact_states=...)` samples one spin tower (it refused): the exact states are tower states and
+  the random starts are projected onto the tower. An SU(2)-symmetric H in a uniform field along z
+  is accepted (it was refused): every Sz member of a multiplet is then a level of its own,
+  solved in its own Sz sector (multiplicity 1, `sz` picks a member), and observables enter as
+  they are. C++: `Subspace::members`, `ed::ops::su2_field`, `OftlmOptions::seed_transform` /
+  `trace_dim`.
+- **Fixed: spin-tower counts under a point group.** Sampled thermal under `total_spin` matched a
+  block's Sz = S and Sz = S + 1 dimensions by engine irrep index, which differs where the
+  co-group acts as a scalar on one sector: it raised ("55 multiplets, expected 54"), or with a
+  selection gave a wrong ln Z silently. Blocks are now matched by physical labels (momentum and
+  co-group characters). `spectrum` and exact `thermal` check that their levels hold the whole
+  tower, as the sampled path did, and `total_dim` counts tower states (eigs: without a
+  selection).
 - **Fixed: stars that time reversal closes.** For a real H whose momenta k and -k are related by
   time reversal but by no spatial operation (translations only, or a chain without its
   reflection), a level counts both but carried no sign of it: `vectors()` returned too few vectors,

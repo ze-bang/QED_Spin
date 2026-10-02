@@ -517,14 +517,18 @@ def verify_content(m):
     parity = bool(np.all((pop[r] - pop[c]) % 2 == 0))
     real = bool(np.all(np.abs(v.imag) < 1e-12))
     flip = _commutes_states(H, np.arange(dim, dtype=np.int64) ^ (dim - 1))
-    su2 = False
+    su2 = su2_field = False
     if u1:
         Sp = sparse_op([(1.0, (("+", i),)) for i in range(N)], N)
-        su2 = _spmax(H @ Sp - Sp @ H) < 1e-9
+        C = H @ Sp - Sp @ H
+        su2 = _spmax(C) < 1e-9
+        # SU(2) up to a uniform field h S^z_tot: [H, S^+_tot] = h S^+_tot
+        h = complex(C.multiply(Sp.conj()).sum() / Sp.multiply(Sp.conj()).sum())
+        su2_field = abs(h.imag) < 1e-12 and _spmax(C - h.real * Sp) < 1e-9
     trans = bool(m["trans"]) and all(_commutes_states(H, perm_states(T, N)) for T in m["trans"])
     point = [list(map(int, P)) for P in m["point"] if _commutes_states(H, perm_states(P, N))]
     return {"N": N, "hermitian": bool(herm), "u1": u1, "parity": parity, "real": real, "flip": bool(flip),
-            "su2": bool(su2), "trans": trans, "point": point,
+            "su2": bool(su2), "su2_field": bool(su2_field), "trans": trans, "point": point,
             "s_H": float(sum(abs(c) for c, _ in m["terms"]))}
 
 
@@ -670,9 +674,9 @@ def gen_invalid(rng, model, content):
         kinds["flip_require"] = 2
     if not content["real"]:
         kinds["tr_require"] = 2
-    if not content["su2"]:
+    if not content["su2_field"]:            # total_spin also takes SU(2) in a uniform field
         kinds["su2_on_non_su2"] = 2
-    else:
+    if content["su2"]:
         kinds["bad_S"] = 1.5
         kinds["sz_su2_disagree"] = 1
     if not content["u1"]:

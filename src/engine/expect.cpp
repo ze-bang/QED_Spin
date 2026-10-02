@@ -29,7 +29,7 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
     // <v|Obar|v> is one rep_matrix_elements sweep per (basis, flip, keep) over all operators --
     // and their conjugates, for a time-reversal-folded level: <K v|A|K v> = conj(<v|A^K|v>) --
     // and all the levels sharing them. No matvec, no CSR, a fixed order.
-    detail::Averager avg(s, n_sites);
+    detail::Averager avg(s, n_sites, s.two_S >= 0 && !r.levels.empty() && detail::members(r.levels.front()) > 1);
     const std::size_t n_ops = ops.size();
     std::vector<std::vector<Complex>> out(r.levels.size(), std::vector<Complex>(n_ops));
     struct Group { std::vector<std::size_t> levels; bool folded = false; };

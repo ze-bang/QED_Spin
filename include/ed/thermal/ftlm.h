@@ -118,6 +118,10 @@ struct OftlmOptions {
     /// block, certified by their residuals. Empty is plain FTLM.
     std::vector<double>                            exact_values;
     std::vector<std::vector<std::complex<double>>> exact_vectors;
+    /// Applied to every random start before it is orthogonalised to the exact states (a
+    /// projection onto a spin tower); the random part's trace then runs over trace_dim states.
+    std::function<void(std::complex<double>*, std::size_t)> seed_transform;
+    std::uint64_t trace_dim = 0;   ///< 0: the block's N
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)

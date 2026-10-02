@@ -103,6 +103,7 @@ Curves oftlm_cpu(
         std::mt19937 gen = ed::thermal::sample_engine(base_seed, s);
 
         ComplexVector v = gaussian_vector(N, gen);
+        if (opts.seed_transform) opts.seed_transform(v.data(), N);
         // Gram-Schmidt against the exact eigenvectors: v -= sum_i |i><i|v>.
         for (const auto& ev : exact_vecs) {
             Complex ov(0.0, 0.0);
@@ -147,11 +148,10 @@ Curves oftlm_cpu(
         if (!sp.ritz.empty()) e_min = std::min(e_min, sp.ritz.front());
     if (!std::isfinite(e_min)) e_min = 0.0;
 
-    // (D - N_V)/R prefactor for the stochastic (complement-space) part.
-    const double pref = (R_eff > 0)
-        ? (static_cast<double>(N) - static_cast<double>(Nv))
-              / static_cast<double>(R_eff)
-        : 0.0;
+    // (D - N_V)/R prefactor for the stochastic (complement-space) part; D is the space the
+    // random starts span (a spin tower's dimension when they are projected onto it).
+    const double D = static_cast<double>(opts.trace_dim > 0 ? opts.trace_dim : N);
+    const double pref = (R_eff > 0) ? (D - static_cast<double>(Nv)) / static_cast<double>(R_eff) : 0.0;
 
     // -------------------------------------------------------------------------
     // 4. Combine per beta.

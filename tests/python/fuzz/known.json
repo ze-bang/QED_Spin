@@ -2,21 +2,6 @@
  "comment": "Accepted known failures of tests/python/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/python/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
  "accepted": [
   {
-   "name": "oftlm_total_spin_refused",
-   "ledger": "K1-sym-composition-05",
-   "why": "OFTLM (exact_states > 0) is refused under total_spin",
-   "match": {"task.kind": ["th_oftlm"], "status": ["refused"], "device": ["cpu"], "request.total_spin": {"absent": false},
-             "message": {"re": "exact_states \\(OFTLM\\) cannot be restricted to one spin tower"}}
-  },
-  {
-   "name": "total_spin_tower_count",
-   "ledger": "K1-sym-composition-03",
-   "why": "FTLM / mTPQ tower sampling under total_spin matches the Sz = S and Sz = S + 1 blocks by engine irrep index; with a point group whose co-group collapses in one sector the multiplet count is wrong and thermal raises",
-   "match": {"task.kind": ["th_ftlm", "th_mtpq", "th_obs"], "status": ["crash"], "extra.error_class": ["RuntimeError"],
-             "request.total_spin": {"absent": false},
-             "message": {"re": "thermal: (the blocks hold [0-9]+ spin-[0-9]+/2 multiplets, expected [0-9]+|a block is larger at Sz = S \\+ 1 than at Sz = S)"}}
-  },
-  {
    "name": "gpu_w_block_parity_or_full_space",
    "ledger": "K1-sym-composition-02",
    "why": "parity / full-space runs put every point-group star through the isotypic W path, which has no device kernel; device='gpu' refuses the block",

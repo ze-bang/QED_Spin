@@ -53,7 +53,8 @@ and uses everything H has:
 
 `auto()` does not use total spin. `Symmetry(total_spin=S)` is an explicit restriction to the
 spin-S multiplets (one tower), for an H that is SU(2) symmetric, including with a scalar
-chirality term; H without SU(2) is refused.
+chirality term, and also in a uniform field along z (each Sz member is then a level of its
+own); any other H is refused.
 
 `Symmetry.select(sz=, momentum={T: theta}, irrep_character={R: chi})` restricts any verb
 to some sectors. Each level reports its momentum (`result.momentum(i, translations)`) and

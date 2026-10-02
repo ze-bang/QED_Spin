@@ -164,6 +164,17 @@ bool su2_invariant(const MaskedOperator& H, double rtol) {
     return true;
 }
 
+std::optional<double> su2_field(const MaskedOperator& H, double rtol) {
+    // [H0 + h S^z_tot, S^+_tot] = h S^+_tot for an SU(2)-invariant H0, whose terms all have
+    // coefficient h: |h| is the commutator's largest one, and its sign the one that leaves an
+    // invariant H0.
+    const int n = H.n_sites();
+    const double a = commutator(H, total(n, '+')).max_abs();
+    for (double h : {a, -a})
+        if (su2_invariant(H - total(n, 'z').scaled(h), rtol)) return h;
+    return std::nullopt;
+}
+
 }  // namespace ed::ops
 
 namespace ed::ops {

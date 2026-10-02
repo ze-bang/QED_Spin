@@ -13,6 +13,7 @@
 #include <ed/parallel/numa.h>             // pin_omp_threads_once
 #include <ed/sectors/sectors.h>
 #include <ed/basis/bits.h>
+#include <ed/basis/su2_dims.h>
 
 #include <algorithm>
 #include <cmath>
@@ -224,18 +225,31 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
 
     std::vector<Subspace> out;
     if (s.two_S >= 0) {
-        if (c != SzContent::U1 || !ed::ops::su2_invariant(h))
-            throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H");
+        // An SU(2)-symmetric H keeps whole multiplets: each is solved at its Sz = S member and
+        // counts 2S + 1 times. A uniform field h S^z_tot splits them by Sz, and every member is a
+        // level of its own, solved in its own Sz sector (audit C07-su2-06).
+        const bool whole = c == SzContent::U1 && ed::ops::su2_invariant(h);
+        if (!whole && !(c == SzContent::U1 && ed::ops::su2_field(h)))
+            throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H "
+                                        "(a uniform field along z is allowed)");
         if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
             throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "
                                         + std::to_string(n_sites));
         const int n = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);   // the Sz = S member
+        if (!whole) {
+            for (int m = n - s.two_S; m <= n; ++m)
+                if ((s.n_up < 0 || m == s.n_up) && (s.sz_parity < 0 || m % 2 == s.sz_parity)) out.push_back({m, -1, 1, 1});
+            if (out.empty())
+                throw ed::InvalidRequest("sectors: n_up / sz_parity name no Sz member of the spin-S tower "
+                                         "(n_up " + std::to_string(n - s.two_S) + ".." + std::to_string(n) + ")");
+            return out;
+        }
         if (s.n_up >= 0 && s.n_up != n)
             throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
         if (s.sz_parity >= 0 && n % 2 != s.sz_parity)
             throw ed::InvalidRequest("sectors: sz_parity and the total-spin restriction name disjoint sectors "
                                      "(the spin-S tower is solved at n_up = " + std::to_string(n) + ")");
-        out.push_back({n, -1, 1});
+        out.push_back({n, -1, 1, s.two_S + 1});
         return out;
     }
     if (!s.use_sz || c == SzContent::None) {
@@ -407,6 +421,9 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         });
     }
     detail::require_some_block(s, n_blocks, "eigs");
+    // Under total_spin a block's tower dimension is not known before it is solved; the whole
+    // tower's is.
+    if (s.two_S >= 0 && !detail::has_selection(s)) res.total_dim = detail::tower_states(subs, n_sites, s.two_S);
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) { return a.estimate < b.estimate; });
     for (const Candidate& c : candidates) {
@@ -493,11 +510,12 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     ed::parallel::pin_omp_threads_once();
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
-    detail::DenseBatch batch(device);
+    detail::DenseBatch batch(device, "spectrum");
     struct Entry { std::size_t id; Level proto; detail::BlockOp filter; };
     std::vector<Entry> entries;
     std::size_t n_blocks = 0;
-    for (const Subspace& sub : subspaces(H, s)) {
+    const auto subs = subspaces(H, s);
+    for (const Subspace& sub : subs) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool tr_on, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
@@ -529,6 +547,13 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
             res.levels.push_back(L);
             res.total_dim += L.multiplicity;
         }
+    // Under total_spin the levels below the ghost must be the whole tower (audit C07-su2-05).
+    if (s.two_S >= 0 && !detail::has_selection(s)) {
+        const std::uint64_t want = detail::tower_states(subs, n_sites, s.two_S);
+        if (res.total_dim != want)
+            throw std::runtime_error("spectrum: the levels hold " + std::to_string(res.total_dim) + " states of total spin "
+                                     + std::to_string(s.two_S) + "/2, expected " + std::to_string(want));
+    }
     detail::require_some_level(s, res.levels.empty(), "spectrum");
     order_levels(res.levels, [](const Level& L) -> const Level& { return L; });
     return res;
@@ -571,9 +596,11 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
                                  + std::to_string(n_sites));
     require_normal(s, n_sites);          // a loaded result never went through the walk
     const int sector_nup = v.basis->n_up;
-    // A spin-S level is solved at its Sz = +S member (n_up = sector_nup); its members at
-    // Sz = S - m follow by m applications of total S-.
-    const bool lowered = s.two_S > 0 && n_up >= 0 && sector_nup >= 0 && n_up < sector_nup
+    // A level of a whole spin-S multiplet is solved at its Sz = +S member (n_up = sector_nup); its
+    // members at Sz = S - m follow by m applications of total S-. In a uniform field each member
+    // is a level of its own.
+    const bool whole = s.two_S > 0 && detail::members(level) > 1;
+    const bool lowered = whole && n_up >= 0 && sector_nup >= 0 && n_up < sector_nup
                          && n_up >= sector_nup - s.two_S;
     const bool mirrored = !lowered && n_up >= 0 && sector_nup >= 0 && sector_nup != n_up;
     if (n_up >= 0 && sector_nup != n_up && !lowered && !(level.mirror == 2 && sector_nup == n_sites - n_up))
@@ -638,7 +665,7 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
             for (std::size_t i = 0; i < x.size(); ++i) y[i] = std::conj(x[i]);
             return y;
         });
-    if (s.two_S > 0 && n_up < 0)   // the other members of an SU(2) multiplet: total S- (clears an up spin)
+    if (whole && n_up < 0)   // the other members of an SU(2) multiplet: total S- (clears an up spin)
         ops.push_back([&](const std::vector<Complex>& x) {
             std::vector<Complex> y(dim, Complex(0, 0));
             for (std::uint64_t st = 0; st < dim; ++st) {

@@ -37,9 +37,10 @@ def expect(H, ops, k: int = 1, *, sym: Optional[Symmetry] = None, device: str = 
     operator in each level's own symmetry block. The value is averaged over the level's
     symmetry multiplet -- the quantity that does not depend on which partner the solver
     returned; for a non-degenerate level it is just <psi|O|psi>. Correlators and structure
-    factors are operators like any other. With a total-spin restriction the multiplet
-    includes its 2S + 1 Sz members, so an operator that is not SU(2) invariant contributes its
-    SU(2)-scalar part (its average over all spin rotations).
+    factors are operators like any other. With a total-spin restriction and an SU(2)-symmetric
+    H the multiplet includes its 2S + 1 Sz members, so an operator that is not SU(2) invariant
+    contributes its SU(2)-scalar part (its average over all spin rotations); in a uniform field
+    each member is a level of its own.
     """
     single = not isinstance(ops, (list, tuple))
     ops = [ops] if single else list(ops)

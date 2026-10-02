@@ -17,8 +17,9 @@ into the engine's :class:`qed._core.sectors.Spec`:
 * ``spin_flip`` / ``time_reversal`` -- ``"auto"`` (use when H has it), ``"off"``,
   ``"require"`` (fail when H lacks it).
 * ``point_group`` -- ``False`` keeps only the abelian part.
-* ``total_spin`` -- a number S restricts to total spin S (H must be SU(2) symmetric);
-  each level then counts 2S + 1 times.
+* ``total_spin`` -- a number S restricts to total spin S. H must be SU(2) symmetric, up to
+  a uniform field along z: without the field each level counts 2S + 1 times (one multiplet);
+  with it every Sz member is a level of its own, and ``sz`` / ``sz_parity`` pick members.
 
 :meth:`select` narrows the sectors (a momentum, a little-group irrep named by its character,
 or the engine's star/irrep indices) without changing the symmetry.

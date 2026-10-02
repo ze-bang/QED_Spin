@@ -103,11 +103,98 @@ def test_total_spin_averages_an_operator_over_the_multiplet():
     np.testing.assert_allclose(th.O[0], th.O[1] / 3.0, atol=1e-12)
 
 
-def test_oftlm_under_total_spin_is_refused():
-    H = _ring(6)
-    with pytest.raises(ValueError, match="exact_states"):
-        qed.thermal(H, [1.0], method="ftlm", exact_states=4,
-                    sym=qed.Symmetry(spatial=None, total_spin=0))
+@pytest.mark.parametrize("S", [0, 1])
+def test_oftlm_samples_one_spin_tower(S):
+    # OFTLM under total_spin (audit K1-sym-composition-05): the exact states are tower states, the
+    # random starts are projected onto the tower, and its trace runs over the tower's states. With
+    # all but one tower state exact, the one random direction left is the last eigenvector, so
+    # OFTLM is exact; at high T ln Z counts the tower whatever the samples.
+    H = _ring(8)
+    sym = qed.Symmetry(spatial=None, total_spin=S)
+    T = [0.3, 1.0, 1e8]
+    exact = qed.thermal(H, T, method="exact", sym=sym)
+    full = qed.thermal(H, T, method="ftlm", exact_states=40, samples=3, seed=7, sym=sym)
+    np.testing.assert_allclose(full.lnZ, exact.lnZ, rtol=1e-10)
+    np.testing.assert_allclose(full.E, exact.E, rtol=1e-10, atol=1e-12)
+    assert not [d for d in full.diagnostics if d[0] == "oftlm_exact_states"]
+    few = qed.thermal(H, T, method="ftlm", exact_states=2, samples=6, seed=7, sym=sym)
+    np.testing.assert_allclose(few.lnZ[-1], exact.lnZ[-1], rtol=1e-6)
+
+
+def _towers(n, S):
+    # states of total spin S: 2S + 1 members per multiplet, M(N, S) = C(N, N/2 - S) - C(N, N/2 - S - 1)
+    return (2 * S + 1) * (math.comb(n, n // 2 - S) - math.comb(n, n // 2 - S - 1))
+
+
+def test_tower_sampling_pairs_blocks_by_their_labels():
+    # FTLM under total_spin counts a block's tower as its dimension at Sz = S less that of the
+    # same block at Sz = S + 1, matched by physical labels (audit K1-sym-composition-03). On the
+    # 12-ring with its reflection the S = 4 star at k = pi is projected at Sz = S but is one plain
+    # block at Sz = S + 1, where the co-group acts as a scalar; engine irrep indices overcounted it.
+    # At high T, ln Z counts the tower's states whatever the samples.
+    n, S = 12, 4
+    H = _ring(n)
+    T, R = _translations(n)[0], _reflection(n)
+    sym = qed.Symmetry(spatial=[T, R], total_spin=S)
+    hot = [1e8]
+    r = qed.thermal(H, hot, method="ftlm", samples=4, seed=3, sym=sym)
+    np.testing.assert_allclose(r.lnZ[0], math.log(_towers(n, S)), rtol=1e-6)
+    k_pi = {tuple(T): Fraction(1, 2)}
+    sel = qed.thermal(H, hot, method="ftlm", samples=4, seed=3, sym=sym.select(momentum=k_pi))
+    plain = qed.Symmetry(spatial=[T], point_group=False, total_spin=S).select(momentum=k_pi)
+    ref = qed.thermal(H, hot, method="exact", sym=plain)
+    np.testing.assert_allclose(sel.lnZ[0], ref.lnZ[0], rtol=1e-6)
+    np.testing.assert_allclose(sel.lnZ[0], math.log(9 * 5), rtol=1e-6)    # 5 multiplets at k = pi
+
+
+@pytest.mark.parametrize("spatial", [None, "ring"])
+def test_exact_paths_hold_the_whole_tower(spatial):
+    # spectrum and exact thermal keep the levels below the tower operator's ghost; together they
+    # must be the whole tower (audit C07-su2-05), as the sampled path already checks.
+    n, S = 8, 1
+    H = _ring(n)
+    groups = None if spatial is None else [_translations(n)[0], _reflection(n)]
+    sym = qed.Symmetry(spatial=groups, total_spin=S)
+    sp = qed.spectrum(H, sym=sym)
+    assert sum(L.multiplicity for L in sp.levels) == _towers(n, S)
+    th = qed.thermal(H, [1e8], method="exact", sym=sym)
+    np.testing.assert_allclose(th.lnZ[0], math.log(_towers(n, S)), rtol=1e-6)
+
+
+def test_total_spin_in_a_uniform_field():
+    # A uniform field h S^z_tot keeps S^2 and S^z, and splits each spin-S multiplet into members
+    # at E + h m (audit C07-su2-06): every member is then a level of its own, in its own Sz sector.
+    n, S, h = 8, 1, 0.3
+    H0, H = _ring(n), _ring(n)
+    for i in range(n):
+        H.add_one_body(qed.OP_SZ, i, h)
+    sym = qed.Symmetry(spatial=None, total_spin=S)
+    free = qed.spectrum(H0, sym=sym).levels
+    want = np.sort([L.energy + h * m for L in free for _ in range(L.multiplicity // (2 * S + 1))
+                    for m in range(-S, S + 1)])
+    sp = qed.spectrum(H, sym=sym)
+    np.testing.assert_allclose(sp.energies, want, atol=1e-10)
+    assert all(L.multiplicity == 1 for L in sp.levels)
+    np.testing.assert_allclose(qed.eigs(H, 4, sym=sym).energies[:4], want[:4], atol=1e-10)
+    top = qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=S, sz=n // 2 + S)).energies
+    np.testing.assert_allclose(top, np.sort([L.energy + h * S for L in free]), atol=1e-10)
+    T = [0.5, 2.0]
+    th = qed.thermal(H, T, method="exact", sym=sym)
+    np.testing.assert_allclose(th.lnZ, [np.log(np.sum(np.exp(-(want - want[0]) / t))) - want[0] / t for t in T],
+                               rtol=1e-10)
+    hot = qed.thermal(H, [1e8], method="ftlm", samples=3, seed=1, sym=sym)
+    np.testing.assert_allclose(hot.lnZ[0], math.log(len(want)), rtol=1e-6)
+    Sz = qed.Operator(n)
+    for i in range(n):
+        Sz.add_one_body(qed.OP_SZ, i, 1.0)
+    low = qed.expect(H, [Sz], 1, sym=sym)                    # the lowest member, m = -S
+    np.testing.assert_allclose(np.asarray(low.values).real.ravel()[0], -S, atol=1e-10)
+    # T = 0 dynamics from that member, against its Sz sector without the restriction (the
+    # lowest spin-1 member is that sector's ground state: E(S) rises with S on the ring)
+    O, omega = _sz_q(n, math.pi), np.linspace(0.0, 4.0, 81)
+    a = qed.dynamics(H, O, omega, eta=0.1, sym=sym)
+    b = qed.dynamics(H, O, omega, eta=0.1, sym=qed.Symmetry(spatial=None, sz=n // 2 - S))
+    np.testing.assert_allclose(a.S, b.S, atol=1e-9)
 
 
 def test_sz_basis_vectors_are_eigenvectors_of_that_block():

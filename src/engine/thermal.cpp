@@ -18,9 +18,13 @@
 #include <ed/thermal/mtpq.h>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <map>
 #include <optional>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace ed::sectors {
 
@@ -130,13 +134,23 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         // The exact states from the block eigensolver, each locked at ||H v - theta v|| <= kLockRel
         // s_H. An unconverged solve returns only its certified pairs; the random part then
         // samples the rest of the block, and the shortfall is reported.
-        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, n - 1));
+        // On a spin tower (op is H there and a ghost level above the band elsewhere) the exact
+        // states are tower states below the ghost, and the random starts are projected onto it.
+        const std::uint64_t space = tower ? tower_dim : n;
+        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, space - 1));
         if (want > 0) {
             BlockSolution ex = solve_block_eigenpairs(ed::matvec::default_cpu_backend(), op, want);
-            if (ex.vectors.size() == ex.values.size()) {
-                ko.exact_values  = std::move(ex.values);
-                ko.exact_vectors = std::move(ex.vectors);
-            }
+            if (ex.vectors.size() == ex.values.size())
+                for (std::size_t i = 0; i < ex.values.size(); ++i) {
+                    if (tower && tower->is_ghost(ex.values[i])) continue;
+                    ko.exact_values.push_back(ex.values[i]);
+                    ko.exact_vectors.push_back(std::move(ex.vectors[i]));
+                }
+        }
+        if (tower) {
+            auto p = tower->projector;
+            ko.seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
+            ko.trace_dim      = tower_dim;
         }
         b.exact_asked = want;
         b.exact_got   = ko.exact_values.size();
@@ -198,8 +212,8 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         throw std::runtime_error("thermal: a block returned " + std::to_string(c.E.size())
                                  + " temperatures, expected " + std::to_string(beta.size()));
     // The kernels' ln Z carries the dimension of the block they sampled; a projected trace
-    // runs over the tower.
-    if (tower) {
+    // runs over the tower (OFTLM's already does: its random part is scaled by trace_dim).
+    if (tower && !oftlm) {
         const double ln_ratio = std::log(static_cast<double>(tower_dim) / static_cast<double>(n));
         for (double& z : c.lnZ) z += ln_ratio;
     }
@@ -217,13 +231,29 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
     return b;
 }
 
-// Block dimensions of one subspace by (momentum, little-group irrep), summed over flip parity.
-using BlockKey = std::pair<int, int>;
+// A block's physical labels: its momentum and its co-group character on the identity and on
+// every residue (none where a residue is outside its group, or for a declined star's plain
+// block, which mixes irreps). Engine irrep indices do not carry across Sz sectors: where the
+// co-group acts as a scalar on one sector, that star is one plain block there (audit
+// K1-sym-composition-03).
+using BlockKey = std::pair<int, std::vector<std::pair<long long, long long>>>;
+BlockKey block_key(const Spec& s, const StarBuild& sb, const ed::solvers::BlockData& bi) {
+    BlockKey key{bi.tag.k_raw, {}};
+    for (int i = -1; i < static_cast<int>(s.residues.size()); ++i) {
+        const auto chi = detail::irrep_char(sb.info, bi.tag.irrep, i);
+        // characters are sums of roots of unity: a grid far below their spacing names them
+        key.second.emplace_back(chi ? std::llround(chi->real() * 1e6) : std::numeric_limits<long long>::min(),
+                                chi ? std::llround(chi->imag() * 1e6) : 0);
+    }
+    return key;
+}
+
+// Block dimensions of one subspace by physical labels, summed over flip parity.
 std::map<BlockKey, std::uint64_t> block_dims(const ::Operator& H, int n_sites, const Spec& s, const Subspace& sub) {
     std::map<BlockKey, std::uint64_t> d;
     if (sub.n_up < 0 || sub.n_up > n_sites) return d;
     detail::walk(H, n_sites, s, detail::engine_options(s, sub), [&](const EngineContext&, bool, StarBuild& sb) {
-        for (const auto& bi : sb.blocks) d[{bi->tag.k_raw, bi->tag.irrep}] += bi->tag.dim;
+        for (const auto& bi : sb.blocks) d[block_key(s, sb, *bi)] += bi->tag.dim;
     });
     return d;
 }
@@ -247,27 +277,25 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
 
     // Observables: each averaged over the symmetries a block uses (the group always; the flip
     // where the block folds or projects by it), which leaves every block trace unchanged.
+    const std::vector<Subspace> subs = subspaces(H, s);
     const std::size_t n_obs = t.observables.size();
     std::optional<detail::Averager> avg;
     if (n_obs > 0) {
         if (t.method == ThermalSpec::Method::mTPQ || t.exact_states > 0)
             throw std::invalid_argument("thermal: observables need method Exact or FTLM (without exact_states)");
-        avg.emplace(s, n_sites);
+        avg.emplace(s, n_sites, subs.front().members > 1);
     }
 
-    // Sampling one spin tower: every multiplet has exactly one Sz = S member and S+ commutes
-    // with the lattice symmetries, so a block's tower dimension is its dimension at Sz = S
-    // less that of the same (momentum, irrep) block at Sz = S + 1 (one more up spin).
+    // Sampling one spin tower: every multiplet has one member at each Sz from S down to -S, and
+    // S+ commutes with the lattice symmetries, so a block's tower dimension (at any of those Sz)
+    // is the dimension of the block with its labels at Sz = S less that at Sz = S + 1.
     const bool tower_sampling = s.two_S >= 0 && t.method != ThermalSpec::Method::Exact;
     std::map<BlockKey, std::uint64_t> dim_at, dim_above;
-    std::uint64_t multiplets = 0;
+    std::uint64_t tower_states = 0;   // under total_spin: the states the blocks hold
     if (tower_sampling) {
-        if (t.exact_states > 0)
-            throw std::invalid_argument("thermal: exact_states (OFTLM) cannot be restricted to one spin tower; "
-                                        "use FTLM or mTPQ");
-        const Subspace hw = subspaces(H, s).front();
-        dim_at    = block_dims(H, n_sites, s, hw);
-        if (hw.n_up < n_sites) dim_above = block_dims(H, n_sites, s, {hw.n_up + 1, -1, 1});
+        const int hw = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);
+        dim_at = block_dims(H, n_sites, s, {hw, -1, 1});
+        if (hw < n_sites) dim_above = block_dims(H, n_sites, s, {hw + 1, -1, 1});
     }
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     ThermalCurves out;
@@ -276,7 +304,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     std::vector<BlockThermo> blocks;
     // Exact: every block's spectrum, batched onto the GPU when asked; the thermodynamics
     // of each block are formed once the batch is solved.
-    detail::DenseBatch batch(t.method == ThermalSpec::Method::Exact ? t.device : Device::Cpu);
+    detail::DenseBatch batch(t.method == ThermalSpec::Method::Exact ? t.device : Device::Cpu, "thermal");
     struct Pending { std::size_t id; std::size_t block; detail::BlockOp filter; };
     // Sampled blocks on the host below kHostPoolMaxDim states run afterwards, concurrently, one thread
     // each (a Lanczos step that short is slower on a thread team -- measured 8x at 32 threads on
@@ -289,14 +317,14 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     std::vector<Deferred> deferred;
     std::vector<Pending> pending;
     std::size_t n_blocks = 0;
-    for (const Subspace& sub : subspaces(H, s)) {
+    for (const Subspace& sub : subs) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext&, bool, StarBuild& sb) {
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
                 std::uint64_t tower_dim = 0;
                 if (tower_sampling) {
-                    const BlockKey key{bi->tag.k_raw, bi->tag.irrep};
+                    const BlockKey key = block_key(s, sb, *bi);
                     const auto it = dim_above.find(key);
                     const std::uint64_t at = dim_at.at(key), above = it == dim_above.end() ? 0 : it->second;
                     if (above > at)
@@ -339,6 +367,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                             q[k].push_back(folded ? 0.5 * (dg[2 * k](n) + std::conj(dg[2 * k + 1](n))) : dg[k](n));
                     }
                     if (ev.empty()) continue;
+                    tower_states += ev.size() * bop.multiplicity;
                     out.e0 = std::min(out.e0, ev.front());
                     b.c = ed::thermal::exact_curves(ev, beta, &q);
                     b.lane = ed::Lane::HostDense;
@@ -350,7 +379,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 } else {
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-                    multiplets += tower_dim * bi->tag.multiplicity;
+                    tower_states += tower_dim * bop.multiplicity;
                     if (t.device == Device::Cpu && bi->tag.dim < ed::kHostPoolMaxDim) {
                         deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, folded, bi->tag, bi->W != nullptr});
                     } else {
@@ -360,7 +389,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     }
                 }
                 b.weight   = static_cast<double>(bop.multiplicity);
-                if (s.two_S >= 0) {
+                if (sub.members > 1) {
                     // Whole multiplets: every Sz from -S to S in equal parts.
                     const double S = 0.5 * s.two_S;
                     b.sz = 0.0; b.sz2 = S * (S + 1.0) / 3.0; b.mirrored = false;
@@ -369,7 +398,8 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     b.sz2      = b.sz * b.sz;
                     b.mirrored = sub.mirror == 2;
                 }
-                out.total_dim += bi->tag.dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
+                if (s.two_S < 0)
+                    out.total_dim += bi->tag.dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 blocks.push_back(std::move(b));
             }
         });
@@ -412,13 +442,6 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     if (t.method != ThermalSpec::Method::Exact)
         for (const auto& b : blocks)
             for (double e : b.c.E) out.e0 = std::min(out.e0, e);
-    // Every multiplet counted once: the Sz = S / S + 1 labels matched block for block.
-    if (tower_sampling && s.only_k0.empty() && s.only_irrep.empty() && s.only_momentum.empty()
-        && s.only_irrep_chars.empty()
-        && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))
-        throw std::runtime_error("thermal: the blocks hold " + std::to_string(multiplets) + " spin-"
-                                 + std::to_string(s.two_S) + "/2 multiplets, expected "
-                                 + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
     batch.solve();
     if (t.method == ThermalSpec::Method::Exact) {
         // Fill in the batched blocks (those solved with observables are complete already).
@@ -428,6 +451,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
             std::vector<double> ev;
             for (double e : batch.spectrum(p.id)) if (!p.filter.is_ghost(e)) ev.push_back(e);
             if (ev.empty()) { empty[p.block] = true; continue; }
+            tower_states += ev.size() * p.filter.multiplicity;
             out.e0 = std::min(out.e0, *std::min_element(ev.begin(), ev.end()));
             BlockThermo b;
             b.c = ed::thermal::exact_curves(ev, beta);
@@ -440,6 +464,16 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
         for (std::size_t i = 0; i < blocks.size(); ++i)
             if (!empty[i]) kept.push_back(std::move(blocks[i]));
         blocks = std::move(kept);
+    }
+    // Under total_spin every multiplet is counted once, on every lane (audit C07-su2-05): a sampled
+    // block by its tower dimension (its Sz = S and S + 1 labels matched), an exact one by its levels
+    // below the ghost.
+    if (s.two_S >= 0) {
+        out.total_dim = tower_states;
+        const std::uint64_t want = detail::tower_states(subs, n_sites, s.two_S);
+        if (!detail::has_selection(s) && tower_states != want)
+            throw std::runtime_error("thermal: the blocks hold " + std::to_string(tower_states) + " states of total spin "
+                                     + std::to_string(s.two_S) + "/2, expected " + std::to_string(want));
     }
     detail::require_some_level(s, blocks.empty(), "thermal");
     if (blocks.empty()) throw std::runtime_error("thermal: no non-empty block");
