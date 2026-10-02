@@ -5,8 +5,8 @@
 // canonical terms (MaskedOperator::to_dense), and for a symmetry sector the block
 // E^dagger H E with E the engine's own rep-basis expansion (ed::sectors::expand).
 //
-//   full space   Operator::apply: matrix-free gather, matrix-free scatter, assembled CSR,
-//                each on a real and a complex input (the real paths engage for real H);
+//   full space   Operator::apply: the row walk and the CSR assembled from it, each on a real
+//                and a complex input;
 //   rep sectors  RepSectorMatVec: reduced CSR (the default lane), the gather walk (CSR
 //                budget 0), the scatter walk, reduced_csr() itself, and the device
 //                gather on host pointers when a CUDA device is present.
@@ -309,19 +309,18 @@ Mat reference_block(const Mat& Hd, const RepSectorData& rd) {
 
 }  // namespace
 
-TEST_CASE("full space: gather, scatter and CSR, on real and complex inputs, are H", "[row_walk]") {
+TEST_CASE("full space: the walk and the CSR, on real and complex inputs, are H", "[row_walk]") {
     for (const auto& m : zoo()) {
         INFO("model " << m.name);
         const Mat ref = m.H->canonical().to_dense();
         const double tol = 1e-12 * std::max(1.0, max_abs(ref));
         const std::size_t D = kAll + 1;
-        struct Lane { const char* name; const char* csr; const char* scatter; };
-        for (const Lane& lane : {Lane{"gather", "0", "0"}, Lane{"scatter", "0", "1"}, Lane{"csr", "1", "0"}}) {
+        for (const char* lane : {"walk", "csr"}) {
             EnvGuard env;
-            env.set("ED_CSR_FORCE", lane.csr);
-            env.set("ED_MATVEC_SCATTER", lane.scatter);
-            const Operator H(*m.H);   // a fresh backend reads the switches on its first apply
-            INFO("lane " << lane.name);
+            env.set("ED_CSR_FORCE", std::string(lane) == "csr" ? "1" : "0");
+            const Operator H(*m.H);   // a fresh copy builds its lane, reading the switch, on first use
+            INFO("lane " << lane);
+            CHECK(std::string(H.full_space_lane()) == lane);
             for (bool imag : {false, true}) {
                 INFO("imaginary input " << imag);
                 const Mat M = columns(D, [&](const Cx* in, Cx* out) { H.apply(in, out, D); }, imag);

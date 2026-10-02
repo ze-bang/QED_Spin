@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -38,7 +39,10 @@
 #include <ed/matvec/term_kernels.h>
 #include <ed/matvec/term_kernels_assemble.h>
 #include <ed/matvec/term_storage.h>
-#include <ed/ops/invariance.h>   // hermitian(masked(*this))
+#include <ed/core/config.h>        // ed::env (ED_CSR_FORCE, ED_CSR_DIM_MAX)
+#include <ed/matvec/reduced_csr.h>  // the full-space CSR
+#include <ed/ops/invariance.h>     // canonical terms, verdicts
+#include <ed/ops/row_walk.h>       // for_each_connection
 
 using Complex = std::complex<double>;
 
@@ -216,20 +220,16 @@ public:
      * Skips work when the cache is already in sync (``terms_fresh_`` and
      * AoS sizes match what was committed last time).
      *
-     * Called automatically by ``term_view_()`` (and therefore by ``apply``)
-     * before the matvec kernel reads ``terms_``. Public so that callers reading the
-     * SoA bins directly can force a refresh. The record counts are compared as well as
-     * ``terms_fresh_``, a second guard behind add_record's eager invalidation.
+     * Called by getTerms() before a symmetry sector's matvec copies the bins. The record
+     * counts are compared as well as ``terms_fresh_``, a second guard behind add_record's
+     * eager invalidation.
      */
     void commitPendingTransforms() const {
         const std::size_t aos_n  = transform_data_.size();
         const std::size_t aos3_n = three_body_data_.size();
         // Double-checked locking: the fast path is one acquire load per
-        // matvec; the rebuild is serialized. Thread safety is load-bearing:
-        // ``term_view_()`` is reached from inside OMP parallel regions (the
-        // dense column assemblers, the sector-parallel FULL loop), and an
-        // unsynchronised first rebuild would drop terms silently and give
-        // wrong eigenvalues. The release store of ``terms_fresh_`` is last,
+        // read; the rebuild is serialized (getTerms() can be reached from inside OMP
+        // parallel regions, and an unsynchronised first rebuild would drop terms). The release store of ``terms_fresh_`` is last,
         // so a reader that passes the acquire check sees the fully built SoA.
         if (terms_fresh_.load(std::memory_order_acquire) &&
             aos_n  == terms_committed_aos_size_ &&
@@ -255,16 +255,13 @@ public:
             [](const Complex& c) { return c; });
         self->terms_committed_aos_size_       = aos_n;
         self->terms_committed_three_aos_size_ = aos3_n;
-        // SoA changed -> backend CSR is stale; isReal() must rescan.
         hermitian_check_done_ = false;
-        if (backend_) self->backend_->invalidate_caches();
         self->terms_fresh_.store(true, std::memory_order_release);
         self->real_check_done_ = false;
     }
 
-    /// Invalidate ALL caches derived from the term list (the ``isReal()``
-    /// cache, the SoA ``terms_`` cache, and the matvec backend's
-    /// assembled CSR). Cheap; safe to call from any term-list mutator.
+    /// Invalidate ALL caches derived from the term list (``isReal()``, the SoA ``terms_``,
+    /// the canonical terms and the full-space lane with its CSR). Cheap; safe to call from any term-list mutator.
     /// Resetting ``terms_fresh_`` here guarantees that terms added after
     /// this call reach the next ``apply()``.
     virtual void invalidateMatrixCaches() {
@@ -274,7 +271,7 @@ public:
         terms_committed_aos_size_       = 0;
         terms_committed_three_aos_size_ = 0;
         canonical_.reset();
-        if (backend_) backend_->invalidate_caches();
+        lane_.reset();
     }
 
     uint64_t getNumBits() const { return n_bits_; }
@@ -320,19 +317,8 @@ public:
     }
 
     // -------------------------------------------------------------------
-    // Copy / move semantics.
-    //
-    // ``backend_`` is a unique_ptr to a polymorphic strategy that owns
-    // mutable per-instance state (CSR caches, scratch buffers) and may
-    // hold non-owning views onto basis-policy data living on the operator
-    // itself (in a derived basis-restricted operator). Naive
-    // copy/move would either fail (unique_ptr is non-copyable) or leave
-    // the destination's backend pointing at the SOURCE's basis tables.
-    //
-    // The contract: cloning an Operator copies the TERM LIST. The new
-    // backend is rebuilt lazily on the next apply() against the new
-    // term list (``other``'s CSR caches are tied to ``other``'s term list
-    // and are not reusable).
+    // Copy / move semantics: a copy carries the records; its canonical terms and its
+    // full-space lane are rebuilt lazily (so a copy reads ED_CSR_* afresh).
     // -------------------------------------------------------------------
     Operator(const Operator& other)
         : LinearOperator(other),
@@ -345,8 +331,7 @@ public:
           terms_committed_aos_size_(other.terms_committed_aos_size_),
           terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
-          real_cache_(other.real_cache_),
-          backend_(nullptr) {}
+          real_cache_(other.real_cache_) {}
 
     Operator(Operator&& other) noexcept
         : LinearOperator(std::move(other)),
@@ -359,12 +344,8 @@ public:
           terms_committed_aos_size_(other.terms_committed_aos_size_),
           terms_committed_three_aos_size_(other.terms_committed_three_aos_size_),
           real_check_done_(other.real_check_done_),
-          real_cache_(other.real_cache_),
-          backend_(nullptr) {
-        // Discard the source backend: its basis policy may point into
-        // ``other``'s soon-to-be-moved-from members. The destination's
-        // backend will be rebuilt lazily on the next apply().
-        other.backend_.reset();
+          real_cache_(other.real_cache_) {
+        other.invalidateMatrixCaches();
     }
 
     Operator& operator=(const Operator& other) {
@@ -380,7 +361,7 @@ public:
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
-            backend_.reset();
+            lane_.reset();
         }
         return *this;
     }
@@ -398,88 +379,50 @@ public:
             real_check_done_                 = other.real_check_done_;
             real_cache_                      = other.real_cache_;
             canonical_.reset();
-            backend_.reset();
-            other.backend_.reset();
+            lane_.reset();
+            other.invalidateMatrixCaches();
         }
         return *this;
     }
 
     // ========================================================================
-    // Matvec entry points.
-    //
-    // The operator exposes one SpMV entry point, apply(complex, complex, n):
-    // y = H * x. It is a one-line delegation to the matvec backend
-    // (ed::matvec::CpuMatVecBackend), which encapsulates the dispatch
-    // logic (assembled-CSR vs matrix-free, threshold selection, scratch-buffer
-    // reuse) behind one strategy object. The
-    // backend is constructed lazily on the first apply call via the
-    // virtual ``make_backend_`` factory, which derived classes override
-    // (a basis-restricted operator constructs its own backend).
-    //
-    // Tunable via the environment:
-    //   ED_CSR_FORCE      0|1   force matrix-free / force assembled (default
-    //                           is dim-based heuristic)
-    //   ED_CSR_DIM_MAX    N     CSR cutoff dim (default 1<<20 for full
-    //                           basis, 1<<22 for restricted bases)
+    // apply: y = H x on the full 2^N space. Row r is the row walk (row_walk.h) of the
+    // program of H^dagger from r, conjugated: <r|H|t> = conj(<t|H^dagger|r>), exact for any
+    // H. The rows are assembled once into a CSR when it is allowed, else walked per apply:
+    //   ED_CSR_FORCE      1: always the CSR, 0: never (unset: the dimension decides)
+    //   ED_CSR_DIM_MAX    the largest dimension assembled (default 2^20)
+    // read when the lane is built (the first apply after a change of the records).
     // ========================================================================
     void apply(const Complex* in, Complex* out, std::size_t size) const override {
         const std::uint64_t dim = 1ULL << n_bits_;
         if (size != static_cast<std::size_t>(dim)) {
             throw std::invalid_argument("Operator::apply: input/output vector size mismatch");
         }
-        ensure_backend_();
-        const auto tv = term_view_();  // rebuilds SoA cache if stale
-        backend_->apply_complex(&tv, in, out, size);
+        const auto lane = full_space_lane_();
+        if (lane->use_csr) {
+            lane->csr.spmv(in, out);
+            return;
+        }
+        const auto view = lane->rows.view();
+        #pragma omp parallel for schedule(static)
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            Complex acc(0.0, 0.0);
+            ed::ops::for_each_connection(view, static_cast<std::uint64_t>(ir),
+                                         [&](std::uint64_t t, const Complex& h) { acc += std::conj(h) * in[t]; });
+            out[ir] = acc;
+        }
     }
 
-    // -----------------------------------------------------------------
-    // Sparse single-state row enumerator: invoke ``emit(s_prime, h)`` for every
-    // computational state ``s_prime`` connected to ``s`` by a Hamiltonian term,
-    // with ``h = <s_prime|H|s>`` (terms emitting the same ``s_prime`` are
-    // delivered separately; the caller accumulates). O(num_terms), no 2^N
-    // vector — used by the symmetry-adapted block builder to apply H over an
-    // orbit support without touching the full Hilbert space.
-    // -----------------------------------------------------------------
-    template <class Emit>
-    void for_each_connected_state(std::uint64_t s, Emit&& emit) const {
-        const auto tv = term_view_();
-        ed::matvec::kernel::apply_term_to_state<Complex>(
-            s, tv.spin_l,
-            *tv.diag_one, *tv.offdiag_one, *tv.diag_two, *tv.mixed_two,
-            *tv.offdiag_two, *tv.three_body,
-            std::forward<Emit>(emit));
-    }
+    /// The representation apply() uses: "csr" or "walk" (builds the lane if needed).
+    [[nodiscard]] const char* full_space_lane() const { return full_space_lane_()->use_csr ? "csr" : "walk"; }
 
-    // ========================================================================
-    // isReal: tests (and caches) whether all stored couplings are purely real.
-    //
-    // An operator with a sub-eps imaginary part that is "really"
-    // floating-point noise from JSON parsing is still classified as real.
-    // The default tolerance (1e-15) is the IEEE-754 round-off floor; raise
-    // it if you load coefficients from low-precision text files.
-    //
-    // Result is cached per-operator; addOneBodyTerm() / addTwoBodyTerm() / etc.
-    // invalidate the cache via invalidateMatrixCaches().
-    // ========================================================================
-
-    bool isReal(double tol = 1e-15) const {
-        if (real_check_done_) {
-            return real_cache_;
+    /// H is real in the S^z basis: its canonical terms equal their complex conjugates within
+    /// `rtol` of the largest coefficient. Cached until the records change.
+    bool isReal(double rtol = ed::ops::kInvarianceRtol) const {
+        if (!real_check_done_) {
+            real_cache_      = ed::ops::conjugation_invariant(canonical(), rtol);
+            real_check_done_ = true;
         }
-        auto coeff_real = [tol](const Complex& c) {
-            return std::abs(c.imag()) <= tol;
-        };
-        bool all_real = true;
-        for (const auto& t : transform_data_) {
-            if (!coeff_real(t.coefficient)) { all_real = false; break; }
-        }
-        if (all_real) {
-            for (const auto& t : three_body_data_) {
-                if (!coeff_real(t.coefficient)) { all_real = false; break; }
-            }
-        }
-        real_cache_      = all_real;
-        real_check_done_ = true;
         return real_cache_;
     }
 
@@ -493,9 +436,7 @@ protected:
     /// Freshness flag for the SoA cache ``terms_``. Set by
     /// ``commitPendingTransforms()`` on rebuild; cleared by
     /// ``invalidateMatrixCaches()``.
-    // Atomic + paired with ``terms_commit_mutex_``: ``term_view_()`` is
-    // reached from OMP-parallel loops on cold operators (see the note
-    // in commitPendingTransforms); an unlocked rebuild drops terms.
+    // Atomic + paired with ``terms_commit_mutex_`` (see commitPendingTransforms).
     mutable std::atomic<bool> terms_fresh_{false};
     mutable std::mutex terms_commit_mutex_;
 
@@ -515,13 +456,58 @@ protected:
     mutable bool hermitian_cached_     = true;
     mutable bool real_cache_      = false;
 
-    // -------------------------------------------------------------------
-    // Matvec backend. Lazily constructed on the first apply() call via the
-    // virtual ``make_backend_`` factory below. Derived classes
-    // may override the factory to plug in a different basis
-    // policy without re-implementing apply() itself.
-    // -------------------------------------------------------------------
-    mutable std::unique_ptr<ed::matvec::MatVecBackendBase> backend_;
+    // The full-space lane: the program apply() walks and, when assembled, its CSR. Built
+    // on first use, immutable, reset with the other caches.
+    struct FullSpaceLane {
+        ed::ops::MaskedProgram                   rows;      // compile_operator(H^dagger)
+        bool                                     use_csr = false;
+        ed::matvec::ReducedSymmetryCsr<Complex>  csr;
+    };
+    mutable std::shared_ptr<const FullSpaceLane> lane_;
+    mutable std::mutex lane_mutex_;
+
+    [[nodiscard]] std::shared_ptr<const FullSpaceLane> full_space_lane_() const {
+        std::lock_guard<std::mutex> lock(lane_mutex_);
+        if (lane_) return lane_;
+        auto L = std::make_shared<FullSpaceLane>();
+        L->rows = ed::ops::compile_operator(canonical().dagger());
+        const std::uint64_t dim = 1ULL << n_bits_;
+        const std::optional<bool> force = ed::env::tristate("ED_CSR_FORCE");
+        const long long cut = ed::env::integer("ED_CSR_DIM_MAX", 0);
+        const std::uint64_t cutoff = cut > 0 ? static_cast<std::uint64_t>(cut) : (std::uint64_t{1} << 20);
+        L->use_csr = dim < (std::uint64_t{1} << 32) && force.value_or(dim <= cutoff);
+        if (L->use_csr) assemble_rows_(L->rows, dim, L->csr);
+        lane_ = std::move(L);
+        return lane_;
+    }
+
+    // The rows of the walk as a CSR (exact zeros dropped), in the walk's order.
+    static void assemble_rows_(const ed::ops::MaskedProgram& P, std::uint64_t dim,
+                               ed::matvec::ReducedSymmetryCsr<Complex>& csr) {
+        const auto view = P.view();
+        csr.dim = dim;
+        csr.row_ptr.assign(dim + 1, 0);
+        #pragma omp parallel for schedule(static)
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            std::uint64_t n = 0;
+            ed::ops::for_each_connection(view, static_cast<std::uint64_t>(ir), [&](std::uint64_t, const Complex& h) {
+                if (h != Complex(0.0, 0.0)) ++n;
+            });
+            csr.row_ptr[static_cast<std::size_t>(ir) + 1] = n;
+        }
+        for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
+        csr.allocate_first_touch();
+        #pragma omp parallel for schedule(static)
+        for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
+            std::uint64_t e = csr.row_ptr[static_cast<std::size_t>(ir)];
+            ed::ops::for_each_connection(view, static_cast<std::uint64_t>(ir), [&](std::uint64_t t, const Complex& h) {
+                if (h == Complex(0.0, 0.0)) return;
+                csr.col_idx[e] = static_cast<std::uint32_t>(t);
+                csr.val[e]     = std::conj(h);
+                ++e;
+            });
+        }
+    }
 
     // The canonical terms (canonical()), immutable once built; reset with the other caches.
     mutable std::shared_ptr<const ed::ops::MaskedOperator> canonical_;
@@ -534,52 +520,6 @@ protected:
         if (site >= n_bits_)
             throw std::invalid_argument("Operator: site " + std::to_string(site) + " is outside [0, "
                                         + std::to_string(n_bits_) + ")");
-    }
-
-    /**
-     * @brief Construct a fresh matvec backend for this operator.
-     *
-     * Returns a CpuMatVecBackend parameterised on the appropriate basis
-     * policy. Operator returns a FullBasisPolicy backend; other basis types
-     * (e.g. symmetry-projected sectors) plug in the same way.
-     */
-    [[nodiscard]] virtual std::unique_ptr<ed::matvec::MatVecBackendBase>
-    make_backend_() const {
-        return ed::matvec::make_cpu_full_basis_backend<
-            DiagonalOneBody, OffDiagonalOneBody,
-            DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-            ThreeBodyTransformData>(n_bits_);
-    }
-
-    void ensure_backend_() const {
-        if (!backend_) backend_ = make_backend_();
-    }
-
-    /**
-     * @brief Build a non-owning TermView over ``terms_``.
-     *
-     * Assumes ``commitPendingTransforms()`` has run (callers in this
-     * class invoke it before ``term_view_``). The view is six pointers
-     * into ``terms_``'s SoA bins plus the ``spin_l`` scalar and a
-     * cached real/complex flag; safe to pass by value.
-     */
-    using TermViewT_ = ed::matvec::TermViewT<
-        DiagonalOneBody, OffDiagonalOneBody,
-        DiagonalTwoBody, MixedTwoBody, OffDiagonalTwoBody,
-        ThreeBodyTransformData>;
-
-    [[nodiscard]] TermViewT_ term_view_() const {
-        commitPendingTransforms();  // rebuilds SoA cache iff terms_fresh_ == false
-        TermViewT_ tv;
-        tv.diag_one    = &terms_.diag_one_body;
-        tv.offdiag_one = &terms_.offdiag_one_body;
-        tv.diag_two    = &terms_.diag_two_body;
-        tv.mixed_two   = &terms_.mixed_two_body;
-        tv.offdiag_two = &terms_.offdiag_two_body;
-        tv.three_body  = &terms_.three_body;
-        tv.spin_l      = static_cast<double>(spin_l_);
-        tv.is_real     = isReal();
-        return tv;
     }
 };
 

@@ -9,9 +9,8 @@
 //   * matrix-vector consistency (apply(v) == Hdense * v) on random v,
 //   * OBC vs PBC ground-state ordering for N=4,
 //   * adding a zero-coefficient term does not perturb the spectrum,
-//   * GATHER == SCATTER kernel equivalence, the real-input specialisation ==
-//     the complex kernel, and the cache-invalidation invariants of the term
-//     storage.
+//   * the walk == the assembled CSR (the two lanes of Operator::apply), real inputs
+//     staying real, and the cache-invalidation invariants of the term storage.
 // =============================================================================
 
 #include "common/catch2_harness.h"
@@ -28,27 +27,16 @@
 using namespace ed_tests;
 
 // =============================================================================
-// GATHER == SCATTER equivalence gate.
-//
-// The default shared-memory matrix-free SpMV is the lock-free row GATHER
-// (apply_terms_gather + precomputed diagonal). ED_MATVEC_SCATTER=1 selects the
-// SCATTER kernel (apply_terms, atomic + radix sort). Both forms must
-// produce bit-for-bit identical results (to ~1e-12). We pin the equivalence
-// across {Full} x {complex, real} x {1/2/3-body} by toggling the env
-// var around backend construction (the tunables are read once, when the lazy
-// backend is built on first apply). ED_CSR_FORCE=0 keeps both runs on the
-// matrix-free path (otherwise the tiny dims would route through assembled CSR
-// and the two kernels would never be exercised).
-//
-// The symmetry orbit-CSR (a lock-free row gather) and on-the-fly
-// representative (scatter) paths have their own dedicated tests.
+// Walk == CSR. Operator::apply walks the rows of H (row_walk.h) per apply, or assembles
+// them once into a CSR (ED_CSR_FORCE=1, or a dimension below ED_CSR_DIM_MAX); the switch is
+// read when the lane is built, so each run below uses a freshly built operator. Both must
+// agree across {complex, real} x {1/2/3-body}. Every lane against a dense reference is
+// test_row_walk.
 // =============================================================================
 namespace {
 
-// Push a deliberately rich, Hermitian-agnostic term mix that lights up all six
-// SoA bins with nonzero imaginary parts so the GATHER/SCATTER transpose is
-// exercised on every code path (diag/offdiag one-body, diag/mixed/offdiag
-// two-body, three-body).
+// A rich term mix with nonzero imaginary parts: one-body diagonal and off-diagonal,
+// two-body diagonal, mixed and off-diagonal, three-body.
 inline void add_rich_complex_terms(Operator& op) {
     // one-body diagonal (Sz)
     op.addOneBodyTerm(/*Sz*/ 2, /*site*/ 0, Complex(0.37, 0.0));
@@ -68,9 +56,7 @@ inline void add_rich_complex_terms(Operator& op) {
     op.addThreeBodyTerm(1, 0, 0, 1, 2, 2, Complex(0.0, -0.7));
 }
 
-// Real-only rich term mix (lights up every bin, no imaginary parts) so the
-// real-input specialisation of apply (matrix_free_real -> gather<double>) can
-// be compared against its SCATTER counterpart.
+// The same shapes with real coefficients only.
 inline void add_rich_real_terms(Operator& op) {
     op.addOneBodyTerm(2, 0, Complex(0.37, 0.0));
     op.addTwoBodyTerm(2, 0, 2, 1, Complex(0.91, 0.0));
@@ -80,31 +66,24 @@ inline void add_rich_real_terms(Operator& op) {
     op.addThreeBodyTerm(1, 0, 0, 1, 2, 2, Complex(0.5, 0.0));
 }
 
-// Run op.apply() under a chosen matrix-free form. The backend is built lazily
-// on first apply, reading ED_MATVEC_SCATTER then; ED_CSR_FORCE=0 pins it to
-// matrix-free. ``build`` must return a freshly-constructed operator so the
-// backend (and its tunables) are created inside this scope.
+// Run op.apply() on the CSR or the walk. ``build`` must return a freshly constructed
+// operator, so its lane (and the ED_CSR_FORCE it reads) is built inside this scope.
 template <class Build>
-inline ComplexVector apply_under_mode(bool scatter, Build&& build,
-                                      const ComplexVector& v) {
-    ::setenv("ED_CSR_FORCE", "0", 1);
-    if (scatter) ::setenv("ED_MATVEC_SCATTER", "1", 1);
-    else         ::unsetenv("ED_MATVEC_SCATTER");
+inline ComplexVector apply_under_lane(bool csr, Build&& build, const ComplexVector& v) {
+    ::setenv("ED_CSR_FORCE", csr ? "1" : "0", 1);
     auto op = build();
     ComplexVector out(v.size(), Complex(0.0, 0.0));
     op->apply(v.data(), out.data(), v.size());
-    ::unsetenv("ED_MATVEC_SCATTER");
+    REQUIRE(std::string(op->full_space_lane()) == (csr ? "csr" : "walk"));
     ::unsetenv("ED_CSR_FORCE");
     return out;
 }
 
-// A real vector (dimension >= 1024) takes the real specialisation of apply.
 template <class Build>
-inline std::vector<double> apply_to_real_under_mode(bool scatter, Build&& build,
-                                                 const std::vector<double>& v) {
+inline std::vector<double> apply_to_real_under_lane(bool csr, Build&& build, const std::vector<double>& v) {
     ComplexVector vc(v.size());
     for (std::size_t i = 0; i < v.size(); ++i) vc[i] = Complex(v[i], 0.0);
-    const ComplexVector out = apply_under_mode(scatter, build, vc);
+    const ComplexVector out = apply_under_lane(csr, build, vc);
     std::vector<double> re(v.size());
     for (std::size_t i = 0; i < v.size(); ++i) re[i] = out[i].real();
     return re;
@@ -112,8 +91,8 @@ inline std::vector<double> apply_to_real_under_mode(bool scatter, Build&& build,
 
 }  // namespace
 
-TEST_CASE("matvec: GATHER == SCATTER on Full basis (complex, 1/2/3-body)",
-          "[operator_apply][gather][equivalence]") {
+TEST_CASE("Operator::apply: the walk equals the CSR (complex, 1/2/3-body)",
+          "[operator_apply][equivalence]") {
     constexpr uint64_t N   = 10;
     constexpr uint64_t dim = 1ULL << N;
     auto build = [] {
@@ -123,16 +102,15 @@ TEST_CASE("matvec: GATHER == SCATTER on Full basis (complex, 1/2/3-body)",
     };
     for (uint64_t seed : {1u, 42u, 90210u}) {
         auto v = random_unit_vector(dim, seed);
-        auto y_scatter = apply_under_mode(/*scatter=*/true,  build, v);
-        auto y_gather  = apply_under_mode(/*scatter=*/false, build, v);
-        INFO("seed=" << seed << "  ||gather - scatter|| = "
-             << l2_diff(y_gather, y_scatter));
-        REQUIRE(l2_diff(y_gather, y_scatter) < 1e-12);
+        auto y_csr  = apply_under_lane(/*csr=*/true,  build, v);
+        auto y_walk = apply_under_lane(/*csr=*/false, build, v);
+        INFO("seed=" << seed << "  ||walk - csr|| = " << l2_diff(y_walk, y_csr));
+        REQUIRE(l2_diff(y_walk, y_csr) < 1e-12);
     }
 }
 
-TEST_CASE("matvec: GATHER == SCATTER real fast path (Full)",
-          "[operator_apply][gather][equivalence][real_input]") {
+TEST_CASE("Operator::apply: the walk equals the CSR on real input (Full)",
+          "[operator_apply][equivalence][real_input]") {
     SECTION("Full basis") {
         constexpr uint64_t N   = 10;
         constexpr uint64_t dim = 1ULL << N;
@@ -145,11 +123,11 @@ TEST_CASE("matvec: GATHER == SCATTER real fast path (Full)",
         std::mt19937_64 g(2024);
         std::normal_distribution<double> nd(0, 1);
         for (auto& x : v) x = nd(g);
-        auto y_scatter = apply_to_real_under_mode(true,  build, v);
-        auto y_gather  = apply_to_real_under_mode(false, build, v);
+        auto y_csr  = apply_to_real_under_lane(true,  build, v);
+        auto y_walk = apply_to_real_under_lane(false, build, v);
         double s = 0.0;
         for (uint64_t i = 0; i < dim; ++i) {
-            double d = y_gather[i] - y_scatter[i];
+            double d = y_walk[i] - y_csr[i];
             s += d * d;
         }
         REQUIRE(std::sqrt(s) < 1e-12);
@@ -223,10 +201,9 @@ TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
     REQUIRE(gap > 1e-10);
 }
 
-TEST_CASE("Operator::apply: the real-input specialisation agrees with the complex kernel",
+TEST_CASE("Operator::apply: a real H keeps real vectors real",
           "[operator_apply][real_input][audit-2.1-phase-1]") {
-    // A real operator applied to a real vector of dimension >= 1024 takes the real
-    // kernel; a complex vector takes the complex one. For real H, H(v + iu) = Hv + iHu.
+    // For real H, H(v + iu) = Hv + iHu, and Hv has no imaginary part at all.
     constexpr int N = 10;
     constexpr uint64_t dim = 1ULL << N;
     auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
@@ -334,14 +311,10 @@ TEST_CASE("Operator: a record added between applies is honoured",
 }
 
 // =============================================================================
-// The GATHER kernel respects complex three-body coefficients.
-//
-// Taking only ``coefficient.real()`` would silently drop the imaginary part and
-// make the GATHER and SCATTER kernels disagree for any Hamiltonian with a
-// complex three-body term. A tiny 3-site H with the imaginary-only coupling
-// i S+_0 S-_1 Sz_2 is applied by both matrix-free kernels.
+// Complex three-body coefficients survive both lanes: taking only ``.real()`` would
+// silently drop i S+_0 S-_1 Sz_2. Applied by the walk and the CSR.
 // =============================================================================
-TEST_CASE("matvec: GATHER three-body kernel keeps complex coefficients",
+TEST_CASE("Operator::apply: a three-body term keeps its complex coefficient",
           "[matvec][kernel][regression][s0][three_body]") {
     constexpr std::uint64_t N   = 3;
     constexpr std::uint64_t dim = 1ULL << N;
@@ -356,10 +329,10 @@ TEST_CASE("matvec: GATHER three-body kernel keeps complex coefficients",
     ComplexVector v(dim);
     for (auto& z : v) z = Complex(dist(gen), dist(gen));
 
-    const auto y_scatter = apply_under_mode(/*scatter=*/true,  build, v);
-    const auto y_gather  = apply_under_mode(/*scatter=*/false, build, v);
-    INFO("||y_gather - y_scatter||_2 = " << l2_diff(y_gather, y_scatter));
-    REQUIRE(l2_diff(y_gather, y_scatter) < 1e-12);
+    const auto y_csr  = apply_under_lane(/*csr=*/true,  build, v);
+    const auto y_gather = apply_under_lane(/*csr=*/false, build, v);
+    INFO("||walk - csr||_2 = " << l2_diff(y_gather, y_csr));
+    REQUIRE(l2_diff(y_gather, y_csr) < 1e-12);
 
     // The pure-imaginary coupling carried through (a .real() truncation would
     // leave the result identically zero).

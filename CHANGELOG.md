@@ -119,6 +119,12 @@ C++ API (installed headers; nothing in Python changes):
   `<ed/ops/time_reversal.h>`, `hamiltonian_is_spin_flip_symmetric` / `sz_axis_of` (`spin_flip.h`
   keeps `flip_subspace_admissible`) and `TermStorage::is_hermitian`; `<ed/ops/invariance.h>`
   replaces them, and `ed::sectors::SzContent` is `ed::ops::SzContent`.
+- `Operator::apply` (the full 2^N space, Python `Operator.apply`) runs on the row walk over the
+  canonical terms (`<ed/ops/row_walk.h>`): rows of H from the program of H^dagger, assembled once
+  into a CSR when `ED_CSR_FORCE` / `ED_CSR_DIM_MAX` allow, else walked per apply. Its scatter
+  form (`ED_MATVEC_SCATTER`) and its real-input specialisation are gone; `isReal()` compares the
+  canonical terms with their conjugates (relative tolerance); `for_each_connected_state` is gone
+  (nothing called it).
 - `Operator`'s records are private: `records()` / `three_body_records()` read them, and
   `add_record` (which the typed setters call) appends one after checking its op types (0, 1, 2)
   and sites (below `n_bits`). `Operator::canonical()` is the cached canonical form, and
