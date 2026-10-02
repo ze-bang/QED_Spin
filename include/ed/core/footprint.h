@@ -38,9 +38,11 @@ enum class Path {
     /// pairs found and a working vector: m + p + k + 3 on the host; on the device the staging copy
     /// of the found and basis columns as well.
     KrylovSchur,
-    /// The certified ground-state vector keeping its basis (`krylov` vectors, host only).
+    /// The certified ground-state vector keeping `krylov` Krylov vectors: those, the seed, three
+    /// recurrence vectors and the Ritz vector; on the device also its host copy.
     GsKeptBasis,
-    /// The certified ground-state vector by two passes without a basis.
+    /// The certified ground-state vector replaying its recurrence (no basis): GsKeptBasis at
+    /// krylov = 0.
     GsTwoPass,
     /// A dense block's eigenvalues: the complex matrix and a real copy of it.
     DenseValues,
@@ -94,12 +96,12 @@ struct Shape {
             break;
         }
         case Path::GsKeptBasis:
-            host = (std::min(M, static_cast<double>(s.dim)) + 6.0) * V;
+        case Path::GsTwoPass: {
+            const double kept = p == Path::GsKeptBasis ? std::min(M, static_cast<double>(s.dim)) : 0.0;
+            if (s.device) { dev = (kept + 5.0) * V; host = V; }
+            else          { host = (kept + 5.0) * V; }
             break;
-        case Path::GsTwoPass:
-            if (s.device) { dev = 5.0 * V; host = 2.0 * V; }
-            else          { host = 7.0 * V; }
-            break;
+        }
         case Path::DenseValues:
             host = 24.0 * D2;
             break;

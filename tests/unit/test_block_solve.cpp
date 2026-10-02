@@ -523,7 +523,7 @@ TEST_CASE("lanes: Krylov-Schur pairs are orthonormal eigenpairs", "[lanes]") {
     REQUIRE(sector.front() >= ref.front() - 1e-12);
 }
 
-TEST_CASE("lanes: the two-pass GS vector is certified at small n", "[lanes]") {
+TEST_CASE("lanes: the replayed GS vector is certified at small n", "[lanes]") {
     ed::matvec::CpuBackend be;
     for (int N : {6, 8, 10, 12}) {                 // 20, 70, 252, 924 states
         const auto H = sz_sector(N, true, N / 2);
@@ -532,11 +532,28 @@ TEST_CASE("lanes: the two-pass GS vector is certified at small n", "[lanes]") {
         REQUIRE(g.certified);
         REQUIRE(g.residual <= 1e-8);
         REQUIRE(residual(*H, g.energy, g.vector) <= 1e-8);
-        // The kept-basis lane finds the same level.
+        // The kept basis finds the same level.
         const auto k = lg::solve_gs_vector(be, *H);
         REQUIRE(k.certified);
         REQUIRE(std::abs(k.energy - g.energy) < 1e-9);
     }
+}
+
+TEST_CASE("lanes: the GS vector stops on the Paige bound; a kept basis saves the replay", "[lanes]") {
+    ed::matvec::CpuBackend be;
+    const auto H = sz_sector(14, true, 7);   // 3432 states, a unique ground state
+    const auto kept = lg::solve_gs_vector(be, *H);
+    const auto replay = lg::solve_gs_vector(be, *H, /*kept_basis_max_dim=*/0);
+    REQUIRE(kept.certified);
+    REQUIRE(replay.certified);
+    REQUIRE(std::abs(kept.energy - replay.energy) < 1e-12 * std::abs(kept.energy));
+    Complex o(0, 0);
+    for (std::size_t a = 0; a < H->dim(); ++a) o += std::conj(kept.vector[a]) * replay.vector[a];
+    REQUIRE(1.0 - std::abs(o) < 1e-10);
+    // The gate ends the recurrence (the lane used to run a fixed 200 steps); the replay applies
+    // H once more per step.
+    REQUIRE(kept.applies < 200);
+    REQUIRE(replay.applies > kept.applies);
 }
 
 TEST_CASE("lanes: a starved budget is reported, not thrown", "[lanes]") {

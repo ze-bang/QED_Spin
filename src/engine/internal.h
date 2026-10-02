@@ -114,20 +114,14 @@ inline constexpr std::size_t kLgTwoPassMinDim = std::size_t{1} << 22;   // 4.2M
     return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
 }
 
-// Per-attempt iteration budgets for the certified GS-vector lanes: the
-// two-pass no-reorth lane (x (1 + restarts) attempts) and the small-n
-// FullCGS2 lane. Both lanes are residual-guarded and THROW on a miss.
-// The small-n lane STORES the Krylov basis -- memory there is
-// 16 B x dim x iterations.
-inline constexpr std::size_t kLgGsTwoPassMaxIter = 600;
-inline constexpr std::size_t kLgGsSmallMaxIter   = 200;
-
-// Restart count for the two-pass GS lane.
+// Recurrence steps per attempt of the certified GS-vector lane (gs_lanczos, Paige-gated), and
+// the restarts after the first attempt.
+inline constexpr std::size_t kLgGsMaxIter = 600;
 inline constexpr int kLgGsRestarts = 4;
 
 // Residual acceptance for the certified GS vector (the CF/DSSF consumer): kGsResidRel times
-// the block operator's norm bound (<ed/core/numerics.h>). Shared by the two-pass INNER
-// accept-or-restart loop and the outer guard in solve_gs_vector.
+// the block operator's norm bound (<ed/core/numerics.h>): gs_lanczos restarts on a miss, and
+// solve_gs_vector certifies nothing above it.
 [[nodiscard]] inline double gs_resid_tol(const ed::LinearOperator& H) {
     return ed::numerics::kGsResidRel * ed::numerics::scale_or_one(H.norm_bound());
 }
@@ -846,7 +840,8 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
     static std::uint64_t ks_budget_bytes() {
         return ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
     }
-    /// The GS vector keeps its Krylov basis up to this dimension, and runs the two-pass above.
+    /// The GS vector may keep its Krylov basis (as far as it fits) up to this dimension; above it,
+    /// it replays the recurrence.
     static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
 };
 #ifdef WITH_CUDA
@@ -857,7 +852,7 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> 
         if (ed::core::mem_guard_off()) return 0;
         return static_cast<std::uint64_t>(ed::core::available_device_bytes(/*fresh=*/true).value_or(0));
     }
-    static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector is always two-pass
+    static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector always replays
 };
 #endif
 
@@ -902,8 +897,9 @@ template <class B>
 [[nodiscard]] BlockSolution solve_block_eigenpairs(B& be, const ed::LinearOperator& H, std::size_t want,
                                                    std::uint64_t max_iter = 0);
 
-/// The certified lowest eigenpair: dense at n <= 2, FullCGS2 with a kept basis up to
-/// kept_basis_max_dim, the two-pass recurrence above; the residual guard decides.
+/// The certified lowest eigenpair: dense at n <= 2, else a Paige-gated recurrence whose Ritz vector
+/// comes from the basis kept while it fits (never above kept_basis_max_dim) or from a replay;
+/// the residual guard decides. max_iter > 0 caps the recurrence steps (a test seam).
 template <class B>
 [[nodiscard]] GsVector solve_gs_vector(B& be, const ed::LinearOperator& H,
                                        std::size_t kept_basis_max_dim = LanePolicy<B>::gs_kept_basis_max_dim,
