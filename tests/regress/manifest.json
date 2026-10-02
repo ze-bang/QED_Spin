@@ -112,7 +112,7 @@
   {"id":"L3-concurrency-07","rep":"L3-concurrency-07","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L3-concurrency-08","rep":"L3-concurrency-08","sev":"low","axis":"robustness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L3-concurrency-11","rep":"L3-concurrency-11","sev":"medium","axis":"correctness","status":"open","dev":"gpu","seconds":120},
-  {"id":"L3-concurrency-12","rep":"L3-concurrency-12","sev":"low","axis":"correctness","status":"open","dev":"cpu","seconds":120},
+  {"id":"L3-concurrency-12","rep":"L3-concurrency-12","sev":"low","axis":"correctness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L4-validation-04","rep":"L4-validation-04","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":120},
   {"id":"L5-memory-04","rep":"L5-memory-04","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":200},
   {"id":"L5-memory-05","rep":"L5-memory-05","sev":"high","axis":"robustness","status":"info","dev":"cpu","seconds":300},

@@ -34,6 +34,32 @@
 
 namespace ed::matvec {
 
+/// sum_{i < n} f(i) with a result that does not depend on thread timing: each thread reduces
+/// its own contiguous chunk and the partials are added in thread order (an OpenMP reduction
+/// combines them in arrival order, so repeated runs differed in the last bits). Serial below
+/// 8193 terms. f may write element i (the fused Lanczos primitives update y in the same pass).
+template <class T, class F>
+[[nodiscard]] inline T ordered_sum(std::size_t n, F&& f) {
+    T total{};
+#ifdef _OPENMP
+    if (n > 8192) {
+        std::vector<T> part(static_cast<std::size_t>(omp_get_max_threads()), T{});
+        #pragma omp parallel
+        {
+            const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
+            const std::size_t nt = static_cast<std::size_t>(omp_get_num_threads());
+            T s{};
+            for (std::size_t i = n * t / nt, end = n * (t + 1) / nt; i < end; ++i) s += f(i);
+            if (t < part.size()) part[t] = s;
+        }
+        for (const T& p : part) total += p;
+        return total;
+    }
+#endif
+    for (std::size_t i = 0; i < n; ++i) total += f(i);
+    return total;
+}
+
 // The host backend for vectors of Scalar. Only std::complex<double> is defined (below);
 // P6.4 adds the double one for real blocks.
 template <class Scalar>
@@ -112,25 +138,19 @@ public:
     [[nodiscard]] Complex dot(const Complex* x, const Complex* y,
                               std::size_t n) const override {
         if (n == 0) return Complex{0.0, 0.0};
-        double re = 0.0, im = 0.0;
-        #pragma omp parallel for reduction(+:re,im) schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+        return ordered_sum<Complex>(n, [&](std::size_t i) {
             const Complex xc = std::conj(x[i]);
             const Complex y_  = y[i];
-            re += xc.real() * y_.real() - xc.imag() * y_.imag();
-            im += xc.real() * y_.imag() + xc.imag() * y_.real();
-        }
-        return Complex{re, im};
+            return Complex(xc.real() * y_.real() - xc.imag() * y_.imag(),
+                           xc.real() * y_.imag() + xc.imag() * y_.real());
+        });
     }
     [[nodiscard]] double nrm2(const Complex* x, std::size_t n) const override {
         if (n == 0) return 0.0;
-        double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+        return std::sqrt(ordered_sum<double>(n, [&](std::size_t i) {
             const Complex v = x[i];
-            sum += v.real() * v.real() + v.imag() * v.imag();
-        }
-        return std::sqrt(sum);
+            return v.real() * v.real() + v.imag() * v.imag();
+        }));
     }
     void axpby(Complex alpha, const Complex* x,
                Complex beta,  Complex* y, std::size_t n) const override {
@@ -148,34 +168,27 @@ public:
     [[nodiscard]] Complex axpy_dot_local(Complex alpha, const Complex* x, Complex* y,
                                          const Complex* z, std::size_t n) const {
         if (n == 0) return Complex{0.0, 0.0};
-        double re = 0.0, im = 0.0;
         const double ar = alpha.real(), ai = alpha.imag();
-        #pragma omp parallel for reduction(+:re,im) schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+        return ordered_sum<Complex>(n, [&](std::size_t i) {
             const Complex xi = x[i];
             const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
             const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
             y[i] = Complex(yr, yi);
             const Complex zi = z[i];
-            re += zi.real() * yr + zi.imag() * yi;
-            im += zi.real() * yi - zi.imag() * yr;
-        }
-        return Complex{re, im};
+            return Complex(zi.real() * yr + zi.imag() * yi, zi.real() * yi - zi.imag() * yr);
+        });
     }
     [[nodiscard]] double axpy_nrm2sq_local(Complex alpha, const Complex* x, Complex* y,
                                            std::size_t n) const {
         if (n == 0) return 0.0;
-        double sq = 0.0;
         const double ar = alpha.real(), ai = alpha.imag();
-        #pragma omp parallel for reduction(+:sq) schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
+        return ordered_sum<double>(n, [&](std::size_t i) {
             const Complex xi = x[i];
             const double yr = y[i].real() + ar * xi.real() - ai * xi.imag();
             const double yi = y[i].imag() + ar * xi.imag() + ai * xi.real();
             y[i] = Complex(yr, yi);
-            sq += yr * yr + yi * yi;
-        }
-        return sq;
+            return yr * yr + yi * yi;
+        });
     }
     [[nodiscard]] Complex axpy_dot(Complex alpha, const Complex* x, Complex* y,
                                    const Complex* z, std::size_t n) const override {
