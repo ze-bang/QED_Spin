@@ -28,10 +28,10 @@
 namespace {
 
 // Pick (dim, terms_per_row) whose upper-bound estimate is ~= gib gigabytes.
-// est = dim * terms * 20 + (dim + 1) * 8
+// est = dim * terms * 7 + (dim + 1) * 8 (the dictionary build's peak, csr_policy.h)
 std::uint64_t dim_for_gib(double gib, std::uint64_t terms_per_row) {
     const double bytes = gib * static_cast<double>(1ULL << 30);
-    return static_cast<std::uint64_t>(bytes / (terms_per_row * 20.0 + 8.0));
+    return static_cast<std::uint64_t>(bytes / (terms_per_row * 7.0 + 8.0));
 }
 
 struct EnvGuard {

@@ -551,6 +551,11 @@ TEST_CASE("rep sectors: too many distinct values fall back to full values, bit f
     CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
     CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
     CHECK(std::memcmp(csr.val.data(), ref.val.data(), ref.val.size() * sizeof(Cx)) == 0);
+    // The full-value fallback is built only within the caller's cap (its exact size): one byte
+    // short, nothing is built and the caller walks.
+    const std::uint64_t full = ref.nnz() * (sizeof(Cx) + sizeof(std::uint32_t)) + (d + 1) * sizeof(std::uint64_t);
+    CHECK(ed::matvec::build_sector_csr(P.view(), pol, d, full).built());
+    CHECK_FALSE(ed::matvec::build_sector_csr(P.view(), pol, d, full - 1).built());
 }
 
 TEST_CASE("rep sectors: the bucket lookup finds what the binary search finds", "[row_walk]") {

@@ -212,10 +212,13 @@ inline constexpr std::size_t kCsrDictMax = 65536;
 /// computed twice instead (count, then fill) into full values, which never holds more than the
 /// CSR. Either way the entries are those of the two-pass build bit for bit. The rows come in units: a row
 /// of a d = 1 sector, or the rank rows of one representative of a d > 1 sector (`dim` counts rows).
+/// `max_full_bytes` caps the full-value fallback: when its exact size (20 bytes an entry, 8 a row)
+/// exceeds it, nothing is built (dim 0) and the caller takes the walk.
 template <class RowPolicy, class ColPolicy>
 inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramView<SectorComplex>& P,
                                                          const RowPolicy& rowp, const ColPolicy& colp, bool same,
-                                                         std::uint64_t dim) {
+                                                         std::uint64_t dim,
+                                                         std::uint64_t max_full_bytes = ~std::uint64_t{0}) {
     ReducedSymmetryCsr<SectorComplex> csr;
     csr.dim = dim;
     csr.row_ptr.assign(dim + 1, 0);
@@ -299,6 +302,9 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
             }
         }
         for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
+        const std::uint64_t full_bytes = csr.row_ptr[dim] * (sizeof(SectorComplex) + sizeof(std::uint32_t))
+                                         + (dim + 1) * sizeof(std::uint64_t);
+        if (full_bytes > max_full_bytes) return ReducedSymmetryCsr<SectorComplex>{};
         csr.allocate_first_touch();
         #pragma omp parallel
         {
@@ -350,11 +356,12 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     return csr;
 }
 
-/// O on one sector as a CSR.
+/// O on one sector as a CSR (max_full_bytes: build_cross_csr).
 template <class Policy>
 inline ReducedSymmetryCsr<SectorComplex> build_sector_csr(const ed::ops::ProgramView<SectorComplex>& P,
-                                                          const Policy& pol, std::uint64_t dim) {
-    return build_cross_csr(P, pol, pol, true, dim);
+                                                          const Policy& pol, std::uint64_t dim,
+                                                          std::uint64_t max_full_bytes = ~std::uint64_t{0}) {
+    return build_cross_csr(P, pol, pol, true, dim, max_full_bytes);
 }
 
 /// The mean number of stored entries per row over up to `samples` evenly spaced rows.

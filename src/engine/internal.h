@@ -327,10 +327,19 @@ private:
         }
         if (budget_ && !budget_->take(est)) return;   // another operator of the block took it first
         const auto t0 = std::chrono::steady_clock::now();
-        csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
-            reduced_csr());
+        // A full-value fallback (too many distinct values for a dictionary) is built only within the
+        // room this block had; past it nothing is built and the walk serves the applies.
+        auto built = ed::matvec::build_sector_csr(rows_->view(), pol_, dim, room);
         csr_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (budget_) budget_->give(est - std::min(est, csr_bytes()));   // the estimate was an upper bound
+        if (!built.built()) {
+            if (budget_) budget_->give(est);
+            return;
+        }
+        csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(std::move(built));
+        if (budget_) {   // the estimate is an upper bound for a dictionary; a full-value CSR may exceed it
+            if (csr_bytes() <= est) budget_->give(est - csr_bytes());
+            else (void)budget_->take(csr_bytes() - est);
+        }
         if (ed::env::flag("ED_SYM_PROFILE", false)) {
             ED_LOG(Info,
                          "[sym_profile] little-group block dim=%llu: "

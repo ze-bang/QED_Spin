@@ -76,9 +76,13 @@ enum class SymMatvecRepr : int {
     return 1u;
 }
 
-/// The bytes of a reduced sector CSR of `dim` rows with at most `per_row` entries a row.
+/// The bytes of a reduced sector CSR of `dim` rows with at most `per_row` entries a row, at its
+/// build's peak: its values in a dictionary (sector_rows.h build_cross_csr: a 4-byte column and a
+/// 1-2 byte value id an entry, the chunks' slabs released as the arrays fill), 7 bytes an entry and
+/// the row pointers. A matrix with too many distinct values for a dictionary falls back to full
+/// values (20 bytes an entry) only within the caller's cap, checked against its exact size.
 [[nodiscard]] inline std::uint64_t csr_estimate_bytes(std::uint64_t dim, std::uint64_t per_row) noexcept {
-    return dim * per_row * (16u /* complex value */ + 4u /* col idx */) + (dim + 1) * 8u /* row ptr */;
+    return dim * per_row * 7u + (dim + 1) * 8u /* row ptr */;
 }
 
 /// The bytes the reduced CSRs built around this call may take, ONE rule for every lane:
