@@ -109,8 +109,9 @@ ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, b
 }
 
 // The pruning estimate of a block above the dense crossover, on the lane place() chooses for
-// it: an upper bound on its lowest level (-inf when the estimate failed: never pruned). A block
-// the transitional small-block rule keeps on the host is solved exactly.
+// it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
+// is never trusted to prune; -inf when the estimate failed). A block the transitional
+// small-block rule keeps on the host is solved exactly.
 double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device device) {
     const ed::LinearOperator& op = *bop.op;
     const ed::Lane lane = ed::place(device, eigs_request(bop, bi, /*dense=*/false, 1));
@@ -118,7 +119,10 @@ double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device de
         const auto sol = solve_block_dense(op, 1, false);
         return sol.values.empty() ? -std::numeric_limits<double>::infinity() : sol.values.front();
     }
-    return ed::with_backend(lane, [&op](auto& be) { return lg_detail::estimate_lowest(be, op).theta; });
+    return ed::with_backend(lane, [&op](auto& be) {
+        const auto e = lg_detail::estimate_lowest(be, op);
+        return e.theta - e.residual;
+    });
 }
 
 // The phase record of one solved block, logged at Info. `rep` is the block's H; its counters

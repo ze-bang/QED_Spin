@@ -440,6 +440,7 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("seed", &sec::DynamicsSpec::seed)
         .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol)
         .def_readwrite("dense_max_dim", &sec::DynamicsSpec::dense_max_dim)
+        .def_readwrite("prune", &sec::DynamicsSpec::prune)
         .def_readwrite("device", &sec::DynamicsSpec::device);
 
     py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")

@@ -124,9 +124,9 @@ std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std
 // level above the window shows up, which catches degeneracies inside a block.
 std::vector<std::pair<Level, BlockVector>>
 ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Device device,
-                int dense_max_dim, double& e0, Placement& placement) {
+                int dense_max_dim, bool prune, double& e0, Placement& placement) {
     EigsOptions eo;
-    eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim;
+    eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim; eo.prune = prune;
     const EigsResult first = eigs(H, u, eo);
     placement += first.placement;
     eo.vectors = true;
@@ -254,7 +254,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         auto t_gm = std::chrono::steady_clock::now();
         // The window is relative to H's scale: s * H keeps the same manifold.
         const double window = d.degeneracy_tol * ed::numerics::scale_or_one(H.norm_bound());
-        const auto manifold = ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, out.e0, out.placement);
+        const auto manifold = ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0,
+                                              out.placement);
         // With a spin tower the solve returns the Sz = S member of each multiplet; the other
         // members follow by total S- (normalised), each in the same momentum sector one Sz lower.
         std::vector<std::pair<BlockVector, int>> states;   // (vector, Sz parity of its subspace)

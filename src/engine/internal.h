@@ -851,8 +851,9 @@ struct GsVector {
 
 /// An upper bound on a block's lowest level (40 Lanczos steps); -inf when it failed.
 struct BlockEstimate {
-    double        theta   = -std::numeric_limits<double>::infinity();
-    std::uint64_t applies = 0;
+    double        theta    = -std::numeric_limits<double>::infinity();   ///< lowest Ritz value
+    double        residual = std::numeric_limits<double>::infinity();    ///< its bound |beta_m z_m|
+    std::uint64_t applies  = 0;
 };
 
 /// The `want` lowest levels by a dense solve on the host: LAPACK values, or Eigen with vectors.

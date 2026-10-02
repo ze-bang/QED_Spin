@@ -1137,3 +1137,14 @@ def test_results_scale_with_the_units_of_h(scale):
     ds = qed.dynamics(Hs, O, omega * scale, eta=0.1 * scale, sym=qed.Symmetry(spatial=None))
     assert d1.ground_manifold == ds.ground_manifold
     np.testing.assert_allclose(np.asarray(ds.S[0]) * scale, np.asarray(d1.S[0]), rtol=1e-6, atol=1e-9)
+
+
+def test_dynamics_prune_flag():
+    # prune=False solves every block in the ground-manifold eigensolve; the answer is the same.
+    n = 10
+    H, O = _ring(n, 0.3), _sz_q(n, math.pi)
+    omega = np.linspace(0.0, 3.0, 61)
+    a = qed.dynamics(H, O, omega, eta=0.1)
+    b = qed.dynamics(H, O, omega, eta=0.1, prune=False)
+    assert a.ground_manifold == b.ground_manifold
+    np.testing.assert_allclose(np.asarray(b.S[0]), np.asarray(a.S[0]), rtol=1e-9, atol=1e-12)

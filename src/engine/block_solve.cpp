@@ -456,7 +456,10 @@ BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H) {
     v0.reset();
     est.applies = Hc.applies;
     if (k.alpha.empty()) return est;
-    est.theta = ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/false).values.front();
+    const std::size_t m = k.alpha.size();
+    const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(k.alpha, k.beta, m, /*vectors=*/true);
+    est.theta    = t.values.front();
+    est.residual = k.beta.size() > m ? std::abs(k.beta[m]) * std::abs(t.z(m - 1, 0)) : 0.0;
     return est;
 }
 

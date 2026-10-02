@@ -38,6 +38,7 @@ struct DynamicsSpec {
     std::uint64_t       seed           = 0;    ///< 0 = draw one
     double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window, relative to s_H (numerics.h)
     int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
+    bool                prune          = true; ///< T = 0: the ground-manifold eigensolve prunes blocks (EigsOptions)
     Device              device         = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
 };
 
