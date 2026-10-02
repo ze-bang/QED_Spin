@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <exception>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -158,16 +159,20 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
     return members * ed::symmetry::multiplet_count(n_sites, two_S);
 }
 
-/// Dense spectra of many blocks: on the host one block at a time, or -- on a device lane --
-/// materialised as the walk visits them and solved in batched cuSOLVER calls (the walk streams
-/// stars, so the matrices are the only thing that outlives a star). place(Task::DenseBatch)
-/// chooses each entry's lane. A batch is packed on the host and uploaded at once, so it is solved
-/// before it outgrows a quarter of the free device memory or of the RAM the job may still
-/// allocate (cuSOLVER's workspace and the eigenvalues come on top), and never holds more than
-/// 256 MiB of matrices; a block larger than that is solved on the host, and so is a batch whose
-/// device solve fails.
+/// Dense spectra of many blocks, materialised as the walk visits them (the walk streams stars, so
+/// the matrices are the only thing that outlives a star). place(Task::DenseBatch) chooses each
+/// entry's lane. On a device lane they are solved in batched cuSOLVER calls: a batch is packed on
+/// the host and uploaded at once, so it is solved before it outgrows a quarter of the free device
+/// memory or of the RAM the job may still allocate (cuSOLVER's workspace and the eigenvalues come
+/// on top), and never holds more than 256 MiB of matrices; a block larger than that is solved on
+/// the host, and so is a batch whose device solve fails. On the host a block above
+/// kHostConcurrentMaxDim is solved at once by the threaded LAPACK; smaller ones are queued (up to
+/// host_budget()) and solved concurrently, one serial LAPACK call per thread.
 class DenseBatch {
 public:
+    /// The largest host block queued for the concurrent solve (its serial zheevd takes ~1 s).
+    static constexpr std::uint64_t kHostConcurrentMaxDim = 2048;
+
     DenseBatch(Device device, const char* verb) : device_(device), verb_(verb) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
@@ -184,12 +189,19 @@ public:
         if (ed::on_device(lanes_.back())) {
             if (budget_ == 0) budget_ = batch_budget();
             if (bytes > budget_) lanes_.back() = ed::Lane::HostDense;   // too large for any batch
-            else if (16 * packed_.data.size() + bytes > budget_) solve();
+            else if (16 * packed_.data.size() + bytes > budget_) solve_device();
         }
         if (!ed::on_device(lanes_.back())) {
             ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {mv.dim()}).host,
                                         "dense spectrum");
-            spectra_.back() = solve_block_full(mv);
+            if (mv.dim() > kHostConcurrentMaxDim) {   // large enough for the threaded LAPACK
+                spectra_.back() = solve_block_full(mv);
+                return id;
+            }
+            if (host_budget_ == 0) host_budget_ = host_budget();
+            if (host_bytes_ + bytes > host_budget_) solve_host();
+            host_.push_back({id, materialize(mv)});
+            host_bytes_ += bytes;
             return id;
         }
         const Eigen::MatrixXcd Hb = materialize(mv);
@@ -204,6 +216,17 @@ public:
 
     /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
     void solve() {
+        solve_device();
+        solve_host();
+    }
+
+    [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
+    [[nodiscard]] ed::Lane lane(std::size_t id) const { return lanes_[id]; }
+    [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
+
+private:
+    // The device batch (and its host fallback when the device solve fails).
+    void solve_device() {
         if (queued_.empty()) return;
         std::vector<double> ev;
         bool on_device = false;
@@ -237,11 +260,53 @@ public:
         budget_ = 0;   // measured afresh for the next batch
     }
 
-    [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
-    [[nodiscard]] ed::Lane lane(std::size_t id) const { return lanes_[id]; }
-    [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
+    // The queued host blocks, concurrently: one serial LAPACK solve per thread, largest first
+    // (LPT), where one threaded solve after another would spend small blocks on the team's
+    // fork/join. A queue too short to fill half the team keeps the threaded solves.
+    void solve_host() {
+        if (host_.empty()) return;
+        const int team = omp_get_max_threads();
+        if (2 * host_.size() < static_cast<std::size_t>(team)) {
+            for (auto& [id, M] : host_) spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
+        } else {
+            std::vector<std::size_t> order(host_.size());
+            std::iota(order.begin(), order.end(), std::size_t{0});
+            std::stable_sort(order.begin(), order.end(), [this](std::size_t a, std::size_t b) {
+                return host_[a].second.rows() > host_[b].second.rows();
+            });
+            const ed::parallel::ThreadBudgetScope blas_serial(team, 1);
+            std::exception_ptr err;
+            #pragma omp parallel for schedule(dynamic, 1)
+            for (long long q = 0; q < static_cast<long long>(order.size()); ++q) {
+                auto& [id, M] = host_[order[static_cast<std::size_t>(q)]];
+                try {
+                    spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
+                } catch (...) {
+                    #pragma omp critical(qed_dense_batch_error)
+                    if (!err) err = std::current_exception();
+                }
+                M.resize(0, 0);
+            }
+            if (err) {
+                host_.clear();
+                host_bytes_ = 0;
+                std::rethrow_exception(err);
+            }
+        }
+        host_.clear();
+        host_bytes_ = 0;
+        host_budget_ = 0;   // measured afresh for the next queue
+    }
 
-private:
+    // The host queue holds at most 2 GiB of matrices, or a quarter of the RAM the job may still
+    // allocate when that is smaller (not checked under ED_MEM_GUARD_OFF).
+    static std::uint64_t host_budget() {
+        std::uint64_t b = std::uint64_t{2} << 30;
+        if (ed::core::mem_guard_off()) return b;
+        if (const std::uint64_t ram = ed::core::available_ram_bytes()) b = std::min<std::uint64_t>(b, ram / 4);
+        return std::max<std::uint64_t>(b, 1);
+    }
+
     // 256 MiB of matrices already amortise the launch (many small blocks, or a few large ones);
     // less when a quarter of the free device memory or of the job's RAM is smaller (those two
     // are not checked under ED_MEM_GUARD_OFF, or where they cannot be measured).
@@ -261,6 +326,9 @@ private:
     std::vector<std::vector<double>>  spectra_;
     std::size_t                       device_blocks_ = 0;
     std::uint64_t                     budget_ = 0;   // bytes of the current batch's matrices at most
+    std::vector<std::pair<std::size_t, Eigen::MatrixXcd>> host_;   // (entry, matrix) for solve_host
+    std::uint64_t                     host_bytes_  = 0;
+    std::uint64_t                     host_budget_ = 0;
 };
 
 /// The S^2 operator a total-spin restriction needs (null without one).

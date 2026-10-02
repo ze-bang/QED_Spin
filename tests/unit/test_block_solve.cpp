@@ -17,6 +17,7 @@
 #include "common/dense_operator.h"
 #include "common/test_harness.h"
 #include "engine/internal.h"
+#include "engine/walk.h"
 
 #include <ed/core/device.h>
 #include <ed/core/errors.h>
@@ -744,3 +745,24 @@ TEST_CASE("linear_operator: a host-only operator refuses a device binding", "[li
     REQUIRE_THROWS_AS(H->bind<ed::matvec::CudaBackend>(), ed::DeviceUnsupported);
 }
 #endif
+
+// The host DenseBatch queues blocks up to kHostConcurrentMaxDim and solves them concurrently (one
+// serial LAPACK call per thread, largest first): the spectra are those of the single solves.
+TEST_CASE("dense: the host DenseBatch solves its queue concurrently, as single solves do", "[dense]") {
+    std::vector<std::shared_ptr<const ed::LinearOperator>> ops;
+    for (int N : {8, 10, 12})                       // 33 blocks of 1 to 924 states
+        for (int n_up = 0; n_up <= N; ++n_up) ops.push_back(sz_sector(N, n_up % 2 == 0, n_up));
+    ed::sectors::detail::DenseBatch batch(ed::Device::Cpu, "test");
+    std::vector<std::size_t> ids;
+    for (const auto& H : ops) ids.push_back(batch.add(*H));
+    batch.solve();
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        INFO("block " << i << ", dim " << ops[i]->dim());
+        const auto ref = lg::solve_block_full(*ops[i]);
+        const auto& got = batch.spectrum(ids[i]);
+        REQUIRE(batch.lane(ids[i]) == ed::Lane::HostDense);
+        REQUIRE(got.size() == ref.size());
+        for (std::size_t j = 0; j < ref.size(); ++j)
+            REQUIRE(std::abs(got[j] - ref[j]) <= 1e-12 * std::max(1.0, std::abs(ref[j])));
+    }
+}

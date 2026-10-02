@@ -27,6 +27,7 @@
 //   thermal.cpp, dynamics.cpp, expect.cpp   the other ed::sectors verbs
 //   oftlm.cpp         OFTLM (declared in ed/thermal/ftlm.h)
 // =============================================================================
+#pragma once
 
 #include "options.h"
 #include <ed/core/config.h>      // typed environment accessors
@@ -824,6 +825,14 @@ star_partition(const EngineContext& cx, bool tr_on);
 // (H.bind<B>()), counts its applies, draws its seed on the host and stages it on the
 // backend; vectors come back on the host, in block coordinates.
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
+/// The lowest eigenpairs of a dense block, ascending; column j of `vectors` belongs to values[j].
+struct DenseEigenpairs {
+    std::vector<double> values;
+    Eigen::MatrixXcd    vectors;
+};
+/// The `want` lowest eigenpairs of a materialised block (consumed): the one dense eigensolve with
+/// vectors (LAPACK MRRR, the real path for a real block).
+[[nodiscard]] DenseEigenpairs dense_eigenpairs_inplace(Eigen::MatrixXcd& Hb, std::size_t want);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 /// The largest block eigs solves densely: dense_max_dim when the caller set it (>= 0), else
 /// min(4 max(40 k, 400), kAutoDenseCeiling, the largest block whose dense solve -- with or

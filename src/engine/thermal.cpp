@@ -368,18 +368,22 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 }
                 if (t.method == ThermalSpec::Method::Exact && n_obs > 0) {
                     // Diagonal elements need the eigenvectors: solved here, on the host.
-                    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(mv));
-                    const Eigen::MatrixXcd& U = es.eigenvectors();
+                    Eigen::MatrixXcd Hb = materialize(mv);
+                    const lg_detail::DenseEigenpairs es = lg_detail::dense_eigenpairs_inplace(Hb, mv.dim());
+                    const Eigen::MatrixXcd& U = es.vectors;
+                    // <n|A|n> = sum_i conj(U_in) (A U)_in: one product, not the sandwich U^dag A U.
                     std::vector<Eigen::VectorXcd> dg;
-                    for (const auto& A : obs) dg.push_back((U.adjoint() * materialize(*A) * U).diagonal());
+                    for (const auto& A : obs)
+                        dg.push_back(U.conjugate().cwiseProduct(materialize(*A) * U).colwise().sum().transpose());
                     std::vector<double> ev;
                     std::vector<std::vector<Complex>> q(n_obs);
-                    for (Eigen::Index n = 0; n < es.eigenvalues().size(); ++n) {
-                        const double e = es.eigenvalues()(n);
+                    for (std::size_t n = 0; n < es.values.size(); ++n) {
+                        const double e = es.values[n];
                         if (bop.is_ghost(e)) continue;
                         ev.push_back(e);
+                        const auto i = static_cast<Eigen::Index>(n);
                         for (std::size_t k = 0; k < n_obs; ++k)
-                            q[k].push_back(folded ? 0.5 * (dg[2 * k](n) + std::conj(dg[2 * k + 1](n))) : dg[k](n));
+                            q[k].push_back(folded ? 0.5 * (dg[2 * k](i) + std::conj(dg[2 * k + 1](i))) : dg[k](i));
                     }
                     if (ev.empty()) continue;
                     tower_states += ev.size() * bop.multiplicity;

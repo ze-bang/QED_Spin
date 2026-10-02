@@ -42,25 +42,26 @@ static void require_lapack_dense(std::uint64_t n) {
                               "with more symmetry, or use eigs / thermal(method='ftlm')");
 }
 
+// Is this Hermitian block real up to roundoff (numerics.h kRealBlockRel, relative to its largest
+// entry)? Real blocks (real momenta under time reversal) take LAPACK's ~2x cheaper real paths.
+static bool real_block(const Eigen::MatrixXcd& Hb) {
+    double max_imag = 0.0, max_abs = 0.0;
+    for (Eigen::Index j = 0; j < Hb.cols(); ++j)
+        for (Eigen::Index i = j; i < Hb.rows(); ++i) {
+            max_imag = std::max(max_imag, std::abs(Hb(i, j).imag()));
+            max_abs  = std::max(max_abs, std::abs(Hb(i, j)));
+        }
+    return max_imag <= ed::numerics::kRealBlockRel * max_abs;
+}
+
 [[nodiscard]] std::vector<double>
 dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
     require_lapack_dense(static_cast<std::uint64_t>(Hb.rows()));
     const lapack_int n = static_cast<lapack_int>(Hb.rows());
     std::vector<double> w(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return w;
-
-    double max_imag = 0.0;             // is this block real (up to roundoff)?
-    for (Eigen::Index j = 0; j < Hb.cols(); ++j)
-        for (Eigen::Index i = j; i < Hb.rows(); ++i) {
-            const double a = std::abs(Hb(i, j).imag());
-            if (a > max_imag) max_imag = a;
-        }
-
-    double max_abs = 0.0;              // relative to the block's own scale (numerics.h)
-    for (Eigen::Index j = 0; j < Hb.cols(); ++j)
-        for (Eigen::Index i = j; i < Hb.rows(); ++i) max_abs = std::max(max_abs, std::abs(Hb(i, j)));
     lapack_int info;
-    if (max_imag <= ed::numerics::kRealBlockRel * max_abs) {
+    if (real_block(Hb)) {
         Eigen::MatrixXd R = Hb.real();  // symmetric; LAPACK reads upper only
         info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'N', 'U', n, R.data(), n,
                               w.data());
@@ -74,6 +75,46 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
             "little_group: dense block eigensolve failed (info = "
             + std::to_string(info) + ")");
     return w;
+}
+
+// The `want` lowest eigenpairs of a materialised block: the one dense eigensolve with vectors.
+// LAPACK's MRRR (dsyevr on the real part of a real block, else zheevr) for the index range
+// 1..want, so only the wanted vectors are formed, threaded through the linked LAPACK. Hb is
+// consumed (a real block frees it once its real copy is made): the peak stays within the
+// DenseVectors footprint (the matrix and the vectors, 32 B per entry).
+[[nodiscard]] DenseEigenpairs dense_eigenpairs_inplace(Eigen::MatrixXcd& Hb, std::size_t want) {
+    require_lapack_dense(static_cast<std::uint64_t>(Hb.rows()));
+    const std::size_t nb = static_cast<std::size_t>(Hb.rows());
+    DenseEigenpairs d;
+    want = std::min(want, nb);
+    if (want == 0) return d;
+    const lapack_int n = static_cast<lapack_int>(nb), iu = static_cast<lapack_int>(want);
+    const char range = want == nb ? 'A' : 'I';
+    std::vector<double> w(nb, 0.0);
+    std::vector<lapack_int> isuppz(2 * nb);
+    lapack_int found = 0, info;
+    if (real_block(Hb)) {
+        Eigen::MatrixXd R = Hb.real();
+        Hb.resize(0, 0);
+        Eigen::MatrixXd Z(static_cast<Eigen::Index>(nb), static_cast<Eigen::Index>(want));
+        info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, 'V', range, 'U', n, R.data(), n, 0.0, 0.0, 1, iu, 0.0, &found,
+                              w.data(), Z.data(), n, isuppz.data());
+        R.resize(0, 0);
+        d.vectors = Z.cast<Complex>();
+    } else {
+        d.vectors.resize(static_cast<Eigen::Index>(nb), static_cast<Eigen::Index>(want));
+        info = LAPACKE_zheevr(LAPACK_COL_MAJOR, 'V', range, 'U', n,
+                              reinterpret_cast<lapack_complex_double*>(Hb.data()), n, 0.0, 0.0, 1, iu, 0.0, &found,
+                              w.data(), reinterpret_cast<lapack_complex_double*>(d.vectors.data()), n,
+                              isuppz.data());
+        Hb.resize(0, 0);
+    }
+    if (info != 0 || static_cast<std::size_t>(found) != want)
+        throw std::runtime_error("little_group: dense block eigensolve with vectors failed (info = "
+                                 + std::to_string(info) + ", " + std::to_string(found) + " of "
+                                 + std::to_string(want) + " pairs)");
+    d.values.assign(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(want));
+    return d;
 }
 
 [[nodiscard]] std::vector<double>
@@ -131,8 +172,8 @@ solve_block_full(const ed::LinearOperator& mv) {
 }
 
 
-// The `want` lowest levels of a block by a dense solve on the host: LAPACK
-// divide-and-conquer for values, Eigen's eigensolver with vectors.
+// The `want` lowest levels of a block by a dense solve on the host: LAPACK divide-and-conquer for
+// values, dense_eigenpairs_inplace with vectors.
 [[nodiscard]] BlockSolution solve_block_dense(const ed::LinearOperator& H, std::size_t want, bool vectors) {
     BlockSolution sol;
     const std::size_t nb = H.dim();
@@ -148,15 +189,12 @@ solve_block_full(const ed::LinearOperator& mv) {
         sol.values.assign(w.begin(), w.begin() + static_cast<long>(std::min(k, w.size())));
         return sol;
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(materialize(H));
-    if (es.info() != Eigen::Success)
-        throw std::runtime_error("little_group: dense block eigensolve failed");
+    Eigen::MatrixXcd Hb = materialize(H);
+    const DenseEigenpairs d = dense_eigenpairs_inplace(Hb, k);
+    sol.values = d.values;
     for (std::size_t j = 0; j < k; ++j) {
-        sol.values.push_back(es.eigenvalues()(static_cast<Eigen::Index>(j)));
-        std::vector<Complex> v(nb);
-        for (std::size_t i = 0; i < nb; ++i)
-            v[i] = es.eigenvectors()(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j));
-        sol.vectors.push_back(std::move(v));
+        const Complex* col = d.vectors.data() + j * nb;
+        sol.vectors.emplace_back(col, col + nb);
     }
     return sol;
 }
@@ -672,9 +710,10 @@ GsVector solve_gs_vector(B& be, const ed::LinearOperator& H, std::size_t kept_ba
     const double tol = gs_resid_tol(H);
     if (n <= 2) {   // the caller sends blocks below its dense crossover to a dense solve
         const Eigen::MatrixXcd M = materialize(H);
-        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
-        const Eigen::VectorXcd v = es.eigenvectors().col(0);
-        g.energy    = es.eigenvalues()(0);
+        Eigen::MatrixXcd Hb = M;
+        const DenseEigenpairs d = dense_eigenpairs_inplace(Hb, 1);
+        const Eigen::VectorXcd v = d.vectors.col(0);
+        g.energy    = d.values[0];
         g.residual  = (M * v - g.energy * v).norm();
         g.vector.assign(v.data(), v.data() + n);
         g.certified = g.residual <= tol;
