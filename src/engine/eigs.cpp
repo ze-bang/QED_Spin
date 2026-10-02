@@ -430,8 +430,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     std::uint64_t acc = 0;
     double cut = std::numeric_limits<double>::infinity();
     for (const auto& r : rows) {
-        // past the k-th level: only its roundoff-equal copies (a multiplet is never split by
-        // rounding) and, with a window, every level within it
+        // past the k-th level: the roundoff-equal copies of it among the rows (a multiplet is
+        // never split by rounding) and, with a window, every row within it
         if (std::isfinite(cut) && !same_energy(r.level.energy, cut)
             && !(o.window > 0.0 && r.level.energy <= cut + o.window)) break;
         res.levels.push_back(r.level);
