@@ -168,8 +168,15 @@ public:
     RepSectorMatVec(const ::Operator& op,
                     std::shared_ptr<const ed::symmetry::RepSectorData> rd,
                     bool force_gpu = false)
+        : RepSectorMatVec(op.row_program(), std::move(rd), force_gpu) {}
+
+    /// An operator given by its row program (Operator::row_program, or compile_operator of an
+    /// adjoint) on a sector basis that already carries its permutation LUT.
+    RepSectorMatVec(std::shared_ptr<const ed::ops::MaskedProgram> rows,
+                    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
+                    bool force_gpu = false)
         : rd_(std::move(rd)),
-          rows_(op.row_program()),
+          rows_(std::move(rows)),
           pol_(rd_->make_policy()),
           force_gpu_(force_gpu)
     {

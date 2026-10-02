@@ -416,3 +416,58 @@ TEST_CASE("canonical() follows the records, and a copy is independent", "[invari
     CHECK(copy.canonical().equals(H->canonical()));
     CHECK(ed::ops::sz_content(H->canonical()) == ed::ops::SzContent::U1);
 }
+
+TEST_CASE("group_average commutes with the group; keep_sz_changes keeps what it says", "[invariance]") {
+    std::mt19937 rng(20261005);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
+    std::uniform_int_distribution<int> pick_len(1, 3);
+    std::normal_distribution<double> g(0.0, 1.0);
+    std::vector<std::vector<int>> G;
+    for (int a = 0; a < N; ++a) {
+        std::vector<int> p(N);
+        for (int i = 0; i < N; ++i) p[static_cast<std::size_t>(i)] = (i + a) % N;
+        G.push_back(p);
+    }
+    const std::size_t D = std::size_t{1} << N;
+    for (int trial = 0; trial < 10; ++trial) {
+        MaskedOperator O(N);
+        for (int t = 0; t < 5; ++t) {
+            std::string o;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                o.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(N, o, sites, Cx(g(rng), g(rng))));
+        }
+        const auto A = ed::ops::group_average(O, G, false);
+        const auto Af = ed::ops::group_average(O, G, true);
+        for (const auto& p : G) {
+            CHECK(ed::ops::commutes_with_permutation(A, p));
+            CHECK(ed::ops::commutes_with_permutation(Af, p));
+        }
+        CHECK(ed::ops::flip_invariant(Af));
+        // the dense average (1/|G|) sum_g U_g O U_g^dagger, U_g|s> = |P_g(s)>
+        const auto Od = O.to_dense();
+        std::vector<Cx> ref(D * D, Cx(0.0, 0.0));
+        for (const auto& p : G)
+            for (std::uint64_t t = 0; t < D; ++t)
+                for (std::uint64_t s = 0; s < D; ++s) {
+                    const Cx v = Od[t * D + s];
+                    if (v == Cx(0.0, 0.0)) continue;
+                    ref[ed::ops::permute_mask(t, p.data(), N) * D + ed::ops::permute_mask(s, p.data(), N)] +=
+                        v / static_cast<double>(G.size());
+                }
+        const auto Ad = A.to_dense();
+        double d = 0.0, m = 0.0;
+        for (std::size_t i = 0; i < Ad.size(); ++i) { d = std::max(d, std::abs(Ad[i] - ref[i])); m = std::max(m, std::abs(ref[i])); }
+        CHECK(d <= 1e-12 * std::max(1.0, m));
+        // the S^z filters
+        using ed::ops::SzKeep;
+        CHECK(ed::ops::sz_content(ed::ops::keep_sz_changes(O, SzKeep::Zero)) == ed::ops::SzContent::U1);
+        CHECK(ed::ops::sz_content(ed::ops::keep_sz_changes(O, SzKeep::Even)) != ed::ops::SzContent::None);
+        CHECK(ed::ops::keep_sz_changes(O, SzKeep::All).equals(O, 0.0));
+        CHECK((ed::ops::keep_sz_changes(O, SzKeep::Zero) + (O - ed::ops::keep_sz_changes(O, SzKeep::Zero))).equals(O));
+    }
+}

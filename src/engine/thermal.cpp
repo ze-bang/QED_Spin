@@ -248,11 +248,11 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     const auto& basis = bi->gop ? *bi->gsec : *sb.hk->rep_data_ptr();
                     const bool flip = sub.mirror == 2 || bi->tag.flip_parity >= 0 || basis.has_flips();
                     using detail::Keep;
-                    const Keep keep = sub.n_up >= 0 ? Keep::Sz : (sub.sz_parity >= 0 ? Keep::Parity : Keep::All);
+                    const Keep keep = sub.n_up >= 0 ? Keep::Zero : (sub.sz_parity >= 0 ? Keep::Even : Keep::All);
                     for (const ::Operator* O : t.observables)
                         for (bool conj : {false, true}) {
                             if (conj && !folded) break;
-                            obs.push_back(detail::block_observable(*avg->get(*O, flip, keep, conj), sb, bi,
+                            obs.push_back(detail::block_observable(avg->get(*O, flip, keep, conj), sb, bi,
                                                                    t.device != Device::Cpu));
                         }
                 }

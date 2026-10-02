@@ -184,92 +184,13 @@ inline std::vector<Perm> close_group(const std::vector<Perm>& gens, int n) {
     return out;
 }
 
-inline int sz_shift(int op) { return op == 0 ? -1 : (op == 1 ? 1 : 0); }
+using Keep = ed::ops::SzKeep;
 
-// One product of single-site operators; the factors of distinct sites commute, so they are
-// kept in site order and equal products merge.
-struct AvgTerm {
-    std::array<std::uint8_t, 3>  op{};
-    std::array<std::uint64_t, 3> site{};
-    int n = 0;
-};
-
-enum class Keep { All, Sz, Parity };
-
-// O averaged over the site permutations `G` (and the Sz flip), without the terms that change
-// what `keep` conserves. Equal terms are merged, so the result is no larger than it must be.
-inline ::Operator averaged(const ::Operator& O, const std::vector<Perm>& G, bool flip, Keep keep) {
-    if (O.has_extra_terms())
-        throw ed::Unsupported("terms on four or more sites are not supported in an observable yet (expect, thermal "
-                              "observables, dynamics, matrix_element); they work in the Hamiltonian");
-    std::vector<std::pair<AvgTerm, Complex>> terms;
-    for (const auto& t : O.records()) {
-        AvgTerm x;
-        x.n = t.is_two_body ? 2 : 1;
-        x.op   = {t.op_type, t.op_type_2, 0};
-        x.site = {t.site_index, t.site_index_2, 0};
-        terms.push_back({x, t.coefficient});
-    }
-    for (const auto& t : O.three_body_records()) {
-        AvgTerm x;
-        x.n = 3;
-        x.op   = {t.op_type_1, t.op_type_2, t.op_type_3};
-        x.site = {t.site_index_1, t.site_index_2, t.site_index_3};
-        terms.push_back({x, t.coefficient});
-    }
-    const double w = 1.0 / static_cast<double>(G.size() * (flip ? 2 : 1));
-    std::map<std::array<std::uint64_t, 7>, Complex> acc;
-    for (const auto& [t, c] : terms) {
-        int shift = 0;
-        for (int f = 0; f < t.n; ++f) shift += sz_shift(t.op[static_cast<std::size_t>(f)]);
-        if ((keep == Keep::Sz && shift != 0) || (keep == Keep::Parity && shift % 2 != 0)) continue;
-        for (int fl = 0; fl < (flip ? 2 : 1); ++fl)
-            for (const Perm& g : G) {
-                std::array<std::pair<std::uint64_t, std::uint8_t>, 3> f{};
-                Complex coef = c * w;
-                for (int k = 0; k < t.n; ++k) {
-                    std::uint8_t op = t.op[static_cast<std::size_t>(k)];
-                    if (fl) {                       // S+ <-> S-, Sz -> -Sz
-                        if (op == 2) coef = -coef;
-                        else op = static_cast<std::uint8_t>(1 - op);
-                    }
-                    f[static_cast<std::size_t>(k)] = {static_cast<std::uint64_t>(g[t.site[static_cast<std::size_t>(k)]]), op};
-                }
-                bool distinct = true;
-                for (int a = 0; a < t.n; ++a)
-                    for (int b = a + 1; b < t.n; ++b)
-                        if (f[static_cast<std::size_t>(a)].first == f[static_cast<std::size_t>(b)].first) distinct = false;
-                if (distinct) std::sort(f.begin(), f.begin() + t.n);
-                std::array<std::uint64_t, 7> key{static_cast<std::uint64_t>(t.n)};
-                for (int k = 0; k < t.n; ++k) {
-                    key[1 + 2 * static_cast<std::size_t>(k)] = f[static_cast<std::size_t>(k)].first;
-                    key[2 + 2 * static_cast<std::size_t>(k)] = f[static_cast<std::size_t>(k)].second;
-                }
-                acc[key] += coef;
-            }
-    }
-    ::Operator out(O.getNumBits(), O.getSpin());
-    for (const auto& [k, c] : acc) {
-        if (std::abs(c) < 1e-15) continue;
-        const auto op = [&](int i) { return static_cast<std::uint8_t>(k[2 + 2 * static_cast<std::size_t>(i)]); };
-        const auto st = [&](int i) { return k[1 + 2 * static_cast<std::size_t>(i)]; };
-        if (k[0] == 1)      out.addOneBodyTerm(op(0), st(0), c);
-        else if (k[0] == 2) out.addTwoBodyTerm(op(0), st(0), op(1), st(1), c);
-        else                out.addThreeBodyTerm(op(0), st(0), op(1), st(1), op(2), st(2), c);
-    }
-    return out;
-}
-
-inline ::Operator conjugated(const ::Operator& O) {
-    ::Operator out(O.getNumBits(), O.getSpin());
-    for (auto t : O.records()) { t.coefficient = std::conj(t.coefficient); out.add_record(t); }
-    for (auto t : O.three_body_records()) { t.coefficient = std::conj(t.coefficient); out.add_record(t); }
-    return out;
-}
-
-/// O averaged over the symmetry group of a Spec, built once per (operator, flip, keep,
-/// conjugate). An operator averaged over the symmetries a block uses is block diagonal and
-/// has the same trace against any function of H over an ensemble those symmetries preserve.
+/// O averaged over the symmetry group of a Spec (and the spin flip), without the terms whose
+/// S^z change `keep` excludes, conjugated (K) for a time-reversed partner: the row program of
+/// that average (Operator::row_program's form), built once per (operator, flip, keep, conj).
+/// An operator averaged over the symmetries a block uses is block diagonal and has the same
+/// trace against any function of H over an ensemble those symmetries preserve.
 class Averager {
 public:
     Averager(const Spec& s, int n_sites) {
@@ -277,24 +198,25 @@ public:
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);
     }
-    std::shared_ptr<const ::Operator> get(const ::Operator& O, bool flip, Keep keep, bool conj) {
+    std::shared_ptr<const ed::ops::MaskedProgram> get(const ::Operator& O, bool flip, Keep keep, bool conj) {
         auto& slot = cache_[{&O, flip, static_cast<int>(keep), conj}];
         if (!slot) {
-            ::Operator a = averaged(O, G_, flip, keep);
-            slot = std::make_shared<::Operator>(conj ? conjugated(a) : std::move(a));
+            ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(O.canonical(), keep), G_, flip);
+            if (conj) a = a.image(ed::ops::MaskedOperator::Map::K);
+            slot = std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_operator(a.dagger()));
         }
         return slot;
     }
 
 private:
     std::vector<Perm> G_;
-    std::map<std::tuple<const ::Operator*, bool, int, bool>, std::shared_ptr<::Operator>> cache_;
+    std::map<std::tuple<const ::Operator*, bool, int, bool>, std::shared_ptr<const ed::ops::MaskedProgram>> cache_;
 };
 
-/// A block-diagonal (averaged) operator restricted to block `bi` of star `sb`, in the
-/// basis the block's H acts on; with `device` it may bind to a CUDA backend.
+/// A block-diagonal (averaged) operator, given by its row program, restricted to block `bi` of
+/// star `sb`, in the basis the block's H acts on; with `device` it may bind to a CUDA backend.
 inline std::shared_ptr<const ed::LinearOperator>
-block_observable(const ::Operator& A, const ed::solvers::lg_detail::StarBuild& sb,
+block_observable(const std::shared_ptr<const ed::ops::MaskedProgram>& A, const ed::solvers::lg_detail::StarBuild& sb,
                  const std::shared_ptr<ed::solvers::BlockData>& bi, bool device) {
     using namespace ed::solvers::lg_detail;
     auto rep = std::make_shared<RepSectorMatVec>(A, bi->gop ? bi->gsec : sb.hk->rep_data_ptr());

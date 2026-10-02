@@ -48,6 +48,18 @@ struct ProductTerm {
 /// Throws std::invalid_argument unless perm is a permutation of 0..n-1.
 void require_permutation(const std::vector<int>& perm, int n);
 
+/// Which changes of the spin counts a term may make: any, none (S^z conserved), or an even
+/// number (S^z parity conserved).
+enum class SzKeep { All, Zero, Even };
+/// O without the terms whose S^z change `keep` excludes.
+[[nodiscard]] MaskedOperator keep_sz_changes(const MaskedOperator& O, SzKeep keep);
+
+/// O averaged over the group G of site permutations (every element listed, image() convention;
+/// over a closed group a permutation and its inverse give the same average) and, with `flip`,
+/// the global spin flip: (1 / (|G| (1 + flip))) sum_g sum_f U O U^dagger. The average commutes
+/// with every element, so it is block diagonal in their sectors.
+[[nodiscard]] MaskedOperator group_average(const MaskedOperator& O, const std::vector<std::vector<int>>& G, bool flip);
+
 /// g H g^-1 == H, given the image.
 [[nodiscard]] inline bool invariant(const MaskedOperator& H, const MaskedOperator& image,
                                     double rtol = kInvarianceRtol) {

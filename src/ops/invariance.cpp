@@ -114,6 +114,30 @@ void require_permutation(const std::vector<int>& perm, int n) {
     }
 }
 
+MaskedOperator keep_sz_changes(const MaskedOperator& O, SzKeep keep) {
+    if (keep == SzKeep::All) return O;
+    MaskedOperator out(O.n_sites());
+    for (const auto& t : O.terms()) {
+        const int d = masked_delta_set_bits(t);
+        if (keep == SzKeep::Zero ? d != 0 : (d % 2 != 0)) continue;
+        out.add_term(t);
+    }
+    return out;
+}
+
+MaskedOperator group_average(const MaskedOperator& O, const std::vector<std::vector<int>>& G, bool flip) {
+    const int n = O.n_sites();
+    const std::uint64_t all = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
+    const double w = 1.0 / static_cast<double>(G.size() * (flip ? 2 : 1));
+    MaskedOperator out(n);
+    for (const auto& g : G) {
+        require_permutation(g, n);
+        out.add(O.image(g.data(), 0), w);
+        if (flip) out.add(O.image(g.data(), all), w);
+    }
+    return out;
+}
+
 bool commutes_with_permutation(const MaskedOperator& H, const std::vector<int>& perm, double rtol) {
     require_permutation(perm, H.n_sites());
     return invariant(H, H.image(perm.data(), 0), rtol);

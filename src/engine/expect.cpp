@@ -37,12 +37,12 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
                                         "invariant (a level holds one member of each spin multiplet)");
     // One averaged operator per (op, flip, keep); one matvec per (averaged op, basis).
     detail::Averager avg(s, n_sites);
-    std::map<std::pair<const ::Operator*, const void*>, std::shared_ptr<RepSectorMatVec>> matvecs;
+    std::map<std::pair<const void*, const void*>, std::shared_ptr<RepSectorMatVec>> matvecs;
     auto average_of = [&](std::size_t o, bool flip, detail::Keep keep, bool conj) {
         return avg.get(*ops[o], flip, keep, conj);
     };
-    auto value = [&](const ::Operator& A, const BlockVector& v) {
-        auto& mv = matvecs[{&A, v.basis.get()}];
+    auto value = [&](const std::shared_ptr<const ed::ops::MaskedProgram>& A, const BlockVector& v) {
+        auto& mv = matvecs[{A.get(), v.basis.get()}];
         if (!mv) mv = std::make_shared<RepSectorMatVec>(A, v.basis);
         std::vector<Complex> y(v.amplitudes.size());
         mv->apply(v.amplitudes.data(), y.data(), y.size());
@@ -56,12 +56,12 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
         const BlockVector& v = r.vectors[static_cast<std::size_t>(L.vector)];
         const bool flip = L.mirror == 2 || L.tag.flip_parity >= 0 || v.basis->has_flips();
         using detail::Keep;
-        const Keep keep = v.basis->n_up >= 0 ? Keep::Sz : (L.tag.sz_parity >= 0 ? Keep::Parity : Keep::All);
+        const Keep keep = v.basis->n_up >= 0 ? Keep::Zero : (L.tag.sz_parity >= 0 ? Keep::Even : Keep::All);
         std::vector<Complex> row;
         for (std::size_t o = 0; o < ops.size(); ++o) {
-            const Complex a = value(*average_of(o, flip, keep, false), v);
+            const Complex a = value(average_of(o, flip, keep, false), v);
             // The time-reversed partner K psi: <K psi|A|K psi> = conj(<psi|A*|psi>).
-            row.push_back(L.tag.tr_folded ? 0.5 * (a + std::conj(value(*average_of(o, flip, keep, true), v))) : a);
+            row.push_back(L.tag.tr_folded ? 0.5 * (a + std::conj(value(average_of(o, flip, keep, true), v))) : a);
         }
         out.push_back(std::move(row));
     }

@@ -935,10 +935,9 @@ def test_four_site_terms_in_the_hamiltonian():
     ref = np.linalg.eigvalsh(M[np.ix_(sector, sector)])[:3]
     r = qed.eigs(H, 3, sym=qed.Symmetry(sz=n // 2))   # translations, found on the canonical terms
     np.testing.assert_allclose(np.sort(np.asarray(r.energies))[:3], ref, atol=1e-10)
-    rv = qed.eigs(qed.Operator.product(n, "zz", [0, 1]) + H, 1, sym=qed.Symmetry(spatial=None, sz=n // 2),
-                  vectors=True)
-    with pytest.raises(NotImplementedError):   # as an observable: not until P3.3
-        rv.expect([H])
+    # as its own observable: <psi|H|psi> = E on every level (four-site terms averaged in the algebra)
+    rv = qed.eigs(H, 2, sym=qed.Symmetry(spatial=None, sz=n // 2), vectors=True)
+    np.testing.assert_allclose(np.asarray(rv.expect([H]))[:, 0].real, [float(L.energy) for L in rv.levels], atol=1e-10)
 
 
 def test_a_multiplet_at_the_kth_level_comes_back_whole():
