@@ -5,13 +5,15 @@
 search', but _find_symmetries_impl runs _run_full_automorphism_pipeline (nauty + full group
 enumeration) unconditionally; translation_only only suppresses the clique step afterwards.
 Restated after P2.1, which removed the option (owner-approved): the call must now raise TypeError,
-and the one automorphism search must run once per operator (the memo), not once per call."""
+and the one automorphism search must run once per operator (the memo), not once per call.
+Restated after P2.8, which moved the search into qed._automorphism.automorphisms."""
 import signal
 
 signal.alarm(250)
 try:
     import qed
     import qed.discovery as disc
+    import qed._automorphism as auto
 except Exception as e:  # pragma: no cover
     print(f"REPRO: INCONCLUSIVE import failed: {e!r}")
     raise SystemExit(0)
@@ -22,7 +24,7 @@ b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
 H = b.to_operator()
 
 calls = {"n": 0, "autos": 0}
-orig = disc._run_full_automorphism_pipeline
+orig = auto.automorphisms
 
 
 def counting(*a, **k):
@@ -38,7 +40,7 @@ try:
 except TypeError:
     removed = True
 
-disc._run_full_automorphism_pipeline = counting
+auto.automorphisms = counting
 disc._FIND_SYM_MEMO.clear()
 try:
     reps = [qed.find_symmetries(H, verbose=False) for _ in range(3)]
@@ -46,7 +48,7 @@ except ImportError as e:
     print(f"REPRO: INCONCLUSIVE pynauty/networkx missing: {e!r}")
     raise SystemExit(0)
 finally:
-    disc._run_full_automorphism_pipeline = orig
+    auto.automorphisms = orig
 
 info = (f"translation_only removed={removed}; 3 calls ran the automorphism search {calls['n']}x "
         f"(|Aut|={calls['autos']}); split |A|={len(reps[0].abelian)} residues={len(reps[0].residues)}")

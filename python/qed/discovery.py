@@ -48,44 +48,6 @@ def _operator_to_graph_records(
     return vertex_weights, edges, triples
 
 
-def _run_full_automorphism_pipeline(
-    vertex_weights: dict[int, tuple],
-    edges: list[dict[str, Any]],
-    triples: list[tuple],
-    construct_colored_graph,
-    autgrp,
-    cap: int,
-) -> tuple[Optional[list[Permutation]], float]:
-    """Run nauty: ``(permutations, |Aut|)``, the automorphisms of the coloured interaction graph
-    on the original vertices and nauty's group order (a supergroup of H's symmetries: the exact
-    term check, :func:`_keep_hamiltonian_symmetries`, follows). Above ``cap`` nothing is
-    enumerated and the list is None (|Aut| reaches N! for field-only, empty or all-to-all H)."""
-    graph, vertex_colors, idx_to_vid, vid_to_idx = construct_colored_graph(
-        vertex_weights, edges, triples
-    )
-    aut = autgrp(graph)
-    # One auxiliary vertex per interacting pair, so the group of the expanded graph is that
-    # of the original vertices: nauty's count (grpsize1 * 10^grpsize2) is |Aut| itself.
-    size = float(aut[1]) * 10.0 ** int(aut[2])
-    if size > cap:
-        return None, size
-    from ._perm import close_group
-    gens = [tuple(int(x) for x in g) for g in aut[0]]
-    expanded = close_group(gens, cap=cap) if gens else [tuple(range(graph.number_of_vertices))]
-
-    # Project back to original-vertex permutations and dedup.
-    seen: set[tuple[int, ...]] = set()
-    autos: list[Permutation] = []
-    for perm in expanded:
-        proj = [idx_to_vid[perm[vid_to_idx[vid]]] for vid in idx_to_vid]
-        key = tuple(proj)
-        if key not in seen:
-            seen.add(key)
-            autos.append(proj)
-
-    return autos, size
-
-
 def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> list[Permutation]:
     """Only the automorphisms that commute with the whole operator.
 
@@ -199,8 +161,7 @@ def _find_symmetries_impl(operator: Operator, *, verbose: bool = True) -> Symmet
     vertex_weights, edges, triples = _operator_to_graph_records(operator)
     # Imported here so that pynauty is needed only by find_symmetries().
     try:
-        from ._automorphism import construct_colored_graph  # type: ignore
-        from pynauty import autgrp  # type: ignore
+        from ._automorphism import automorphisms  # type: ignore
     except ImportError as e:  # pragma: no cover - environment-dependent
         raise ImportError(
             "find_symmetries() requires pynauty. Install it with `pip install pynauty` (or skip "
@@ -210,19 +171,18 @@ def _find_symmetries_impl(operator: Operator, *, verbose: bool = True) -> Symmet
 
     diagnostics: list[tuple[str, str]] = []
     identity = [list(range(num_sites))]
-    automorphisms, aut_order = _run_full_automorphism_pipeline(
-        vertex_weights, edges, triples, construct_colored_graph, autgrp, cap=_AUT_ENUMERATION_CAP)
-    if automorphisms is None:
+    autos, aut_order = automorphisms(vertex_weights, edges, triples, cap=_AUT_ENUMERATION_CAP)
+    if autos is None:
         msg = (f"H's interaction graph has {aut_order:.6g} automorphisms, more than "
                f"{_AUT_ENUMERATION_CAP}: no spatial symmetry is used. Pass "
                "Symmetry(spatial=[...]) with generators of a subgroup to use one.")
         _log.log(note, "[qed.find_symmetries] %s", msg)
         diagnostics.append(("aut_capped", msg))
-        automorphisms = identity
-    automorphisms = _keep_hamiltonian_symmetries(operator, automorphisms)
-    if len(automorphisms) <= 1:
+        autos = identity
+    autos = _keep_hamiltonian_symmetries(operator, autos)
+    if len(autos) <= 1:
         return Symmetries(abelian=identity, residues=[], diagnostics=diagnostics)
-    abelian, residues, notes = spatial_split(automorphisms)
+    abelian, residues, notes = spatial_split(autos)
     diagnostics.extend(notes)
     return Symmetries(abelian=[list(a) for a in abelian], residues=[list(r) for r in residues],
                       diagnostics=diagnostics)

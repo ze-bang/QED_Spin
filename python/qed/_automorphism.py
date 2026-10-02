@@ -7,8 +7,9 @@ symmetries; ``qed._groups`` splits them for the sector engine.
 """
 import itertools
 from collections import defaultdict
+from typing import Optional
 
-from pynauty import Graph
+from pynauty import Graph, autgrp
 
 from . import _log
 
@@ -188,4 +189,31 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     # Create pynauty graph
     g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict, 
               vertex_coloring=coloring)
-    return g, vertex_colors, idx_to_vid, vid_to_idx
+    return g, idx_to_vid, vid_to_idx
+
+
+def automorphisms(vertex_weights, edges, triples, cap: int) -> tuple[Optional[list[list[int]]], float]:
+    """Run nauty: ``(permutations, |Aut|)``, the automorphisms of the coloured interaction graph
+    on the original vertices and nauty's group order (a supergroup of H's symmetries: the exact
+    term check of :func:`qed.discovery.find_symmetries` follows). Above ``cap`` nothing is
+    enumerated and the list is None (|Aut| reaches N! for field-only, empty or all-to-all H)."""
+    from ._perm import close_group
+    graph, idx_to_vid, vid_to_idx = construct_colored_graph(vertex_weights, edges, triples)
+    aut = autgrp(graph)
+    # One auxiliary vertex per interacting pair, so the group of the expanded graph is that
+    # of the original vertices: nauty's count (grpsize1 * 10^grpsize2) is |Aut| itself.
+    size = float(aut[1]) * 10.0 ** int(aut[2])
+    if size > cap:
+        return None, size
+    gens = [tuple(int(x) for x in g) for g in aut[0]]
+    expanded = close_group(gens, cap=cap) if gens else [tuple(range(graph.number_of_vertices))]
+    # Back to permutations of the original vertices, each once.
+    seen: set[tuple[int, ...]] = set()
+    autos: list[list[int]] = []
+    for perm in expanded:
+        proj = [idx_to_vid[perm[vid_to_idx[vid]]] for vid in idx_to_vid]
+        key = tuple(proj)
+        if key not in seen:
+            seen.add(key)
+            autos.append(proj)
+    return autos, size
