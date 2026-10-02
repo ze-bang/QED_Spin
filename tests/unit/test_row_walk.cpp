@@ -18,7 +18,9 @@
 // translation-symmetrised operators). Sectors: translations Z_8, the dihedral group D_8
 // (non-abelian, its four 1-dim irreps), each with and without the spin flip, at
 // n_up = 4, 3 and the full space (n_up = -1) as each model's symmetries allow.
-// This test pins today's lanes before they move onto one row walk (P3.2).
+// This test pins today's lanes before they move onto one row walk (P3.2), and the walk itself:
+// compile_operator keeps every term exactly, and for_each_connection over it reproduces
+// MaskedOperator::to_dense bit for bit (O directly, and rows of O through O^dagger).
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -29,6 +31,8 @@
 #include <ed/input/hamiltonian_builder.h>
 #include <ed/ops/invariance.h>
 #include <ed/ops/operator.h>
+#include <ed/ops/program.h>
+#include <ed/ops/row_walk.h>
 #include <ed/sectors/sectors.h>
 
 #include <algorithm>
@@ -386,4 +390,58 @@ TEST_CASE("rep sectors: CSR, gather walk, scatter walk and device gather are the
         }
     }
     CHECK(sectors > 200);
+}
+
+TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly", "[row_walk]") {
+    std::vector<MaskedOperator> ops;
+    for (const auto& m : zoo()) ops.push_back(m.H->canonical());
+    std::mt19937 rng(20261003);
+    const std::string alphabet = "+-zxyudI";
+    std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
+    std::uniform_int_distribution<int> pick_len(1, 4);
+    std::normal_distribution<double> gauss(0.0, 1.0);
+    for (int trial = 0; trial < 20; ++trial) {   // non-Hermitian, up to four sites
+        MaskedOperator O(N);
+        for (int t = 0; t < 8; ++t) {
+            std::string o;
+            std::vector<int> sites;
+            for (int k = pick_len(rng); k > 0; --k) {
+                o.push_back(alphabet[static_cast<std::size_t>(pick_op(rng))]);
+                sites.push_back(pick_site(rng));
+            }
+            O.add(MaskedOperator::product(N, o, sites, Cx(gauss(rng), gauss(rng))));
+        }
+        ops.push_back(O);
+    }
+    const std::size_t D = kAll + 1;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        INFO("operator " << i);
+        const MaskedOperator& O = ops[i];
+        const auto P = ed::ops::compile_operator(O);
+        REQUIRE(ed::ops::program_operator(P, N).equals(O, 0.0));
+        for (std::size_t g = 1; g < P.n_groups(); ++g) REQUIRE(P.group_flip[g - 1] < P.group_flip[g]);
+        const Mat ref = O.to_dense();
+        // columns: <t|O|s> straight from the walk
+        Mat M(D * D, Cx(0.0, 0.0));
+        for (std::uint64_t s = 0; s < D; ++s) {
+            bool first = true;
+            ed::ops::for_each_connection(P.view(), s, [&](std::uint64_t t, Cx h) {
+                if (first && P.n_groups() > 0 && P.group_flip[0] == 0 && t != s) FAIL("diagonal not emitted first");
+                first = false;
+                M[t * D + s] += h;
+            });
+        }
+        CHECK(max_diff(M, ref) == 0.0);
+        // rows: <s|O|t> = conj(<t|O^dagger|s>)
+        const auto Pd = ed::ops::compile_operator(O.dagger());
+        Mat R(D * D, Cx(0.0, 0.0));
+        for (std::uint64_t s = 0; s < D; ++s)
+            ed::ops::for_each_connection(Pd.view(), s, [&](std::uint64_t t, Cx h) { R[s * D + t] += std::conj(h); });
+        CHECK(max_diff(R, ref) == 0.0);
+    }
+    // a transverse field: one group whose subgroups differ in popcount
+    const auto Px = ed::ops::compile_operator(P("x", {0}));
+    REQUIRE(Px.n_groups() == 1);
+    CHECK(Px.group_setbits[0] == -1);
+    CHECK(ed::ops::compile_operator(P("+-", {0, 1})).group_setbits[0] == 1);
 }

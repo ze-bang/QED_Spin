@@ -179,7 +179,7 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
         for (int gi = 0; gi < prog.n_groups; ++gi) {
             const std::uint64_t F = prog.group_flip[gi];
             const std::uint64_t v = s & F;
-            if (__popcll(v) != prog.group_setbits[gi]) continue;
+            if (prog.group_setbits[gi] >= 0 && __popcll(v) != prog.group_setbits[gi]) continue;
             std::uint32_t lo = prog.group_vbegin[gi], hi = prog.group_vbegin[gi + 1];
             while (lo < hi) {
                 const std::uint32_t mid = lo + ((hi - lo) >> 1);

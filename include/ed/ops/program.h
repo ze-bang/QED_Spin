@@ -43,6 +43,21 @@ namespace ed::symmetry { struct RepSectorData; }
 
 namespace ed::ops {
 
+/// Pointers into a program's arrays: what a row walk (row_walk.h) reads, on the host or, with
+/// the arrays copied to a device, in a kernel. C is the complex type of the reading side
+/// (std::complex<double> on the host); every array is laid out as in MaskedProgram.
+template <class C>
+struct ProgramView {
+    std::uint32_t        n_groups      = 0;
+    const std::uint64_t* group_flip    = nullptr;
+    const int*           group_setbits = nullptr;   ///< -1: the group's subgroups differ in popcount
+    const std::uint32_t* group_vbegin  = nullptr;
+    const std::uint64_t* vsub_val      = nullptr;
+    const std::uint32_t* vsub_tbegin   = nullptr;
+    const std::uint64_t* term_sign     = nullptr;
+    const C*             term_coeff    = nullptr;
+};
+
 /// Flat program over which the sector sweep runs. Terms are grouped by flip mask (one
 /// target state and ONE rep lookup per group per ket rep, shared by every observable that
 /// flips those bits), then by the required values on the flipped bits (for a given ket
@@ -51,7 +66,7 @@ struct MaskedProgram {
     int n_obs = 0;
     int delta_set_bits = 0;                        ///< n_set(bra) - n_set(ket)
     std::vector<std::uint64_t> group_flip;         ///< flip mask per group
-    std::vector<int>           group_setbits;      ///< popcount(v) every subgroup of the group has
+    std::vector<int>           group_setbits;      ///< popcount(v) of every subgroup, or -1 if they differ
     std::vector<std::uint32_t> group_vbegin;       ///< n_groups + 1 offsets into vsub_*
     std::vector<std::uint64_t> vsub_val;           ///< required values, sorted within a group
     std::vector<std::uint32_t> vsub_tbegin;        ///< n_vsub + 1 offsets into term_*
@@ -65,6 +80,10 @@ struct MaskedProgram {
 
     [[nodiscard]] std::size_t n_groups() const noexcept { return group_flip.size(); }
     [[nodiscard]] std::size_t n_terms() const noexcept { return term_sign.size(); }
+    [[nodiscard]] ProgramView<std::complex<double>> view() const noexcept {
+        return {static_cast<std::uint32_t>(group_flip.size()), group_flip.data(), group_setbits.data(),
+                group_vbegin.data(), vsub_val.data(), vsub_tbegin.data(), term_sign.data(), term_coeff.data()};
+    }
 };
 
 struct CompileOptions {
@@ -86,6 +105,14 @@ struct CompileOptions {
                                             const CompileOptions& opt = {});
 
 
+
+/// One operator's canonical terms in the flip-grouped layout, for the row walks (row_walk.h):
+/// no sector and no projection (n_obs = 1, n_up = -1). Groups are in ascending flip mask, so
+/// the diagonal (F = 0) comes first; within a subgroup the terms keep their key order.
+[[nodiscard]] MaskedProgram compile_operator(const MaskedOperator& O);
+
+/// The operator a program was compiled from (one observable): every term, coefficients exact.
+[[nodiscard]] MaskedOperator program_operator(const MaskedProgram& P, int n_sites);
 
 /// Read-only view of one vector in a sector's rep basis (length = sector dim()).
 struct RepVectorView {

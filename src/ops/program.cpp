@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -20,6 +21,32 @@ namespace ed::ops {
 
 namespace {
 inline int popc(std::uint64_t x) { return __builtin_popcountll(x); }
+
+// flip -> value -> terms, packed into the program arrays
+struct T { std::uint64_t sign; std::complex<double> c; std::uint32_t obs; };
+using Tree = std::map<std::uint64_t, std::map<std::uint64_t, std::vector<T>>>;
+
+void pack(const Tree& tree, MaskedProgram& P) {
+    P.group_vbegin.push_back(0);
+    P.vsub_tbegin.push_back(0);
+    for (const auto& [F, vmap] : tree) {
+        P.group_flip.push_back(F);
+        int setbits = popc(vmap.begin()->first);
+        for (const auto& [V, ts] : vmap)
+            if (popc(V) != setbits) setbits = -1;
+        P.group_setbits.push_back(setbits);
+        for (const auto& [V, ts] : vmap) {
+            P.vsub_val.push_back(V);
+            for (const auto& t : ts) {
+                P.term_sign.push_back(t.sign);
+                P.term_coeff.push_back(t.c);
+                P.term_obs.push_back(t.obs);
+            }
+            P.vsub_tbegin.push_back(static_cast<std::uint32_t>(P.term_sign.size()));
+        }
+        P.group_vbegin.push_back(static_cast<std::uint32_t>(P.vsub_val.size()));
+    }
+}
 }  // namespace
 
 // -----------------------------------------------------------------------------
@@ -53,9 +80,7 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
                       * std::conj(src.characters[static_cast<std::size_t>(g)]))
             / static_cast<double>(G);
 
-    // flip -> value -> terms
-    struct T { std::uint64_t sign; std::complex<double> c; std::uint32_t obs; };
-    std::map<std::uint64_t, std::map<std::uint64_t, std::vector<T>>> tree;
+    Tree tree;
     MaskedProgram P;
     P.n_obs = static_cast<int>(ops.size());
     P.delta_set_bits = delta_req;
@@ -90,28 +115,31 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
             ++P.terms_per_obs[a];
         }
     }
-    P.group_vbegin.push_back(0);
-    P.vsub_tbegin.push_back(0);
-    for (const auto& [F, vmap] : tree) {
-        P.group_flip.push_back(F);
-        P.group_setbits.push_back(popc(vmap.begin()->first));
-        for (const auto& [V, ts] : vmap) {
-            P.vsub_val.push_back(V);
-            for (const auto& t : ts) {
-                P.term_sign.push_back(t.sign);
-                P.term_coeff.push_back(t.c);
-                P.term_obs.push_back(t.obs);
-            }
-            P.vsub_tbegin.push_back(static_cast<std::uint32_t>(P.term_sign.size()));
-        }
-        P.group_vbegin.push_back(static_cast<std::uint32_t>(P.vsub_val.size()));
-    }
+    pack(tree, P);
     if (P.n_groups() > 100000 || P.n_terms() > 1000000)
         ED_LOG(Info, "compile_program: large program (%zu groups, %zu terms)", P.n_groups(), P.n_terms());
     return P;
 }
 
+MaskedProgram compile_operator(const MaskedOperator& O) {
+    Tree tree;
+    for (const auto& t : O.terms())   // key order (flip, value, sign)
+        tree[t.flip_mask][t.cond_val].push_back(T{t.sign_mask, t.coeff, 0});
+    MaskedProgram P;
+    P.n_obs = 1;
+    P.terms_per_obs.assign(1, O.size());
+    pack(tree, P);
+    return P;
+}
 
+MaskedOperator program_operator(const MaskedProgram& P, int n_sites) {
+    MaskedOperator O(n_sites);
+    for (std::size_t g = 0; g < P.n_groups(); ++g)
+        for (std::uint32_t vi = P.group_vbegin[g]; vi < P.group_vbegin[g + 1]; ++vi)
+            for (std::uint32_t k = P.vsub_tbegin[vi]; k < P.vsub_tbegin[vi + 1]; ++k)
+                O.add_term({P.group_flip[g], P.vsub_val[vi], P.group_flip[g], P.term_sign[k], P.term_coeff[k]});
+    return O;
+}
 
 using Complex = std::complex<double>;
 
@@ -216,7 +244,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
             for (std::size_t gi = 0; gi < n_groups; ++gi) {
                 const std::uint64_t F = prog.group_flip[gi];
                 const std::uint64_t v = s & F;
-                if (masked_popcount(v) != prog.group_setbits[gi]) continue;
+                if (prog.group_setbits[gi] >= 0 && masked_popcount(v) != prog.group_setbits[gi]) continue;
                 const auto vb = prog.vsub_val.begin() + prog.group_vbegin[gi];
                 const auto ve = prog.vsub_val.begin() + prog.group_vbegin[gi + 1];
                 const auto it = std::lower_bound(vb, ve, v);
