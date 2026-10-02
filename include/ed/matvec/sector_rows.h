@@ -230,21 +230,16 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     // The dictionary when it is the smaller form (a tiny sector stores its few values directly).
     const bool full = csr.dict.size() * sizeof(SectorComplex) + nnz * (narrow ? 1 : 2) >= nnz * sizeof(SectorComplex);
     if (full) csr.dict.clear();
+    // Allocated, not touched (NumaVector default-initialises): the copy below is the first touch,
+    // so a page is committed only as the slabs that fill it are released -- the slabs (6 B an
+    // entry) and the CSR (5-6 B) are never resident together (a 1.2e9-entry sector: 14 GB at the
+    // peak when the CSR was touched first). The static chunk schedule puts each chunk's pages on
+    // the thread that owns its rows in spmv's static partition.
     csr.col_idx.resize(nnz);
     if (full)        csr.val.resize(nnz);
     else if (narrow) csr.id8.resize(nnz);
     else             csr.id16.resize(nnz);
-    // first touch in spmv's static row partition
-    #pragma omp parallel for schedule(static) if(dim > (1ULL << 16))
-    for (long long ir = 0; ir < static_cast<long long>(dim); ++ir)
-        for (std::uint64_t e = csr.row_ptr[static_cast<std::uint64_t>(ir)]; e < csr.row_ptr[static_cast<std::uint64_t>(ir) + 1];
-             ++e) {
-            csr.col_idx[e] = 0;
-            if (full)        csr.val[e] = SectorComplex(0.0, 0.0);
-            else if (narrow) csr.id8[e] = 0;
-            else             csr.id16[e] = 0;
-        }
-    #pragma omp parallel for schedule(dynamic, 1)
+    #pragma omp parallel for schedule(static)
     for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
         Slab& slab = slabs[static_cast<std::size_t>(c)];
         const auto& map = to_global[static_cast<std::size_t>(c)];
