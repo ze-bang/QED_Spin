@@ -54,6 +54,12 @@ Breaking changes so far:
   at the top level (`qed.eigs`, `qed.EigResult`, ...), which is where to import them from;
   `momentum_of` and `irrep_characters_of` are `qed.symmetry.momentum_of` and
   `qed.symmetry.irrep_characters_of`.
+- **`thermal`**: the entropy is `ThermalResult.entropy` (was `S`). `krylov` means one thing,
+  the FTLM / OFTLM Lanczos depth; mTPQ's steps per sample are `steps=` (default: enough for
+  the coldest T), and `method="mtpq"` with `krylov=` raises `InvalidRequest` instead of
+  reading it as a step count. `krylov` or `steps` below 1 raise (`krylov=0` used to become
+  100 silently). C++: `ThermalSpec::steps`.
+- **One `samples` default, 40**: `dynamics` at T > 0 took 30 (`DynamicsSpec::samples` too).
 - **`dense_max_dim` is the dense crossover, and an argument of `eigs`, `thermal` and
   `dynamics`.** Blocks up to that dimension are diagonalised densely. `eigs` used it only as a
   lower bound (the crossover was max(dense_max_dim, 1600) for k <= 10, 160 k above); it now

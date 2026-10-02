@@ -28,15 +28,15 @@ except Exception as e:
     raise SystemExit(0)
 
 lnC = math.log(math.comb(N, N // 2))
-print(f"full: S(1000)={full.S[-1]:.6f} (N ln2={N*math.log(2):.6f}) chi={full.chi}")
-print(f"sz=4: S(1000)={one.S[-1]:.6f} (ln C={lnC:.6f}) M={one.M} chi={one.chi}")
-print(f"none: M={none.M} chi={none.chi} S(1000)={none.S[-1]:.6f}")
+print(f"full: S(1000)={full.entropy[-1]:.6f} (N ln2={N*math.log(2):.6f}) chi={full.chi}")
+print(f"sz=4: S(1000)={one.entropy[-1]:.6f} (ln C={lnC:.6f}) M={one.M} chi={one.chi}")
+print(f"none: M={none.M} chi={none.chi} S(1000)={none.entropy[-1]:.6f}")
 none_missing = none.M is None and none.chi is None
-one_trivial = one.chi is not None and np.all(np.abs(one.chi) < 1e-12) and abs(one.S[-1] - lnC) < 1e-3
+one_trivial = one.chi is not None and np.all(np.abs(one.chi) < 1e-12) and abs(one.entropy[-1] - lnC) < 1e-3
 flag = [f for f in ("total_dim", "restricted", "complete") if hasattr(one, f)]
 if none_missing and one_trivial and not flag:
     print(f"REPRO: CONFIRMED Symmetry.none() gives M=chi=None on U(1) H; sz=4 gives chi==0 and "
-          f"S(inf)={one.S[-1]:.4f}=lnC(8,4) with no restriction flag")
+          f"S(inf)={one.entropy[-1]:.4f}=lnC(8,4) with no restriction flag")
 elif none_missing or one_trivial:
     print(f"REPRO: CONFIRMED (partial) none_missing={none_missing} one_trivial={one_trivial} flags={flag}")
 else:

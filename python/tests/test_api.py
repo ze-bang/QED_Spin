@@ -423,7 +423,7 @@ def test_mtpq_values_do_not_depend_on_the_temperature_grid():
     sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")
     one = qed.thermal(H, [T0], method="mtpq", samples=8, seed=5, sym=sym)
     many = qed.thermal(H, np.linspace(T0, 10.0, 40), method="mtpq", samples=8, seed=5, sym=sym)
-    for f in ("lnZ", "E", "C", "S", "F"):
+    for f in ("lnZ", "E", "C", "entropy", "F"):
         a, b = getattr(one, f)[0], getattr(many, f)[0]
         assert abs(a - b) <= 1e-12 * max(1.0, abs(b)), (f, a, b)
 
@@ -441,13 +441,13 @@ def test_mtpq_matches_exact_and_does_not_depend_on_the_energy_scale():
                      sym=qed.Symmetry.none())
     np.testing.assert_allclose(np.asarray(r2.E) / 0.04, r1.E, rtol=1e-9)
     np.testing.assert_allclose(r2.C, r1.C, rtol=1e-8)
-    np.testing.assert_allclose(r2.S, r1.S, rtol=1e-9)
+    np.testing.assert_allclose(r2.entropy, r1.entropy, rtol=1e-9)
 
 
 def test_mtpq_refuses_a_temperature_its_trajectory_cannot_reach():
     # 20 steps cannot reach T = 0.02: refused, never clamped (audit C11-thermal-05: C grew as 1/T^2).
     with pytest.raises(qed.errors.ConvergenceError):
-        qed.thermal(_heisenberg_ring(12), [0.02], method="mtpq", krylov=20, samples=2, seed=1,
+        qed.thermal(_heisenberg_ring(12), [0.02], method="mtpq", steps=20, samples=2, seed=1,
                     sym=qed.Symmetry.none())
 
 

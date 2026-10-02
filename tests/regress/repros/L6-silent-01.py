@@ -43,8 +43,8 @@ except Exception as ex:
     raise SystemExit(0)
 
 print(f"exact T={T0}: lnZ={lnZ_ex:.4f} S={S_ex:.4f} E={E_ex:.5f}")
-print(f"(a) one-point grid: lnZ={A.lnZ[0]:.4f} S={A.S[0]:.4f} E={A.E[0]:.5f}")
-print(f"(a) dense grid    : lnZ={B.lnZ[0]:.4f} S={B.S[0]:.4f} E={B.E[0]:.5f}")
+print(f"(a) one-point grid: lnZ={A.lnZ[0]:.4f} S={A.entropy[0]:.4f} E={A.E[0]:.5f}")
+print(f"(a) dense grid    : lnZ={B.lnZ[0]:.4f} S={B.entropy[0]:.4f} E={B.E[0]:.5f}")
 print(f"(b) Sz blocks={A2.blocks}: one-point E={A2.E[0]:.5f} lnZ={A2.lnZ[0]:.4f}; dense E={B2.E[0]:.5f} lnZ={B2.lnZ[0]:.4f}")
 a_bad = abs(A.lnZ[0] - lnZ_ex) > 1.0 and abs(B.lnZ[0] - lnZ_ex) < 0.5 * abs(A.lnZ[0] - lnZ_ex)
 b_bad = abs(A2.E[0] - B2.E[0]) > 0.02 and abs(A2.E[0] - E_ex) > abs(B2.E[0] - E_ex)

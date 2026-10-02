@@ -354,6 +354,7 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("temperatures", &sec::ThermalSpec::temperatures)
         .def_readwrite("samples", &sec::ThermalSpec::samples)
         .def_readwrite("krylov", &sec::ThermalSpec::krylov)
+        .def_readwrite("steps", &sec::ThermalSpec::steps)
         .def_readwrite("exact_states", &sec::ThermalSpec::exact_states)
         .def_readwrite("dense_max_dim", &sec::ThermalSpec::dense_max_dim)
         .def_readwrite("seed", &sec::ThermalSpec::seed)

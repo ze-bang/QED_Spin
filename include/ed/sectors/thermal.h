@@ -29,7 +29,8 @@ struct ThermalSpec {
     enum class Method { Exact, FTLM, mTPQ } method = Method::FTLM;
     std::vector<double> temperatures;
     std::size_t   samples      = 40;
-    std::size_t   krylov       = 100;   ///< FTLM Lanczos depth; mTPQ step count (0 = automatic)
+    std::size_t   krylov       = 100;   ///< FTLM / OFTLM Lanczos depth (>= 1)
+    std::size_t   steps        = 0;     ///< mTPQ steps per sample (0 = sized for the coldest T)
     std::size_t   exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
     std::uint64_t dense_max_dim = 512;  ///< FTLM / mTPQ diagonalise blocks up to this dimension; 0: always sample
     std::uint64_t seed         = 0;     ///< 0 = draw one

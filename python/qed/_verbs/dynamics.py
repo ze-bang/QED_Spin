@@ -32,7 +32,7 @@ class DynamicsResult:
 @_log.replays
 def dynamics(H, O, omega: Sequence[float], *, eta: float = 0.05,
              T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
-             krylov: int = 200, samples: int = 30, seed: int = 0,
+             krylov: int = 200, samples: int = 40, seed: int = 0,
              degeneracy_tol: float = 1e-8, device: str = "cpu",
              dense_max_dim: Optional[int] = None) -> DynamicsResult:
     """S(omega) = sum_m p_m <m|O^dag delta(omega - H + E_m) O|m>, Lorentzian width ``eta``.

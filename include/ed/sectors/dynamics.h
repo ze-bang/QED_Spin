@@ -33,7 +33,7 @@ struct DynamicsSpec {
     double              eta            = 0.05;
     std::vector<double> temperatures;          ///< empty = T = 0
     std::size_t         krylov         = 200;
-    std::size_t         samples        = 30;   ///< T > 0: random vectors per source sector
+    std::size_t         samples        = 40;   ///< T > 0: random vectors per source sector
     std::uint64_t       seed           = 0;    ///< 0 = draw one
     double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window
     int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)

@@ -83,8 +83,8 @@ T = [0.5, 2.0, 50.0]
 try:
     th_odd = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None, sz="odd"))
     th_all = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None))
-    same = np.allclose(th_odd.S, th_all.S, atol=1e-10) and np.allclose(th_odd.E, th_all.E, atol=1e-10)
-    print(f"thermal S(T) sz=odd {np.round(th_odd.S, 6)}  full {np.round(th_all.S, 6)}  identical={same}")
+    same = np.allclose(th_odd.entropy, th_all.entropy, atol=1e-10) and np.allclose(th_odd.E, th_all.E, atol=1e-10)
+    print(f"thermal S(T) sz=odd {np.round(th_odd.entropy, 6)}  full {np.round(th_all.entropy, 6)}  identical={same}")
     print(f"  expectations at T=50: odd half S->~{7*np.log(2):.4f} (7 ln2), full ~{8*np.log(2):.4f} (8 ln2)"
           " (per-site normalisation would divide by N)")
     if same:

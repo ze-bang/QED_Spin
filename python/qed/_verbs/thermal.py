@@ -16,7 +16,8 @@ _METHODS = {"exact", "ftlm", "mtpq"}
 
 @dataclass
 class ThermalResult:
-    """Thermodynamics per temperature. ``M`` and ``chi`` (magnetisation per system and
+    """Thermodynamics per temperature: energy ``E``, heat capacity ``C``, ``entropy``, free
+    energy ``F`` and ``lnZ``. ``M`` and ``chi`` (magnetisation per system and
     susceptibility per site) are present when H conserves Sz. ``O``: <O>(T) per requested
     observable, a complex array [len(observables), len(T)] (None without observables).
     ``diagnostics``: (code, message) pairs for fallbacks the run took."""
@@ -24,7 +25,7 @@ class ThermalResult:
     T: np.ndarray
     E: np.ndarray
     C: np.ndarray
-    S: np.ndarray
+    entropy: np.ndarray
     F: np.ndarray
     lnZ: np.ndarray
     M: Optional[np.ndarray]
@@ -41,16 +42,16 @@ class ThermalResult:
 
 @_log.replays
 def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
-            samples: int = 40, krylov: Optional[int] = None, exact_states: int = 0,
-            seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None,
+            samples: int = 40, krylov: Optional[int] = None, steps: Optional[int] = None,
+            exact_states: int = 0, seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None,
             dense_max_dim: Optional[int] = None) -> ThermalResult:
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
     Lanczos; ``exact_states > 0`` treats that many lowest states of each block exactly),
     or ``"mtpq"`` (microcanonical thermal pure quantum states). ``krylov`` is the FTLM
-    Lanczos depth (default 100) or the mTPQ step count (default: automatic). ``samples``
-    random vectors per block; ``seed`` 0 draws one. ``dense_max_dim``: the sampled methods
+    Lanczos depth (default 100), ``steps`` the mTPQ steps per sample (default: enough for the
+    coldest ``T``). ``samples`` random vectors per block; ``seed`` 0 draws one. ``dense_max_dim``: the sampled methods
     diagonalise blocks up to this dimension exactly instead (a sampled trace needs a dimension
     well above ``samples``); ``None`` is 512, 0 always samples.
 
@@ -68,7 +69,16 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
                 "mtpq": _core.sectors.ThermalMethod.mTPQ}[key]
     t.temperatures = [float(x) for x in T]
     t.samples = int(samples)
-    t.krylov = int(krylov) if krylov is not None else (0 if key == "mtpq" else 100)
+    if key == "mtpq" and krylov is not None:
+        raise InvalidRequest("method='mtpq' takes steps=, not krylov= (the Lanczos depth of FTLM)")
+    if key != "mtpq" and steps is not None:
+        raise InvalidRequest(f"steps= is the mTPQ step count; method={key!r} takes krylov=")
+    if krylov is not None and int(krylov) < 1:
+        raise InvalidRequest(f"krylov must be >= 1, got {krylov}")
+    if steps is not None and int(steps) < 1:
+        raise InvalidRequest(f"steps must be >= 1 (or None for automatic), got {steps}")
+    t.krylov = 100 if krylov is None else int(krylov)
+    t.steps = 0 if steps is None else int(steps)
     t.exact_states = int(exact_states)
     if dense_max_dim is not None:
         if int(dense_max_dim) < 0:
@@ -81,7 +91,7 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     diagnostics: list = []
     r = _core.sectors.thermal(H, sym.resolve(H, diagnostics), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
-    return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), S=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
+    return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), entropy=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
                          M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,
                          O=np.asarray(r.O, complex) if ops else None,
                          method=key, e0=float(r.e0), blocks=int(r.blocks),

@@ -251,7 +251,7 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
             "mTPQ: " + std::to_string(steps) + " steps reach T = "
             + (std::isfinite(T_reached) ? std::to_string(T_reached) : std::string("none of the targets"))
             + " but the grid asks for T = " + std::to_string(1.0 / beta_max)
-            + (auto_steps ? std::string("") : std::string("; raise krylov or leave it unset")));
+            + (auto_steps ? std::string("") : std::string("; raise steps or leave it unset")));
     }
 }
 

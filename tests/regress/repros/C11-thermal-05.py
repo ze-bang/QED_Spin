@@ -32,7 +32,7 @@ for i, j in bonds:
     H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5)
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
 try:
-    r = qed.thermal(H, list(Ts), method="mtpq", krylov=200, samples=50, seed=9, sym=qed.Symmetry.none())
+    r = qed.thermal(H, list(Ts), method="mtpq", steps=200, samples=50, seed=9, sym=qed.Symmetry.none())
 except Exception as ex:
     print(f"REPRO: NOT_REPRODUCED thermal refused: {type(ex).__name__}: {str(ex)[:200]}")
     raise SystemExit(0)

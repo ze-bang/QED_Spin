@@ -83,7 +83,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         };
         ed::thermal::OftlmOptions ko;
         ko.num_samples = t.samples;
-        ko.krylov_dim  = t.krylov ? t.krylov : 100;
+        ko.krylov_dim  = t.krylov;
         ko.num_exact   = t.exact_states;
         ko.betas       = beta;
         ko.random_seed = seed;
@@ -101,7 +101,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             if (mtpq) {
                 ed::thermal::MtpqRun run;
                 run.samples = t.samples;
-                run.steps   = t.krylov;
+                run.steps   = t.steps;
                 run.seed    = seed;
                 run.seed_transform = seed_transform;
                 if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
@@ -109,7 +109,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             }
             ed::thermal::FtlmOptions ko;
             ko.num_samples    = t.samples;
-            ko.krylov_dim     = t.krylov ? t.krylov : 100;
+            ko.krylov_dim     = t.krylov;
             ko.betas          = beta;
             ko.random_seed    = seed;
             ko.seed_transform = seed_transform;

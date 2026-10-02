@@ -101,7 +101,8 @@ ThermalSpec spec_for(ThermalSpec::Method m, std::uint64_t seed, ed::Device devic
     t.method        = m;
     t.temperatures  = m == ThermalSpec::Method::mTPQ ? T_HIGH : T_BROAD;
     t.samples       = 50;
-    t.krylov        = m == ThermalSpec::Method::mTPQ ? 200 : 60;
+    t.krylov        = 60;                                       // FTLM Lanczos depth
+    t.steps         = m == ThermalSpec::Method::mTPQ ? 200 : 0;  // mTPQ steps per sample
     t.dense_max_dim = 0;   // dim 64: the sampling kernels, not the dense crossover
     t.seed          = seed;
     t.device        = device;

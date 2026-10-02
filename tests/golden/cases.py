@@ -147,7 +147,7 @@ def thermal_cases(m):
 
 
 def _thermo(r):
-    out = {"T": fl(r.T), "E": fl(r.E), "C": fl(r.C), "S": fl(r.S)}
+    out = {"T": fl(r.T), "E": fl(r.E), "C": fl(r.C), "S": fl(r.entropy)}
     if getattr(r, "M", None) is not None and len(r.M):
         out["M"], out["chi"] = fl(r.M), fl(r.chi)
     return out
