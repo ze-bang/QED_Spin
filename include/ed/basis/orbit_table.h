@@ -33,7 +33,10 @@
 
 #include <algorithm>
 #include <complex>
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -48,6 +51,8 @@
 
 namespace ed::symmetry {
 
+struct SharedRankLookup;   // rep_sector.h
+
 struct OrbitTable {
     std::vector<std::uint64_t> reps;      // canonical reps, ascending
     std::vector<std::uint16_t> stab_id;   // per rep -> index into stab_elems
@@ -55,13 +60,22 @@ struct OrbitTable {
                                                          // element-index sets
     std::uint64_t subspace_dim = 0;       // C(N, n_up) or 2^N
     std::uint64_t content_hash = 0;       // (group, subspace, engine version)
+    /// A fixed-Sz table's dense rank -> rep index lookup (rep_sector.h rank_lookup_of), built on
+    /// first use and kept with the table, so every walk over it shares one.
+    struct RankSlot {
+        std::mutex mu;
+        bool tried = false;
+        std::shared_ptr<const SharedRankLookup> table;
+        std::atomic<std::uint64_t> bytes{0};
+    };
+    std::shared_ptr<RankSlot> rank_slot = std::make_shared<RankSlot>();
 
     [[nodiscard]] std::size_t size() const noexcept { return reps.size(); }
-    /// Bytes it holds (10 per rep, and the stabiliser sets).
+    /// Bytes it holds (10 per rep, the stabiliser sets, and its rank lookup once built).
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         std::uint64_t b = reps.size() * sizeof(std::uint64_t) + stab_id.size() * sizeof(std::uint16_t);
         for (const auto& s : stab_elems) b += s.size() * sizeof(std::uint16_t);
-        return b;
+        return b + (rank_slot ? rank_slot->bytes.load() : 0);
     }
     [[nodiscard]] bool        empty() const noexcept { return reps.empty(); }
 
@@ -139,6 +153,75 @@ inline bool visit_state(std::uint64_t                s,
     return true;
 }
 
+/// The fused rep + stabiliser scan of every subspace: items 0..total-1 in ascending state order,
+/// first(i) the state of item i, next(s) the state after s, keep(s) whether s is in the subspace.
+/// The item range is cut into 64 chunks per thread taken dynamically -- a state's cost varies
+/// with how early its canonicalisation exits and with its stabiliser, so equal static ranges left
+/// threads idle -- and merged in item order: reps ascend, and the stabiliser sets keep their
+/// first-occurrence numbering, so the table is the same, bit for bit, at any thread count.
+template <class First, class Next, class Keep>
+inline void scan_orbits(std::uint64_t total, const CompiledGroup& cg, First first, Next next, Keep keep,
+                        OrbitTable& tab) {
+    const std::size_t G = cg.size();
+    int nthreads = 1;
+#ifdef _OPENMP
+    nthreads = omp_get_max_threads();
+#endif
+    if (total < (std::uint64_t{1} << 14) || nthreads < 1) nthreads = 1;
+    const std::uint64_t n_chunks = std::max<std::uint64_t>(
+        1, std::min<std::uint64_t>(total, 64ull * static_cast<std::uint64_t>(nthreads)));
+    struct Local {
+        std::vector<std::uint64_t> reps;
+        std::vector<std::uint16_t> stab_id;
+        StabDedup                  dedup;
+    };
+    std::vector<Local> local(static_cast<std::size_t>(n_chunks));
+    // chunk c covers items [c total / n_chunks, (c + 1) total / n_chunks), without overflow
+    const std::uint64_t q = total / n_chunks, r = total % n_chunks;
+    const auto bound = [q, r](std::uint64_t c) { return c * q + std::min(c, r); };
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
+#endif
+    for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
+        const std::uint64_t begin = bound(static_cast<std::uint64_t>(c));
+        const std::uint64_t end   = bound(static_cast<std::uint64_t>(c) + 1);
+        Local& out = local[static_cast<std::size_t>(c)];
+        std::vector<std::uint16_t> stab_scratch;
+        stab_scratch.reserve(G ? G : 1);
+        if (begin == end) continue;
+        std::uint64_t s = first(begin);
+        for (std::uint64_t i = begin; i < end; ++i) {
+            if (keep(s)) {
+                if (G == 0) {
+                    out.reps.push_back(s);
+                    stab_scratch.assign(1, 0);
+                    out.stab_id.push_back(out.dedup.id_of(stab_scratch));
+                } else if (visit_state(s, cg, G, stab_scratch)) {
+                    out.reps.push_back(s);
+                    out.stab_id.push_back(out.dedup.id_of(stab_scratch));
+                }
+            }
+            if (i + 1 < end) s = next(s);
+        }
+    }
+
+    // Merge: concatenate the chunks in order; remap chunk-local stabiliser ids into the global list.
+    std::size_t tot = 0;
+    for (const auto& l : local) tot += l.reps.size();
+    tab.reps.reserve(tot);
+    tab.stab_id.reserve(tot);
+    StabDedup global;
+    for (auto& l : local) {
+        std::vector<std::uint16_t> remap(l.dedup.sets.size());
+        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
+            remap[k] = global.id_of(l.dedup.sets[k]);
+        tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
+        for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
+        l = Local{};   // release as we go
+    }
+    tab.stab_elems = std::move(global.sets);
+}
+
 }  // namespace detail
 
 /// Fused rep + stabilizer scan over the fixed-Sz subspace (streaming
@@ -179,72 +262,12 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
         return tab;
     }
 
-    int nthreads = 1;
-#ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-#endif
-    if (total < (std::uint64_t{1} << 14)) nthreads = 1;
-    if (nthreads < 1) nthreads = 1;
-
-    struct Local {
-        std::vector<std::uint64_t> reps;
-        std::vector<std::uint16_t> stab_id;
-        detail::StabDedup          dedup;
-    };
-    std::vector<Local> local(static_cast<std::size_t>(nthreads));
-
-#ifdef _OPENMP
-#   pragma omp parallel num_threads(nthreads)
-#endif
-    {
-        int tid = 0, nt = 1;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-        nt  = omp_get_num_threads();
-#endif
-        const std::uint64_t chunk = total / static_cast<std::uint64_t>(nt);
-        const std::uint64_t rem   = total % static_cast<std::uint64_t>(nt);
-        const std::uint64_t begin =
-            static_cast<std::uint64_t>(tid) * chunk +
-            std::min<std::uint64_t>(static_cast<std::uint64_t>(tid), rem);
-        const std::uint64_t count =
-            chunk + (static_cast<std::uint64_t>(tid) < rem ? 1u : 0u);
-
-        Local& out = local[static_cast<std::size_t>(tid)];
-        std::vector<std::uint16_t> stab_scratch;
-        stab_scratch.reserve(G ? G : 1);
-        if (count > 0) {
-            std::uint64_t s = ed::core::combinadic::unrank_to_state(
-                begin, static_cast<int>(n_bits), n_up, binom);
-            for (std::uint64_t i = 0; i < count; ++i) {
-                if (G == 0) {
-                    out.reps.push_back(s);
-                    stab_scratch.assign(1, 0);
-                    out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-                } else if (detail::visit_state(s, cg, G, stab_scratch)) {
-                    out.reps.push_back(s);
-                    out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-                }
-                if (i + 1 < count) s = next_bit_permutation(s);
-            }
-        }
-    }
-
-    // Merge: concatenate ascending thread chunks; remap thread-local
-    // stabilizer ids into the global deduped list.
-    std::size_t tot = 0;
-    for (const auto& l : local) tot += l.reps.size();
-    tab.reps.reserve(tot);
-    tab.stab_id.reserve(tot);
-    detail::StabDedup global;
-    for (auto& l : local) {
-        std::vector<std::uint16_t> remap(l.dedup.sets.size());
-        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
-            remap[k] = global.id_of(l.dedup.sets[k]);
-        tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
-        for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
-    }
-    tab.stab_elems = std::move(global.sets);
+    detail::scan_orbits(
+        total, cg,
+        [&](std::uint64_t i) {
+            return ed::core::combinadic::unrank_to_state(i, static_cast<int>(n_bits), n_up, binom);
+        },
+        [](std::uint64_t s) { return next_bit_permutation(s); }, [](std::uint64_t) { return true; }, tab);
     prof.set_items(tab.reps.size());
     return tab;
 }
@@ -287,71 +310,13 @@ build_orbit_table_full_compiled(std::uint64_t        n_bits,
     const std::uint64_t dim = (1ULL << n_bits);
     tab.subspace_dim = dim;
 
-    const std::size_t G = cg.size();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
 
-    int nthreads = 1;
-#ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-#endif
-    if (dim < (std::uint64_t{1} << 14)) nthreads = 1;
-    if (nthreads < 1) nthreads = 1;
-
-    struct Local {
-        std::vector<std::uint64_t> reps;
-        std::vector<std::uint16_t> stab_id;
-        detail::StabDedup          dedup;
-    };
-    std::vector<Local> local(static_cast<std::size_t>(nthreads));
-
-#ifdef _OPENMP
-#   pragma omp parallel num_threads(nthreads)
-#endif
-    {
-        int tid = 0, nt = 1;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-        nt  = omp_get_num_threads();
-#endif
-        const std::uint64_t chunk = dim / static_cast<std::uint64_t>(nt);
-        const std::uint64_t rem   = dim % static_cast<std::uint64_t>(nt);
-        const std::uint64_t begin =
-            static_cast<std::uint64_t>(tid) * chunk +
-            std::min<std::uint64_t>(static_cast<std::uint64_t>(tid), rem);
-        const std::uint64_t count =
-            chunk + (static_cast<std::uint64_t>(tid) < rem ? 1u : 0u);
-
-        Local& out = local[static_cast<std::size_t>(tid)];
-        std::vector<std::uint16_t> stab_scratch;
-        stab_scratch.reserve(G ? G : 1);
-        for (std::uint64_t i = 0; i < count; ++i) {
-            const std::uint64_t s = begin + i;
-            if (G == 0) {
-                out.reps.push_back(s);
-                stab_scratch.assign(1, 0);
-                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-            } else if (detail::visit_state(s, cg, G, stab_scratch)) {
-                out.reps.push_back(s);
-                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-            }
-        }
-    }
-
-    std::size_t tot = 0;
-    for (const auto& l : local) tot += l.reps.size();
-    tab.reps.reserve(tot);
-    tab.stab_id.reserve(tot);
-    detail::StabDedup global;
-    for (auto& l : local) {
-        std::vector<std::uint16_t> remap(l.dedup.sets.size());
-        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
-            remap[k] = global.id_of(l.dedup.sets[k]);
-        tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
-        for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
-    }
-    tab.stab_elems = std::move(global.sets);
+    detail::scan_orbits(
+        dim, cg, [](std::uint64_t i) { return i; }, [](std::uint64_t s) { return s + 1; },
+        [](std::uint64_t) { return true; }, tab);
     prof.set_items(tab.reps.size());
     return tab;
 }
@@ -370,74 +335,14 @@ build_orbit_table_parity_compiled(std::uint64_t        n_bits,
     const std::uint64_t dim_all = (1ULL << n_bits);
     tab.subspace_dim = dim_all / 2;
 
-    const std::size_t G = cg.size();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)
         ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
 
-    int nthreads = 1;
-#ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-#endif
-    if (dim_all < (std::uint64_t{1} << 14)) nthreads = 1;
-    if (nthreads < 1) nthreads = 1;
-
-    struct Local {
-        std::vector<std::uint64_t> reps;
-        std::vector<std::uint16_t> stab_id;
-        detail::StabDedup          dedup;
-    };
-    std::vector<Local> local(static_cast<std::size_t>(nthreads));
-
-#ifdef _OPENMP
-#   pragma omp parallel num_threads(nthreads)
-#endif
-    {
-        int tid = 0, nt = 1;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-        nt  = omp_get_num_threads();
-#endif
-        const std::uint64_t chunk = dim_all / static_cast<std::uint64_t>(nt);
-        const std::uint64_t rem   = dim_all % static_cast<std::uint64_t>(nt);
-        const std::uint64_t begin =
-            static_cast<std::uint64_t>(tid) * chunk +
-            std::min<std::uint64_t>(static_cast<std::uint64_t>(tid), rem);
-        const std::uint64_t count =
-            chunk + (static_cast<std::uint64_t>(tid) < rem ? 1u : 0u);
-
-        Local& out = local[static_cast<std::size_t>(tid)];
-        std::vector<std::uint16_t> stab_scratch;
-        stab_scratch.reserve(G ? G : 1);
-        for (std::uint64_t i = 0; i < count; ++i) {
-            const std::uint64_t s = begin + i;
-            if ((static_cast<int>(__builtin_popcountll(s)) & 1) != parity)
-                continue;
-            if (G == 0) {
-                out.reps.push_back(s);
-                stab_scratch.assign(1, 0);
-                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-            } else if (detail::visit_state(s, cg, G, stab_scratch)) {
-                out.reps.push_back(s);
-                out.stab_id.push_back(out.dedup.id_of(stab_scratch));
-            }
-        }
-    }
-
-    std::size_t tot = 0;
-    for (const auto& l : local) tot += l.reps.size();
-    tab.reps.reserve(tot);
-    tab.stab_id.reserve(tot);
-    detail::StabDedup global;
-    for (auto& l : local) {
-        std::vector<std::uint16_t> remap(l.dedup.sets.size());
-        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
-            remap[k] = global.id_of(l.dedup.sets[k]);
-        tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
-        for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
-    }
-    tab.stab_elems = std::move(global.sets);
+    detail::scan_orbits(
+        dim_all, cg, [](std::uint64_t i) { return i; }, [](std::uint64_t s) { return s + 1; },
+        [parity](std::uint64_t s) { return (static_cast<int>(__builtin_popcountll(s)) & 1) == parity; }, tab);
     prof.set_items(tab.reps.size());
     return tab;
 }

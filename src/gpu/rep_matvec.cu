@@ -122,7 +122,10 @@ acquire_gpu_shared_rank(
     auto& slot = registry[srl->uid];   // by table identity: a freed table's address can be reused
     if (auto sp = slot.lock()) return sp;
     auto sp = std::make_shared<GpuSharedRankTable>();
-    build_or_evict(keep, [&] { sp->d_shared_of_rank = srl->shared_of_rank; return 0; });   // one H2D per (N, n_up)
+    build_or_evict(keep, [&] {   // one H2D per (N, n_up)
+        sp->d_shared_of_rank.assign(srl->shared_of_rank.begin(), srl->shared_of_rank.end());
+        return 0;
+    });
     if (ed::env::flag("ED_SYM_PROFILE", false)) {
         ED_LOG(Info,
                      "[sym_profile] GPU shared rank table uploaded: "

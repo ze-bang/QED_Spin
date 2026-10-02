@@ -172,7 +172,8 @@ try_group_path(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0
     };
 
     const auto t_tab = std::chrono::steady_clock::now();
-    const ed::symmetry::OrbitTable tab = group_orbit_table(Gp, N, opt.n_up, flip);
+    const auto tab_ptr = group_orbit_table(Gp, N, opt.n_up, flip);
+    const ed::symmetry::OrbitTable& tab = *tab_ptr;
     sb.t_orbit = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_tab).count();
     std::vector<std::shared_ptr<ed::symmetry::RepSectorData>> secs(static_cast<std::size_t>(nIr));
     std::uint64_t one_dim_total = 0;

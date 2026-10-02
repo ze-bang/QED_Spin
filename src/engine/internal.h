@@ -940,8 +940,15 @@ namespace lg_detail {
 // for plain blocks; a group-sector block is re-expressed in the k-sector). Norms are kept.
 [[nodiscard]] std::vector<Complex> lift_to_rep(const BlockData& b, const Complex* v);
 
+// The reps of an orbit table that survive the projection onto `characters`, in table order, into
+// rd.reps with 1/norm in rd.inv_norms; `local` (when given) gets each table entry's index among them,
+// -1 where it cancels. Counted per chunk, placed by a prefix sum and written in parallel: the same
+// arrays as a serial filter. (group_sector.cpp)
+void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
+                 ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local = nullptr);
+
 // group_sector.cpp: the group-sector fast path of build_star_blocks (try_group_path, stars.cpp).
-[[nodiscard]] ed::symmetry::OrbitTable
+[[nodiscard]] std::shared_ptr<const ed::symmetry::OrbitTable>
 group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip);
 [[nodiscard]] ed::symmetry::RepSectorData
 group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,

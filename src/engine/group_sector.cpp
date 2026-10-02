@@ -5,7 +5,9 @@
 #include "internal.h"
 
 #include <ed/basis/orbit_table.h>
+#include <ed/basis/symmetry_cache.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -32,13 +34,15 @@ void check_group_args(const std::vector<std::vector<int>>& perms, int n_sites, i
 
 namespace lg_detail {
 
-ed::symmetry::OrbitTable
+// Through the orbit-table registry: the estimate walk, each survivor's re-walk and the next call
+// on the same group reuse the table.
+std::shared_ptr<const ed::symmetry::OrbitTable>
 group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, bool flip) {
     check_group_args(perms, n_sites, n_up, flip);
     const ed::symmetry::CompiledGroup cg = flip
         ? ed::symmetry::make_flip_extended_group_from_perms(perms, static_cast<std::uint64_t>(n_sites))
         : ed::symmetry::CompiledGroup::from_permutations(perms, n_sites);
-    return ed::symmetry::build_orbit_table_fixed_sz_streaming(static_cast<std::uint64_t>(n_sites), n_up, cg);
+    return ed::symmetry::acquire_orbit_table_fixed_sz_compiled(static_cast<std::uint64_t>(n_sites), n_up, cg);
 }
 
 ed::symmetry::RepSectorData
@@ -63,16 +67,55 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
         rd.flip_masks.assign(Gx, 0ULL);
         for (std::size_t g = G; g < Gx; ++g) rd.flip_masks[g] = all_ones;
     }
-    rd.reps.reserve(tab.reps.size());
-    rd.inv_norms.reserve(tab.reps.size());
-    for (std::size_t i = 0; i < tab.reps.size(); ++i) {
-        const double nsq = ed::symmetry::projected_norm_sq_stab(tab.stabilizer_of(i), characters);
-        // scale-free: squared norm of a projected unit vector
-        if (nsq <= 1e-12) continue;
-        rd.reps.push_back(tab.reps[i]);
-        rd.inv_norms.push_back(1.0 / std::sqrt(nsq));
-    }
+    filter_reps(tab, characters, rd);
     return rd;
+}
+
+void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
+                 ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local) {
+    const std::size_t n = tab.reps.size();
+    int T = 1;
+#ifdef _OPENMP
+    if (n >= (std::size_t{1} << 14)) T = omp_get_max_threads();
+#endif
+    const std::size_t C = std::max<std::size_t>(1, std::min<std::size_t>(n, 4 * static_cast<std::size_t>(T)));
+    const auto bound = [n, C](std::size_t c) { return c * (n / C) + std::min(c, n % C); };
+    std::vector<double> inv(n);           // 1/norm, 0 where the rep cancels
+    std::vector<std::size_t> at(C + 1, 0);
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static) num_threads(T)
+#endif
+    for (long long c = 0; c < static_cast<long long>(C); ++c) {
+        std::size_t kept = 0;
+        for (std::size_t i = bound(static_cast<std::size_t>(c)); i < bound(static_cast<std::size_t>(c) + 1); ++i) {
+            const double nsq = ed::symmetry::projected_norm_sq_stab(tab.stabilizer_of(i), characters);
+            // scale-free: squared norm of a projected unit vector
+            inv[i] = nsq <= 1e-12 ? 0.0 : 1.0 / std::sqrt(nsq);
+            kept += inv[i] != 0.0;
+        }
+        at[static_cast<std::size_t>(c) + 1] = kept;
+    }
+    for (std::size_t c = 0; c < C; ++c) at[c + 1] += at[c];
+    rd.reps.resize(at[C]);
+    rd.inv_norms.resize(at[C]);
+    if (local) local->resize(n);
+#ifdef _OPENMP
+#   pragma omp parallel for schedule(static) num_threads(T)
+#endif
+    for (long long c = 0; c < static_cast<long long>(C); ++c) {
+        std::size_t pos = at[static_cast<std::size_t>(c)];
+        for (std::size_t i = bound(static_cast<std::size_t>(c)); i < bound(static_cast<std::size_t>(c) + 1); ++i) {
+            if (inv[i] == 0.0) {
+                if (local) (*local)[i] = -1;
+                continue;
+            }
+            rd.reps[pos] = tab.reps[i];
+            rd.inv_norms[pos] = inv[i];
+            // narrow-ok: a rank table (the only user of `local`) exists only for at most INT32_MAX reps
+            if (local) (*local)[i] = static_cast<std::int32_t>(pos);
+            ++pos;
+        }
+    }
 }
 
 std::vector<Complex>

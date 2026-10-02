@@ -23,29 +23,14 @@
 #include <omp.h>
 #endif
 
+#include <ed/core/numa_vector.h>
+
 namespace ed::matvec {
 
-// Allocator whose value-less construct() default-initialises: resize() then leaves trivial elements untouched instead
-// of zero-filling them on the calling thread. Linux places a page on the NUMA node of the thread that first writes it,
-// so a serial zero fill would put a whole reduced CSR (tens to hundreds of GB) on ONE node and every spmv would stream
-// it across the interconnect (measured on Fir: ~80 GB/s from one domain vs ~8x that interleaved). The builders below
-// (allocate_first_touch) instead first-touch every row's slots from the thread that owns the row in spmv's static
-// partition.
-template <class T, class A = std::allocator<T>>
-struct DefaultInitAllocator : A {
-    using A::A;
-    template <class U>
-    struct rebind { using other = DefaultInitAllocator<U, typename std::allocator_traits<A>::template rebind_alloc<U>>; };
-    template <class U>
-    void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) { ::new (static_cast<void*>(p)) U; }
-    template <class U, class... Args>
-    void construct(U* p, Args&&... args) {
-        std::allocator_traits<A>::construct(static_cast<A&>(*this), p, std::forward<Args>(args)...);
-    }
-};
-
-template <class T>
-using NumaVector = std::vector<T, DefaultInitAllocator<T>>;
+// The CSR arrays are NumaVectors (core/numa_vector.h): the builders below (allocate_first_touch)
+// first-touch every row's slots from the thread that owns the row in spmv's static partition.
+using ed::core::DefaultInitAllocator;
+using ed::core::NumaVector;
 
 template <class Scalar>
 struct ReducedSymmetryCsr {

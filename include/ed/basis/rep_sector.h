@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #ifdef _OPENMP
@@ -39,7 +40,9 @@
 #endif
 
 #include <ed/core/config.h>
+#include <ed/core/numa_vector.h>
 #include <ed/basis/combinadic.h>                   // BinomialTable + rank_state (O(1) reverse lookup)
+#include <ed/basis/orbit_table.h>
 #include <ed/matvec/rep_symmetry_basis_policy.h>   // RepSymmetryBasisPolicy (make_policy)
 
 namespace ed::symmetry {
@@ -73,7 +76,7 @@ namespace ed::symmetry {
 // ``local_of_shared`` remap (int32 x #reps, ~76 MB at N=32).
 // ---------------------------------------------------------------------------
 struct SharedRankLookup {
-    std::vector<std::int32_t>           shared_of_rank;  // rank -> shared idx, -1
+    ed::core::NumaVector<std::int32_t>  shared_of_rank;  // rank -> shared idx, -1
     /// Unique per table (device caches key on it; an address can be reused after a free).
     std::uint64_t                       uid = 0;
     ed::core::combinadic::BinomialTable binom;
@@ -96,8 +99,14 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
     srl->binom.resize(n_sites);
     const std::uint64_t dim_full_sz = srl->binom.at(n_sites, n_up);
     if (dim_full_sz == 0) return nullptr;
-    srl->shared_of_rank.assign(static_cast<std::size_t>(dim_full_sz),
-                               std::int32_t{-1});
+    // Resized untouched, then first-touched in parallel: the lookups land anywhere, so the pages
+    // are spread over the NUMA nodes rather than all on the calling thread's.
+    srl->shared_of_rank.resize(static_cast<std::size_t>(dim_full_sz));
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (long long r = 0; r < static_cast<long long>(dim_full_sz); ++r)
+        srl->shared_of_rank[static_cast<std::size_t>(r)] = std::int32_t{-1};
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif
@@ -111,6 +120,21 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
         }
     }
     return srl;
+}
+
+/// The shared rank lookup of a fixed-Sz orbit table: built once, on first use, and kept with the
+/// table (OrbitTable::rank_slot), so the walks of one call and the calls that reuse the table from
+/// the registry share it. Null when the table cannot carry one (make_shared_rank_lookup).
+[[nodiscard]] inline std::shared_ptr<const SharedRankLookup>
+rank_lookup_of(const OrbitTable& tab, int n_sites, int n_up) {
+    auto& slot = *tab.rank_slot;
+    std::lock_guard<std::mutex> lk(slot.mu);
+    if (!slot.tried) {
+        slot.table = make_shared_rank_lookup(tab.reps, n_sites, n_up);
+        slot.tried = true;
+        if (slot.table) slot.bytes = slot.table->shared_of_rank.size() * sizeof(std::int32_t);
+    }
+    return slot.table;
 }
 
 struct RepSectorData {
