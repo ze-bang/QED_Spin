@@ -190,32 +190,6 @@ ed::ops::MaskedOperator total_s_minus(int n_sites) {
     return S;
 }
 
-// The middle of a spin tower's spectrum: the extreme Ritz values of a short Lanczos run on the
-// projected operator, started inside the tower (the off-tower ghost excluded).
-double tower_midpoint(const ed::symmetry::CasimirProjectedOperator& hp) {
-    const std::size_t n = hp.dim();
-    std::vector<Complex> v(n);
-    std::mt19937_64 gen(0x70E4ULL);
-    std::normal_distribution<double> nd(0.0, 1.0);
-    for (auto& z : v) z = Complex(nd(gen), nd(gen));
-    // scale-free: unit-vector norm
-    if (hp.prepare_start_vector(v.data(), n) < 1e-12) return hp.ghost_shift();
-    ed::krylov::LanczosKernelOptions lo;
-    lo.max_iter   = std::min<std::size_t>(n, 30);
-    lo.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
-    lo.keep_basis = false;
-    ed::matvec::CpuBackend be;
-    auto mv = [&hp](const Complex* in, Complex* out, std::size_t nn) { hp.apply(in, out, nn); };
-    const auto k = ed::krylov::lanczos_kernel(be, mv, n, v.data(), lo);
-    const std::vector<double> ritz =
-        ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/false).values;
-    const double mu = hp.ghost_shift();
-    double lo_e = std::numeric_limits<double>::infinity(), hi_e = -lo_e;
-    for (double r : ritz)
-        if (std::abs(r - mu) > 1e-6 * std::max(1.0, std::abs(mu))) { lo_e = std::min(lo_e, r); hi_e = std::max(hi_e, r); }
-    return std::isfinite(lo_e) ? 0.5 * (lo_e + hi_e) : mu;
-}
-
 }  // namespace
 
 DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O, const DynamicsSpec& d) {
@@ -400,11 +374,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         std::size_t id = 0;                     // its index over the whole call: seeds its samples
         const Target* src = nullptr; Subspace sub; std::vector<const Target*> targets;
         std::vector<std::shared_ptr<const ed::ops::MaskedProgram>> programs;   // O to each target
+        // The spin tower the samples start in (P_S of a Gaussian), on the bare H: the levels outside it
+        // carry roundoff weight, and the kernel drops them (FtlmCrossIrrepOptions::min_weight).
         std::shared_ptr<const ed::symmetry::LowdinS2Projector> tower;
-        std::shared_ptr<RepSectorMatVec> s2;
-        // H with the off-tower drift scrubbed (the thermal blocks' wrapper): roundoff that leaves
-        // the tower is sent to a ghost level above the band instead of growing in the Krylov space.
-        std::shared_ptr<const ed::symmetry::CasimirProjectedOperator> Hp;
         std::uint64_t tower_dim = 0;
     };
     std::vector<Subspace> source_subs = subspaces(H, u);
@@ -419,36 +391,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         }
         s2c = detail::s2_carrier_for(u, n_sites);
     }
-    // Sector dimensions per momentum (its characters on A) at Sz = S and S + 1, measured once by
-    // streaming those two subspaces (only the characters and counts are kept).
-    using Dims = std::vector<std::pair<std::vector<Complex>, std::uint64_t>>;
-    Dims dims_at_S, dims_above_S;
-    if (s.two_S >= 0) {
-        auto measure = [&](int n_up, Dims& into) {
-            if (n_up < 0 || n_up > n_sites) return;
-            stream_sectors({n_up, -1, 1}, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
-                into.push_back({rd->characters, rd->reps.size()});
-            });
-        };
-        measure(n0, dims_at_S);
-        measure(n0 + 1, dims_above_S);
-    }
+    // A source's spin-S states, by Burnside (tower_dimension).
     auto tower_dim_of = [&](const Target& src) -> std::uint64_t {
-        auto dim_in = [&](const Dims& dims) -> std::uint64_t {
-            for (const auto& [chi, n] : dims) {
-                if (chi.size() != src.rd->characters.size()) continue;
-                bool same = true;
-                for (std::size_t g = 0; g < chi.size() && same; ++g)
-                    // scale-free: unit-modulus characters / phases (group data, not energies)
-                    same = std::abs(chi[g] - src.rd->characters[g]) <= 1e-9;
-                if (same) return n;
-            }
-            return 0;
-        };
-        const std::uint64_t at = dim_in(dims_at_S), above = dim_in(dims_above_S);
-        if (above > at)
-            throw std::runtime_error("dynamics: a momentum sector is larger at Sz = S + 1 than at Sz = S");
-        return at - above;
+        return static_cast<std::uint64_t>(tower_dimension(*src.rd, s.two_S));
     };
     // The source subspaces are processed one at a time, and a subspace's sectors stay cached only
     // until the last source subspace that needs them (as its own or as a target): the call holds
@@ -476,6 +421,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         if (const auto p = j.tower) {
             fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
             fo.trace_dim      = j.tower_dim;
+            fo.min_weight     = ed::numerics::kRoundoffWeight;
         }
         return fo;
     };
@@ -508,7 +454,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
     auto run = [&](const Job& j) {
         const auto fo = options(j);
         const std::size_t dim_src = j.src->rd->reps.size();
-        const ed::LinearOperator& Hs = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
+        const ed::LinearOperator& Hs = *j.src->H;
         auto H_src = [&Hs](const Complex* in, Complex* o, std::size_t nn) { Hs.apply(in, o, nn); };
         auto& be = ed::matvec::default_cpu_backend();
         return collect(j, [&](const Target* t, std::size_t k) {
@@ -531,11 +477,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         const std::size_t dim_src = j.src->rd->reps.size();
         ed::matvec::CudaBackend cbe;
         j.src->H->enable_device(true);
-        if (j.s2) j.s2->enable_device(true);
-        const auto H_src = j.Hp ? j.Hp->bind_cuda() : j.src->H->bind_cuda();
+        const auto H_src = j.src->H->bind_cuda();
         // Samples in lockstep (one multi-vector launch per H apply) when both H have a
         // multi-vector kernel: as many as fit in 90% of the free device memory (at most 8).
-        const ed::LinearOperator& src_op = j.Hp ? static_cast<const ed::LinearOperator&>(*j.Hp) : *j.src->H;
+        const ed::LinearOperator& src_op = *j.src->H;
         auto batched = [&](const ed::LinearOperator& dst_op, std::size_t dim_dst) {
             auto f = fo;
             auto ms = src_op.bind_cuda_multi();
@@ -593,12 +538,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
                 j.tower_dim = tower_dim_of(src);
                 if (j.tower_dim == 0) continue;
                 if (si == 0) multiplets += j.tower_dim;   // one member of each multiplet per Sz sector
-                j.s2    = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
+                // S^2 as S- S+ + Sz(Sz + 1) through the sector one up spin higher, or the S^2 carrier on a
+                // sector with the spin flip.
+                std::shared_ptr<const ed::LinearOperator> s2;
+                if (src.rd->has_flips()) s2 = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
+                else                     s2 = std::make_shared<LadderS2>(src.rd);
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
-                    j.s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
-                auto hp = std::make_shared<ed::symmetry::CasimirProjectedOperator>(src.H, j.tower, 1);
-                hp->place_ghost(tower_midpoint(*hp));   // interior: Lanczos does not amplify it
-                j.Hp = hp;
+                    s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
             }
             for (const Subspace& tsub : targets_of(sub, shifts, n_sites)) {
                 const auto& ts = sectors_of(tsub);
@@ -651,7 +597,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,
         for (std::size_t i : small) {        // warm the lazily built operators before going parallel
             std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
             jobs[i].src->H->apply(x.data(), y.data(), x.size());
-            if (jobs[i].s2) jobs[i].s2->apply(x.data(), y.data(), x.size());
+            if (jobs[i].tower) {             // S^2 on the source (its CSRs)
+                std::vector<Complex> z(x.size(), Complex(1, 0));
+                jobs[i].tower->project(z.data(), z.size());
+            }
             for (const Target* t : jobs[i].targets) {
                 std::vector<Complex> a(t->rd->reps.size(), Complex(0, 0)), b(a.size());
                 t->H->apply(a.data(), b.data(), a.size());

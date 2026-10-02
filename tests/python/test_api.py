@@ -198,6 +198,36 @@ def test_total_spin_eigs_solve_the_bare_h(J, S, spatial):
             assert r.complete
 
 
+@pytest.mark.parametrize("spatial", [None, "ring"])
+def test_total_spin_thermal_on_a_ferromagnet(spatial):
+    # P6.5 step 4: the thermal lanes sample the spin-S tower on the bare H. On a ferromagnet every
+    # off-tower state lies below the S = 0 tower, so a roundoff copy of one would own Z at low T:
+    # the exact paths solve H on the tower (Q^dag H Q), FTLM / OFTLM drop roundoff-weight Ritz
+    # pairs, mTPQ scrubs its iterate back into the tower.
+    n, S = 12, 0
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=-1.0)
+    b.heisenberg([(i, (i + 2) % n) for i in range(n)], J=-0.3)
+    H = b.to_operator()
+    levels = np.repeat(_spin_levels(H, n, S), 2 * S + 1)
+    groups = None if spatial is None else [_translations(n)[0], _reflection(n)]
+    sym = qed.Symmetry(spatial=groups, total_spin=S)
+    T = np.array([0.05, 0.3, 2.0])
+    e0 = levels.min()
+    lnZ = [math.log(np.sum(np.exp(-(levels - e0) / t))) - e0 / t for t in T]
+    ex = qed.thermal(H, T, method="exact", sym=sym)
+    np.testing.assert_allclose(ex.lnZ, lnZ, rtol=1e-10)
+    np.testing.assert_allclose(qed.spectrum(H, sym=sym).energies, np.sort(levels), atol=1e-9)
+    E = [np.sum(levels * np.exp(-(levels - e0) / t)) / np.sum(np.exp(-(levels - e0) / t)) for t in T]
+    # At T = 0.05 the tower's ground state dominates: a sampled lane that let the ferromagnetic
+    # multiplet (far below) in would sit near its energy instead.
+    for method, kw in (("ftlm", dict(samples=8, krylov=60)), ("ftlm", dict(samples=4, krylov=60, exact_states=3)),
+                       ("mtpq", dict(samples=4))):
+        r = qed.thermal(H, T, method=method, sym=sym, seed=5, **kw)
+        assert abs(r.E[0] - E[0]) < 1e-3 * abs(E[0]), (method, kw, r.E[0], E[0])
+        np.testing.assert_allclose(r.lnZ[-1], lnZ[-1], rtol=0.05)
+
+
 def test_total_spin_in_a_uniform_field():
     # A uniform field h S^z_tot keeps S^2 and S^z, and splits each spin-S multiplet into members
     # at E + h m (audit C07-su2-06): every member is then a level of its own, in its own Sz sector.

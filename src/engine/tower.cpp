@@ -88,8 +88,107 @@ double Tower::gap() const {
 
 bool Tower::highest_weight() const { return 2 * sector->n_up - sector->n_sites == two_S; }
 
+namespace {
+
+// The configurations of n up spins a permutation fixes: those constant on each of its cycles, i.e.
+// the ways to pick cycles whose lengths sum to n.
+double fixed_configurations(const int* perm, int N, int n) {
+    std::vector<int> seen(static_cast<std::size_t>(N), 0), lengths;
+    for (int i = 0; i < N; ++i) {
+        if (seen[static_cast<std::size_t>(i)]) continue;
+        int len = 0;
+        for (int j = i; !seen[static_cast<std::size_t>(j)]; j = perm[j]) {
+            seen[static_cast<std::size_t>(j)] = 1;
+            ++len;
+        }
+        lengths.push_back(len);
+    }
+    std::vector<double> ways(static_cast<std::size_t>(n) + 1, 0.0);
+    ways[0] = 1.0;
+    for (int len : lengths)
+        for (int k = n; k >= len; --k) ways[static_cast<std::size_t>(k)] += ways[static_cast<std::size_t>(k - len)];
+    return ways[static_cast<std::size_t>(n)];
+}
+
+// The multiplicity of the sector's irrep in the Sz sector of n up spins, over the elements of its
+// group without the spin flip (Burnside: (1/|G|) sum_g conj(tr D(g)) fix_g(n)).
+double irrep_multiplicity(const ed::symmetry::RepSectorData& rd, int n) {
+    const int N = rd.n_sites;
+    if (n < 0 || n > N) return 0.0;
+    const int d = rd.irrep_dim;
+    const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
+    Complex sum(0, 0);
+    int order = 0;
+    for (int g = 0; g < rd.group_size; ++g) {
+        if (!rd.flip_masks.empty() && rd.flip_masks[static_cast<std::size_t>(g)] != 0) continue;
+        ++order;
+        Complex chi(0, 0);
+        if (d == 1) {
+            chi = rd.characters[static_cast<std::size_t>(g)];
+        } else {
+            for (int a = 0; a < d; ++a)
+                chi += rd.irrep_D[static_cast<std::size_t>(g) * dd + static_cast<std::size_t>(a * d + a)];
+        }
+        sum += std::conj(chi) * fixed_configurations(rd.perms_flat.data() + static_cast<std::size_t>(g) * N, N, n);
+    }
+    return std::real(sum) / static_cast<double>(order);
+}
+
+}  // namespace
+
+std::int64_t tower_dimension(const ed::symmetry::RepSectorData& rd, int two_S) {
+    const int N = rd.n_sites;
+    if (rd.n_up < 0 || two_S < 0 || two_S > N || (N - two_S) % 2 != 0)
+        throw std::invalid_argument("tower_dimension: needs a fixed-Sz sector and a spin S of its sites");
+    if (std::abs(2 * rd.n_up - N) > two_S) return 0;   // no member of spin S at this Sz
+    if (rd.has_flips()) {
+        // At Sz = 0 the flip acts on a spin-S state as (-1)^((N - 2S)/2): a block of the other
+        // parity holds none. The parity is the sector's character of the pure flip.
+        const int d = rd.irrep_dim;
+        for (int g = 0; g < rd.group_size; ++g) {
+            if (rd.flip_masks[static_cast<std::size_t>(g)] == 0) continue;
+            const int* p = rd.perms_flat.data() + static_cast<std::size_t>(g) * N;
+            bool identity = true;
+            for (int i = 0; i < N && identity; ++i) identity = p[i] == i;
+            if (!identity) continue;
+            const Complex chi = d == 1 ? rd.characters[static_cast<std::size_t>(g)]
+                                       : rd.irrep_D[static_cast<std::size_t>(g) * static_cast<std::size_t>(d * d)];
+            const double want = ((N - two_S) / 2) % 2 == 0 ? 1.0 : -1.0;
+            // scale-free: a +-1 character (group data)
+            if (std::abs(chi - Complex(want, 0.0)) > 1e-6) return 0;
+            break;
+        }
+    }
+    const int hw = (N + two_S) / 2;
+    const double m = irrep_multiplicity(rd, hw) - irrep_multiplicity(rd, hw + 1);
+    const double r = std::round(m);
+    // scale-free: an integer count from character sums (group data)
+    if (!(std::abs(m - r) < 1e-6) || r < 0.0)
+        throw std::runtime_error("tower_dimension: the character sums give " + std::to_string(m)
+                                 + " multiplets, not a count");
+    return static_cast<std::int64_t>(r);
+}
+
+namespace {
+
+std::vector<Complex> valence_bond_start(const ed::symmetry::RepSectorData& rd, int two_S, std::uint64_t s);
+
+}  // namespace
+
 std::vector<Complex> Tower::seed(std::uint64_t s) const {
-    const ed::symmetry::RepSectorData& rd = *sector;
+    if (!memo) return valence_bond_start(*sector, two_S, s);
+    std::lock_guard<std::mutex> lk(memo->m);
+    if (!memo->have || memo->s != s) {
+        memo->v = valence_bond_start(*sector, two_S, s);
+        memo->s = s;
+        memo->have = true;
+    }
+    return memo->v;
+}
+
+namespace {
+
+std::vector<Complex> valence_bond_start(const ed::symmetry::RepSectorData& rd, int two_S, std::uint64_t s) {
     const int N = rd.n_sites;
     if (rd.n_up < 0 || two_S < 0 || two_S > N || (N - two_S) % 2 != 0)
         throw std::invalid_argument("Tower::seed: needs a fixed-Sz sector and a spin S of its sites");
@@ -152,6 +251,8 @@ std::vector<Complex> Tower::seed(std::uint64_t s) const {
     for (Complex& c : u) c *= inv;
     return u;
 }
+
+}  // namespace
 
 TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std::vector<double>& values,
                          std::vector<std::vector<Complex>> vectors, double cluster_tol) {
@@ -322,6 +423,32 @@ private:
 
 std::unique_ptr<const ed::LinearOperator> tower_penalty(const ed::LinearOperator& H, const Tower& t) {
     return std::make_unique<TowerPenalty>(H, t);
+}
+
+Eigen::MatrixXcd tower_basis(const Tower& t) {
+    const auto n = static_cast<Eigen::Index>(t.s2->dim());
+    const double gap = t.gap();
+    if (gap == 0.0) return Eigen::MatrixXcd::Identity(n, n);   // the block holds this tower alone
+    Eigen::MatrixXcd S2 = materialize(*t.s2);
+    const double lam = t.lambda();
+    DenseEigenpairs d = dense_eigenpairs_in_range(S2, lam - 0.5 * gap, lam + 0.5 * gap);
+    if (t.dim >= 0 && d.vectors.cols() != static_cast<Eigen::Index>(t.dim))
+        throw std::runtime_error("tower_basis: S^2 has " + std::to_string(d.vectors.cols()) + " states at S(S+1), the "
+                                 "block's dimensions say " + std::to_string(t.dim));
+    return std::move(d.vectors);
+}
+
+Eigen::MatrixXcd tower_block(const ed::LinearOperator& H, const Tower& t, Eigen::MatrixXcd* basis) {
+    Eigen::MatrixXcd Q = tower_basis(t);
+    Eigen::MatrixXcd Hq;
+    {
+        const Eigen::MatrixXcd Hb = materialize(H);
+        Hq = Hb * Q;
+    }
+    Eigen::MatrixXcd Ht = Q.adjoint() * Hq;
+    Ht = 0.5 * (Ht + Ht.adjoint()).eval();   // Hermitian to roundoff
+    if (basis) *basis = std::move(Q);
+    return Ht;
 }
 
 }  // namespace ed::solvers::lg_detail

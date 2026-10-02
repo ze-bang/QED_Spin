@@ -27,6 +27,9 @@ inline constexpr double kLockRel = 1e-10;
 inline constexpr double kGsResidRel = 1e-9;
 /// Eigenvalues closer than this * s_H are one cluster where a spin tower is told apart inside it.
 inline constexpr double kClusterRel = 1e-8;
+/// A start-vector weight |<v0|psi>|^2 at or below this is roundoff: a sampled spin tower drops such
+/// Ritz pairs (copies of levels outside the tower; a Gaussian start's weights sit near 1/dim).
+inline constexpr double kRoundoffWeight = 1e-20;
 /// A dense block is real when max |Im H_ij| <= this * max |H_ij|.
 inline constexpr double kRealBlockRel = 32.0 * kEps;
 

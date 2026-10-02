@@ -117,6 +117,37 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
     return d;
 }
 
+DenseEigenpairs dense_eigenpairs_in_range(Eigen::MatrixXcd& Hb, double lo, double hi) {
+    require_lapack_dense(static_cast<std::uint64_t>(Hb.rows()));
+    const std::size_t nb = static_cast<std::size_t>(Hb.rows());
+    DenseEigenpairs d;
+    if (nb == 0) return d;
+    const lapack_int n = static_cast<lapack_int>(nb);
+    std::vector<double> w(nb, 0.0);
+    std::vector<lapack_int> isuppz(2 * nb);
+    lapack_int found = 0, info;
+    if (real_block(Hb)) {
+        Eigen::MatrixXd R = Hb.real();
+        Hb.resize(0, 0);
+        Eigen::MatrixXd Z(static_cast<Eigen::Index>(nb), static_cast<Eigen::Index>(nb));
+        info = LAPACKE_dsyevr(LAPACK_COL_MAJOR, 'V', 'V', 'U', n, R.data(), n, lo, hi, 0, 0, 0.0, &found,
+                              w.data(), Z.data(), n, isuppz.data());
+        d.vectors = Z.leftCols(found).cast<Complex>();
+    } else {
+        Eigen::MatrixXcd Z(static_cast<Eigen::Index>(nb), static_cast<Eigen::Index>(nb));
+        info = LAPACKE_zheevr(LAPACK_COL_MAJOR, 'V', 'V', 'U', n,
+                              reinterpret_cast<lapack_complex_double*>(Hb.data()), n, lo, hi, 0, 0, 0.0, &found,
+                              w.data(), reinterpret_cast<lapack_complex_double*>(Z.data()), n, isuppz.data());
+        Hb.resize(0, 0);
+        d.vectors = Z.leftCols(found);
+    }
+    if (info != 0)
+        throw std::runtime_error("little_group: dense block eigensolve in a value range failed (info = "
+                                 + std::to_string(info) + ")");
+    d.values.assign(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(found));
+    return d;
+}
+
 [[nodiscard]] std::vector<double>
 dense_block_eigenvalues(const ed::LinearOperator& mv) {
     require_lapack_dense(mv.dim());
@@ -230,6 +261,10 @@ BlockSolution solve_block_dense_tower(const ed::LinearOperator& H, const Tower& 
 }
 
 namespace {
+
+// The start seeds of the Krylov-Schur / scan lanes and of the GS vector lane.
+constexpr std::uint64_t kKsStartSeed = 0x51ED0B70ULL;
+constexpr std::uint64_t kGsStartSeed = 0x51ED900DULL;
 
 // A unit-variance Gaussian start of dimension n from `seed`, drawn on the host and staged on
 // the backend; the host draw is freed before the caller's kernel runs.
@@ -434,7 +469,7 @@ static BlockSolution krylov_schur_lane(B& be, const ed::LinearOperator& H, std::
     const double scale = ed::numerics::scale_or_one(H.norm_bound());
     const double tol = ed::numerics::kLockRel * scale;
 
-    auto v0 = staged_start(be, nb, 0x51ED0B70ULL, tower);   // same stream as the k = 1 scan
+    auto v0 = staged_start(be, nb, kKsStartSeed, tower);   // same stream as the k = 1 scan
     ed::krylov::KrylovSchurOptions o;
     o.num_eigs             = k;
     o.max_iter             = per_cycle;
@@ -535,7 +570,7 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     CountedH<B> Hc(H);
     // Fixed start-vector seed. Single-vector Lanczos returns ONE copy of a
     // genuinely degenerate pair (see above for the lanes that count copies).
-    auto v0 = staged_seed(be, static_cast<std::size_t>(nb), 0x51ED0B70ULL);
+    auto v0 = staged_seed(be, static_cast<std::size_t>(nb), kKsStartSeed);
     auto kres = ed::krylov::lanczos_kernel(be, Hc, static_cast<std::size_t>(nb), v0.get(), kopts);
     v0.reset();
     BlockSolution sol;
@@ -674,7 +709,7 @@ gs_lanczos(B& be, CountedH<B>& H, std::size_t n, std::size_t kept_basis_max_dim,
     std::size_t left = max_steps > 0 ? static_cast<std::size_t>(max_steps)
                                      : per_attempt * static_cast<std::size_t>(kLgGsRestarts + 1);
     const std::size_t keep_cap = gs_keep_cap<B>(n, kept_basis_max_dim, per_attempt);
-    UV seed = staged_start(be, n, 0x51ED900DULL, tower);
+    UV seed = staged_start(be, n, kGsStartSeed, tower);
     {
         const double s0 = be.nrm2(seed.get(), n);
         if (!(s0 > 0.0)) return std::nullopt;
@@ -831,15 +866,19 @@ BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower&
                                 std::uint64_t max_iter) {
     BlockSolution sol;
     const std::size_t nb = H.dim();
-    // Nothing to solve: an empty block, or one without a spin-S state (known from the dims, or seen
-    // as the valence-bond start vanishing on it).
-    if (nb == 0 || t.dim == 0 || (t.dim < 0 && t.seed(0x51ED0B70ULL).empty())) {
+    if (nb == 0 || t.dim == 0) {
         sol.whole = true;
         return sol;
     }
     if (nb <= 2) return solve_block_dense_tower(H, t, want, vectors);
     const std::uint64_t states = t.dim > 0 ? static_cast<std::uint64_t>(t.dim) : nb;
     const std::size_t k = static_cast<std::size_t>(std::min<std::uint64_t>(std::max<std::size_t>(want, 1), states));
+    // A block whose spin-S dimension is not known holds none when the start vanishes on it (the
+    // lane's own start: Tower::seed keeps it for the lane).
+    if (t.dim < 0 && t.seed(k == 1 ? kGsStartSeed : kKsStartSeed).empty()) {
+        sol.whole = true;
+        return sol;
+    }
     const double cluster = ed::numerics::kClusterRel * ed::numerics::scale_or_one(H.norm_bound());
     BlockSolution raw = tower_attempt(be, H, t, k, max_iter);
     sol.applies = raw.applies;

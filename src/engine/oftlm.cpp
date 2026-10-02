@@ -132,8 +132,12 @@ Curves oftlm_cpu(
         ed::krylov::TridiagEig t =
             ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
         SampleSpectrum sp;
-        sp.weights = t.weights();
-        sp.ritz    = std::move(t.values);
+        const std::vector<double> w = t.weights();
+        for (std::size_t j = 0; j < w.size(); ++j)
+            if (!(w[j] < opts.min_weight)) {   // a roundoff copy outside the seed's subspace: dropped
+                sp.weights.push_back(w[j]);
+                sp.ritz.push_back(t.values[j]);
+            }
         if (!sp.ritz.empty()) samples.push_back(std::move(sp));
     }
 

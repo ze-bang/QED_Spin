@@ -26,6 +26,7 @@
 #include <ed/krylov/tridiag.h>
 #include <ed/matvec/backend.h>
 #include <ed/matvec/batcher.h>
+#include <ed/matvec/cpu_backend.h>   // is_cpu_backend_v
 #include <ed/thermal/sample_seed.h>
 #include <ed/core/numerics.h>
 #include <ed/thermal/tpq_thermo.h>
@@ -46,6 +47,14 @@ struct MtpqOptions {
     /// projection). Must leave a normalisable vector; a zero result
     /// throws (the targeted subspace has no weight in this block).
     std::function<void(Complex*, std::size_t)> seed_transform;
+
+    /// A subspace the seed was projected on that the iteration leaves only by roundoff (a spin
+    /// tower: (L - H)^k amplifies an off-tower level below the tower's lowest without bound). From
+    /// `scrub_every` steps on, at a cadence that doubles while it finds nothing (to 16x), the unit
+    /// iterate goes through `scrub` on the host, which returns the norm it leaves (exactly 1:
+    /// untouched); that factor joins the step's norm, so the trajectory stays the projected start's.
+    std::function<double(Complex*, std::size_t)> scrub;
+    std::size_t scrub_every = 0;
 
     /// Device multi-vector H: on a CUDA run up to `batch_width` samples advance in lockstep and
     /// share each H apply (see FtlmOptions::batch_matvec).
@@ -123,6 +132,7 @@ MtpqResult mtpq_kernel(Backend&       backend,
             out_s.Es.push_back(E);
         };
         energy(0);
+        std::size_t interval = opts.scrub_every, next_scrub = opts.scrub_every;
         for (std::size_t k = 1; k <= opts.max_iter; ++k) {
             ed::core::poll_interrupt();
             be.axpby(Complex(L, 0.0), psi.get(), Complex(-1.0, 0.0), hpsi.get(), local_n);
@@ -132,6 +142,28 @@ MtpqResult mtpq_kernel(Backend&       backend,
                 throw ed::ConvergenceError("mtpq_kernel: (L - H) psi vanished at step " + std::to_string(k));
             be.scale(Complex(1.0 / nrm, 0.0), psi.get(), local_n);
             out_s.log_norms.push_back(std::log(nrm));
+            if (opts.scrub && opts.scrub_every > 0 && k >= next_scrub) {
+                double f = 1.0;
+                if constexpr (ed::matvec::is_cpu_backend_v<std::decay_t<decltype(be)>>) {
+                    f = opts.scrub(psi.get(), local_n);
+                } else {
+                    std::vector<Complex> h(local_n);
+                    be.copy_to_host(psi.get(), h.data(), local_n);
+                    f = opts.scrub(h.data(), local_n);
+                    if (f != 1.0) be.copy_from_host(h.data(), psi.get(), local_n);
+                }
+                if (f != 1.0) {
+                    if (!(f > 0.0))
+                        throw ed::ConvergenceError("mtpq_kernel: the iterate left the projected subspace at step "
+                                                   + std::to_string(k));
+                    be.scale(Complex(1.0 / f, 0.0), psi.get(), local_n);
+                    out_s.log_norms.back() += std::log(f);
+                    interval = opts.scrub_every;
+                } else {
+                    interval = std::min(2 * interval, 16 * opts.scrub_every);
+                }
+                next_scrub = k + interval;
+            }
             energy(k);
         }
         return out_s;
@@ -175,6 +207,8 @@ struct MtpqRun {
     /// Base seed of the run (0 draws one): the bound estimate and every sample derive from it.
     std::uint64_t seed    = 0;
     std::function<void(Complex*, std::size_t)> seed_transform;
+    std::function<double(Complex*, std::size_t)> scrub;   ///< MtpqOptions::scrub
+    std::size_t   scrub_every = 0;
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
     std::size_t   batch_width = 8;                     ///< device: samples in lockstep at most
     double        scale = 0.0;   ///< s_H (LinearOperator::norm_bound()), floors the shift margin; 0: unknown
@@ -203,6 +237,8 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     kopts.num_samples    = run.samples;
     kopts.random_seed    = base_seed;
     kopts.seed_transform = run.seed_transform;
+    kopts.scrub          = run.scrub;
+    kopts.scrub_every    = run.scrub_every;
     kopts.batch_matvec   = run.batch_matvec;
     kopts.batch_width = run.batch_width;
 

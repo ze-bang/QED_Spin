@@ -74,6 +74,12 @@ struct FtlmOptions {
     /// throws (the targeted subspace has no weight in this block).
     std::function<void(Complex*, std::size_t)> seed_transform;
 
+    /// Ritz pairs whose start-vector weight |<v0|psi_j>|^2 lies below this are dropped (0: none).
+    /// A start inside an invariant subspace (seed_transform onto a spin tower) reaches the levels
+    /// outside it only through roundoff, with roundoff weight: below the subspace's lowest level
+    /// such a copy would still dominate Z at low enough T.
+    double min_weight = 0.0;
+
     /// Static observables: each applies O to a backend vector (in, out, n). The kernel also
     /// returns <O>(T) = sum_r sum_ij e^{-beta (e_i + e_j) / 2} <r|psi_i><psi_i|O|psi_j><psi_j|r> / Z
     /// (the symmetric, low-temperature Lanczos form), from the Krylov basis of each sample: it is
@@ -122,6 +128,8 @@ struct OftlmOptions {
     /// projection onto a spin tower); the random part's trace then runs over trace_dim states.
     std::function<void(std::complex<double>*, std::size_t)> seed_transform;
     std::uint64_t trace_dim = 0;   ///< 0: the block's N
+    /// Random-part Ritz pairs with start weight below this are dropped (FtlmOptions::min_weight).
+    double        min_weight = 0.0;
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
     double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
@@ -146,7 +154,12 @@ struct SampleMoments {
                                                   const std::vector<double>& weights,
                                                   const std::vector<double>& betas) {
     SampleMoments m;
-    m.e_min = *std::min_element(ritz.begin(), ritz.end());
+    // The reference is the lowest Ritz value that carries weight (one without weight -- a dropped
+    // roundoff copy -- would underflow every term at low T).
+    m.e_min = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < ritz.size(); ++i)
+        if (weights[i] > 0.0) m.e_min = std::min(m.e_min, ritz[i]);
+    if (!std::isfinite(m.e_min)) m.e_min = *std::min_element(ritz.begin(), ritz.end());
     m.Z.resize(betas.size());
     m.E1.resize(betas.size());
     m.E2.resize(betas.size());
@@ -334,6 +347,8 @@ FtlmResult ftlm_kernel(const Backend& backend,
             // block, before the host-side post-processing).
             if (!k.alpha.empty()) {
                 ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(k.alpha, k.beta, k.alpha.size(), /*vectors=*/true);
+                for (std::size_t j = 0; j < t.m; ++j)   // a dropped pair keeps its value, without weight
+                    if (t.vectors[j * t.m] * t.vectors[j * t.m] < opts.min_weight) t.vectors[j * t.m] = 0.0;
                 out.weights = t.weights();
                 out.ritz    = std::move(t.values);
                 if (n_obs > 0) out.Y = std::move(t.vectors);
@@ -422,7 +437,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
             // Symmetric (low-temperature Lanczos) estimator: sum_ij e^{-beta (e_i + e_j) / 2}
             // <r|psi_i> A_ij <psi_j|r>, exact for the lowest state already at one sample, where
             // the one-sided FTLM form sum_i e^{-beta e_i} <r|psi_i><psi_i|O|r> fluctuates at low T.
-            const double smin = *std::min_element(ritz_values.begin(), ritz_values.end());
+            const double smin = smp.mom.e_min;   // the lowest Ritz value with weight
             if (obs_z.empty()) {
                 obs_z.assign(betas.size(), 0.0);
                 obs_num.assign(n_obs, std::vector<Complex>(betas.size(), Complex(0, 0)));
@@ -449,7 +464,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
                 }
             }
         }
-        ground_state_estimate = std::min(ground_state_estimate, ritz_values.front());
+        ground_state_estimate = std::min(ground_state_estimate, smp.mom.e_min);
         moments.push_back(std::move(smp.mom));
     }
 

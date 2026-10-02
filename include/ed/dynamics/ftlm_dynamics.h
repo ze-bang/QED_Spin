@@ -60,6 +60,10 @@ struct FtlmCrossIrrepOptions {
     /// the transform, whose dimension is `trace_dim` (0: the whole source sector).
     std::function<void(Complex*, std::size_t)> seed_transform;
     std::size_t trace_dim        = 0;
+    /// Source Ritz pairs whose start weight |<r|psi_i>|^2 lies below this are dropped (0: none): with
+    /// the start projected onto a spin tower, the levels outside it carry only roundoff weight
+    /// (ed::thermal::FtlmOptions::min_weight).
+    double      min_weight       = 0.0;
     /// Device multi-vector source and target H (LinearOperator::bind_cuda_multi): on a CUDA run
     /// up to `batch_width` samples advance in lockstep and share each H apply. O must then be
     /// safe to apply from several threads at once.
@@ -153,7 +157,10 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
         out.ritz = std::move(th.values);
         out.kind = Sample::Kind::ZOnly;
         out.c.resize(mH);
-        for (std::size_t i = 0; i < mH; ++i) out.c[i] = VH[i * mH];
+        for (std::size_t i = 0; i < mH; ++i) {
+            out.c[i] = VH[i * mH];
+            if (out.c[i] * out.c[i] < opts.min_weight) out.c[i] = 0.0;   // a roundoff copy: no weight
+        }
 
         auto phi = bk.make_zero_vector(dim_dst);
         O_apply(r.get(), phi.get(), dim_dst);
@@ -244,7 +251,11 @@ FtlmCrossIrrepSectorResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, HDst&
     for (const Sample& smp : samples) {
         if (smp.kind == Sample::Kind::Skip) continue;
         const std::size_t mH = smp.ritz.size();
-        const double smin = *std::min_element(smp.ritz.begin(), smp.ritz.end());
+        // The reference: the lowest source Ritz value with weight (a dropped copy would underflow the rest).
+        double smin = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < mH; ++i)
+            if (smp.c[i] != 0.0) smin = std::min(smin, smp.ritz[i]);
+        if (!std::isfinite(smin)) smin = *std::min_element(smp.ritz.begin(), smp.ritz.end());
         if (smin < E_min) {
             if (std::isfinite(E_min))
                 for (double T : temperatures) {

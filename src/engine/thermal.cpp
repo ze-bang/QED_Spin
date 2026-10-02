@@ -61,6 +61,28 @@ std::size_t device_sample_width(ed::core::Path path, ed::core::Shape s, std::siz
     return w;
 }
 
+// mTPQ on the bare H of a spin tower (internal.h, Tower): a unit iterate whose
+// ||(S^2 - S(S+1)) v|| sits at roundoff is left alone (1); past it the iterate becomes P_S v, and
+// its norm is returned.
+constexpr std::size_t kTowerScrubEvery = 10;
+std::function<double(Complex*, std::size_t)> tower_scrub(const detail::BlockOp& bop) {
+    return [P = bop.projector, t = bop.tower](Complex* v, std::size_t n) {
+        const double gap = t->gap();
+        if (gap == 0.0) return 1.0;   // the block holds this tower alone
+        std::vector<Complex> w(n);
+        t->s2->apply(v, w.data(), n);
+        const double lam = t->lambda();
+        double r = 0.0;
+        for (std::size_t i = 0; i < n; ++i) r += std::norm(w[i] - lam * v[i]);
+        // scale-free: a fraction of the unit iterate's norm, in units of the tower gap
+        if (std::sqrt(r) <= 1e-8 * gap) return 1.0;
+        P->project(v, n);
+        double s = 0.0;
+        for (std::size_t i = 0; i < n; ++i) s += std::norm(v[i]);
+        return std::sqrt(s);
+    };
+}
+
 // One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
 // or -- at most dense_max_dim states, with no tower and no observables -- its exact
 // thermodynamics on the host. `tower`: the seeds are projected onto it, and Z counts its states
@@ -134,12 +156,14 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         // The exact states from the block eigensolver, each locked at ||H v - theta v|| <= kLockRel
         // s_H. An unconverged solve returns only its certified pairs; the random part then
         // samples the rest of the block, and the shortfall is reported.
-        // On a spin tower (op is H there and a ghost level above the band elsewhere) the exact
-        // states are tower states below the ghost, and the random starts are projected onto it.
+        // On a spin tower the exact states are the tower lanes' certified spin-S states (or, on a
+        // projected operator, tower states below its ghost), and the random starts are projected onto it.
         const std::uint64_t space = tower ? tower_dim : n;
         const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, space - 1));
         if (want > 0) {
-            BlockSolution ex = solve_block_eigenpairs(ed::matvec::default_cpu_backend(), op, want);
+            BlockSolution ex = tower && tower->tower
+                ? solve_block_tower(ed::matvec::default_cpu_backend(), op, *tower->tower, want, /*vectors=*/true)
+                : solve_block_eigenpairs(ed::matvec::default_cpu_backend(), op, want);
             if (ex.vectors.size() == ex.values.size())
                 for (std::size_t i = 0; i < ex.values.size(); ++i) {
                     if (tower && tower->is_ghost(ex.values[i])) continue;
@@ -151,6 +175,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             auto p = tower->projector;
             ko.seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
             ko.trace_dim      = tower_dim;
+            if (tower->tower) ko.min_weight = ed::numerics::kRoundoffWeight;   // bare H: drop roundoff copies
         }
         b.exact_asked = want;
         b.exact_got   = ko.exact_values.size();
@@ -174,6 +199,10 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
                 run.steps   = t.steps;
                 run.seed    = seed;
                 run.seed_transform = seed_transform;
+                if (tower && tower->tower) {   // bare H: keep the iterate in the tower
+                    run.scrub       = tower_scrub(*tower);
+                    run.scrub_every = kTowerScrubEvery;
+                }
                 run.batch_width    = w;
                 run.scale          = op.norm_bound();
                 if constexpr (device) run.batch_matvec = op.bind_cuda_multi();   // samples share each H apply
@@ -186,6 +215,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
             ko.betas          = beta;
             ko.random_seed    = seed;
             ko.seed_transform = seed_transform;
+            if (tower && tower->tower) ko.min_weight = ed::numerics::kRoundoffWeight;   // bare H: drop roundoff copies
             for (const auto& A : obs) {
                 if (device && !A->has_device_kernel())
                     throw std::invalid_argument("ed::thermal: an observable has no device kernel for the selected GPU lane");
@@ -288,15 +318,28 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
 
     // Sampling one spin tower: every multiplet has one member at each Sz from S down to -S, and
     // S+ commutes with the lattice symmetries, so a block's tower dimension (at any of those Sz)
-    // is the dimension of the block with its labels at Sz = S less that at Sz = S + 1.
+    // is the dimension of the block with its labels at Sz = S less that at Sz = S + 1: by Burnside
+    // for a block with a sector of its own (tower_dimension), from the engine's blocks at those two
+    // Sz for an isotypic (W) block -- walked on the first one met.
     const bool tower_sampling = s.two_S >= 0 && t.method != ThermalSpec::Method::Exact;
     std::map<BlockKey, std::uint64_t> dim_at, dim_above;
+    bool dims_walked = false;
     std::uint64_t tower_states = 0;   // under total_spin: the states the blocks hold
-    if (tower_sampling) {
-        const int hw = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);
-        dim_at = block_dims(H, n_sites, s, {hw, -1, 1});
-        if (hw < n_sites) dim_above = block_dims(H, n_sites, s, {hw + 1, -1, 1});
-    }
+    auto w_tower_dim = [&](const StarBuild& sb, const ed::solvers::BlockData& bi) -> std::uint64_t {
+        if (!dims_walked) {
+            const int hw = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);
+            dim_at = block_dims(H, n_sites, s, {hw, -1, 1});
+            if (hw < n_sites) dim_above = block_dims(H, n_sites, s, {hw + 1, -1, 1});
+            dims_walked = true;
+        }
+        const BlockKey key = block_key(s, sb, bi);
+        const auto it = dim_above.find(key);
+        const std::uint64_t at = dim_at.at(key), above = it == dim_above.end() ? 0 : it->second;
+        if (above > at)
+            throw std::runtime_error("thermal: a block is larger at Sz = S + 1 than at Sz = S; "
+                                     "its labels do not match across Sz");
+        return at - above;
+    };
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     ThermalCurves out;
     out.T  = t.temperatures;
@@ -324,13 +367,9 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                 if (bi->tag.dim == 0) continue;
                 std::uint64_t tower_dim = 0;
                 if (tower_sampling) {
-                    const BlockKey key = block_key(s, sb, *bi);
-                    const auto it = dim_above.find(key);
-                    const std::uint64_t at = dim_at.at(key), above = it == dim_above.end() ? 0 : it->second;
-                    if (above > at)
-                        throw std::runtime_error("thermal: a block is larger at Sz = S + 1 than at Sz = S; "
-                                                 "its labels do not match across Sz");
-                    tower_dim = at - above;
+                    tower_dim = bi->W ? w_tower_dim(sb, *bi)
+                                      : static_cast<std::uint64_t>(tower_dimension(
+                                            bi->gop ? *bi->gsec : *sb.hk->rep_data_ptr(), s.two_S));
                     if (tower_dim == 0) continue;
                 }
                 // A sampled block's reduced CSRs (H, S^2, observables) share what its kernel leaves.
@@ -344,7 +383,8 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                                       : n_obs > 0 ? ed::core::Path::FtlmSampleKept : ed::core::Path::FtlmSample;
                     budget = detail::block_budget(ed::core::footprint(path, shape).host);
                 }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device, budget);
+                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, t.device, budget,
+                                                                   /*tower_lanes=*/true);
                 if (!bop.op) continue;
                 const auto& mv = *bop.op;
                 BlockThermo b;
@@ -367,9 +407,14 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                         }
                 }
                 if (t.method == ThermalSpec::Method::Exact && n_obs > 0) {
-                    // Diagonal elements need the eigenvectors: solved here, on the host.
-                    Eigen::MatrixXcd Hb = materialize(mv);
-                    const lg_detail::DenseEigenpairs es = lg_detail::dense_eigenpairs_inplace(Hb, mv.dim());
+                    // Diagonal elements need the eigenvectors: solved here, on the host. On a spin tower,
+                    // of H on its states (Q^dag H Q), lifted back to the block.
+                    Eigen::MatrixXcd Q;
+                    Eigen::MatrixXcd Hb = bop.tower ? tower_block(mv, *bop.tower, &Q) : materialize(mv);
+                    if (Hb.rows() == 0) continue;
+                    const auto nH = static_cast<std::size_t>(Hb.rows());
+                    lg_detail::DenseEigenpairs es = lg_detail::dense_eigenpairs_inplace(Hb, nH);
+                    if (bop.tower) es.vectors = (Q * es.vectors).eval();
                     const Eigen::MatrixXcd& U = es.vectors;
                     // <n|A|n> = sum_i conj(U_in) (A U)_in: one product, not the sandwich U^dag A U.
                     std::vector<Eigen::VectorXcd> dg;
@@ -394,7 +439,14 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     detail::BlockOp filter = bop;
                     filter.op.reset();
                     filter.projector.reset();      // only the ghost value outlives the star
-                    pending.push_back({batch.add(mv), blocks.size(), filter});
+                    filter.tower.reset();
+                    if (bop.tower) {                   // H on the tower's states
+                        Eigen::MatrixXcd Ht = tower_block(mv, *bop.tower);
+                        if (Ht.rows() == 0) continue;
+                        pending.push_back({batch.add(std::move(Ht)), blocks.size(), filter});
+                    } else {
+                        pending.push_back({batch.add(mv), blocks.size(), filter});
+                    }
                 } else {
                     // Distinct, reproducible streams per block.
                     seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;

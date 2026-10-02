@@ -214,6 +214,9 @@ public:
     /// The block budget its reduced CSR takes from (csr_policy.h CsrBudget), set before the first
     /// apply; without one it asks the default rule.
     void set_csr_budget(std::shared_ptr<ed::planner::CsrBudget> b) noexcept { budget_ = std::move(b); }
+    /// Walk the first `applies` applies before building the reduced CSR: an operator applied once
+    /// or twice (a spin tower's S^2 certifying a few vectors) does not pay for a build.
+    void defer_csr(std::uint64_t applies) noexcept { defer_csr_ = applies; }
     [[nodiscard]] bool has_device_kernel() const override {
 #ifdef WITH_CUDA
         return device_ok_ && rd_->irrep_dim == 1;   // the device kernels are 1-dim (d > 1: P7.5)
@@ -290,6 +293,7 @@ private:
     // on small blocks).
     void ensure_lane_() const {
         if (!force_gpu_) {
+            if (applies_.load(std::memory_order_relaxed) < defer_csr_) return;   // the walk, for now
             std::call_once(csr_once_, [this] { maybe_build_csr_(); });
             if (csr_) return;
         }
@@ -404,6 +408,7 @@ private:
     bool                                           force_gpu_ = false;
     bool                                           device_ok_ = false;
     std::shared_ptr<ed::planner::CsrBudget>        budget_;      // the block's, or null: the default rule
+    std::uint64_t                                  defer_csr_ = 0;   // applies walked before the CSR
     // Per-operator counters (relaxed: applies may run concurrently).
     mutable std::atomic<std::uint64_t>             applies_{0};
     mutable std::atomic<std::uint64_t>             apply_ns_{0};
@@ -879,6 +884,9 @@ struct DenseEigenpairs {
 /// The `want` lowest eigenpairs of a materialised block (consumed): the one dense eigensolve with
 /// vectors (LAPACK MRRR, the real path for a real block).
 [[nodiscard]] DenseEigenpairs dense_eigenpairs_inplace(Eigen::MatrixXcd& Hb, std::size_t want);
+/// The eigenpairs with eigenvalues in (lo, hi] of a materialised block (LAPACK MRRR, range by value);
+/// Hb is consumed.
+[[nodiscard]] DenseEigenpairs dense_eigenpairs_in_range(Eigen::MatrixXcd& Hb, double lo, double hi);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
 /// The largest block eigs solves densely: dense_max_dim when the caller set it (>= 0), else
 /// min(4 max(40 k, 400), kAutoDenseCeiling, the largest block whose dense solve -- with or
@@ -945,7 +953,18 @@ struct Tower {
     /// A unit start inside the tower: random valence-bond states (singlet pairs, the 2S free spins
     /// in their symmetric state) on the block, exactly spin S; empty when the block holds none.
     [[nodiscard]] std::vector<Complex> seed(std::uint64_t s) const;
+
+    /// The last start computed (a lane asks for the one its caller checked).
+    struct SeedMemo { std::mutex m; bool have = false; std::uint64_t s = 0; std::vector<Complex> v; };
+    std::shared_ptr<SeedMemo> memo = std::make_shared<SeedMemo>();
 };
+
+/// The states of total spin S in a fixed-Sz sector (P6.5 step 2): S+ maps the sector's spin >= S + 1
+/// states onto the same irrep one up spin higher, so they number the irrep's multiplicity at
+/// Sz = S less that at Sz = S + 1, each by Burnside over the sector's group without the spin flip
+/// (a flip sector sits at Sz = 0, where every spin-S state has the flip parity of its block): no
+/// orbit table. 0 when S has no member at the sector's Sz.
+[[nodiscard]] std::int64_t tower_dimension(const ed::symmetry::RepSectorData& rd, int two_S);
 
 /// The spin-S levels among unit eigenpairs (values ascending, vectors aligned). A vector with
 /// ||(S^2 - S(S+1)) psi|| at roundoff is one; in a cluster of values within `cluster_tol` that holds
@@ -960,6 +979,14 @@ struct TowerLevels {
 };
 [[nodiscard]] TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std::vector<double>& values,
                                        std::vector<std::vector<Complex>> vectors, double cluster_tol);
+
+/// The tower's states in its (dense-sized) block: the eigenvectors of S^2 at S(S+1), the columns of
+/// an n x d_t matrix Q with Q^dag Q = I.
+[[nodiscard]] Eigen::MatrixXcd tower_basis(const Tower& t);
+/// H on the tower of a dense-sized block, Q^dag H Q (d_t x d_t), with Q in `basis` when given: the
+/// exact paths diagonalise it instead of the block (whose other towers they would have to drop).
+[[nodiscard]] Eigen::MatrixXcd tower_block(const ed::LinearOperator& H, const Tower& t,
+                                           Eigen::MatrixXcd* basis = nullptr);
 
 /// H + mu f(S^2) on the tower's block: f = S^2 - S(S+1) at the highest weight, its square elsewhere,
 /// mu lifting every off-tower state 2 s_H: above the band, so the lowest levels are the tower's.

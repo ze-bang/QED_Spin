@@ -615,15 +615,23 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
             detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
-                detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
+                detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, Device::Cpu, nullptr,
+                                                             /*tower_lanes=*/true);
                 if (!bop.op) continue;
                 Level L;
                 L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
                 L.fold = detail::fold_of(cx.tr, sub, bi->tag);
                 detail::label(L, sb);
-                const std::size_t id = batch.add(*bop.op);
+                // A spin tower: H on its states (Q^dag H Q), every level of which is one.
+                Eigen::MatrixXcd Ht;
+                if (bop.tower) {
+                    Ht = tower_block(*bop.op, *bop.tower);
+                    if (Ht.rows() == 0) continue;
+                }
+                const std::size_t id = bop.tower ? batch.add(std::move(Ht)) : batch.add(*bop.op);
                 bop.op.reset();                    // keep only the ghost filter past the star
                 bop.projector.reset();
+                bop.tower.reset();
                 entries.push_back({id, L, bop});
             }
         });

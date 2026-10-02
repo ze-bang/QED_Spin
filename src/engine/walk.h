@@ -115,9 +115,8 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         bi->gop ? bi->gsec : (bi->W ? nullptr : sb.hk->rep_data_ptr());
     std::shared_ptr<const ed::LinearOperator> s2;
     std::shared_ptr<RepSectorMatVec> s2rep;
-    std::shared_ptr<const LadderS2> ladder;
     if (sec && !dev && sub.n_up >= 0 && !sec->has_flips()) {
-        s2 = ladder = std::make_shared<LadderS2>(sec);
+        s2 = std::make_shared<LadderS2>(sec);
     } else if (sec) {
         s2 = s2rep = std::make_shared<RepSectorMatVec>(*s2_carrier, sec);
         s2rep->set_csr_budget(budget);
@@ -132,19 +131,20 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     }
     b.multiplicity *= static_cast<std::uint64_t>(sub.members);
     if (tower_lanes && sec) {
-        // The eigs lanes on the bare H (Tower). At the highest weight the block holds as many spin-S
-        // states as it has states less those of the sector one up spin higher, onto which S+ maps.
+        // The lanes on the bare H (Tower), with the block's spin-S dimension by Burnside.
         auto t = std::make_shared<Tower>();
         t->sector = sec;
         t->s2     = s2;
         t->two_S  = s.two_S;
         t->towers = towers;
-        if (ladder && t->highest_weight())
-            t->dim = static_cast<std::int64_t>(sec->states() - ladder->raised_states());
+        t->dim    = tower_dimension(*sec, s.two_S);
         if (t->dim == 0) {
             b.op.reset();
             return b;
         }
+        if (s2rep) s2rep->defer_csr(1);   // certifying one level walks; a second apply builds the CSR
+        // The sampled lanes start from P_S of a Gaussian (isotropic in the tower: an unbiased trace).
+        b.projector = std::make_shared<ed::symmetry::LowdinS2Projector>(s2, s.two_S, towers);
         b.tower = std::move(t);
         return b;
     }
@@ -208,41 +208,12 @@ public:
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
     std::size_t add(const ed::LinearOperator& mv) {
-        using namespace ed::solvers::lg_detail;
-        const std::size_t id = spectra_.size();
-        spectra_.emplace_back();
-        ed::BlockRequest req;
-        req.task = ed::Task::DenseBatch;
-        req.dim  = mv.dim();
-        req.verb = verb_;
-        lanes_.push_back(ed::place(device_, req));
-        const std::uint64_t bytes = 16 * mv.dim() * mv.dim();
-        if (ed::on_device(lanes_.back())) {
-            if (budget_ == 0) budget_ = batch_budget();
-            if (bytes > budget_) lanes_.back() = ed::Lane::HostDense;   // too large for any batch
-            else if (16 * packed_.data.size() + bytes > budget_) solve_device();
-        }
-        if (!ed::on_device(lanes_.back())) {
-            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {mv.dim()}).host,
-                                        "dense spectrum");
-            if (mv.dim() > kHostConcurrentMaxDim) {   // large enough for the threaded LAPACK
-                spectra_.back() = solve_block_full(mv);
-                return id;
-            }
-            if (host_budget_ == 0) host_budget_ = host_budget();
-            if (host_bytes_ + bytes > host_budget_) solve_host();
-            host_.push_back({id, materialize(mv)});
-            host_bytes_ += bytes;
-            return id;
-        }
-        const Eigen::MatrixXcd Hb = materialize(mv);
-        const std::size_t nb = static_cast<std::size_t>(Hb.rows());
-        packed_.offset.push_back(packed_.data.size());
-        packed_.block_dim.push_back(ed::core::checked_narrow<int>(nb, "dense batch block"));
-        packed_.block_irrep_dim.push_back(1);
-        packed_.data.insert(packed_.data.end(), Hb.data(), Hb.data() + nb * nb);   // column-major
-        queued_.push_back(id);
-        return id;
+        return add_lazy(mv.dim(), [&mv] { return ed::solvers::lg_detail::materialize(mv); });
+    }
+    /// The same for a block given as its matrix (a spin tower's Q^dag H Q).
+    std::size_t add(Eigen::MatrixXcd M) {
+        const auto n = static_cast<std::uint64_t>(M.rows());
+        return add_lazy(n, [&M] { return std::move(M); });
     }
 
     /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
@@ -256,6 +227,47 @@ public:
     [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
 
 private:
+    // add(): the block of dimension `dim` whose matrix make() forms.
+    template <class Make>
+    std::size_t add_lazy(std::uint64_t dim, Make&& make) {
+        using namespace ed::solvers::lg_detail;
+        const std::size_t id = spectra_.size();
+        spectra_.emplace_back();
+        ed::BlockRequest req;
+        req.task = ed::Task::DenseBatch;
+        req.dim  = dim;
+        req.verb = verb_;
+        lanes_.push_back(ed::place(device_, req));
+        const std::uint64_t bytes = 16 * dim * dim;
+        if (ed::on_device(lanes_.back())) {
+            if (budget_ == 0) budget_ = batch_budget();
+            if (bytes > budget_) lanes_.back() = ed::Lane::HostDense;   // too large for any batch
+            else if (16 * packed_.data.size() + bytes > budget_) solve_device();
+        }
+        if (!ed::on_device(lanes_.back())) {
+            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host,
+                                        "dense spectrum");
+            if (dim > kHostConcurrentMaxDim) {   // large enough for the threaded LAPACK
+                Eigen::MatrixXcd M = make();
+                spectra_.back() = dense_eigenvalues_inplace(M);
+                return id;
+            }
+            if (host_budget_ == 0) host_budget_ = host_budget();
+            if (host_bytes_ + bytes > host_budget_) solve_host();
+            host_.push_back({id, make()});
+            host_bytes_ += bytes;
+            return id;
+        }
+        const Eigen::MatrixXcd Hb = make();
+        const std::size_t nb = static_cast<std::size_t>(Hb.rows());
+        packed_.offset.push_back(packed_.data.size());
+        packed_.block_dim.push_back(ed::core::checked_narrow<int>(nb, "dense batch block"));
+        packed_.block_irrep_dim.push_back(1);
+        packed_.data.insert(packed_.data.end(), Hb.data(), Hb.data() + nb * nb);   // column-major
+        queued_.push_back(id);
+        return id;
+    }
+
     // The device batch (and its host fallback when the device solve fails).
     void solve_device() {
         if (queued_.empty()) return;

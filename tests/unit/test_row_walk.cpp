@@ -1128,6 +1128,7 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
                     }
                     if (t.highest_weight())
                         CHECK(d - ladder->raised_states() == ref.size());
+                    CHECK(tower_dimension(*rd, two_S) == static_cast<std::int64_t>(ref.size()));
                     // The start: empty exactly when the block holds no spin-S state, else a unit spin-S vector.
                     const std::vector<Cx> v = t.seed(11);
                     REQUIRE(v.empty() == ref.empty());
@@ -1143,6 +1144,14 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
                     REQUIRE(dense.values.size() == ref.size());
                     CHECK(dense.whole);
                     for (std::size_t i = 0; i < ref.size(); ++i) CHECK(std::abs(dense.values[i] - ref[i]) <= 1e-10);
+                    // H on the tower's states (the exact thermal paths and spectrum): Q^dag H Q.
+                    Eigen::MatrixXcd Q;
+                    const Eigen::MatrixXcd Ht = tower_block(Hs, t, &Q);
+                    REQUIRE(static_cast<std::size_t>(Ht.rows()) == ref.size());
+                    CHECK((Q.adjoint() * Q - Eigen::MatrixXcd::Identity(Q.cols(), Q.cols())).norm() <= 1e-12);
+                    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> et(Ht);
+                    for (std::size_t i = 0; i < ref.size(); ++i)
+                        CHECK(std::abs(et.eigenvalues()(static_cast<Eigen::Index>(i)) - ref[i]) <= 1e-10);
                     // The penalty's lowest levels are the tower's: every off-tower state is lifted above the band.
                     const auto P = tower_penalty(Hs, t);
                     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> ep(
@@ -1174,4 +1183,29 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
     CHECK(checked > 0);
     CHECK(empty > 0);
     CHECK(krylov > 0);
+}
+
+TEST_CASE("tower: Burnside dimensions on spin-flip sectors match S^2's spectrum", "[row_walk][su2]") {
+    using namespace ed::solvers::lg_detail;
+    const auto s2 = ed::ops::make_S2_carrier(static_cast<std::uint64_t>(N));
+    const auto G = ring_group(/*dihedral=*/true, /*with_flip=*/true);
+    int checked = 0;
+    for (const auto& chi : characters(G, /*dihedral=*/true, /*with_flip=*/true)) {
+        auto rd = std::make_shared<RepSectorData>(make_sector(G, chi, N / 2));
+        const std::size_t d = rd->states();
+        if (d == 0) continue;
+        REQUIRE(rd->has_flips());
+        const RepSectorMatVec S2(*s2, std::shared_ptr<const RepSectorData>(rd));
+        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(
+            eigen_of(columns(d, [&](const Cx* in, Cx* out) { S2.apply(in, out, d); }), d));
+        for (int two_S = 0; two_S <= N; two_S += 2) {
+            const double lam = 0.25 * two_S * (two_S + 2);
+            std::int64_t count = 0;
+            for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i) count += std::abs(es.eigenvalues()(i) - lam) < 1e-8;
+            INFO("states " << d << " 2S " << two_S);
+            CHECK(tower_dimension(*rd, two_S) == count);
+            ++checked;
+        }
+    }
+    CHECK(checked > 0);
 }
