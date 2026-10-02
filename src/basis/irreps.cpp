@@ -242,6 +242,72 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     return out;
 }
 
+
+// One decomposition of the omega-twisted group algebra (decompose_projective_irreps): the right
+// regular action R(h) e_x = omega(x, h) e_{xh} commutes with the left one L(g) e_x = omega(g, x)
+// e_{gx} (associativity of the twisted algebra), R(h)^dagger is a phase times R(h^-1), so
+// M = M0 + M0^dagger with M0 = sum_h c_h R(h) is a generic Hermitian element of the right algebra;
+// its eigenspaces are single irreducible left modules, and D(g) = V^dagger L(g) V on each.
+[[nodiscard]] bool try_decompose_twisted(const std::vector<std::vector<int>>& mult,
+                                         const std::vector<std::vector<Complex>>& omega,
+                                         std::uint64_t seed, std::vector<IrrepData>& out) {
+    const int n = static_cast<int>(mult.size());
+    std::mt19937_64 gen(seed);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    Eigen::MatrixXcd M0 = Eigen::MatrixXcd::Zero(n, n);
+    for (int h = 0; h < n; ++h) {
+        const Complex c(nd(gen), nd(gen));
+        for (int x = 0; x < n; ++x)
+            M0(mult[static_cast<std::size_t>(x)][static_cast<std::size_t>(h)], x) +=
+                c * omega[static_cast<std::size_t>(x)][static_cast<std::size_t>(h)];
+    }
+    const Eigen::MatrixXcd M = M0 + M0.adjoint();
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
+    if (es.info() != Eigen::Success) return false;
+    const Eigen::VectorXd evals = es.eigenvalues();
+    const Eigen::MatrixXcd evecs = es.eigenvectors();
+    const double span = std::max(1.0, evals(n - 1) - evals(0));
+    const double tol  = 1e-6 * span;
+    std::vector<IrrepData> irreps;
+    long long sum_d2 = 0;
+    for (int b = 0, i = 1; i <= n; ++i) {
+        if (i < n && evals(i) - evals(i - 1) <= tol) continue;
+        const int d = i - b;
+        const Eigen::MatrixXcd V = evecs.block(0, b, n, d);
+        b = i;
+        IrrepData ir;
+        ir.dim = d;
+        ir.matrices.resize(static_cast<std::size_t>(n));
+        ir.character.assign(static_cast<std::size_t>(n), Complex(0.0, 0.0));
+        Eigen::MatrixXcd Lv(n, d);
+        for (int g = 0; g < n; ++g) {
+            for (int x = 0; x < n; ++x)
+                Lv.row(mult[static_cast<std::size_t>(g)][static_cast<std::size_t>(x)]) =
+                    omega[static_cast<std::size_t>(g)][static_cast<std::size_t>(x)] * V.row(x);
+            const Eigen::MatrixXcd D = V.adjoint() * Lv;
+            auto& flat = ir.matrices[static_cast<std::size_t>(g)];
+            flat.resize(static_cast<std::size_t>(d) * d);
+            for (int r = 0; r < d; ++r)
+                for (int c = 0; c < d; ++c) flat[static_cast<std::size_t>(r) * d + c] = D(r, c);
+            ir.character[static_cast<std::size_t>(g)] = D.trace();
+        }
+        bool seen = false;
+        for (const auto& other : irreps) {
+            if (other.dim != d) continue;
+            bool same = true;
+            for (int g = 0; g < n && same; ++g)
+                same = std::abs(other.character[static_cast<std::size_t>(g)] - ir.character[static_cast<std::size_t>(g)]) <= 1e-5;
+            if (same) { seen = true; break; }
+        }
+        if (seen) continue;
+        sum_d2 += static_cast<long long>(d) * d;
+        irreps.push_back(std::move(ir));
+    }
+    if (sum_d2 != static_cast<long long>(n)) return false;   // a degenerate draw: retry
+    out = std::move(irreps);
+    return true;
+}
+
 }  // namespace
 
 GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
@@ -344,6 +410,54 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
             "decompose_irreps: #irreps != #conjugacy-classes");
 
     // Order irreps by ascending dimension (1-D first), stable.
+    std::stable_sort(irreps.begin(), irreps.end(),
+                     [](const IrrepData& a, const IrrepData& b) { return a.dim < b.dim; });
+    gi.irreps = std::move(irreps);
+    return gi;
+}
+
+
+GroupIrreps decompose_projective_irreps(const std::vector<std::vector<int>>& mult,
+                                        const std::vector<std::vector<Complex>>& omega) {
+    const std::size_t n = mult.size();
+    if (omega.size() != n)
+        throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
+    bool trivial = true;
+    for (std::size_t a = 0; a < n; ++a) {
+        if (omega[a].size() != n)
+            throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
+        for (std::size_t b = 0; b < n; ++b) {
+            // scale-free: unit-modulus phases (group data)
+            if (std::abs(std::abs(omega[a][b]) - 1.0) > 1e-8)
+                throw std::invalid_argument("decompose_projective_irreps: omega is not unit-modulus");
+            // scale-free: unit-modulus phases (group data)
+            trivial = trivial && std::abs(omega[a][b] - Complex(1.0, 0.0)) <= 1e-12;
+        }
+    }
+    GroupIrreps gi = decompose_irreps_tables(mult);   // the tables; and the irreps when omega = 1
+    if (trivial) return gi;
+    // A 2-cocycle, normalised at the identity: omega(x, y) omega(xy, z) = omega(y, z) omega(x, yz).
+    int e = 0;   // the identity: e x = x for one x already
+    while (gi.mult[static_cast<std::size_t>(e)][0] != 0) ++e;
+    for (std::size_t x = 0; x < n; ++x) {
+        // scale-free: unit-modulus phases (group data)
+        if (std::abs(omega[static_cast<std::size_t>(e)][x] - 1.0) > 1e-8 || std::abs(omega[x][static_cast<std::size_t>(e)] - 1.0) > 1e-8)
+            throw std::invalid_argument("decompose_projective_irreps: omega is not normalised at the identity");
+        for (std::size_t y = 0; y < n; ++y)
+            for (std::size_t z = 0; z < n; ++z) {
+                const auto xy = static_cast<std::size_t>(mult[x][y]), yz = static_cast<std::size_t>(mult[y][z]);
+                // scale-free: unit-modulus phases (group data)
+                if (std::abs(omega[x][y] * omega[xy][z] - omega[y][z] * omega[x][yz]) > 1e-8)
+                    throw std::invalid_argument("decompose_projective_irreps: omega is not a 2-cocycle");
+            }
+    }
+    std::vector<IrrepData> irreps;
+    bool ok = false;
+    for (std::uint64_t seed = 1; seed <= 16 && !ok; ++seed)
+        ok = try_decompose_twisted(mult, omega, 0x9E3779B97F4A7C15ull * seed, irreps);
+    if (!ok)
+        throw std::runtime_error("decompose_projective_irreps: numerical decomposition failed "
+                                 "(sum d^2 != |G|) after 16 attempts");
     std::stable_sort(irreps.begin(), irreps.end(),
                      [](const IrrepData& a, const IrrepData& b) { return a.dim < b.dim; });
     gi.irreps = std::move(irreps);

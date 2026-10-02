@@ -92,4 +92,17 @@ decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
 [[nodiscard]] GroupIrreps
 decompose_irreps_tables(const std::vector<std::vector<int>>& mult);
 
+/// The omega-projective irreps of an abstract group (its multiplication table): D(e) D(f) =
+/// omega(e, f) D(ef), omega a unit-modulus 2-cocycle normalised at the identity (omega[e][f]).
+/// A little co-group P_k = G_k / A carries omega(e, f) = chi_k(a_ef) for p_e p_f = a_ef p_ef: its
+/// omega-irreps are the irreps of G_k that restrict to chi_k on A, D(a p_e) = chi_k(a) D(e) --
+/// coboundaries and genuinely projective factor systems alike. Same numerical method as
+/// decompose_irreps_tables, on the twisted group algebra (left action L(g) e_x = omega(g, x) e_gx);
+/// sum of d^2 is |G| and the irreps are ordered by dimension. omega = 1 everywhere returns
+/// decompose_irreps_tables(mult). The tables (inverse, classes) are those of the group itself.
+/// Throws std::invalid_argument for an omega that is not a normalised unit 2-cocycle.
+[[nodiscard]] GroupIrreps
+decompose_projective_irreps(const std::vector<std::vector<int>>& mult,
+                            const std::vector<std::vector<std::complex<double>>>& omega);
+
 }  // namespace ed::symmetry

@@ -16,6 +16,7 @@
 #include <ed/basis/irreps.h>
 
 #include <algorithm>
+#include <array>
 #include <complex>
 #include <vector>
 
@@ -177,4 +178,121 @@ TEST_CASE("irreps: (Z_2)^10 gets its 1024 characters exactly", "[irreps][abelian
         REQUIRE(broken == 0);
     }
     for (int x = 0; x < n; ++x) REQUIRE(gi.irreps[0].character[x] == Complex(1.0, 0.0));
+}
+
+// ---- omega-projective irreps (decompose_projective_irreps) --------------------------------------
+namespace {
+
+using Omega = std::vector<std::vector<Complex>>;
+
+// Every irrep is unitary and D(g) D(h) = omega(g, h) D(gh); sum d^2 = |G|.
+void check_projective(const ed::symmetry::GroupIrreps& gi, const Omega& omega) {
+    const int n = gi.order;
+    long long sumd2 = 0;
+    for (const auto& ir : gi.irreps) {
+        const int d = ir.dim;
+        sumd2 += static_cast<long long>(d) * d;
+        auto at = [d](const std::vector<Complex>& M, int r, int c) { return M[static_cast<std::size_t>(r * d + c)]; };
+        for (int g = 0; g < n; ++g) {
+            const auto& D = ir.matrices[static_cast<std::size_t>(g)];
+            for (int r = 0; r < d; ++r)
+                for (int c = 0; c < d; ++c) {
+                    Complex u(0, 0);
+                    for (int k = 0; k < d; ++k) u += std::conj(at(D, k, r)) * at(D, k, c);
+                    REQUIRE(std::abs(u - (r == c ? Complex(1, 0) : Complex(0, 0))) < 1e-8);
+                }
+            for (int h = 0; h < n; ++h) {
+                const auto& E = ir.matrices[static_cast<std::size_t>(h)];
+                const auto& F = ir.matrices[static_cast<std::size_t>(gi.mult[static_cast<std::size_t>(g)][static_cast<std::size_t>(h)])];
+                const Complex w = omega[static_cast<std::size_t>(g)][static_cast<std::size_t>(h)];
+                for (int r = 0; r < d; ++r)
+                    for (int c = 0; c < d; ++c) {
+                        Complex p(0, 0);
+                        for (int k = 0; k < d; ++k) p += at(D, r, k) * at(E, k, c);
+                        REQUIRE(std::abs(p - w * at(F, r, c)) < 1e-8);
+                    }
+            }
+        }
+    }
+    REQUIRE(sumd2 == n);
+}
+
+}  // namespace
+
+TEST_CASE("irreps: the Pauli cocycle on Z2 x Z2 has one two-dimensional projective irrep",
+          "[irreps][projective]") {
+    // {e, a, b, ab} with a b = b a: indices as bit vectors, x y = x ^ y. D(a) = sigma_x, D(b) =
+    // sigma_z and D(ab) = sigma_x sigma_z give omega(g, h) = D(g) D(h) D(gh)^-1, a scalar.
+    std::vector<std::vector<int>> mult(4, std::vector<int>(4));
+    for (int x = 0; x < 4; ++x)
+        for (int y = 0; y < 4; ++y) mult[static_cast<std::size_t>(x)][static_cast<std::size_t>(y)] = x ^ y;
+    using M2 = std::array<Complex, 4>;
+    const M2 I{1, 0, 0, 1}, X{0, 1, 1, 0}, Z{1, 0, 0, -1};
+    auto mul = [](const M2& A, const M2& B) {
+        return M2{A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3]};
+    };
+    const std::array<M2, 4> D{I, X, Z, mul(X, Z)};
+    Omega omega(4, std::vector<Complex>(4));
+    for (int g = 0; g < 4; ++g)
+        for (int h = 0; h < 4; ++h) {
+            const M2 p = mul(D[static_cast<std::size_t>(g)], D[static_cast<std::size_t>(h)]);
+            const M2& q = D[static_cast<std::size_t>(g ^ h)];   // unitary with real entries: q^-1 = q^T
+            omega[static_cast<std::size_t>(g)][static_cast<std::size_t>(h)] = p[0] * q[0] + p[1] * q[1];
+        }
+    const auto gi = ed::symmetry::decompose_projective_irreps(mult, omega);
+    REQUIRE(gi.irreps.size() == 1);
+    REQUIRE(gi.irreps[0].dim == 2);
+    check_projective(gi, omega);
+}
+
+TEST_CASE("irreps: a coboundary on D_4 twists its ordinary irreps", "[irreps][projective]") {
+    const Permutation r{1, 2, 3, 0};
+    const Permutation s{0, 3, 2, 1};
+    const auto gi0 = decompose_irreps(generate_group({r, s}), 4);
+    const int n = gi0.order;
+    int e = 0;
+    while (gi0.mult[static_cast<std::size_t>(e)][0] != 0) ++e;
+    // omega(g, h) = phi(g) phi(h) / phi(gh) with phi(e) = 1: a coboundary, equivalent to omega = 1.
+    std::vector<Complex> phi(static_cast<std::size_t>(n));
+    for (int g = 0; g < n; ++g) phi[static_cast<std::size_t>(g)] = g == e ? Complex(1, 0) : std::polar(1.0, 0.7 + 1.3 * g);
+    Omega omega(static_cast<std::size_t>(n), std::vector<Complex>(static_cast<std::size_t>(n)));
+    for (int g = 0; g < n; ++g)
+        for (int h = 0; h < n; ++h)
+            omega[static_cast<std::size_t>(g)][static_cast<std::size_t>(h)] =
+                phi[static_cast<std::size_t>(g)] * phi[static_cast<std::size_t>(h)]
+                / phi[static_cast<std::size_t>(gi0.mult[static_cast<std::size_t>(g)][static_cast<std::size_t>(h)])];
+    const auto gi = ed::symmetry::decompose_projective_irreps(gi0.mult, omega);
+    std::vector<int> dims;
+    for (const auto& ir : gi.irreps) dims.push_back(ir.dim);
+    REQUIRE(dims == std::vector<int>({1, 1, 1, 1, 2}));
+    check_projective(gi, omega);
+    // Each twisted irrep is phi times an ordinary one: |chi| matches irrep by irrep.
+    for (const auto& ir : gi.irreps) {
+        bool found = false;
+        for (const auto& o : gi0.irreps) {
+            if (o.dim != ir.dim) continue;
+            bool same = true;
+            for (int g = 0; g < n && same; ++g)
+                same = std::abs(ir.character[static_cast<std::size_t>(g)]
+                                - phi[static_cast<std::size_t>(g)] * o.character[static_cast<std::size_t>(g)]) < 1e-8;
+            found = found || same;
+        }
+        REQUIRE(found);
+    }
+}
+
+TEST_CASE("irreps: omega = 1 is the ordinary decomposition; a non-cocycle is refused", "[irreps][projective]") {
+    const Permutation r{1, 2, 3, 0};
+    const Permutation s{0, 3, 2, 1};
+    const auto gi0 = decompose_irreps(generate_group({r, s}), 4);
+    const std::size_t n = static_cast<std::size_t>(gi0.order);
+    Omega one(n, std::vector<Complex>(n, Complex(1, 0)));
+    const auto gi1 = ed::symmetry::decompose_projective_irreps(gi0.mult, one);
+    REQUIRE(gi1.irreps.size() == gi0.irreps.size());
+    for (std::size_t i = 0; i < gi0.irreps.size(); ++i)
+        REQUIRE(gi1.irreps[i].character == gi0.irreps[i].character);
+    Omega bad = one;
+    bad[1][2] = Complex(0, 1);
+    bad[2][1] = Complex(0, 1);
+    REQUIRE_THROWS_AS(ed::symmetry::decompose_projective_irreps(gi0.mult, bad), std::invalid_argument);
 }
