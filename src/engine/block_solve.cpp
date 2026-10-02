@@ -10,6 +10,7 @@
 #include <ed/core/footprint.h>
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -82,7 +83,7 @@ solve_block_full(const ed::LinearOperator& mv) {
 // Shared dense/Lanczos crossover for the lowest-k path. Kept in one place so
 // the device lane of the sectors eigensolve (eigs.cpp) makes exactly the same dense-vs-Lanczos
 // decision as the CPU ``solve_block_lowest``.
-[[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim) {
+[[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim, bool vectors) {
     // An explicit crossover (EigsOptions::dense_max_dim >= 0) is the caller's: 0 sends
     // every block above dimension 2 to Krylov, a large value solves exactly.
     if (dense_max_dim >= 0) return static_cast<std::uint64_t>(dense_max_dim);
@@ -99,7 +100,20 @@ solve_block_full(const ed::LinearOperator& mv) {
     // 8-15 s of latency-bound time PER BLOCK in the serial star walk
     // (an N=20 ring walk: 227 s dense vs 0.7 s). Pass a larger
     // dense_max_dim when a mid-band block needs exact multiplicities.
-    return 4u * max_iter_cap;
+    //
+    // The floor grows with k (160 k), while Krylov-Schur needs only ~2k + 60 vectors: the automatic
+    // floor never exceeds kAutoDenseCeiling, nor the largest block whose dense working set
+    // (core/footprint.h) fits in half the RAM the job may still allocate.
+    std::uint64_t floor_ = std::min<std::uint64_t>(4u * max_iter_cap, kAutoDenseCeiling);
+    const std::uint64_t avail = ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
+    if (avail > 0) {
+        ed::core::Shape one;
+        one.dim = 1;
+        const double per = static_cast<double>(ed::core::footprint(
+            vectors ? ed::core::Path::DenseVectors : ed::core::Path::DenseValues, one).host);
+        floor_ = std::min<std::uint64_t>(floor_, static_cast<std::uint64_t>(std::sqrt(0.5 * static_cast<double>(avail) / per)));
+    }
+    return floor_;
 }
 
 
@@ -110,6 +124,11 @@ solve_block_full(const ed::LinearOperator& mv) {
     const std::size_t nb = H.dim();
     if (nb == 0) return sol;
     const std::size_t k = std::min(std::max<std::size_t>(want, 1), nb);
+    ed::core::Shape shape;
+    shape.dim = nb;
+    ed::core::guard_working_set(ed::core::footprint(vectors ? ed::core::Path::DenseVectors
+                                                            : ed::core::Path::DenseValues, shape).host,
+                                "dense block eigensolve");
     if (!vectors) {
         const std::vector<double> w = dense_block_eigenvalues(H);   // ascending
         sol.values.assign(w.begin(), w.begin() + static_cast<long>(std::min(k, w.size())));

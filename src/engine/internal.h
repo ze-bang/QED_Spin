@@ -814,7 +814,11 @@ star_partition(const EngineContext& cx, bool tr_on);
 // backend; vectors come back on the host, in block coordinates.
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
 [[nodiscard]] std::vector<double> solve_block_full(const ed::LinearOperator& mv);
-[[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim);
+/// The largest block eigs solves densely: dense_max_dim when the caller set it (>= 0), else
+/// min(4 max(40 k, 400), kAutoDenseCeiling, the largest block whose dense solve -- with or
+/// without `vectors` -- fits in half the RAM the job may still allocate).
+[[nodiscard]] std::uint64_t lowest_dense_floor(std::size_t k, int dense_max_dim, bool vectors);
+inline constexpr std::uint64_t kAutoDenseCeiling = 8192;
 
 /// The memory the lanes on one backend may use, for any vector Scalar; what they need is
 /// core/footprint.h (P7.3's resident basis replaces the device row).

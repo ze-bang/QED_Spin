@@ -118,7 +118,7 @@
   {"id":"L5-memory-05","rep":"L5-memory-05","sev":"high","axis":"robustness","status":"info","dev":"cpu","seconds":300},
   {"id":"L5-memory-06","rep":"L5-memory-06","sev":"medium","axis":"robustness","status":"fixed","dev":"gpu","seconds":240},
   {"id":"L5-memory-09","rep":"L5-memory-09","sev":"medium","axis":"robustness","status":"info","dev":"cpu","seconds":180},
-  {"id":"L5-memory-10","rep":"L5-memory-10","sev":"medium","axis":"robustness","status":"open","dev":"cpu","seconds":240},
+  {"id":"L5-memory-10","rep":"L5-memory-10","sev":"medium","axis":"robustness","status":"fixed","dev":"cpu","seconds":240},
   {"id":"L6-silent-01","rep":"L6-silent-01","sev":"critical","axis":"correctness","status":"fixed","dev":"cpu","seconds":90},
   {"id":"L6-silent-11","rep":"L6-silent-11","sev":"low","axis":"correctness","status":"info","dev":"cpu","seconds":120},
   {"id":"L6-silent-12","rep":"L6-silent-12","sev":"medium","axis":"robustness","status":"fixed","dev":"gpu","seconds":120},

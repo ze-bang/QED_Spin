@@ -314,7 +314,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 const auto t0 = std::chrono::steady_clock::now();
                 // The same lanes on every device: dense below the crossover, else the certified
                 // Krylov lanes on the backend place() chooses.
-                const bool dense = dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim);
+                const bool dense = dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors);
                 const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
                 const std::size_t w = static_cast<std::size_t>(want);
                 BlockSolution sol = lane == ed::Lane::HostDense
@@ -395,7 +395,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 if (dim == 0) continue;
                 if (s.two_S < 0)
                     res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
-                const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim);
+                const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
                 if (!prune || dim <= floor_) { solve_block(sub, sb, bi, cx.t_orbit_table); continue; }
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device);
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
