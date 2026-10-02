@@ -60,6 +60,11 @@ Breaking changes so far:
   removes. A block that cannot certify all N_V samples the rest and adds an
   `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
   `exact_vectors`) in place of `num_exact` and `exact_krylov`.
+- **Observables under `total_spin`.** `expect` and thermal `observables` with a total-spin
+  restriction take an operator that is not SU(2) invariant through its SU(2)-scalar part (its
+  average over all spin rotations: S^z_i S^z_j enters as S_i.S_j / 3), whose expectation is the
+  multiplet average; they refused it. `spin_flip='require'` with `total_spin` or an explicit
+  `sz` != N/2 no longer refuses a flip-symmetric H.
 - **Fixed: stars that time reversal closes.** For a real H whose momenta k and -k are related by
   time reversal but by no spatial operation (translations only, or a chain without its
   reflection), a level counts both but carried no sign of it: `vectors()` returned too few vectors,

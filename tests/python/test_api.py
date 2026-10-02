@@ -64,12 +64,43 @@ def test_total_spin_needs_an_su2_hamiltonian():
         qed.eigs(b.to_operator(), 1, sym=qed.Symmetry(spatial=None, total_spin=0))
 
 
-def test_expect_under_total_spin_needs_invariant_operators():
-    H = _ring(6)
-    sz0 = qed.Operator(6)
-    sz0.add_one_body(qed.OP_SZ, 0, 1.0)
-    with pytest.raises(ValueError, match="SU\\(2\\) invariant"):
-        qed.expect(H, [sz0], 1, sym=qed.Symmetry(spatial=None, total_spin=0))
+def test_total_spin_averages_an_operator_over_the_multiplet():
+    # A level under total_spin stands for its 2S + 1 Sz members: an operator that is not SU(2)
+    # invariant enters through its rotation average -- S^z_0 S^z_2 as S_0.S_2 / 3, S^z_0 as 0,
+    # S^z_0 S^+_1 S^-_2 as its chirality-free part (audit K3-model-scale-06, K1-sym-composition-05).
+    n = 6
+    H = _ring(n, 0.3)
+    sym = qed.Symmetry(spatial=None, total_spin=1)
+    zz = qed.Operator.product(n, "zz", [0, 2])
+    dot02 = (qed.Operator.product(n, "zz", [0, 2]) + qed.Operator.product(n, "+-", [0, 2], 0.5)
+             + qed.Operator.product(n, "-+", [0, 2], 0.5))
+    sz0 = qed.Operator.product(n, "z", [0])
+    three = qed.Operator.product(n, "z+-", [0, 1, 2]) + qed.Operator.product(n, "z-+", [0, 1, 2])
+    r = qed.expect(H, [zz, dot02, sz0, three], 4, sym=sym)
+    np.testing.assert_allclose(r.values[:, 0], r.values[:, 1] / 3.0, atol=1e-12)
+    np.testing.assert_allclose(r.values[:, 2], 0.0, atol=1e-12)
+    # per energy, sum of multiplicity x <O> = Tr(P O), P onto the S = 1 states at that energy
+    Hd, Od = _dense(H, n), _dense(three, n)
+    E, V = np.linalg.eigh(Hd)
+    S2 = sum(_dense(qed.Operator.product(n, ab, [i, j], c), n)
+             for i in range(n) for j in range(n) for ab, c in (("zz", 1.0), ("+-", 0.5), ("-+", 0.5)))
+    clusters = {}
+    for e, mult, val in zip(r.energies, r.multiplicities, r.values[:, 3]):
+        c = clusters.setdefault(round(float(e), 7), [0, 0.0])
+        c[0] += int(mult)
+        c[1] += int(mult) * val
+    checked = 0
+    for e, (dim, total) in clusters.items():
+        W = V[:, np.abs(E - e) < 1e-7]
+        s, U = np.linalg.eigh(W.conj().T @ S2 @ W)
+        P = W @ U[:, np.abs(s - 2.0) < 1e-6]
+        if P.shape[1] != dim:
+            continue                                       # a cluster cut by the k window
+        np.testing.assert_allclose(total, np.trace(P.conj().T @ Od @ P), atol=1e-9)
+        checked += 1
+    assert checked >= 1
+    th = qed.thermal(H, [0.5, 1.0], method="exact", sym=sym, observables=[zz, dot02])
+    np.testing.assert_allclose(th.O[0], th.O[1] / 3.0, atol=1e-12)
 
 
 def test_oftlm_under_total_spin_is_refused():

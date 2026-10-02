@@ -65,7 +65,9 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     ``observables``: operators O whose thermal averages <O>(T) = Tr(e^{-H/T} O) / Z are
     returned in ``O`` (methods ``"exact"`` and ``"ftlm"`` without ``exact_states``). O may
     break the symmetries: each block uses O averaged over the symmetries it resolves, which
-    has the same thermal average. Under ``total_spin`` every O must be SU(2) invariant.
+    has the same thermal average. Under ``total_spin`` an O that is not SU(2) invariant enters
+    through its SU(2)-scalar part (its average over all spin rotations), which has the same
+    thermal average.
     """
     key = str(method).lower()
     if key not in _METHODS:

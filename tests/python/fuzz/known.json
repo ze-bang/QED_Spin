@@ -9,13 +9,6 @@
              "message": {"re": "exact_states \\(OFTLM\\) cannot be restricted to one spin tower"}}
   },
   {
-   "name": "total_spin_noninvariant_observable",
-   "ledger": "K3-model-scale-06",
-   "why": "under total_spin, expect() and thermal(observables=) refuse a non-SU(2)-invariant operator instead of returning its multiplet / thermal average",
-   "match": {"task.kind": ["expect", "th_obs"], "status": ["refused"], "request.total_spin": {"absent": false},
-             "message": {"re": "with a total-spin restriction every (operator|observable) must be"}}
-  },
-  {
    "name": "total_spin_tower_count",
    "ledger": "K1-sym-composition-03",
    "why": "FTLM / mTPQ tower sampling under total_spin matches the Sz = S and Sz = S + 1 blocks by engine irrep index; with a point group whose co-group collapses in one sector the multiplet count is wrong and thermal raises",

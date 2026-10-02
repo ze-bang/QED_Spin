@@ -5,6 +5,10 @@
 #include <ed/core/errors.h>
 #include <ed/ops/operator.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <complex>
 #include <stdexcept>
 #include <string>
 
@@ -158,6 +162,105 @@ bool su2_invariant(const MaskedOperator& H, double rtol) {
     for (char a : {'+', '-', 'z'})
         if (commutator(H, total(H.n_sites(), a)).max_abs() > cut) return false;
     return true;
+}
+
+}  // namespace ed::ops
+
+namespace ed::ops {
+
+namespace {
+
+using Rot = std::array<double, 9>;   // row-major 3 x 3
+
+Rot rotation(std::array<double, 3> a, double angle) {   // Rodrigues, about the unit axis a
+    const double n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    for (double& x : a) x /= n;
+    const double c = std::cos(angle), s = std::sin(angle), t = 1.0 - c;
+    return {t * a[0] * a[0] + c,        t * a[0] * a[1] - s * a[2], t * a[0] * a[2] + s * a[1],
+            t * a[0] * a[1] + s * a[2], t * a[1] * a[1] + c,        t * a[1] * a[2] - s * a[0],
+            t * a[0] * a[2] - s * a[1], t * a[1] * a[2] + s * a[0], t * a[2] * a[2] + c};
+}
+
+Rot multiply(const Rot& x, const Rot& y) {
+    Rot z{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) z[3 * i + j] += x[3 * i + k] * y[3 * k + j];
+    return z;
+}
+
+// The 60 rotations of the icosahedron with vertices (0, +-1, +-phi) and their cyclic
+// permutations, closed from the five-fold rotation about a vertex and the three-fold rotation
+// about a face centre.
+const std::vector<Rot>& icosahedral_rotations() {
+    static const std::vector<Rot> group = [] {
+        const double phi = (1.0 + std::sqrt(5.0)) / 2.0, pi = 3.14159265358979323846;
+        const std::vector<Rot> gens = {rotation({0.0, 1.0, phi}, 2.0 * pi / 5.0),
+                                       rotation({1.0, 1.0, 1.0}, 2.0 * pi / 3.0)};
+        std::vector<Rot> g = {{1, 0, 0, 0, 1, 0, 0, 0, 1}};
+        auto known = [&g](const Rot& r) {
+            for (const Rot& h : g) {
+                double d = 0.0;
+                for (int i = 0; i < 9; ++i) d = std::max(d, std::abs(h[i] - r[i]));
+                // scale-free: entries of rotation matrices
+                if (d < 1e-9) return true;
+            }
+            return false;
+        };
+        for (std::size_t head = 0; head < g.size(); ++head)
+            for (const Rot& x : gens) {
+                const Rot r = multiply(x, g[head]);
+                if (!known(r)) g.push_back(r);
+            }
+        if (g.size() != 60) throw std::logic_error("icosahedral_rotations: closed to " + std::to_string(g.size()));
+        return g;
+    }();
+    return group;
+}
+
+}  // namespace
+
+MaskedOperator su2_scalar_part(const MaskedOperator& O) {
+    using C = std::complex<double>;
+    if (su2_invariant(O)) return O;
+    const auto& G = icosahedral_rotations();
+    const C I(0.0, 1.0);
+    MaskedOperator out(O.n_sites());
+    for (const ProductTerm& t : product_terms(O)) {
+        const std::size_t n = t.ops.size();
+        if (n == 0) { out.add(MaskedOperator::product(O.n_sites(), "", {}, t.coeff)); continue; }
+        if (n > 5)
+            throw ed::Unsupported("su2_scalar_part: a term on " + std::to_string(n) + " sites; the rotation "
+                                  "average is exact on at most 5");
+        // A factor S+ = S^x + i S^y, S- = S^x - i S^y, S^z as its Cartesian vector v (op = v.S).
+        std::vector<std::array<C, 3>> v(n);
+        for (std::size_t k = 0; k < n; ++k)
+            v[k] = t.ops[k] == '+' ? std::array<C, 3>{1.0, I, 0.0}
+                 : t.ops[k] == '-' ? std::array<C, 3>{1.0, -I, 0.0} : std::array<C, 3>{0.0, 0.0, 1.0};
+        std::size_t combos = 1;
+        for (std::size_t k = 0; k < n; ++k) combos *= 3;
+        std::string ops(n, ' ');
+        for (const Rot& R : G) {
+            // U_R (v.S) U_R^dagger = (R v).S, written back over S+, S-, S^z:
+            // w.S = (w_x - i w_y)/2 S+ + (w_x + i w_y)/2 S- + w_z S^z.
+            std::vector<std::array<C, 3>> f(n);
+            for (std::size_t k = 0; k < n; ++k) {
+                C w[3];
+                for (int a = 0; a < 3; ++a) w[a] = R[3 * a] * v[k][0] + R[3 * a + 1] * v[k][1] + R[3 * a + 2] * v[k][2];
+                f[k] = {0.5 * (w[0] - I * w[1]), 0.5 * (w[0] + I * w[1]), w[2]};
+            }
+            for (std::size_t idx = 0; idx < combos; ++idx) {
+                C c = t.coeff / static_cast<double>(G.size());
+                std::size_t r = idx;
+                for (std::size_t k = 0; k < n; ++k, r /= 3) {
+                    ops[k] = "+-z"[r % 3];
+                    c *= f[k][r % 3];
+                }
+                if (c != C(0.0, 0.0)) out.add(MaskedOperator::product(O.n_sites(), ops, t.sites, c));
+            }
+        }
+    }
+    return out;
 }
 
 }  // namespace ed::ops

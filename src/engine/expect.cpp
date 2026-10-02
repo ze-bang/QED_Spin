@@ -24,10 +24,6 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
     const int n_sites = r.n_sites;
     detail::validate_environment("expect");
     for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], n_sites, "expect", i);
-    for (const ::Operator* O : ops)
-        if (s.two_S >= 0 && !ed::ops::su2_invariant(O->canonical()))
-            throw std::invalid_argument("expect: with a total-spin restriction every operator must be SU(2) "
-                                        "invariant (a level holds one member of each spin multiplet)");
     // Every level's vector lives in its own sector basis; the operators averaged over the
     // symmetry group (and the flip where the level folds or projects by it) are invariant, so
     // <v|Obar|v> is one rep_matrix_elements sweep per (basis, flip, keep) over all operators --

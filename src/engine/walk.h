@@ -238,7 +238,10 @@ using Keep = ed::ops::SzKeep;
 /// symmetries preserve.
 class Averager {
 public:
-    Averager(const Spec& s, int n_sites) {
+    // Under a total-spin restriction a block holds one member of each multiplet: an O that is not
+    // SU(2) invariant enters through its SU(2)-scalar part, whose expectation is the multiplet
+    // average (and whose thermal trace with the SU(2)-symmetric H is O's).
+    Averager(const Spec& s, int n_sites) : su2_(s.two_S >= 0) {
         std::vector<Perm> gens = abelian_or_identity(s, n_sites);
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);
@@ -246,7 +249,8 @@ public:
     const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep, bool conj) {
         auto& slot = averages_[{&O, flip, static_cast<int>(keep), conj}];
         if (!slot) {
-            ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(O.canonical(), keep), G_, flip);
+            const ed::ops::MaskedOperator src = su2_ ? ed::ops::su2_scalar_part(O.canonical()) : O.canonical();
+            ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(src, keep), G_, flip);
             if (conj) a = a.image(ed::ops::MaskedOperator::Map::K);
             slot = std::make_shared<const ed::ops::MaskedOperator>(std::move(a));
         }
@@ -262,6 +266,7 @@ public:
 
 private:
     using Key = std::tuple<const ::Operator*, bool, int, bool>;
+    bool su2_ = false;
     std::vector<Perm> G_;
     std::map<Key, std::shared_ptr<const ed::ops::MaskedOperator>> averages_;
     std::map<Key, std::shared_ptr<const ed::ops::MaskedProgram>> programs_;

@@ -99,4 +99,12 @@ enum class SzContent { U1, Parity, None };
 /// [H, S^a_tot] = 0 for a = +, -, z: full spin-rotation invariance.
 [[nodiscard]] bool su2_invariant(const MaskedOperator& H, double rtol = kInvarianceRtol);
 
+/// The SU(2)-scalar part of O: its average over every global spin rotation,
+/// int dR U_R O U_R^dagger, whose expectation in a spin multiplet is the multiplet average of O
+/// and whose thermal trace with an SU(2)-symmetric H is O's. Computed exactly as the average over
+/// the 60 rotations of the icosahedral group, which has no invariant harmonic below l = 6, so it
+/// equals the full rotation average on every term of at most 5 sites (more raise Unsupported).
+/// An SU(2)-invariant O is returned as it is.
+[[nodiscard]] MaskedOperator su2_scalar_part(const MaskedOperator& O);
+
 }  // namespace ed::ops

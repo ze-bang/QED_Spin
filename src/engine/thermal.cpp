@@ -252,10 +252,6 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     if (n_obs > 0) {
         if (t.method == ThermalSpec::Method::mTPQ || t.exact_states > 0)
             throw std::invalid_argument("thermal: observables need method Exact or FTLM (without exact_states)");
-        for (const ::Operator* O : t.observables)
-            if (s.two_S >= 0 && !ed::ops::su2_invariant(O->canonical()))
-                throw std::invalid_argument("thermal: with a total-spin restriction every observable must be "
-                                            "SU(2) invariant (a block holds one member of each spin multiplet)");
         avg.emplace(s, n_sites);
     }
 
