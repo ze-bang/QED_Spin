@@ -108,7 +108,15 @@ krylov_schur_kernel(Backend&                             be,
     const std::size_t m = std::max<std::size_t>(1, std::min<std::size_t>({m_cap, 2 * p_want + 20, n}));
     const std::size_t p_keep = std::min(p_want, m > 1 ? m - 1 : std::size_t{1});
 
-    auto V = be.make_zero_vector(n * (m + 1));   // columns 0..m, contiguous
+    // n x cols, contiguous, each column first-touched on its own: a column is spread over the NUMA
+    // domains by the row partition every kernel uses, as a separate vector would be (one fill of
+    // the whole block would put each column on a single domain, and every gather from it there).
+    auto columns = [&](std::size_t cols) {
+        UniqueVec b{be.allocate(n * cols), typename ed::matvec::BasicBackend<Scalar>::Deleter{&be}};
+        for (std::size_t j = 0; j < cols; ++j) be.fill_zero(b.get() + j * n, n);
+        return b;
+    };
+    auto V = columns(m + 1);   // columns 0..m
     auto col = [&](std::size_t j) { return V.get() + j * n; };
     auto w = be.make_zero_vector(n);
     std::vector<UniqueVec> found_vecs;
@@ -190,7 +198,7 @@ krylov_schur_kernel(Backend&                             be,
             const bool done = conv == top;     // an invariant subspace (beta 0) converges all of them
             if (done || cycle + 1 == budget) {
                 if (conv > 0) {
-                    auto X = be.make_zero_vector(n * conv);
+                    auto X = columns(conv);
                     rotate(e.vectors, mm, conv, X.get());
                     for (std::size_t i = 0; i < conv; ++i) {
                         auto x = be.make_zero_vector(n);
@@ -204,7 +212,7 @@ krylov_schur_kernel(Backend&                             be,
             // Thick restart: the p lowest Ritz vectors, then the residual direction.
             p = std::min(p_keep, mm - 1);
             {
-                auto U = be.make_zero_vector(n * p);
+                auto U = columns(p);
                 rotate(e.vectors, mm, p, U.get());
                 be.copy(U.get(), col(0), n * p);
             }
