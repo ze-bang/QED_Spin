@@ -146,7 +146,8 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     const std::uint64_t q = dim / n_chunks, rem = dim % n_chunks;
     const auto first_row = [q, rem](std::uint64_t c) { return c * q + std::min(c, rem); };
     struct Slab {
-        std::vector<std::uint32_t> col, id;   // per entry: column, chunk-local value id
+        std::vector<std::uint32_t> col;       // per entry: column,
+        std::vector<std::uint16_t> id;        // and chunk-local value id (a chunk keeps <= kCsrDictMax)
         std::vector<SectorComplex> values;    // the chunk's distinct values, by local id
         std::unordered_map<ValueBits, std::uint32_t, ValueBitsHash> index;
     };
@@ -163,13 +164,17 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
                  ++r) {
                 detail::cross_row(P, rowp, colp, same, r, row);
                 csr.row_ptr[r + 1] = row.size();
+                bool full = false;
                 for (const auto& [j, v] : row) {
                     const auto [it, fresh] = slab.index.try_emplace(bits_of(v), static_cast<std::uint32_t>(slab.values.size()));
-                    if (fresh) slab.values.push_back(v);
+                    if (fresh) {
+                        if (slab.values.size() == kCsrDictMax) { full = true; break; }   // ids stay below 2^16
+                        slab.values.push_back(v);
+                    }
                     slab.col.push_back(static_cast<std::uint32_t>(j));
-                    slab.id.push_back(it->second);
+                    slab.id.push_back(static_cast<std::uint16_t>(it->second));
                 }
-                if (slab.values.size() > kCsrDictMax) {
+                if (full) {
                     overflow.store(true, std::memory_order_relaxed);
                     break;
                 }
