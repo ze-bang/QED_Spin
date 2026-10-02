@@ -10,7 +10,8 @@
 //   * has_device_kernel(): the operator can bind a device apply (bind_cuda).
 //     The default bind_cuda() throws ed::DeviceUnsupported instead of handing
 //     the host apply device pointers.
-//   * bind<CpuBackend>() -> bind_cpu(), bind<CudaBackend>() -> bind_cuda().
+//   * bind<CpuBackend>() -> bind_cpu(), bind<CudaBackend>() -> bind_cuda(),
+//     bind<BasicCpuBackend<double>>() -> bind_cpu_real() for an operator that is_real().
 //
 // Internal kernels stay templated (term_kernels.h), so the virtual call costs
 // one indirection per apply.
@@ -55,6 +56,15 @@ public:
         throw ed::DeviceUnsupported(description() + " has no device kernel");
     }
 
+    /// The operator is real in its basis (real matrix elements): bind_cpu_real() applies it to
+    /// real host vectors, so a real symmetric eigenproblem runs in real arithmetic. May build the
+    /// operator's representation (it answers from it).
+    [[nodiscard]] virtual bool is_real() const { return false; }
+    using RealMatvecFn = std::function<void(const double*, double*, std::size_t)>;
+    [[nodiscard]] virtual RealMatvecFn bind_cpu_real() const {
+        throw ed::Unsupported(description() + " is not real");
+    }
+
     /// k vectors per call on the device: outs[i] = A ins[i] (device pointers, each of dim()).
     /// Operators whose device kernel can serve several vectors in one pass return it; the
     /// default (empty) means callers apply the vectors one at a time.
@@ -62,9 +72,13 @@ public:
                                              std::size_t n, std::size_t k)>;
     [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
 
-    /// bind<CpuBackend>() is bind_cpu(), bind<CudaBackend>() is bind_cuda().
+    /// The apply on vectors of a Backend: bind<CpuBackend>() is bind_cpu(), bind<CudaBackend>()
+    /// bind_cuda(), bind<BasicCpuBackend<double>>() bind_cpu_real().
     template <typename Backend>
-    [[nodiscard]] MatvecFn bind() const;
+    using BoundFn = std::function<void(const typename Backend::scalar_type*, typename Backend::scalar_type*,
+                                       std::size_t)>;
+    template <typename Backend>
+    [[nodiscard]] BoundFn<Backend> bind() const;
 };
 
 }  // namespace ed
@@ -82,6 +96,11 @@ namespace ed {
 template <>
 inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CpuBackend>() const {
     return bind_cpu();
+}
+
+template <>
+inline LinearOperator::RealMatvecFn LinearOperator::bind<ed::matvec::BasicCpuBackend<double>>() const {
+    return bind_cpu_real();
 }
 
 #ifdef WITH_CUDA

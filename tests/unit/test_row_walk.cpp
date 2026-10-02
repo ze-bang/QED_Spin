@@ -383,6 +383,24 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
                             const auto csr = op.reduced_csr();
                             const Mat C = columns(d, [&](const Cx* in, Cx* out) { csr.spmv(in, out); });
                             CHECK(max_diff(C, ref) <= tol);
+                            // A real block (a dictionary CSR) applies its real part to real vectors (P6.4).
+                            bool real_ref = true;
+                            for (const Cx& x : ref) real_ref = real_ref && std::abs(x.imag()) <= tol;
+                            CHECK(op.is_real() == (real_ref && csr.dictionary()));
+                            if (op.is_real()) {
+                                const auto rf = op.bind_cpu_real();
+                                double worst = 0.0;
+                                std::vector<double> e(d, 0.0), o(d);
+                                for (std::size_t j = 0; j < d; ++j) {
+                                    e[j] = 1.0;
+                                    rf(e.data(), o.data(), d);
+                                    for (std::size_t i = 0; i < d; ++i)
+                                        worst = std::max(worst, std::abs(o[i] - ref[i * d + j].real()));
+                                    e[j] = 0.0;
+                                }
+                                CHECK(worst <= tol);
+                                CHECK(std::string(op.lane()) == "csr-real");
+                            }
                         }
                         {   // the walk: no CSR fits a budget of 0
                             EnvGuard env;

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -77,9 +78,10 @@ struct ReducedSymmetryCsr {
         else spmv_with([this](std::uint64_t e) { return val[e]; }, in, out);
     }
 
-private:
-    template <class Value>
-    inline void spmv_with(Value value, const Scalar* __restrict__ in, Scalar* __restrict__ out) const {
+    /// out = A in with entry e's value given by value(e), on vectors of V (RealCsrView: the real
+    /// part of a real block on real vectors).
+    template <class V, class Value>
+    inline void spmv_with(Value value, const V* __restrict__ in, V* __restrict__ out) const {
 #ifdef _OPENMP
         const std::uint64_t par = static_cast<std::uint64_t>(omp_get_max_threads()) * 1024ULL;
 #else
@@ -88,12 +90,47 @@ private:
         #pragma omp parallel for schedule(static) if(dim > par)
         for (long long ir = 0; ir < static_cast<long long>(dim); ++ir) {
             const std::uint64_t r = static_cast<std::uint64_t>(ir);
-            Scalar acc = Scalar(0);
+            V acc = V(0);
             const std::uint64_t e0 = row_ptr[r], e1 = row_ptr[r + 1];
             for (std::uint64_t e = e0; e < e1; ++e) acc += value(e) * in[col_idx[e]];
             out[r] = acc;
         }
     }
+};
+
+/// The real part of a complex CSR whose block is real -- every value within `rel` of the real
+/// axis, relative to the largest |value| -- for real vectors. It shares the CSR's structure
+/// (row_ptr, col_idx and the value ids) and holds only the real dictionary, so it exists for a
+/// dictionary CSR only (a full-value CSR, > 65536 distinct values, stays complex). The CSR must
+/// outlive the view.
+class RealCsrView {
+public:
+    [[nodiscard]] static std::optional<RealCsrView> of(const ReducedSymmetryCsr<std::complex<double>>& c,
+                                                       double rel) {
+        if (!c.dictionary()) return std::nullopt;
+        double big = 0.0, imag = 0.0;
+        for (const auto& v : c.dict) {
+            big  = std::max(big, std::abs(v));
+            imag = std::max(imag, std::abs(v.imag()));
+        }
+        if (imag > rel * big) return std::nullopt;
+        RealCsrView r;
+        r.c_ = &c;
+        r.dict_.reserve(c.dict.size());
+        for (const auto& v : c.dict) r.dict_.push_back(v.real());
+        return r;
+    }
+
+    /// out = Re(A) in.
+    void spmv(const double* __restrict__ in, double* __restrict__ out) const {
+        if (!c_->id8.empty()) c_->spmv_with([this](std::uint64_t e) { return dict_[c_->id8[e]]; }, in, out);
+        else c_->spmv_with([this](std::uint64_t e) { return dict_[c_->id16[e]]; }, in, out);
+    }
+    [[nodiscard]] std::uint64_t bytes() const noexcept { return dict_.size() * sizeof(double); }
+
+private:
+    const ReducedSymmetryCsr<std::complex<double>>* c_ = nullptr;
+    std::vector<double>                             dict_;
 };
 
 }  // namespace ed::matvec

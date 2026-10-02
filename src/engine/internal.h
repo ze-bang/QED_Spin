@@ -233,6 +233,29 @@ public:
 #endif
         return {};
     }
+    /// Real when its applies run on the reduced CSR, which keeps its values in a dictionary, and
+    /// every value is real up to roundoff (numerics.h kRealBlockRel): a real symmetry sector of a
+    /// real H. Builds the representation on first call, as the first apply would.
+    [[nodiscard]] bool is_real() const override {
+        ensure_lane_();
+        if (!csr_ || (gpu_fn_ && force_gpu_)) return false;
+        std::call_once(real_once_, [this] {
+            real_ = ed::matvec::RealCsrView::of(*csr_, ed::numerics::kRealBlockRel);
+        });
+        return real_.has_value();
+    }
+    [[nodiscard]] RealMatvecFn bind_cpu_real() const override {
+        if (!is_real()) return ed::LinearOperator::bind_cpu_real();   // throws Unsupported
+        return [this](const double* in, double* out, std::size_t) {
+            const auto t0 = std::chrono::steady_clock::now();
+            real_->spmv(in, out);
+            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - t0).count();
+            applies_.fetch_add(1, std::memory_order_relaxed);
+            real_applies_.fetch_add(1, std::memory_order_relaxed);
+            apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
+        };
+    }
     [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const {
         return rd_;
     }
@@ -363,6 +386,8 @@ private:
     double                                         norm_bound_ = 0.0;   // sum of |c| over the program
     mutable std::once_flag                         csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
+    mutable std::once_flag                         real_once_;
+    mutable std::optional<ed::matvec::RealCsrView> real_;     // csr_'s real part, when the block is real
     mutable std::once_flag                         gpu_once_;
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
     bool                                           force_gpu_ = false;
@@ -371,6 +396,7 @@ private:
     // Per-operator counters (relaxed: applies may run concurrently).
     mutable std::atomic<std::uint64_t>             applies_{0};
     mutable std::atomic<std::uint64_t>             apply_ns_{0};
+    mutable std::atomic<std::uint64_t>             real_applies_{0};   // of them on real vectors
     mutable double                                 csr_build_s_ = 0.0;
     mutable double                                 gpu_build_s_ = 0.0;
 public:
@@ -384,11 +410,12 @@ public:
     [[nodiscard]] double build_seconds() const noexcept { return csr_build_s_ + gpu_build_s_; }
     [[nodiscard]] std::uint64_t csr_nnz() const noexcept { return csr_ ? csr_->nnz() : 0; }
     [[nodiscard]] std::uint64_t csr_bytes() const noexcept { return csr_ ? csr_->bytes() : 0; }
-    /// The representation host applies use: "csr", "gpu-gather" (device kernel, host
-    /// vectors), "walk" (CSR-free gather), or "none" before the first apply.
+    /// The representation host applies use: "csr", "csr-real" (its real part on real vectors),
+    /// "gpu-gather" (device kernel, host vectors), "walk" (CSR-free gather), or "none" before the
+    /// first apply.
     [[nodiscard]] const char* lane() const noexcept {
         if (gpu_fn_ && (force_gpu_ || !csr_)) return "gpu-gather";
-        if (csr_) return "csr";
+        if (csr_) return real_applies_.load(std::memory_order_relaxed) > 0 ? "csr-real" : "csr";
         return applies() > 0 ? "walk" : "none";
     }
     /// Did the GPU rep-gather actually engage for this sector? Lazy, so this
