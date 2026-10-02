@@ -39,6 +39,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -73,6 +74,30 @@ struct GpuSharedRankTable {
     thrust::device_vector<std::int32_t> d_shared_of_rank;
 };
 
+// The byte budget of a strong device cache: ED_GPU_SYM_CACHE_GIB when set, else `share` of the
+// device's memory and at most `cap_gib` (a fixed 16-24 GiB would fill a 10 GB MIG slice).
+[[nodiscard]] inline double device_cache_budget(double share, double cap_gib) {
+    constexpr double GiB = 1073741824.0;
+    if (const char* v = std::getenv("ED_GPU_SYM_CACHE_GIB"); v != nullptr && v[0] != '\0')
+        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", cap_gib)) * GiB;
+    std::size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) { cudaGetLastError(); return cap_gib * GiB; }
+    return std::min(cap_gib * GiB, share * static_cast<double>(total_b));
+}
+
+// Build `make()`; when the device is out of memory, release the strong cache `keep` (what no
+// live operator holds is freed with it) and build once more.
+template <class Keep, class Make>
+auto build_or_evict(Keep& keep, Make&& make) {
+    try {
+        return make();
+    } catch (const std::bad_alloc&) {                  // thrust::system::detail::bad_alloc
+        keep.clear();
+        cudaGetLastError();
+        return make();
+    }
+}
+
 [[nodiscard]] inline std::shared_ptr<GpuSharedRankTable>
 acquire_gpu_shared_rank(
     const std::shared_ptr<const ed::symmetry::SharedRankLookup>& srl)
@@ -87,11 +112,9 @@ acquire_gpu_shared_rank(
                                  std::shared_ptr<GpuSharedRankTable>>> keep;
     // BYTE-aware eviction: a count cap would pin up to 4 x 36 GB at N >= 34
     // half filling -- device OOM the moment a job touches two subspaces.
-    // ED_GPU_SYM_CACHE_GIB (default 24) bounds the
-    // strong cache; the weak registry still dedups concurrent co-owners.
-    static const double kBudgetBytes = [] {
-        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 24.0)) * 1073741824.0;
-    }();
+    // ED_GPU_SYM_CACHE_GIB, else a quarter of the device's memory (at most 24 GiB), bounds
+    // the strong cache; the weak registry still dedups concurrent co-owners.
+    static const double kBudgetBytes = device_cache_budget(0.25, 24.0);
 
     std::lock_guard<std::mutex> lk(mtx);
     for (auto it = registry.begin(); it != registry.end();)   // drop tables nobody holds
@@ -99,7 +122,7 @@ acquire_gpu_shared_rank(
     auto& slot = registry[srl->uid];   // by table identity: a freed table's address can be reused
     if (auto sp = slot.lock()) return sp;
     auto sp = std::make_shared<GpuSharedRankTable>();
-    sp->d_shared_of_rank = srl->shared_of_rank;   // one H2D per (N, n_up)
+    build_or_evict(keep, [&] { sp->d_shared_of_rank = srl->shared_of_rank; return 0; });   // one H2D per (N, n_up)
     if (ed::env::flag("ED_SYM_PROFILE", false)) {
         ED_LOG(Info,
                      "[sym_profile] GPU shared rank table uploaded: "
@@ -459,10 +482,9 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     static std::mutex mtx;
     static std::map<std::uint64_t, std::vector<MirrorSlot>> registry;
     static std::vector<std::shared_ptr<const GpuSectorMirror>> keep;
-    // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of sector arrays at N=36).
-    static const double kKeepBudget = [] {
-        return std::max(0.0, ed::env::real("ED_GPU_SYM_CACHE_GIB", 16.0)) * 1073741824.0;
-    }();
+    // Byte-aware strong cache (a count cap would pin ~4 x 4 GB of sector arrays at N=36):
+    // ED_GPU_SYM_CACHE_GIB, else 15% of the device's memory (at most 16 GiB).
+    static const double kKeepBudget = device_cache_budget(0.15, 16.0);
     std::lock_guard<std::mutex> lk(mtx);
     auto& bucket = registry[content_key(rep)];
     for (auto it = bucket.begin(); it != bucket.end();) {
@@ -471,7 +493,7 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
         if (matches(*it)) return locked;
         ++it;
     }
-    std::shared_ptr<const GpuSectorMirror> mirror = build_sector_mirror(rep);
+    std::shared_ptr<const GpuSectorMirror> mirror = build_or_evict(keep, [&] { return build_sector_mirror(rep); });
     MirrorSlot s;
     s.n_up   = rep.n_up;
     std::copy(sig, sig + 4, s.reps_sig);
