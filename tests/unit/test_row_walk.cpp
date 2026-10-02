@@ -42,11 +42,16 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using Cx = std::complex<double>;
 using ed::ops::MaskedOperator;
@@ -418,6 +423,67 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
         }
     }
     CHECK(sectors > 200);
+}
+
+// The sector CSR as it was built before P6.1 step 3: every row computed twice (count, then fill).
+template <class Policy>
+ed::matvec::ReducedSymmetryCsr<Cx> two_pass_csr(const ed::ops::ProgramView<Cx>& P, const Policy& pol, std::uint64_t dim) {
+    ed::matvec::ReducedSymmetryCsr<Cx> csr;
+    csr.dim = dim;
+    csr.row_ptr.assign(dim + 1, 0);
+    std::vector<std::pair<std::uint64_t, Cx>> row;
+    for (std::uint64_t r = 0; r < dim; ++r) {
+        ed::matvec::detail::cross_row(P, pol, pol, true, r, row);
+        csr.row_ptr[r + 1] = csr.row_ptr[r] + row.size();
+    }
+    csr.allocate_first_touch();
+    for (std::uint64_t r = 0; r < dim; ++r) {
+        ed::matvec::detail::cross_row(P, pol, pol, true, r, row);
+        std::uint64_t e = csr.row_ptr[r];
+        for (const auto& [j, v] : row) { csr.col_idx[e] = static_cast<std::uint32_t>(j); csr.val[e] = v; ++e; }
+    }
+    return csr;
+}
+
+TEST_CASE("rep sectors: the one-pass CSR is the two-pass CSR bit for bit", "[row_walk]") {
+    // P6.1 step 3 builds each row once into per-chunk slabs and copies them into place; the arrays
+    // must be the ones the two-pass build made, at any thread count.
+    int sectors = 0;
+    for (const auto& m : zoo()) {
+        const MaskedOperator& h = m.H->canonical();
+        for (bool dihedral : {false, true}) {
+            if (dihedral && !m.dihedral) continue;
+            const auto G = ring_group(dihedral, false);
+            std::vector<int> n_ups{-1};
+            if (m.u1) n_ups = {N / 2, N / 2 - 1, -1};
+            for (const auto& chi : characters(G, dihedral, false))
+                for (int n_up : n_ups) {
+                    const RepSectorData rd = make_sector(G, chi, n_up);
+                    const std::uint64_t d = rd.reps.size();
+                    if (d == 0) continue;
+                    ++sectors;
+                    INFO("model " << m.name << " dihedral " << dihedral << " n_up " << n_up << " dim " << d);
+                    const auto P = ed::ops::compile_program({h.dagger()}, rd, rd);
+                    const auto pol = rd.make_policy();
+                    const auto ref = two_pass_csr(P.view(), pol, d);
+                    for (int threads : {1, 3, 7}) {
+#ifdef _OPENMP
+                        const int before = omp_get_max_threads();
+                        omp_set_num_threads(threads);
+#endif
+                        const auto csr = ed::matvec::build_sector_csr(P.view(), pol, d);
+#ifdef _OPENMP
+                        omp_set_num_threads(before);
+#endif
+                        INFO("threads " << threads);
+                        CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
+                        CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
+                        CHECK(std::memcmp(csr.val.data(), ref.val.data(), ref.val.size() * sizeof(Cx)) == 0);
+                    }
+                }
+        }
+    }
+    CHECK(sectors >= 12);
 }
 
 TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly", "[row_walk]") {
