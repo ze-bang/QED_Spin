@@ -1,9 +1,9 @@
 // =============================================================================
-// python/qed/_bindings/sectors_bindings.cpp -- _core.sectors: the symmetry sectors of a
+// python/qed/_bindings/sectors.cpp -- _core.sectors: the symmetry sectors of a
 // Hamiltonian and the lowest-level eigensolve over them (include/ed/sectors/sectors.h).
 // =============================================================================
 
-#include "sectors_bindings.h"
+#include "bindings.h"
 
 #include <ed/sectors/sectors.h>
 #include <ed/sectors/thermal.h>
@@ -267,12 +267,6 @@ void bind_sectors(py::module_& m) {
         .value("None_", sec::SzContent::None);
     s.def("sz_content", &sec::sz_content, py::arg("H"));
 
-    py::class_<sec::Subspace>(s, "Subspace")
-        .def_readonly("n_up", &sec::Subspace::n_up)
-        .def_readonly("sz_parity", &sec::Subspace::sz_parity)
-        .def_readonly("mirror", &sec::Subspace::mirror);
-    s.def("subspaces", &sec::subspaces, py::arg("H"), py::arg("spec"));
-
     py::class_<sec::Level>(s, "Level")
         .def_readonly("energy", &sec::Level::energy)
         .def_readonly("multiplicity", &sec::Level::multiplicity)
@@ -299,10 +293,7 @@ void bind_sectors(py::module_& m) {
     py::class_<sec::EigsResult>(s, "EigsResult")
         .def_readonly("levels", &sec::EigsResult::levels)
         .def_readonly("n_sites", &sec::EigsResult::n_sites)
-        .def_readonly("total_dim", &sec::EigsResult::total_dim)
-        .def_readonly("partial_blocks", &sec::EigsResult::partial_blocks)
         .def_readonly("complete", &sec::EigsResult::complete)
-        .def_readonly("flip_engaged", &sec::EigsResult::flip_engaged)
         .def_readonly("tr_engaged", &sec::EigsResult::tr_engaged)
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
         .def_property_readonly("placement", [](const sec::EigsResult& r) { return placement_to_py(r.placement); })
@@ -311,12 +302,6 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
                                "Per solved block: dim, lane, phase seconds, nnz, applies (one dict each).")
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
-        .def("sector_vector", [](const sec::EigsResult& r, int i) {
-                 const auto& v = r.vectors.at(static_cast<std::size_t>(i));
-                 return py::make_tuple(py::array_t<std::uint64_t>(v.basis->reps.size(), v.basis->reps.data()),
-                                       to_array(v.amplitudes));
-             }, py::arg("i"),
-             "(representatives, amplitudes) of vector i in the rep basis it was solved in.")
         .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up) {
                  const auto& L = r.levels.at(static_cast<std::size_t>(level));
                  if (L.vector < 0) throw std::invalid_argument("multiplet: the level carries no vector");
@@ -345,9 +330,6 @@ void bind_sectors(py::module_& m) {
 
     py::class_<sec::SpectrumResult>(s, "SpectrumResult")
         .def_readonly("levels", &sec::SpectrumResult::levels)
-        .def_readonly("total_dim", &sec::SpectrumResult::total_dim)
-        .def_readonly("flip_engaged", &sec::SpectrumResult::flip_engaged)
-        .def_readonly("tr_engaged", &sec::SpectrumResult::tr_engaged)
         .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
         .def_property_readonly("placement", [](const sec::SpectrumResult& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::SpectrumResult::diagnostics)
@@ -389,7 +371,6 @@ void bind_sectors(py::module_& m) {
         .def_readonly("chi", &sec::ThermalCurves::chi)
         .def_readonly("O", &sec::ThermalCurves::O)
         .def_readonly("e0", &sec::ThermalCurves::e0)
-        .def_readonly("total_dim", &sec::ThermalCurves::total_dim)
         .def_readonly("blocks", &sec::ThermalCurves::blocks)
         .def_readonly("device_blocks", &sec::ThermalCurves::device_blocks)
         .def_property_readonly("placement", [](const sec::ThermalCurves& r) { return placement_to_py(r.placement); })
@@ -417,11 +398,9 @@ void bind_sectors(py::module_& m) {
 
     py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")
         .def_readonly("omega", &sec::DynamicsCurves::omega)
-        .def_readonly("T", &sec::DynamicsCurves::T)
         .def_readonly("S", &sec::DynamicsCurves::S)
         .def_readonly("e0", &sec::DynamicsCurves::e0)
         .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
-        .def_readonly("target_sectors", &sec::DynamicsCurves::target_sectors)
         .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks)
         .def_property_readonly("placement", [](const sec::DynamicsCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
@@ -441,17 +420,17 @@ void bind_sectors(py::module_& m) {
     s.def("eigs",
           [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors,
              int dense_max_dim, bool allow_partial, sec::Device device,
-             bool prune, double prune_margin, double window) {
+             bool prune, double window) {
               sec::EigsOptions o;
               o.k = k; o.vectors = vectors; o.dense_max_dim = dense_max_dim;
               o.allow_partial = allow_partial; o.device = device;
-              o.prune = prune; o.prune_margin = prune_margin; o.window = window;
+              o.prune = prune; o.window = window;
               py::gil_scoped_release nogil;
               return sec::eigs(H, spec, o);
           },
           py::arg("H"), py::arg("spec"), py::arg("k") = 1,
           py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
           py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
-          py::arg("prune") = true, py::arg("prune_margin") = 0.02, py::arg("window") = 0.0,
+          py::arg("prune") = true, py::arg("window") = 0.0,
           "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
 }

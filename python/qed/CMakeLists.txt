@@ -24,15 +24,15 @@ include(EDPybind11)
 # default extras (smallest possible wheel, hidden symbols).
 if(WITH_CUDA)
     pybind11_add_module(_core MODULE NO_EXTRAS
-        _bindings/qed_bindings.cpp
-        _bindings/input_bindings.cpp
-        _bindings/sectors_bindings.cpp
+        _bindings/core.cpp
+        _bindings/input.cpp
+        _bindings/sectors.cpp
     )
 else()
     pybind11_add_module(_core MODULE
-        _bindings/qed_bindings.cpp
-        _bindings/input_bindings.cpp
-        _bindings/sectors_bindings.cpp
+        _bindings/core.cpp
+        _bindings/input.cpp
+        _bindings/sectors.cpp
     )
 endif()
 

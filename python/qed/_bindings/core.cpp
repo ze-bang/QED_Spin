@@ -1,10 +1,10 @@
 // =============================================================================
-// python/qed/_bindings/qed_bindings.cpp -- the pybind11 module `qed._core`.
+// python/qed/_bindings/core.cpp -- the pybind11 module `qed._core`.
 //
 //   * Operator: the spin-1/2 Hamiltonian / observable builder (terms,
 //     apply, and the term iterators symmetry discovery reads);
-//   * input (input_bindings.cpp): lattices and the Hamiltonian DSL;
-//   * sectors (sectors_bindings.cpp): the symmetry-sector verbs behind qed.api;
+//   * input (input.cpp): lattices and the Hamiltonian DSL;
+//   * sectors (sectors.cpp): the symmetry-sector verbs behind qed.api;
 //   * dssf, symmetry: observable assembly and site-permutation helpers;
 //   * the environment registry (env_*) and build / device probes;
 //   * the log bridge (log_*) behind qed.set_log_level, and the translation of the
@@ -28,8 +28,7 @@
 #include <ed/ops/commute_check.h>
 #include <ed/basis/group.h>
 
-#include "input_bindings.h"
-#include "sectors_bindings.h"
+#include "bindings.h"
 
 #include <complex>
 #include <cstdint>

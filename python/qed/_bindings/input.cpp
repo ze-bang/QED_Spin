@@ -1,5 +1,5 @@
 // =============================================================================
-// python/qed/_bindings/input_bindings.cpp
+// python/qed/_bindings/input.cpp
 //
 // pybind11 bindings for the standalone `ed::input` C++ library.
 //
@@ -25,7 +25,7 @@
 // submodule under `qed.input`.
 // =============================================================================
 
-#include "input_bindings.h"
+#include "bindings.h"
 
 #include <pybind11/complex.h>
 #include <pybind11/functional.h>
@@ -352,7 +352,7 @@ void bind_input(py::module_& parent) {
         // Output paths ---------------------------------------------------
         // `to_operator()` returns a freshly-allocated unique-owned Operator
         // (matching the default pybind11 holder for the `Operator` class
-        // bound in qed_bindings.cpp). The C++ API returns a
+        // bound in core.cpp). The C++ API returns a
         // shared_ptr; we copy-construct into a unique_ptr so Python takes
         // sole ownership and there is no shared_ptr/unique_ptr holder
         // conflict.
