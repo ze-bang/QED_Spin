@@ -84,9 +84,11 @@ pybind11 ≥ 2.10, NumPy. Automatic symmetry detection also needs `pynauty`. Sit
 
 ## Verification
 
-- `python/tests/grid` checks every task × symmetry × backend cell against a dense
+- `tests/python/grid` checks every task × symmetry × backend cell against a dense
   reference.
-- `tests/golden` holds recorded results on CPU and GPU.
+- `tests/python/golden` holds recorded results on CPU and GPU.
+- `tests/python/regress` replays every audit repro (a fixed bug must stay fixed), and
+  `tests/python/fuzz` compares random small models with a dense reference.
 - `bench/` holds timed cases against recorded baselines.
 - `scripts/gate/` runs all of these, plus the C++ unit tests and the examples, as SLURM
   arrays.
@@ -97,7 +99,8 @@ pybind11 ≥ 2.10, NumPy. Automatic symmetry detection also needs `pynauty`. Sit
 python/qed/        the package: verbs (qed/_verbs), symmetry discovery, Hamiltonian builders
 include/ed/, src/  the engine: symmetry sectors, matvec kernels (CPU, CUDA), Krylov,
                    thermal and dynamics kernels, backends
-tests/             C++ unit tests and the golden suite (python/tests: API tests, the grid)
+tests/unit/        C++ unit tests
+tests/python/      API tests, the grid, golden, regress and fuzz suites
 examples/          one runnable script per family of verbs
 bench/             benchmark cases and results
 docs/              architecture page and API reference (Sphinx + Doxygen)

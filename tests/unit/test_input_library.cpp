@@ -2,7 +2,7 @@
 // test_input_library (Catch2 v3)
 //
 // Lockdown for the standalone `ed::input` C++ library (the lattices; the Hamiltonian
-// builder is Python, python/tests/test_input.py). Coverage:
+// builder is Python, tests/python/test_input.py). Coverage:
 //
 //   1. `lattice::chain` produces the expected NN bond structure (PBC + OBC).
 //   2. `lattice::square` produces |E| = 2 * Lx * Ly under PBC.

@@ -1,7 +1,7 @@
-"""The audit regression ratchet: every repro script of tests/regress/repros, run as its own
+"""The audit regression ratchet: every repro script of tests/python/regress/repros, run as its own
 process and judged by the one ``REPRO: <VERDICT> ...`` line it prints.
 
-tests/regress/manifest.json gives each script a status:
+tests/python/regress/manifest.json gives each script a status:
   open   a confirmed bug that is still there. The case asserts the bug is gone and is
          xfail(strict=True): today it XFAILs; once a fix makes the script stop printing
          CONFIRMED it XPASSes and fails the gate until the manifest says ``fixed``.
@@ -34,7 +34,7 @@ import pytest
 import qed
 
 ROOT = Path(__file__).resolve().parents[3]
-REGRESS = ROOT / "tests" / "regress"
+REGRESS = Path(__file__).resolve().parent             # manifest.json and repros/ beside this file
 RUN_ONE = REGRESS / "run_one.py"
 MANIFEST = json.loads((REGRESS / "manifest.json").read_text())
 STATUSES = ("open", "fixed", "perf", "info")
@@ -111,8 +111,8 @@ def _gpu_count():
 
 def _env(dev, tmp):
     env = dict(os.environ)
-    # The package the session resolved (conftest pins it), plus python/tests for grid.models.
-    paths = [str(Path(qed.__file__).resolve().parents[1]), str(ROOT / "python" / "tests")]
+    # The package the session resolved (conftest pins it), plus tests/python for grid.models.
+    paths = [str(Path(qed.__file__).resolve().parents[1]), str(ROOT / "tests" / "python")]
     if env.get("PYTHONPATH"):
         paths.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(paths)

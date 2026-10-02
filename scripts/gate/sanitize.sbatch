@@ -1,11 +1,11 @@
 #!/bin/bash
 # Gate sanitizer stage, once per batch of commits (not every gate).
 #   KIND=asan   the cpu variant built with AddressSanitizer + UndefinedBehaviorSanitizer
-#               (build/cpu-asan: unit tests and _core), then ctest, then python/tests/test_api.py
+#               (build/cpu-asan: unit tests and _core), then ctest, then tests/python/test_api.py
 #               with libasan preloaded (the interpreter's own leaks are not checked).
 #   KIND=cusan  compute-sanitizer memcheck and synccheck over the device unit tests of the cuda
 #               gate build (build/cuda-tests; run the gate's build step first) and over the
-#               GPU-path driver tests/regress/repros/X04-gpu-paths-under-sanitizer.py.
+#               GPU-path driver tests/python/regress/repros/X04-gpu-paths-under-sanitizer.py.
 # Submit from a snapshot worktree:
 #   sbatch --account=<acct> --export=ALL,KIND=asan scripts/gate/sanitize.sbatch
 #   sbatch --account=<acct> --export=ALL,KIND=cusan --gpus-per-node=<gpu> scripts/gate/sanitize.sbatch
@@ -51,7 +51,7 @@ if [ "${KIND}" = asan ]; then
     grep -E "tests passed|tests failed" "${D}/ctest-asan.log"
     QED_CORE_DIR="${PWD}/build/cpu-asan/python/qed" LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
         ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-        python -m pytest python/tests/test_api.py -q -p no:cacheprovider > "${D}/pytest-asan.log" 2>&1
+        python -m pytest tests/python/test_api.py -q -p no:cacheprovider > "${D}/pytest-asan.log" 2>&1
     record asan_pytest $? "${D}/pytest-asan.log"
     tail -3 "${D}/pytest-asan.log"
 elif [ "${KIND}" = cusan ]; then
@@ -69,10 +69,10 @@ elif [ "${KIND}" = cusan ]; then
             record "cusan_${t}_${tool}" $? "${D}/cusan-${t}.${tool}.log"
         done
     done
-    export PYTHONPATH="${PWD}/python/tests:${PYTHONPATH}"
+    export PYTHONPATH="${PWD}/tests/python:${PYTHONPATH}"
     for tool in memcheck synccheck; do
         timeout 2400 compute-sanitizer --tool ${tool} --target-processes all --error-exitcode 99 \
-            python -u tests/regress/repros/X04-gpu-paths-under-sanitizer.py > "${D}/cusan-X04.${tool}.log" 2>&1
+            python -u tests/python/regress/repros/X04-gpu-paths-under-sanitizer.py > "${D}/cusan-X04.${tool}.log" 2>&1
         record "cusan_X04_${tool}" $? "${D}/cusan-X04.${tool}.log"
         grep -E "device_blocks|REPRO" "${D}/cusan-X04.${tool}.log" | head -5
     done

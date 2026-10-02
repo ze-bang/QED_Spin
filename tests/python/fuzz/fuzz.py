@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Randomized differential fuzzing of the qed public API against a dense numpy oracle.
 
-    python tests/fuzz/fuzz.py --seed 1 --cases 150 --device cpu --out DIR --budget-seconds 540 --strict
+    python tests/python/fuzz/fuzz.py --seed 1 --cases 150 --device cpu --out DIR --budget-seconds 540 --strict
 
 Each case draws a small spin-1/2 model (N <= 12) from a family whose symmetry content is
 known and then VERIFIED numerically (U(1), Sz parity, spin flip, complex conjugation,
@@ -20,7 +20,7 @@ Statuses: pass | wrong | crash | refused | timeout | invalid_ok | invalid_bad, p
 harness_error (the reference or comparison code itself failed -- a harness problem, not a
 library finding) and skip (not applicable after the library resolved its groups).
 A non-pass record that matches an entry of known.json (an accepted failure tied to an OPEN
-ledger id of tests/regress/manifest.json) carries that id in known_id. Under --strict the
+ledger id of tests/python/regress/manifest.json) carries that id in known_id. Under --strict the
 exit code is 1 when any non-pass record is unexplained (or a harness_error occurred) and 2
 when known.json names a ledger id that is not open.
 

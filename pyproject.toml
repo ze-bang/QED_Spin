@@ -91,7 +91,7 @@ WITH_CUDA = "OFF"
 # Tooling: ruff (linter) + pytest defaults.
 # -----------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["python/tests"]
+testpaths = ["tests/python"]
 python_files = ["test_*.py"]
 # Skip the long-running perf/scale guards by default (run them in the nightly
 # benchmarks lane with `-m slow`).
@@ -99,7 +99,7 @@ addopts = "-q -m 'not slow and not grid and not regress'"
 markers = [
     "slow: long-running performance / scale guard (deselected by default; run in nightly with -m slow)",
     "grid: task x symmetry x backend coverage grid (run with -m grid; scripts/run_grid.sbatch)",
-    "regress: audit repro ratchet, tests/regress (run with -m 'regress and not perf and not info')",
+    "regress: audit repro ratchet, tests/python/regress (run with -m 'regress and not perf and not info')",
     "perf: regress case for a confirmed performance issue (non-blocking bench stage)",
     "info: regress case that is inconclusive, not reproduced or an elegance note",
     "gpu: needs a CUDA device; skipped without one",

@@ -14,7 +14,7 @@ but only when converged).
 
 Model: open Ising chain N=4, H = sum_i Sz_i Sz_{i+1}, Symmetry(sz=2): one 6-dim block with three
 doubly degenerate levels {-3/4, -1/4, +1/4}. eigs(H, k=7) with ED_SYM_LG_DENSE_FLOOR=0 (the
-library's own test-grid setting, python/tests/grid/adapter.py:64) forces the Krylov lane.
+library's own test-grid setting, tests/python/grid/adapter.py:64) forces the Krylov lane.
 Expected: the 6 levels with multiplicity (k > restricted dim returns all)."""
 import os
 import signal

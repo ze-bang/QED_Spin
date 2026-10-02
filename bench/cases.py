@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "python"))
 from grid.models import Model, chain, fourier, triangular  # noqa: E402
 
 from qed import Symmetry, dynamics, eigs, expect, spectrum, thermal  # noqa: E402

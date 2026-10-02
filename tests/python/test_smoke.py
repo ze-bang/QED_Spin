@@ -2,7 +2,7 @@
 
 These checks intentionally stay tiny so they pass on any developer laptop
 in <1 s. Heavier physics regression tests live under
-``python/tests/test_physics_*.py`` and are gated on the C++ ctest baseline.
+``tests/python/test_physics_*.py`` and are gated on the C++ ctest baseline.
 """
 
 from __future__ import annotations

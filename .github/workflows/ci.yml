@@ -113,7 +113,7 @@ jobs:
 
       - name: Run pytest (slow guards and the grid deselected)
         run: |
-          python -m pytest python/tests -v
+          python -m pytest tests/python -v
 
   # ---------------------------------------------------------------------------
   # Examples lane: build the wheel and run every script in examples/.
@@ -160,7 +160,7 @@ jobs:
           done
 
   # ---------------------------------------------------------------------------
-  # Correctness lane: the CPU half of the coverage grid (python/tests/grid), every
+  # Correctness lane: the CPU half of the coverage grid (tests/python/grid), every
   # task x symmetry cell against an independent dense reference.
   # ---------------------------------------------------------------------------
   linux-correctness:
@@ -201,7 +201,7 @@ jobs:
         env:
           OMP_NUM_THREADS: "4"
           QED_GRID_REPORT: grid-cpu.json
-        run: python -m pytest python/tests/grid -m grid -k cpu -q -rf -p no:cacheprovider
+        run: python -m pytest tests/python/grid -m grid -k cpu -q -rf -p no:cacheprovider
 
       - name: Upload the cell table
         if: always()

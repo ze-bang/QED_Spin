@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Golden-master driver.
 
-    python tests/golden/golden.py record  --out tests/golden/refs/<tag>/cpu.json.gz
-    python tests/golden/golden.py compare --ref tests/golden/refs/<tag>/cpu.json.gz
-    python tests/golden/golden.py bless   --ref tests/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
-    python tests/golden/golden.py retire  --ref tests/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
-    python tests/golden/golden.py list
+    python tests/python/golden/golden.py record  --out tests/python/golden/refs/<tag>/cpu.json.gz
+    python tests/python/golden/golden.py compare --ref tests/python/golden/refs/<tag>/cpu.json.gz
+    python tests/python/golden/golden.py bless   --ref tests/python/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
+    python tests/python/golden/golden.py retire  --ref tests/python/golden/refs/<tag>/cpu.json.gz --only <case> ... --reason "..."
+    python tests/python/golden/golden.py list
 
 ``record`` runs every case twice unless --once is given and refuses to write a
 reference whose two passes disagree (those cases are listed as nondeterministic and

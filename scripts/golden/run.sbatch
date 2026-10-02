@@ -1,8 +1,8 @@
 #!/bin/bash
 # Golden harness, one device per job.
-#   sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
+#   sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/python/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
 #   sbatch --gpus-per-node=h100:1 --mem=48G \
-#          --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
+#          --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/python/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
 # MODE: compare (default) | record | bless (ONLY=<exact names>, REASON=...) | bless_new (REASON=...)
 #       | retire (ONLY=<exact names>, REASON=...). ONLY="substr ..." filters compare/record.
 #       compare: TOL=<x> overrides every tier (0 = bitwise), GOT=<file> compares a recorded file
@@ -32,7 +32,7 @@ if [ "${DEVICE}" = gpu ]; then
     python -c "import qed, sys; ok = bool(qed._core.have_cuda()); print('have_cuda =', ok); sys.exit(0 if ok else 3)" \
         || { echo "=== NODE FAILURE: the library sees no CUDA device ==="; exit 3; }
 fi
-G="python -u tests/golden/golden.py"
+G="python -u tests/python/golden/golden.py"
 case "${MODE}" in
     compare)   ${G} compare --device "${DEVICE}" --ref "${REF}" ${ONLY:+--only ${ONLY}} ${TOL:+--tol ${TOL}} ${GOT:+--got ${GOT}} ;;
     record)    ${G} record  --device "${DEVICE}" --out "${REF}" ${ONLY:+--only ${ONLY}} ${ONCE:+--once} ;;

@@ -6,7 +6,7 @@
 scripts/build.sh --variant cpu --tests          # -> build/cpu, with the C++ unit tests
 ctest --test-dir build/cpu --output-on-failure
 export PYTHONPATH=$PWD/python QED_CORE_DIR=$PWD/build/cpu/python/qed
-python -m pytest python/tests                   # API tests; add `-m grid` for the coverage grid
+python -m pytest tests/python                   # API tests; add `-m grid` for the coverage grid
 ```
 
 `scripts/build.sh --variant cuda` builds the CUDA variant into `build/cuda`. On a cluster,
@@ -29,12 +29,12 @@ the BLAS / LAPACK provider (`AUTO`, `FLEXIBLAS`, `OPENBLAS`, `MKL`; `cmake/EDBla
 ## Tests
 
 - C++ code lands with a Catch2 test under `tests/unit/`; Python code with a pytest test
-  under `python/tests/`.
-- A new task, symmetry or backend path gets grid cells (`python/tests/grid`) checked
+  under `tests/python/`.
+- A new task, symmetry or backend path gets grid cells (`tests/python/grid`) checked
   against the dense reference; sampled GPU paths must reproduce the CPU path at the same
   seeds.
 - Changes that move numbers on purpose re-bless the golden suite
-  (`tests/golden/golden.py bless`) with a reason.
+  (`tests/python/golden/golden.py bless`) with a reason.
 
 ## Where things live
 

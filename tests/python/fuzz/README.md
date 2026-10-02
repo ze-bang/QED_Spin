@@ -9,9 +9,9 @@ strict `device="gpu"`, validated requests, `dense_max_dim`, canonical mTPQ, cert
 
 ```bash
 source scripts/golden/env.sh                       # this checkout's python/ + build/$QED_VARIANT
-python tests/fuzz/fuzz.py --seed 1 --cases 150 --device cpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
-python tests/fuzz/fuzz.py --seed 1 --cases 150 --device gpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
-python tests/fuzz/fuzz.py --seed 1 --replay 1-37 --out /tmp/x    # rerun one case in-process, print it
+python tests/python/fuzz/fuzz.py --seed 1 --cases 150 --device cpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
+python tests/python/fuzz/fuzz.py --seed 1 --cases 150 --device gpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
+python tests/python/fuzz/fuzz.py --seed 1 --replay 1-37 --out /tmp/x    # rerun one case in-process, print it
 ```
 
 Options: `--case-timeout` (hard per-case kill, default 240 s), `--families ring,tri`,
@@ -31,7 +31,7 @@ unexplained records, how often each known entry matched).
 ## Gate use and known.json
 
 `known.json` lists the accepted failures. Each entry names an OPEN ledger id of
-`tests/regress/manifest.json` and either a predicate (`match`: dotted record paths -> a list of
+`tests/python/regress/manifest.json` and either a predicate (`match`: dotted record paths -> a list of
 allowed values, `{"re": ...}`, `{"contains": ...}`, `{"nonempty": ...}`, `{"absent": ...}`,
 `{"lt"/"gt": ...}`, or a scalar) or explicit `cases` (`[seed, index, device]`). A non-pass record
 that matches an entry carries its ledger id in `known_id`. With `--strict` the exit code is 1

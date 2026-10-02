@@ -1,6 +1,6 @@
 """Run one audit repro script the way the audit ran it.
 
-    python tests/regress/run_one.py tests/regress/repros/<id>.py [args...]
+    python tests/python/regress/run_one.py tests/python/regress/repros/<id>.py [args...]
 
 The repro scripts call ``qed._core.cuda_device_count()``, which the extension does not
 bind. When it is missing it is supplied here, counting the GPUs that ``nvidia-smi -L``

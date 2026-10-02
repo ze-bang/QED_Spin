@@ -16,7 +16,7 @@ lg_sectors raises "N block(s) could not certify their lowest levels". The depend
 deflated (block size reduced) and the cycle continued, as in standard block Lanczos.
 
 Reached through dense_max_dim=0 (ED_SYM_LG_DENSE_FLOOR=0 before 0.6.0), which the test grid sets
-(python/tests/grid/adapter.py:64) to force the Krylov lane at toy dimensions. Model: open Heisenberg
+(tests/python/grid/adapter.py:64) to force the Krylov lane at toy dimensions. Model: open Heisenberg
 chain with unequal bonds (no spatial symmetry, distinct one-magnon levels), Symmetry(sz=1): one block
 of dimension N. Expected: odd N (3, 5) with block_size=2 raises; even N (4) with block_size=2 and
 odd N with block_size=1 return the exact ground energy.

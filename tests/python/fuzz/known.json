@@ -1,5 +1,5 @@
 {
- "comment": "Accepted known failures of tests/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
+ "comment": "Accepted known failures of tests/python/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/python/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
  "accepted": [
   {
    "name": "tr_fold_vectors_short",

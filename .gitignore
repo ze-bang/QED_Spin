@@ -183,5 +183,5 @@ local.cmake.user
 
 # job logs and scratch golden recordings
 /logs/
-/tests/golden/refs/smoke/
+/tests/python/golden/refs/smoke/
 bench/results/

@@ -1,4 +1,4 @@
-"""Benchmark models that the grid zoo (python/tests/grid/models.py) does not hold: the
+"""Benchmark models that the grid zoo (tests/python/grid/models.py) does not hold: the
 nearest-neighbour Heisenberg ring and 6x6 triangular torus of the XDiag twins, the 36-site
 kagome torus (Heisenberg and the BFG model), the triangle-based NLCE clusters, and the
 symmetry selections the cases use (a block named by momentum and irrep characters)."""
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import qed
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "python"))
 from support.triangular import TriangularTorus  # noqa: E402
 
 

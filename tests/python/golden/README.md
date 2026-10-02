@@ -2,7 +2,7 @@
 
 Records the VALUES every public verb returns on small systems at a reference commit,
 and compares later commits against them. It complements the coverage grid
-(`python/tests/grid`, which checks against a dense reference): the golden suite also
+(`tests/python/grid`, which checks against a dense reference): the golden suite also
 pins behaviour that has no closed-form reference -- fixed-seed thermal curves, which
 calls raise, how many eigenvalues come back, which symmetry sector a level lives in.
 
@@ -39,9 +39,9 @@ exactly (the default `dense_max_dim` of `qed.thermal`) and sample the larger one
 ## Running (compute nodes only)
 
     scripts/gate/submit.sh <account> --build-only        # builds the extension (submits a job)
-    sbatch --export=ALL,DEVICE=cpu,MODE=record,REF=tests/golden/refs/<tag>/cpu.json.gz  scripts/golden/run.sbatch
-    sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
-    sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
+    sbatch --export=ALL,DEVICE=cpu,MODE=record,REF=tests/python/golden/refs/<tag>/cpu.json.gz  scripts/golden/run.sbatch
+    sbatch --export=ALL,DEVICE=cpu,MODE=compare,REF=tests/python/golden/refs/<tag>/cpu.json.gz scripts/golden/run.sbatch
+    sbatch --gpus-per-node=h100:1 --mem=48G --export=ALL,DEVICE=gpu,MODE=compare,REF=tests/python/golden/refs/<tag>/gpu.json.gz scripts/golden/run.sbatch
 
 
 Bitwise evidence for a refactor that claims to change nothing: record the base build once

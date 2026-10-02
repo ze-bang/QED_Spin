@@ -68,10 +68,10 @@ On the host, sampled blocks below 2^16 states run concurrently, one thread each.
 
 ## Verification
 
-- `python/tests/grid` checks every task × symmetry × backend cell against a dense
+- `tests/python/grid` checks every task × symmetry × backend cell against a dense
   reference. Sampled GPU cells must reproduce the CPU path at the same seeds, except
   spin-restricted finite-T dynamics, which is held to the reference (see the test).
-- `tests/golden` holds recorded results on CPU and GPU.
+- `tests/python/golden` holds recorded results on CPU and GPU.
 - `bench/` holds timed cases with recorded baselines.
 - `scripts/gate/` runs the build, the C++ unit tests, pytest, the grid, the golden
   suite and the examples as SLURM arrays.

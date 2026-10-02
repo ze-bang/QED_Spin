@@ -11,4 +11,4 @@ Four short scripts, one per task; each runs in seconds:
 
 Every verb takes `sym=` (default `qed.Symmetry.auto()`) and `device=` (`"cpu"`, `"gpu"`,
 `"auto"`). Correctness of every task x symmetry x backend combination is pinned by the
-coverage grid in `python/tests/grid/`.
+coverage grid in `tests/python/grid/`.
