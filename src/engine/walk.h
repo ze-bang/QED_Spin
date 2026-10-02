@@ -7,6 +7,8 @@
 
 #include "internal.h"
 
+#include <ed/core/footprint.h>
+#include <ed/core/memory.h>
 #include <ed/sectors/sectors.h>
 #include <ed/core/interrupt.h>
 #include <ed/ops/casimir.h>
@@ -14,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -104,9 +107,13 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
 }
 
 /// Dense spectra of many blocks: on the host one block at a time, or -- on a device lane --
-/// materialised as the walk visits them and solved in one batched cuSOLVER call at the end
-/// (the walk streams stars, so the matrices are the only thing that outlives a star).
-/// place(Task::DenseBatch) chooses each entry's lane.
+/// materialised as the walk visits them and solved in batched cuSOLVER calls (the walk streams
+/// stars, so the matrices are the only thing that outlives a star). place(Task::DenseBatch)
+/// chooses each entry's lane. A batch is packed on the host and uploaded at once, so it is solved
+/// before it outgrows a quarter of the free device memory or of the RAM the job may still
+/// allocate (cuSOLVER's workspace and the eigenvalues come on top), and never holds more than
+/// 256 MiB of matrices; a block larger than that is solved on the host, and so is a batch whose
+/// device solve fails.
 class DenseBatch {
 public:
     explicit DenseBatch(Device device) : device_(device) {}
@@ -117,7 +124,15 @@ public:
         const std::size_t id = spectra_.size();
         spectra_.emplace_back();
         lanes_.push_back(ed::place(device_, {ed::Task::DenseBatch, mv.dim()}));
+        const std::uint64_t bytes = 16 * mv.dim() * mv.dim();
+        if (ed::on_device(lanes_.back())) {
+            if (budget_ == 0) budget_ = batch_budget();
+            if (bytes > budget_) lanes_.back() = ed::Lane::HostDense;   // too large for any batch
+            else if (16 * packed_.data.size() + bytes > budget_) solve();
+        }
         if (!ed::on_device(lanes_.back())) {
+            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {mv.dim()}).host,
+                                        "dense spectrum");
             spectra_.back() = solve_block_full(mv);
             return id;
         }
@@ -134,21 +149,36 @@ public:
     /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
     void solve() {
         if (queued_.empty()) return;
+        std::vector<double> ev;
+        bool on_device = false;
 #ifdef WITH_CUDA
-        const std::vector<double> ev = ed::solvers::lg_blocks_batched_eigenvalues_gpu(packed_);
-#else
-        const std::vector<double> ev;   // unreachable: nothing is queued without a device
+        try {
+            ev = ed::solvers::lg_blocks_batched_eigenvalues_gpu(packed_);
+            on_device = true;
+        } catch (const std::exception& e) {
+            ED_LOG(Warn, "dense spectra: the batched device solve of %zu blocks failed (%s); solving them on the host",
+                   queued_.size(), e.what());
+        }
 #endif
         std::size_t off = 0;
         for (std::size_t q = 0; q < queued_.size(); ++q) {
             const std::size_t nb = static_cast<std::size_t>(packed_.block_dim[q]);
-            spectra_[queued_[q]].assign(ev.begin() + static_cast<long>(off),
-                                        ev.begin() + static_cast<long>(off + nb));
-            off += nb;
+            if (on_device) {
+                spectra_[queued_[q]].assign(ev.begin() + static_cast<long>(off),
+                                            ev.begin() + static_cast<long>(off + nb));
+                off += nb;
+            } else {
+                Eigen::MatrixXcd Hb = Eigen::Map<const Eigen::MatrixXcd>(
+                    packed_.data.data() + packed_.offset[q], static_cast<Eigen::Index>(nb),
+                    static_cast<Eigen::Index>(nb));
+                spectra_[queued_[q]] = ed::solvers::lg_detail::dense_eigenvalues_inplace(Hb);
+                lanes_[queued_[q]] = ed::Lane::HostDense;
+            }
         }
-        device_blocks_ += queued_.size();
+        if (on_device) device_blocks_ += queued_.size();
         queued_.clear();
         packed_ = {};
+        budget_ = 0;   // measured afresh for the next batch
     }
 
     [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
@@ -156,12 +186,24 @@ public:
     [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
 
 private:
+    // 256 MiB of matrices already amortise the launch (many small blocks, or a few large ones);
+    // less when a quarter of the free device memory or of the job's RAM is smaller (those two
+    // are not checked under ED_MEM_GUARD_OFF, or where they cannot be measured).
+    static std::uint64_t batch_budget() {
+        std::uint64_t b = std::uint64_t{256} << 20;
+        if (ed::core::mem_guard_off()) return b;
+        if (const auto dev = ed::core::available_device_bytes(/*fresh=*/true)) b = std::min<std::uint64_t>(b, *dev / 4);
+        if (const std::uint64_t ram = ed::core::available_ram_bytes()) b = std::min<std::uint64_t>(b, ram / 4);
+        return std::max<std::uint64_t>(b, 1);
+    }
+
     Device device_;
     std::vector<ed::Lane>             lanes_;
     ed::solvers::LgBlocksPacked       packed_;
     std::vector<std::size_t>          queued_;
     std::vector<std::vector<double>>  spectra_;
     std::size_t                       device_blocks_ = 0;
+    std::uint64_t                     budget_ = 0;   // bytes of the current batch's matrices at most
 };
 
 /// The S^2 operator a total-spin restriction needs (null without one).
