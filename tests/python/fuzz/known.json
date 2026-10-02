@@ -1,19 +1,4 @@
 {
  "comment": "Accepted known failures of tests/python/fuzz/fuzz.py. Each entry names a ledger id that is OPEN in tests/python/regress/manifest.json and a predicate on the case record (see README.md). A record that matches is tagged with the id and does not fail --strict; an entry whose ledger id is no longer open makes --strict exit 2 (remove the entry when the bug is fixed). Only open ledger bugs belong here; new findings do not.",
- "accepted": [
-  {
-   "name": "gpu_w_block_parity_or_full_space",
-   "ledger": "K1-sym-composition-02",
-   "why": "parity / full-space runs put every point-group star through the isotypic W path, which has no device kernel; device='gpu' refuses the block",
-   "match": {"device": ["gpu"], "status": ["refused"], "extra.error_class": ["DeviceUnsupported"],
-             "message": {"re": "n_up -1 \\(dim [0-9]+\\) is an isotypic \\(W\\) block, which has no device kernel"}}
-  },
-  {
-   "name": "gpu_w_block_fixed_n_up",
-   "ledger": "K1-sym-composition-02",
-   "why": "at fixed n_up a star with irreps of dimension > 1 (or a declined group path) goes to the isotypic W path, which has no device kernel (the K1-sym-composition-02 claim); P6.3 retires the W path (d-dimensional group sectors) for every n_up, which removes these too",
-   "match": {"device": ["gpu"], "status": ["refused"], "extra.error_class": ["DeviceUnsupported"],
-             "message": {"re": "n_up [0-9]+ \\(dim [0-9]+\\) is an isotypic \\(W\\) block, which has no device kernel"}}
-  }
- ]
+ "accepted": []
 }
