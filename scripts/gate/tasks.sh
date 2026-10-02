@@ -13,8 +13,10 @@ CPU_TASKS=(
   "examples|for ex in examples/[0-9]*.py; do python -u \"\${ex}\" || exit 1; done"
   "grid_cpu_levels|${GRID} -k 'cpu and (eigs or vectors or expect or spectrum)'"
   "grid_cpu_thermal|${GRID} -k 'cpu and th_'"
-  "grid_cpu_dyn0|${GRID} -k 'cpu and dyn0'"
-  "grid_cpu_dynT|${GRID} -k 'cpu and dynT'"
+  "grid_cpu_dyn0|${GRID} -k 'cpu and dyn0 and not _3b'"
+  "grid_cpu_dyn0_3b|${GRID} -k 'cpu and dyn0_3b'"
+  "grid_cpu_dynT|${GRID} -k 'cpu and dynT and not _3b'"
+  "grid_cpu_dynT_3b|${GRID} -k 'cpu and dynT_3b'"
 )
 GPU_TASKS=()
 if [ "${V}" = cpu ]; then
@@ -29,7 +31,8 @@ else
     "grid_gpu_mtpq|${GRID} -k 'gpu and (th_mtpq or th_O)'"
     "grid_gpu_dyn0|${GRID} -k 'gpu and dyn0'"
     "grid_gpu_dynT_zz|${GRID} -k 'gpu and dynT_zz'"
-    "grid_gpu_dynT_pm|${GRID} -k 'gpu and (dynT_pm or dynT_3b)'"
+    "grid_gpu_dynT_pm|${GRID} -k 'gpu and dynT_pm'"
+    "grid_gpu_dynT_3b|${GRID} -k 'gpu and dynT_3b'"
   )
 fi
 # Audit repro ratchet (python/tests/regress): shards bin-packed by the scripts' # SECONDS caps,
