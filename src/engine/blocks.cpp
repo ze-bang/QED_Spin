@@ -5,9 +5,7 @@
 
 #include "internal.h"
 
-namespace ed::solvers {
-
-using namespace lg_detail;
+namespace ed::solvers::lg_detail {
 
 std::vector<std::complex<double>> lift_to_rep(const BlockData& b, const std::complex<double>* v) {
     if (!b.hk)       // a star solved on the group-sector path never builds its k-sector
@@ -27,4 +25,4 @@ std::vector<std::complex<double>> lift_to_rep(const BlockData& b, const std::com
     return u;
 }
 
-}  // namespace ed::solvers
+}  // namespace ed::solvers::lg_detail
