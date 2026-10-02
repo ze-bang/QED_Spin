@@ -535,3 +535,37 @@ TEST_CASE("tridiag_eig solves the Lanczos tridiagonal",
     alpha[3] = std::nan("");
     CHECK_THROWS_AS(ed::krylov::tridiag_eig(alpha, beta, m, true), ed::ConvergenceError);
 }
+
+// tridiag_ends: the gates' O(m) form must read what tridiag_eig reads, also when the lowest pair
+// has converged (decaying trailing couplings: a tiny last component, the Paige regime).
+TEST_CASE("tridiag_ends matches tridiag_eig at the ends of the spectrum", "[krylov][tridiag]") {
+    std::mt19937_64 rng(0x3E4D5ull);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    for (const std::size_t m : {std::size_t{1}, std::size_t{2}, std::size_t{5}, std::size_t{40}, std::size_t{200}}) {
+        for (int trial = 0; trial < 6; ++trial) {
+            INFO("m " << m << " trial " << trial);
+            std::vector<double> alpha(m), beta(m + 1);
+            for (auto& a : alpha) a = dist(rng);
+            for (auto& b : beta) b = 0.05 + std::abs(dist(rng));
+            if (trial % 2)   // Lanczos-like: the couplings decay past the middle
+                for (std::size_t i = m / 2; i <= m; ++i) beta[i] *= std::pow(0.6, static_cast<double>(i - m / 2));
+            const auto full = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+            const std::size_t c = std::min<std::size_t>(4, m);
+            const auto ends = ed::krylov::tridiag_ends(alpha, beta, m, c);
+            REQUIRE(ends.values.size() == c);
+            REQUIRE(ends.vectors.size() == m * c);
+            CHECK(std::abs(ends.top - full.values[m - 1]) < 1e-13);
+            for (std::size_t j = 0; j < c; ++j) {
+                CHECK(std::abs(ends.values[j] - full.values[j]) < 1e-13);
+                for (std::size_t i = 0; i < m; ++i) CHECK(std::abs(std::abs(ends.z(i, j)) - std::abs(full.z(i, j))) < 1e-10);
+                // The Paige bound the gates compare with their thresholds.
+                const double bound_full = beta[m] * std::abs(full.z(m - 1, j));
+                const double bound_ends = beta[m] * std::abs(ends.z(m - 1, j));
+                CHECK(std::abs(bound_ends - bound_full) <= 1e-10 * bound_full + 1e-13);   // the gates judge >= 1e-9 scale
+            }
+        }
+    }
+    std::vector<double> alpha{0.1, 0.2, std::nan("")}, beta{0.0, 0.5, 0.5, 0.5};
+    CHECK_THROWS_AS(ed::krylov::tridiag_ends(alpha, beta, 3, 1), ed::ConvergenceError);
+    CHECK(ed::krylov::tridiag_ends(alpha, beta, 0, 1).values.empty());
+}

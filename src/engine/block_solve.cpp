@@ -243,6 +243,25 @@ inline std::size_t leading_block(const std::vector<double>& alpha, const std::ve
     return m;
 }
 
+// The k = 1 gate and readout of a Lanczos run of m steps: lowest_levels on the lowest Ritz values,
+// their Paige bounds and the Ritz values' scale, in O(m) through tridiag_ends. Four values cover
+// the lowest level unless it fills them (a cluster of ghost copies); then the full solve decides.
+bool lowest_level(const std::vector<double>& alpha, const std::vector<double>& beta, std::size_t m,
+                  std::vector<double>* out) {
+    const double beta_m = beta.size() > m ? std::abs(beta[m]) : 0.0;
+    const ed::krylov::TridiagEnds t = ed::krylov::tridiag_ends(alpha, beta, m, 4);
+    const std::size_t c = t.values.size();
+    const double scale = std::max({std::abs(t.values.front()), std::abs(t.top), 1e-300});
+    // scale-free: lowest_levels' level width, relative to the Ritz values' scale
+    if (c < m && std::abs(t.values[c - 1] - t.values.front()) <= 1e-9 * scale) {
+        const ed::krylov::TridiagEig f = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
+        return lowest_levels(m, f.values.data(), [&](std::size_t j) { return beta_m * std::abs(f.z(m - 1, j)); },
+                             scale, 1, out);
+    }
+    return lowest_levels(c, t.values.data(), [&](std::size_t j) { return beta_m * std::abs(t.z(m - 1, j)); },
+                         scale, 1, out);
+}
+
 }  // namespace
 
 // The Krylov-Schur working set at cycle length m on lane B (core/footprint.h): the part that
@@ -378,28 +397,16 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     ed::krylov::LanczosKernelOptions kopts;
     kopts.max_iter        = static_cast<std::size_t>(std::min<std::uint64_t>(
         nb, max_iter > 0 ? max_iter : lg_lowest_max_iter(k)));
-    // Ring reorth is a MEMORY term at frontier dims: 8 ring vectors x 16 B
-    // x nb is ~48 GB per 3.8e8-dim block (81 G RSS measured against a 96 G
-    // budget on a 4x3 kagome block). This scan is
-    // eigenvalues-only and the k-DISTINCT Paige-bound gate below is
-    // ghost-aware by design, so above the two-pass dim floor we drop to
-    // the pure three-term recurrence: ghosts cost duplicate converged
-    // copies (deduped), not wrong eigenvalues. Small blocks keep the ring
-    // -- it sharpens the excited window at negligible cost there.
-    if (static_cast<std::size_t>(nb) > kLgTwoPassMinDim) {
-        kopts.reorth          = ed::krylov::ReorthPolicy::None;
-    } else if (static_cast<std::size_t>(nb) <= kopts.max_iter) {
-        // The run may span the whole block. The ring's projections are not recorded in the
-        // tridiagonal; once the space is (nearly) exhausted they stop being negligible, and the
-        // tridiagonal's eigenvalues leave H's spectrum (the 28-state parity-1 k-sectors of the
-        // chiral 3x3 torus: -5.31939 against E0 -5.31922). At this size full reorthogonalisation
-        // is exact and cheap. Blocks this small are dense at the default crossover.
-        kopts.reorth          = ed::krylov::ReorthPolicy::FullCGS2;
-    } else {
-        kopts.reorth          = ed::krylov::ReorthPolicy::LocalDGKS3;
-        kopts.local_ring_size = 8;
-    }
-    kopts.keep_basis      = kopts.reorth == ed::krylov::ReorthPolicy::FullCGS2;   // CGS2 projects on it
+    // The pure three-term recurrence: this scan is eigenvalues-only and its gate is ghost-aware
+    // (below), so a ghost costs a duplicate converged copy, merged into its level, not a wrong
+    // value; and it holds no basis (at frontier dims one vector is ~6 GB). A local reorthogonalisation
+    // ring bought nothing for the lowest level and cost 8 vectors (~48 GB on a 3.8e8-dim block).
+    // Only a run that may span the whole block reorthogonalises fully: there the recurrence would
+    // go on from roundoff once the space is exhausted. At this size full reorthogonalisation is
+    // exact and cheap; blocks this small are dense at the default crossover.
+    kopts.reorth     = static_cast<std::size_t>(nb) <= kopts.max_iter ? ed::krylov::ReorthPolicy::FullCGS2
+                                                                       : ed::krylov::ReorthPolicy::None;
+    kopts.keep_basis = kopts.reorth == ed::krylov::ReorthPolicy::FullCGS2;   // CGS2 projects on it
     // k-LOWEST converged Ritz early exit: at 1e8 dims the window fills with
     // ghost COPIES of converged extremes, and a ghost is exactly as
     // stationary as an eigenvalue (a stationarity test burns the full
@@ -415,26 +422,15 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // sector minimum of -6.57). The gate demands that the k LOWEST distinct
     // Ritz values, walked contiguously from the bottom, EACH carry a
     // converged bound -- the first unconverged distinct value vetoes the
-    // exit.
-    {
-        const std::size_t kk = k;
-        kopts.convergence_check =
-            [kk](const std::vector<double>& alpha,
-                 const std::vector<double>& beta) -> bool {
-                const std::size_t m_all = alpha.size();
-                const std::size_t m = leading_block(alpha, beta, m_all);
-                // An exhausted Krylov space (m < m_all) is exact; a live run needs a few steps.
-                if (m == m_all && m_all < kk + 2) return false;
-                const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
-                const double beta_m = (beta.size() > m) ? std::abs(beta[m]) : 0.0;
-                const double scale = std::max(
-                    {std::abs(t.values[0]), std::abs(t.values[m - 1]), 1e-300});
-                return lowest_levels(m, t.values.data(),
-                                     [&](std::size_t j) { return beta_m * std::abs(t.z(m - 1, j)); },
-                                     scale, kk, nullptr);
-            };
-        kopts.convergence_check_interval = 10;
-    }
+    // exit. It is O(m) (lowest_level), so it runs after every step.
+    kopts.convergence_check = [](const std::vector<double>& alpha, const std::vector<double>& beta) -> bool {
+        const std::size_t m_all = alpha.size();
+        const std::size_t m = leading_block(alpha, beta, m_all);
+        // An exhausted Krylov space (m < m_all) is exact; a live run needs a few steps.
+        if (m == m_all && m_all < k + 2) return false;
+        return lowest_level(alpha, beta, m, nullptr);
+    };
+    kopts.convergence_check_interval = 1;
     CountedH Hc{H.bind<B>()};
     // Fixed start-vector seed. Single-vector Lanczos returns ONE copy of a
     // genuinely degenerate pair (see above for the lanes that count copies).
@@ -444,20 +440,14 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     BlockSolution sol;
     sol.applies = Hc.applies;
     if (kres.alpha.empty()) return sol;
-    const std::size_t m = leading_block(kres.alpha, kres.beta, kres.alpha.size());
-    const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(kres.alpha, kres.beta, m, /*vectors=*/true);
-    // Ghost handling: with a local reorth ring at dim ~1e8 the Ritz
-    // window fills with ghost COPIES of converged extremes faster than
-    // genuine upper levels converge. On this path a single-vector recurrence
-    // cannot represent a true within-block degeneracy anyway (exact
-    // arithmetic yields ONE copy per eigenvalue), so equal-to-tolerance
-    // duplicates ARE one level (see lowest_levels). Additionally
-    // keep only Ritz values whose tridiagonal residual bound
-    // |beta_m * z_{m,j}| marks them converged -- both tests are free (the
-    // tridiag is m <= a few hundred).
-    const double beta_m = (kres.beta.size() > m) ? std::abs(kres.beta[m]) : 0.0;
-    const double scale  = std::max(
-        {std::abs(t.values.front()), std::abs(t.values[m - 1]), 1e-300});
+    // Ghost handling: the Ritz window fills with ghost COPIES of converged
+    // extremes faster than genuine upper levels converge. On this path a
+    // single-vector recurrence cannot represent a true within-block
+    // degeneracy anyway (exact arithmetic yields ONE copy per eigenvalue),
+    // so equal-to-tolerance duplicates ARE one level (see lowest_levels).
+    // Additionally keep only Ritz values whose tridiagonal residual bound
+    // |beta_m * z_{m,j}| marks them converged.
+    //
     // CONTIGUITY (pairs with the gate above): walk the Ritz values
     // ASCENDING, merge ghost copies into levels, and take the k lowest levels
     // -- STOPPING at the first unconverged one. Skipping past it would
@@ -466,10 +456,10 @@ static BlockSolution lowest_scan_lane(B& be, const ed::LinearOperator& H, std::u
     // converged=true. An unconverged low value truncates the list and flags
     // the block unconverged; it is never silently replaced by a higher value.
     // A budget-capped block that could not deliver k converged levels must be
-    // DISTINGUISHABLE from a converged one downstream.
-    sol.converged = lowest_levels(m, t.values.data(),
-                                  [&](std::size_t j) { return beta_m * std::abs(t.z(m - 1, j)); },
-                                  scale, k, &sol.values);
+    // DISTINGUISHABLE from a converged one downstream. The readout is the
+    // gate's own computation, so the two never disagree.
+    const std::size_t m = leading_block(kres.alpha, kres.beta, kres.alpha.size());
+    sol.converged = lowest_level(kres.alpha, kres.beta, m, &sol.values);
     return sol;
 }
 
@@ -612,10 +602,10 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
             // scale-free: relative to the Ritz values' scale
             if (!(b > 1e-12 * scale)) break;
             scale = std::max(scale, b);
-            if (m >= 3 && m % 10 == 0) {
-                // Paige bound on the smallest Ritz value only.
-                const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
-                const double tscale = std::max({std::abs(t.values[0]), std::abs(t.values[m - 1]), 1e-300});
+            if (m >= 3) {
+                // Paige bound on the smallest Ritz value only, O(m) (tridiag_ends): every step.
+                const ed::krylov::TridiagEnds t = ed::krylov::tridiag_ends(alpha, beta, m, 1);
+                const double tscale = std::max({std::abs(t.values[0]), std::abs(t.top), 1e-300});
                 // scale-free: relative to the Ritz values' scale
                 if (beta[m] * std::abs(t.z(m - 1, 0)) < 1e-9 * tscale) break;
             }
@@ -630,11 +620,8 @@ gs_lanczos(B& be, CountedH& H, std::size_t n, std::size_t kept_basis_max_dim, st
             }
         }
         left -= m;
-        std::vector<double> z;   // the lowest Ritz vector of the tridiagonal
-        {
-            const ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(alpha, beta, m, /*vectors=*/true);
-            z.assign(t.vectors.begin(), t.vectors.begin() + static_cast<long>(m));
-        }
+        // The lowest Ritz vector of the tridiagonal.
+        const std::vector<double> z = ed::krylov::tridiag_ends(alpha, beta, m, 1).vectors;
         // ---------------- u = sum_j z_j V_j ----------------------------
         be.fill_zero(u.get(), n);
         if (keeping) {
