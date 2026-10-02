@@ -1,7 +1,282 @@
 {
   "commit": "the commit that adds this file",
-  "note": "qed.api baseline, CPU, from gate 62312406",
+  "note": "qed.api baseline, CPU, from gate 62312406 + P3 exit cells (sq12ring, kagome12bq, dyn*_3b, tri9h) measured on ba1a670: jobs 62505565 / 62505613",
   "cells": [
+    {
+      "cell": "dyn0_3b-abelian-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.297298939833182E-9,
+      "note": "rel L1 0.000",
+      "secs": 2.29
+    },
+    {
+      "cell": "dyn0_3b-abelian-tri9-cpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.396639566986642E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.04
+    },
+    {
+      "cell": "dyn0_3b-abelian-tri9chi-cpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.7214748417951396E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.01
+    },
+    {
+      "cell": "dyn0_3b-flip-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "flip",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.2870362072276354E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.7
+    },
+    {
+      "cell": "dyn0_3b-lg-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.297298939833182E-9,
+      "note": "rel L1 0.000",
+      "secs": 2.55
+    },
+    {
+      "cell": "dyn0_3b-lg-kagome12bq-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.2005701432859674E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.56
+    },
+    {
+      "cell": "dyn0_3b-lg-sq12ring-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.00004819405331125354,
+      "note": "rel L1 0.000",
+      "secs": 2.34
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.2381582672376635E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.06
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9chi-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.7214748417951396E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.03
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9h-cpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.752054734840197E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.05
+    },
+    {
+      "cell": "dyn0_3b-none-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "none",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.3709251074615128E-14,
+      "note": "rel L1 0.000",
+      "secs": 48.82
+    },
+    {
+      "cell": "dyn0_3b-none-tri9chi-cpu",
+      "task": "dyn0_3b",
+      "content": "none",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.038509293422042E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.31
+    },
+    {
+      "cell": "dyn0_3b-su2-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 9.604468950961127E-15,
+      "note": "rel L1 0.000",
+      "secs": 47.4
+    },
+    {
+      "cell": "dyn0_3b-su2-kagome12bq-cpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.5320062531232687E-9,
+      "note": "rel L1 0.000",
+      "secs": 2.05
+    },
+    {
+      "cell": "dyn0_3b-su2-sq12ring-cpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.069670215864772E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.13
+    },
+    {
+      "cell": "dyn0_3b-su2-tri9-cpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.6169109052999432E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.15
+    },
+    {
+      "cell": "dyn0_3b-sz_all-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.2870362072276354E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.94
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.7305928879471388E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.1
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9chi-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.5677823433239645E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.03
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9h-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.528600272002065E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.08
+    },
+    {
+      "cell": "dyn0_3b-sz_one-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.4726970527435977E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.31
+    },
+    {
+      "cell": "dyn0_3b-sz_one-sq12ring-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 8.946640632444336E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.4
+    },
+    {
+      "cell": "dyn0_3b-sz_one-tri9-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.7561774378362276E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.02
+    },
+    {
+      "cell": "dyn0_3b-sz_one-tri9h-cpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.8488675936099265E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.02
+    },
+    {
+      "cell": "dyn0_3b-tr-chain12-cpu",
+      "task": "dyn0_3b",
+      "content": "tr",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.297298939833182E-9,
+      "note": "rel L1 0.000",
+      "secs": 2.29
+    },
     {
       "cell": "dyn0_pm-abelian-chain12-cpu",
       "task": "dyn0_pm",
@@ -58,6 +333,28 @@
       "secs": 2.84
     },
     {
+      "cell": "dyn0_pm-lg-kagome12bq-cpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.0563294935211895E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.11
+    },
+    {
+      "cell": "dyn0_pm-lg-sq12ring-cpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.224656114678305E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.88
+    },
+    {
       "cell": "dyn0_pm-lg-tri9-cpu",
       "task": "dyn0_pm",
       "content": "lg",
@@ -78,6 +375,17 @@
       "metric": 3.389417085553758E-14,
       "note": "rel L1 0.000",
       "secs": 0.31
+    },
+    {
+      "cell": "dyn0_pm-lg-tri9h-cpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.3804068489346615E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.02
     },
     {
       "cell": "dyn0_pm-none-chain12-cpu",
@@ -111,6 +419,28 @@
       "metric": 3.648683554139441E-14,
       "note": "rel L1 0.000",
       "secs": 1.92
+    },
+    {
+      "cell": "dyn0_pm-su2-kagome12bq-cpu",
+      "task": "dyn0_pm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.606757431849886E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.17
+    },
+    {
+      "cell": "dyn0_pm-su2-sq12ring-cpu",
+      "task": "dyn0_pm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.549616078830374E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.31
     },
     {
       "cell": "dyn0_pm-su2-tri9-cpu",
@@ -157,6 +487,17 @@
       "secs": 0.09
     },
     {
+      "cell": "dyn0_pm-sz_all-tri9h-cpu",
+      "task": "dyn0_pm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.94838731345564E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.01
+    },
+    {
       "cell": "dyn0_pm-sz_one-chain12-cpu",
       "task": "dyn0_pm",
       "content": "sz_one",
@@ -168,6 +509,17 @@
       "secs": 2.55
     },
     {
+      "cell": "dyn0_pm-sz_one-sq12ring-cpu",
+      "task": "dyn0_pm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.1818152951649054E-13,
+      "note": "rel L1 0.000",
+      "secs": 2.44
+    },
+    {
       "cell": "dyn0_pm-sz_one-tri9-cpu",
       "task": "dyn0_pm",
       "content": "sz_one",
@@ -177,6 +529,17 @@
       "metric": 1.4668512858910493E-14,
       "note": "rel L1 0.000",
       "secs": 0.19
+    },
+    {
+      "cell": "dyn0_pm-sz_one-tri9h-cpu",
+      "task": "dyn0_pm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.531057165689396E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.01
     },
     {
       "cell": "dyn0_pm-tr-chain12-cpu",
@@ -256,6 +619,28 @@
       "secs": 3.88
     },
     {
+      "cell": "dyn0_zz-lg-kagome12bq-cpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.501455756014043E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.06
+    },
+    {
+      "cell": "dyn0_zz-lg-sq12ring-cpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.918818075790559E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.09
+    },
+    {
       "cell": "dyn0_zz-lg-tri9-cpu",
       "task": "dyn0_zz",
       "content": "lg",
@@ -276,6 +661,17 @@
       "metric": 3.336598886718047E-14,
       "note": "rel L1 0.000",
       "secs": 0.31
+    },
+    {
+      "cell": "dyn0_zz-lg-tri9h-cpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.5166458554094288E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.02
     },
     {
       "cell": "dyn0_zz-lg-xyz12-cpu",
@@ -333,6 +729,28 @@
       "secs": 49.89
     },
     {
+      "cell": "dyn0_zz-su2-kagome12bq-cpu",
+      "task": "dyn0_zz",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.607579621549209E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.05
+    },
+    {
+      "cell": "dyn0_zz-su2-sq12ring-cpu",
+      "task": "dyn0_zz",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.386014121627991E-14,
+      "note": "rel L1 0.000",
+      "secs": 2.22
+    },
+    {
       "cell": "dyn0_zz-su2-tri9-cpu",
       "task": "dyn0_zz",
       "content": "su2",
@@ -377,6 +795,17 @@
       "secs": 0.33
     },
     {
+      "cell": "dyn0_zz-sz_all-tri9h-cpu",
+      "task": "dyn0_zz",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.807379404696289E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.01
+    },
+    {
       "cell": "dyn0_zz-sz_one-chain12-cpu",
       "task": "dyn0_zz",
       "content": "sz_one",
@@ -386,6 +815,17 @@
       "metric": 8.674325624297365E-14,
       "note": "rel L1 0.000",
       "secs": 2.56
+    },
+    {
+      "cell": "dyn0_zz-sz_one-sq12ring-cpu",
+      "task": "dyn0_zz",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.4508990902520977E-13,
+      "note": "rel L1 0.000",
+      "secs": 2.46
     },
     {
       "cell": "dyn0_zz-sz_one-tri9-cpu",
@@ -399,6 +839,17 @@
       "secs": 0.01
     },
     {
+      "cell": "dyn0_zz-sz_one-tri9h-cpu",
+      "task": "dyn0_zz",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.359747493090059E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.01
+    },
+    {
       "cell": "dyn0_zz-tr-chain12-cpu",
       "task": "dyn0_zz",
       "content": "tr",
@@ -408,6 +859,281 @@
       "metric": 3.13899358738208E-14,
       "note": "rel L1 0.000",
       "secs": 2.81
+    },
+    {
+      "cell": "dynT_3b-abelian-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01279107134304655,
+      "note": "rel L1 0.013",
+      "secs": 6.91
+    },
+    {
+      "cell": "dynT_3b-abelian-tri9-cpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.030316821571969698,
+      "note": "rel L1 0.030",
+      "secs": 0.16
+    },
+    {
+      "cell": "dynT_3b-abelian-tri9chi-cpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03882931520491243,
+      "note": "rel L1 0.039",
+      "secs": 0.16
+    },
+    {
+      "cell": "dynT_3b-flip-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "flip",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.007528680336456006,
+      "note": "rel L1 0.008",
+      "secs": 6.25
+    },
+    {
+      "cell": "dynT_3b-lg-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01279107134304655,
+      "note": "rel L1 0.013",
+      "secs": 6.91
+    },
+    {
+      "cell": "dynT_3b-lg-kagome12bq-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.010466024524427188,
+      "note": "rel L1 0.010",
+      "secs": 8.37
+    },
+    {
+      "cell": "dynT_3b-lg-sq12ring-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.02272203561710269,
+      "note": "rel L1 0.023",
+      "secs": 7.02
+    },
+    {
+      "cell": "dynT_3b-lg-tri9-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.015784718550295247,
+      "note": "rel L1 0.016",
+      "secs": 1.26
+    },
+    {
+      "cell": "dynT_3b-lg-tri9chi-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03882931520491243,
+      "note": "rel L1 0.039",
+      "secs": 0.17
+    },
+    {
+      "cell": "dynT_3b-lg-tri9h-cpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.013906516115619886,
+      "note": "rel L1 0.014",
+      "secs": 1.07
+    },
+    {
+      "cell": "dynT_3b-none-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "none",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.011433762642560085,
+      "note": "rel L1 0.011",
+      "secs": 8.36
+    },
+    {
+      "cell": "dynT_3b-none-tri9chi-cpu",
+      "task": "dynT_3b",
+      "content": "none",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.039005334315840995,
+      "note": "rel L1 0.039",
+      "secs": 0.5
+    },
+    {
+      "cell": "dynT_3b-su2-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.021805035628569943,
+      "note": "rel L1 0.022",
+      "secs": 3.28
+    },
+    {
+      "cell": "dynT_3b-su2-kagome12bq-cpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.02842088262067082,
+      "note": "rel L1 0.028",
+      "secs": 3.34
+    },
+    {
+      "cell": "dynT_3b-su2-sq12ring-cpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.05118264024216473,
+      "note": "rel L1 0.051",
+      "secs": 3.44
+    },
+    {
+      "cell": "dynT_3b-su2-tri9-cpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03873378481265916,
+      "note": "rel L1 0.039",
+      "secs": 0.26
+    },
+    {
+      "cell": "dynT_3b-sz_all-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.007528680336456006,
+      "note": "rel L1 0.008",
+      "secs": 6.05
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9-cpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.043865060875984636,
+      "note": "rel L1 0.044",
+      "secs": 0.24
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9chi-cpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9chi",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0483325945861823,
+      "note": "rel L1 0.048",
+      "secs": 0.29
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9h-cpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.037803258374530406,
+      "note": "rel L1 0.038",
+      "secs": 0.25
+    },
+    {
+      "cell": "dynT_3b-sz_one-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.017657107733796997,
+      "note": "rel L1 0.018",
+      "secs": 3.23
+    },
+    {
+      "cell": "dynT_3b-sz_one-sq12ring-cpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.04552047492543437,
+      "note": "rel L1 0.046",
+      "secs": 3.45
+    },
+    {
+      "cell": "dynT_3b-sz_one-tri9-cpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03932645486581627,
+      "note": "rel L1 0.039",
+      "secs": 0.19
+    },
+    {
+      "cell": "dynT_3b-sz_one-tri9h-cpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03932933943781606,
+      "note": "rel L1 0.039",
+      "secs": 0.17
+    },
+    {
+      "cell": "dynT_3b-tr-chain12-cpu",
+      "task": "dynT_3b",
+      "content": "tr",
+      "model": "chain12",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01279107134304655,
+      "note": "rel L1 0.013",
+      "secs": 6.61
     },
     {
       "cell": "dynT_pm-abelian-chain12-cpu",
@@ -465,6 +1191,28 @@
       "secs": 7.88
     },
     {
+      "cell": "dynT_pm-lg-kagome12bq-cpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.010913262499045989,
+      "note": "rel L1 0.011",
+      "secs": 7.9
+    },
+    {
+      "cell": "dynT_pm-lg-sq12ring-cpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01995195818260347,
+      "note": "rel L1 0.020",
+      "secs": 6.66
+    },
+    {
       "cell": "dynT_pm-lg-tri9-cpu",
       "task": "dynT_pm",
       "content": "lg",
@@ -485,6 +1233,17 @@
       "metric": 0.04185611646545127,
       "note": "rel L1 0.042",
       "secs": 0.47
+    },
+    {
+      "cell": "dynT_pm-lg-tri9h-cpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.018668993856025103,
+      "note": "rel L1 0.019",
+      "secs": 0.31
     },
     {
       "cell": "dynT_pm-none-chain12-cpu",
@@ -518,6 +1277,28 @@
       "metric": 0.012657211148069265,
       "note": "rel L1 0.013",
       "secs": 3.26
+    },
+    {
+      "cell": "dynT_pm-su2-kagome12bq-cpu",
+      "task": "dynT_pm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03638131280522811,
+      "note": "rel L1 0.036",
+      "secs": 3.19
+    },
+    {
+      "cell": "dynT_pm-su2-sq12ring-cpu",
+      "task": "dynT_pm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.05444357671547226,
+      "note": "rel L1 0.054",
+      "secs": 3.15
     },
     {
       "cell": "dynT_pm-su2-tri9-cpu",
@@ -564,6 +1345,17 @@
       "secs": 0.33
     },
     {
+      "cell": "dynT_pm-sz_all-tri9h-cpu",
+      "task": "dynT_pm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.030153399043588238,
+      "note": "rel L1 0.030",
+      "secs": 0.21
+    },
+    {
       "cell": "dynT_pm-sz_one-chain12-cpu",
       "task": "dynT_pm",
       "content": "sz_one",
@@ -575,6 +1367,17 @@
       "secs": 3.85
     },
     {
+      "cell": "dynT_pm-sz_one-sq12ring-cpu",
+      "task": "dynT_pm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.06974997105133095,
+      "note": "rel L1 0.070",
+      "secs": 3.38
+    },
+    {
       "cell": "dynT_pm-sz_one-tri9-cpu",
       "task": "dynT_pm",
       "content": "sz_one",
@@ -584,6 +1387,17 @@
       "metric": 0.05414635005336109,
       "note": "rel L1 0.054",
       "secs": 0.17
+    },
+    {
+      "cell": "dynT_pm-sz_one-tri9h-cpu",
+      "task": "dynT_pm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.043209222676287025,
+      "note": "rel L1 0.043",
+      "secs": 0.16
     },
     {
       "cell": "dynT_pm-tr-chain12-cpu",
@@ -663,6 +1477,28 @@
       "secs": 8.04
     },
     {
+      "cell": "dynT_zz-lg-kagome12bq-cpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.008452338915835637,
+      "note": "rel L1 0.008",
+      "secs": 8.17
+    },
+    {
+      "cell": "dynT_zz-lg-sq12ring-cpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.024282334516911665,
+      "note": "rel L1 0.024",
+      "secs": 6.69
+    },
+    {
       "cell": "dynT_zz-lg-tri9-cpu",
       "task": "dynT_zz",
       "content": "lg",
@@ -683,6 +1519,17 @@
       "metric": 0.02324635305459401,
       "note": "rel L1 0.023",
       "secs": 0.47
+    },
+    {
+      "cell": "dynT_zz-lg-tri9h-cpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.017267717231634276,
+      "note": "rel L1 0.017",
+      "secs": 0.33
     },
     {
       "cell": "dynT_zz-lg-xyz12-cpu",
@@ -740,6 +1587,28 @@
       "secs": 52.23
     },
     {
+      "cell": "dynT_zz-su2-kagome12bq-cpu",
+      "task": "dynT_zz",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.03617130974908103,
+      "note": "rel L1 0.036",
+      "secs": 3.08
+    },
+    {
+      "cell": "dynT_zz-su2-sq12ring-cpu",
+      "task": "dynT_zz",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.05856431660406325,
+      "note": "rel L1 0.059",
+      "secs": 3.18
+    },
+    {
       "cell": "dynT_zz-su2-tri9-cpu",
       "task": "dynT_zz",
       "content": "su2",
@@ -784,6 +1653,17 @@
       "secs": 0.34
     },
     {
+      "cell": "dynT_zz-sz_all-tri9h-cpu",
+      "task": "dynT_zz",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.021041711107629726,
+      "note": "rel L1 0.021",
+      "secs": 0.21
+    },
+    {
       "cell": "dynT_zz-sz_one-chain12-cpu",
       "task": "dynT_zz",
       "content": "sz_one",
@@ -795,6 +1675,17 @@
       "secs": 3.99
     },
     {
+      "cell": "dynT_zz-sz_one-sq12ring-cpu",
+      "task": "dynT_zz",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.05311177237139063,
+      "note": "rel L1 0.053",
+      "secs": 3.33
+    },
+    {
       "cell": "dynT_zz-sz_one-tri9-cpu",
       "task": "dynT_zz",
       "content": "sz_one",
@@ -804,6 +1695,17 @@
       "metric": 0.018964292241552105,
       "note": "rel L1 0.019",
       "secs": 0.18
+    },
+    {
+      "cell": "dynT_zz-sz_one-tri9h-cpu",
+      "task": "dynT_zz",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0583103223861055,
+      "note": "rel L1 0.058",
+      "secs": 0.17
     },
     {
       "cell": "dynT_zz-tr-chain12-cpu",
@@ -883,6 +1785,28 @@
       "secs": 0.21
     },
     {
+      "cell": "eigs-lg-kagome12bq-cpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.105427357601002E-15,
+      "note": "",
+      "secs": 48.16
+    },
+    {
+      "cell": "eigs-lg-sq12ring-cpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.329070518200751E-15,
+      "note": "",
+      "secs": 0.06
+    },
+    {
       "cell": "eigs-lg-tri9-cpu",
       "task": "eigs",
       "content": "lg",
@@ -903,6 +1827,17 @@
       "metric": 1.3322676295501878E-14,
       "note": "",
       "secs": 0.29
+    },
+    {
+      "cell": "eigs-lg-tri9h-cpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.329070518200751E-15,
+      "note": "",
+      "secs": 0.08
     },
     {
       "cell": "eigs-lg-xyz12-cpu",
@@ -960,6 +1895,28 @@
       "secs": 54.93
     },
     {
+      "cell": "eigs-su2-kagome12bq-cpu",
+      "task": "eigs",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 48.78
+    },
+    {
+      "cell": "eigs-su2-sq12ring-cpu",
+      "task": "eigs",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 48.58
+    },
+    {
       "cell": "eigs-su2-tri9-cpu",
       "task": "eigs",
       "content": "su2",
@@ -1004,6 +1961,17 @@
       "secs": 0.01
     },
     {
+      "cell": "eigs-sz_all-tri9h-cpu",
+      "task": "eigs",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.105427357601002E-15,
+      "note": "",
+      "secs": 0.07
+    },
+    {
       "cell": "eigs-sz_one-chain12-cpu",
       "task": "eigs",
       "content": "sz_one",
@@ -1015,10 +1983,32 @@
       "secs": 0.18
     },
     {
+      "cell": "eigs-sz_one-sq12ring-cpu",
+      "task": "eigs",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.8191672047105385E-14,
+      "note": "",
+      "secs": 48.6
+    },
+    {
       "cell": "eigs-sz_one-tri9-cpu",
       "task": "eigs",
       "content": "sz_one",
       "model": "tri9",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.440892098500626E-15,
+      "note": "",
+      "secs": 0.0
+    },
+    {
+      "cell": "eigs-sz_one-tri9h-cpu",
+      "task": "eigs",
+      "content": "sz_one",
+      "model": "tri9h",
       "backend": "cpu",
       "status": "pass",
       "metric": 4.440892098500626E-15,
@@ -1103,6 +2093,28 @@
       "secs": 0.56
     },
     {
+      "cell": "expect-lg-kagome12bq-cpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.3877788046704215E-15,
+      "note": "9 clusters, matrix elements 4.4e-16",
+      "secs": 0.51
+    },
+    {
+      "cell": "expect-lg-sq12ring-cpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.440917929490128E-15,
+      "note": "9 clusters, matrix elements 1.4e-16",
+      "secs": 0.57
+    },
+    {
       "cell": "expect-lg-tri9-cpu",
       "task": "expect",
       "content": "lg",
@@ -1123,6 +2135,17 @@
       "metric": 1.5543126230988698E-15,
       "note": "3 clusters, matrix elements 2.1e-16",
       "secs": 0.6
+    },
+    {
+      "cell": "expect-lg-tri9h-cpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.8858505035911505E-16,
+      "note": "6 clusters, matrix elements 1.9e-16",
+      "secs": 0.1
     },
     {
       "cell": "expect-lg-xyz12-cpu",
@@ -1180,6 +2203,28 @@
       "secs": 0.18
     },
     {
+      "cell": "expect-su2-kagome12bq-cpu",
+      "task": "expect",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.3861802251067274E-15,
+      "note": "3 clusters, matrix elements 0.0e+00",
+      "secs": 0.16
+    },
+    {
+      "cell": "expect-su2-sq12ring-cpu",
+      "task": "expect",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.788636071533347E-15,
+      "note": "3 clusters, matrix elements 0.0e+00",
+      "secs": 0.18
+    },
+    {
       "cell": "expect-su2-tri9-cpu",
       "task": "expect",
       "content": "su2",
@@ -1224,6 +2269,17 @@
       "secs": 0.03
     },
     {
+      "cell": "expect-sz_all-tri9h-cpu",
+      "task": "expect",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.885780586188048E-16,
+      "note": "6 clusters, matrix elements 4.2e-17",
+      "secs": 0.29
+    },
+    {
       "cell": "expect-sz_one-chain12-cpu",
       "task": "expect",
       "content": "sz_one",
@@ -1235,6 +2291,17 @@
       "secs": 0.85
     },
     {
+      "cell": "expect-sz_one-sq12ring-cpu",
+      "task": "expect",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.585605340943431E-15,
+      "note": "9 clusters, matrix elements 3.3e-16",
+      "secs": 0.96
+    },
+    {
       "cell": "expect-sz_one-tri9-cpu",
       "task": "expect",
       "content": "sz_one",
@@ -1242,6 +2309,17 @@
       "backend": "cpu",
       "status": "pass",
       "metric": 1.942890293094024E-16,
+      "note": "3 clusters, matrix elements 4.2e-17",
+      "secs": 0.01
+    },
+    {
+      "cell": "expect-sz_one-tri9h-cpu",
+      "task": "expect",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.440892098500626E-16,
       "note": "3 clusters, matrix elements 4.2e-17",
       "secs": 0.01
     },
@@ -1323,6 +2401,28 @@
       "secs": 0.02
     },
     {
+      "cell": "spectrum-lg-kagome12bq-cpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.4424906541753444E-14,
+      "note": "",
+      "secs": 0.02
+    },
+    {
+      "cell": "spectrum-lg-sq12ring-cpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.7533531010703882E-14,
+      "note": "",
+      "secs": 0.05
+    },
+    {
       "cell": "spectrum-lg-tri9-cpu",
       "task": "spectrum",
       "content": "lg",
@@ -1343,6 +2443,17 @@
       "metric": 1.3322676295501878E-14,
       "note": "",
       "secs": 0.32
+    },
+    {
+      "cell": "spectrum-lg-tri9h-cpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.105427357601002E-15,
+      "note": "",
+      "secs": 0.05
     },
     {
       "cell": "spectrum-lg-xyz12-cpu",
@@ -1400,6 +2511,28 @@
       "secs": 0.09
     },
     {
+      "cell": "spectrum-su2-kagome12bq-cpu",
+      "task": "spectrum",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.4349632593280148E-14,
+      "note": "",
+      "secs": 0.08
+    },
+    {
+      "cell": "spectrum-su2-sq12ring-cpu",
+      "task": "spectrum",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.4638958368304884E-14,
+      "note": "",
+      "secs": 0.11
+    },
+    {
       "cell": "spectrum-su2-tri9-cpu",
       "task": "spectrum",
       "content": "su2",
@@ -1444,6 +2577,17 @@
       "secs": 0.01
     },
     {
+      "cell": "spectrum-sz_all-tri9h-cpu",
+      "task": "spectrum",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.105427357601002E-15,
+      "note": "",
+      "secs": 0.0
+    },
+    {
       "cell": "spectrum-sz_one-chain12-cpu",
       "task": "spectrum",
       "content": "sz_one",
@@ -1455,6 +2599,17 @@
       "secs": 0.18
     },
     {
+      "cell": "spectrum-sz_one-sq12ring-cpu",
+      "task": "spectrum",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 8.970602038971265E-14,
+      "note": "",
+      "secs": 0.18
+    },
+    {
       "cell": "spectrum-sz_one-tri9-cpu",
       "task": "spectrum",
       "content": "sz_one",
@@ -1462,6 +2617,17 @@
       "backend": "cpu",
       "status": "pass",
       "metric": 6.661338147750939E-15,
+      "note": "",
+      "secs": 0.0
+    },
+    {
+      "cell": "spectrum-sz_one-tri9h-cpu",
+      "task": "spectrum",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 5.329070518200751E-15,
       "note": "",
       "secs": 0.0
     },
@@ -1543,6 +2709,28 @@
       "secs": 0.95
     },
     {
+      "cell": "th_Oexact-lg-kagome12bq-cpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.4980018094074533E-16,
+      "note": "max |dO| 2.50e-16",
+      "secs": 0.85
+    },
+    {
+      "cell": "th_Oexact-lg-sq12ring-cpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.2490009614545252E-15,
+      "note": "max |dO| 1.25e-15",
+      "secs": 0.48
+    },
+    {
       "cell": "th_Oexact-lg-tri9-cpu",
       "task": "th_Oexact",
       "content": "lg",
@@ -1563,6 +2751,17 @@
       "metric": 8.049146102251491E-16,
       "note": "max |dO| 8.05e-16",
       "secs": 0.3
+    },
+    {
+      "cell": "th_Oexact-lg-tri9h-cpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.718448038447226E-16,
+      "note": "max |dO| 4.72e-16",
+      "secs": 0.06
     },
     {
       "cell": "th_Oexact-lg-xyz12-cpu",
@@ -1620,6 +2819,28 @@
       "secs": 1.08
     },
     {
+      "cell": "th_Oexact-su2-kagome12bq-cpu",
+      "task": "th_Oexact",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.2490009027033011E-15,
+      "note": "max |dO| 1.25e-15",
+      "secs": 0.11
+    },
+    {
+      "cell": "th_Oexact-su2-sq12ring-cpu",
+      "task": "th_Oexact",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.497202527569243E-15,
+      "note": "max |dO| 3.50e-15",
+      "secs": 0.14
+    },
+    {
       "cell": "th_Oexact-su2-tri9-cpu",
       "task": "th_Oexact",
       "content": "su2",
@@ -1664,6 +2885,17 @@
       "secs": 0.02
     },
     {
+      "cell": "th_Oexact-sz_all-tri9h-cpu",
+      "task": "th_Oexact",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.192690473634684E-15,
+      "note": "max |dO| 2.19e-15",
+      "secs": 0.01
+    },
+    {
       "cell": "th_Oexact-sz_one-chain12-cpu",
       "task": "th_Oexact",
       "content": "sz_one",
@@ -1675,6 +2907,17 @@
       "secs": 0.76
     },
     {
+      "cell": "th_Oexact-sz_one-sq12ring-cpu",
+      "task": "th_Oexact",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.3600232051658168E-15,
+      "note": "max |dO| 1.36e-15",
+      "secs": 0.37
+    },
+    {
       "cell": "th_Oexact-sz_one-tri9-cpu",
       "task": "th_Oexact",
       "content": "sz_one",
@@ -1684,6 +2927,17 @@
       "metric": 3.524958103184872E-15,
       "note": "max |dO| 3.52e-15",
       "secs": 0.01
+    },
+    {
+      "cell": "th_Oexact-sz_one-tri9h-cpu",
+      "task": "th_Oexact",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 2.3037127760972E-15,
+      "note": "max |dO| 2.30e-15",
+      "secs": 0.0
     },
     {
       "cell": "th_Oexact-tr-chain12-cpu",
@@ -1763,6 +3017,28 @@
       "secs": 0.92
     },
     {
+      "cell": "th_Oftlm-lg-kagome12bq-cpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.000488818277796732,
+      "note": "err R=50: 4.89e-04",
+      "secs": 0.66
+    },
+    {
+      "cell": "th_Oftlm-lg-sq12ring-cpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0016034224117917745,
+      "note": "err R=50: 1.60e-03",
+      "secs": 0.69
+    },
+    {
       "cell": "th_Oftlm-lg-tri9-cpu",
       "task": "th_Oftlm",
       "content": "lg",
@@ -1783,6 +3059,17 @@
       "metric": 0.001341603737070653,
       "note": "err R=50: 1.34e-03",
       "secs": 0.33
+    },
+    {
+      "cell": "th_Oftlm-lg-tri9h-cpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0017529124447400735,
+      "note": "err R=50: 1.75e-03",
+      "secs": 0.07
     },
     {
       "cell": "th_Oftlm-lg-xyz12-cpu",
@@ -1840,6 +3127,28 @@
       "secs": 0.38
     },
     {
+      "cell": "th_Oftlm-su2-kagome12bq-cpu",
+      "task": "th_Oftlm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0055152394739377,
+      "note": "err R=50: 5.52e-03",
+      "secs": 0.36
+    },
+    {
+      "cell": "th_Oftlm-su2-sq12ring-cpu",
+      "task": "th_Oftlm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.004476559819098835,
+      "note": "err R=50: 4.48e-03",
+      "secs": 0.39
+    },
+    {
       "cell": "th_Oftlm-su2-tri9-cpu",
       "task": "th_Oftlm",
       "content": "su2",
@@ -1884,6 +3193,17 @@
       "secs": 0.21
     },
     {
+      "cell": "th_Oftlm-sz_all-tri9h-cpu",
+      "task": "th_Oftlm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.013619482208071338,
+      "note": "err R=50: 1.36e-02",
+      "secs": 0.11
+    },
+    {
       "cell": "th_Oftlm-sz_one-chain12-cpu",
       "task": "th_Oftlm",
       "content": "sz_one",
@@ -1895,6 +3215,17 @@
       "secs": 0.6
     },
     {
+      "cell": "th_Oftlm-sz_one-sq12ring-cpu",
+      "task": "th_Oftlm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.012310327128260828,
+      "note": "err R=50: 1.23e-02",
+      "secs": 0.53
+    },
+    {
       "cell": "th_Oftlm-sz_one-tri9-cpu",
       "task": "th_Oftlm",
       "content": "sz_one",
@@ -1904,6 +3235,17 @@
       "metric": 0.014730953842594957,
       "note": "err R=50: 1.47e-02",
       "secs": 0.13
+    },
+    {
+      "cell": "th_Oftlm-sz_one-tri9h-cpu",
+      "task": "th_Oftlm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.014730953842595679,
+      "note": "err R=50: 1.47e-02",
+      "secs": 0.1
     },
     {
       "cell": "th_Oftlm-tr-chain12-cpu",
@@ -1983,6 +3325,28 @@
       "secs": 0.48
     },
     {
+      "cell": "th_exact-lg-kagome12bq-cpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.7969627442180354E-14,
+      "note": "dE/N 1.11e-16 dC/N 3.80e-14",
+      "secs": 0.02
+    },
+    {
+      "cell": "th_exact-lg-sq12ring-cpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.6653345369377348E-15,
+      "note": "dE/N 4.44e-16 dC/N 1.67e-15",
+      "secs": 0.05
+    },
+    {
       "cell": "th_exact-lg-tri9-cpu",
       "task": "th_exact",
       "content": "lg",
@@ -2003,6 +3367,17 @@
       "metric": 1.569731998706124E-14,
       "note": "dE/N 1.68e-15 dC/N 1.57e-14",
       "secs": 0.29
+    },
+    {
+      "cell": "th_exact-lg-tri9h-cpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.434289889507151E-14,
+      "note": "dE/N 2.96e-16 dC/N 3.43e-14",
+      "secs": 0.05
     },
     {
       "cell": "th_exact-lg-xyz12-cpu",
@@ -2060,6 +3435,28 @@
       "secs": 61.68
     },
     {
+      "cell": "th_exact-su2-kagome12bq-cpu",
+      "task": "th_exact",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.5247062871518818E-14,
+      "note": "dE/N 4.44e-16 dC/N 1.52e-14",
+      "secs": 0.08
+    },
+    {
+      "cell": "th_exact-su2-sq12ring-cpu",
+      "task": "th_exact",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.774758283725532E-14,
+      "note": "dE/N 1.04e-15 dC/N 3.77e-14",
+      "secs": 0.11
+    },
+    {
       "cell": "th_exact-su2-tri9-cpu",
       "task": "th_exact",
       "content": "su2",
@@ -2104,6 +3501,17 @@
       "secs": 0.01
     },
     {
+      "cell": "th_exact-sz_all-tri9h-cpu",
+      "task": "th_exact",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.4367570517840956E-14,
+      "note": "dE/N 1.06e-15 dC/N 3.44e-14",
+      "secs": 0.0
+    },
+    {
       "cell": "th_exact-sz_one-chain12-cpu",
       "task": "th_exact",
       "content": "sz_one",
@@ -2115,6 +3523,17 @@
       "secs": 0.19
     },
     {
+      "cell": "th_exact-sz_one-sq12ring-cpu",
+      "task": "th_exact",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.534209961723415E-14,
+      "note": "dE/N 9.25e-16 dC/N 3.53e-14",
+      "secs": 0.17
+    },
+    {
       "cell": "th_exact-sz_one-tri9-cpu",
       "task": "th_exact",
       "content": "sz_one",
@@ -2123,6 +3542,17 @@
       "status": "pass",
       "metric": 5.268655881944065E-13,
       "note": "dE/N 2.07e-15 dC/N 5.27e-13",
+      "secs": 0.0
+    },
+    {
+      "cell": "th_exact-sz_one-tri9h-cpu",
+      "task": "th_exact",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.015237276962782E-14,
+      "note": "dE/N 1.23e-15 dC/N 1.02e-14",
       "secs": 0.0
     },
     {
@@ -2203,6 +3633,28 @@
       "secs": 0.19
     },
     {
+      "cell": "th_ftlm-lg-kagome12bq-cpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0021324149681381708,
+      "note": "err R=50: 2.13e-03",
+      "secs": 0.08
+    },
+    {
+      "cell": "th_ftlm-lg-sq12ring-cpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.003671799649187698,
+      "note": "err R=50: 3.67e-03",
+      "secs": 0.11
+    },
+    {
       "cell": "th_ftlm-lg-tri9-cpu",
       "task": "th_ftlm",
       "content": "lg",
@@ -2223,6 +3675,17 @@
       "metric": 0.004366428378119045,
       "note": "err R=50: 4.37e-03",
       "secs": 0.38
+    },
+    {
+      "cell": "th_ftlm-lg-tri9h-cpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.011932477068018798,
+      "note": "err R=50: 1.19e-02",
+      "secs": 0.05
     },
     {
       "cell": "th_ftlm-lg-xyz12-cpu",
@@ -2280,6 +3743,28 @@
       "secs": 0.89
     },
     {
+      "cell": "th_ftlm-su2-kagome12bq-cpu",
+      "task": "th_ftlm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0021910757434655537,
+      "note": "err R=50: 2.19e-03",
+      "secs": 0.24
+    },
+    {
+      "cell": "th_ftlm-su2-sq12ring-cpu",
+      "task": "th_ftlm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01200760998772138,
+      "note": "err R=50: 1.20e-02",
+      "secs": 0.27
+    },
+    {
       "cell": "th_ftlm-su2-tri9-cpu",
       "task": "th_ftlm",
       "content": "su2",
@@ -2324,6 +3809,17 @@
       "secs": 0.03
     },
     {
+      "cell": "th_ftlm-sz_all-tri9h-cpu",
+      "task": "th_ftlm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.006133947926261257,
+      "note": "err R=50: 6.13e-03",
+      "secs": 0.02
+    },
+    {
       "cell": "th_ftlm-sz_one-chain12-cpu",
       "task": "th_ftlm",
       "content": "sz_one",
@@ -2335,6 +3831,17 @@
       "secs": 0.2
     },
     {
+      "cell": "th_ftlm-sz_one-sq12ring-cpu",
+      "task": "th_ftlm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.00543670291869965,
+      "note": "err R=50: 5.44e-03",
+      "secs": 0.21
+    },
+    {
       "cell": "th_ftlm-sz_one-tri9-cpu",
       "task": "th_ftlm",
       "content": "sz_one",
@@ -2342,6 +3849,17 @@
       "backend": "cpu",
       "status": "pass",
       "metric": 0.002100016942518934,
+      "note": "err R=50: 2.10e-03",
+      "secs": 0.02
+    },
+    {
+      "cell": "th_ftlm-sz_one-tri9h-cpu",
+      "task": "th_ftlm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0021000169425163685,
       "note": "err R=50: 2.10e-03",
       "secs": 0.02
     },
@@ -2423,6 +3941,28 @@
       "secs": 0.3
     },
     {
+      "cell": "th_mtpq-lg-kagome12bq-cpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.007176161258025375,
+      "note": "err R=16: 7.18e-03",
+      "secs": 0.05
+    },
+    {
+      "cell": "th_mtpq-lg-sq12ring-cpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.012691539500244783,
+      "note": "err R=16: 1.27e-02",
+      "secs": 0.1
+    },
+    {
       "cell": "th_mtpq-lg-tri9-cpu",
       "task": "th_mtpq",
       "content": "lg",
@@ -2443,6 +3983,17 @@
       "metric": 0.02797756788835838,
       "note": "err R=16: 2.80e-02",
       "secs": 0.3
+    },
+    {
+      "cell": "th_mtpq-lg-tri9h-cpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.003280926503459236,
+      "note": "err R=16: 3.28e-03",
+      "secs": 0.06
     },
     {
       "cell": "th_mtpq-lg-xyz12-cpu",
@@ -2500,6 +4051,28 @@
       "secs": 0.24
     },
     {
+      "cell": "th_mtpq-su2-kagome12bq-cpu",
+      "task": "th_mtpq",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0029166433769726627,
+      "note": "err R=16: 2.92e-03",
+      "secs": 0.13
+    },
+    {
+      "cell": "th_mtpq-su2-sq12ring-cpu",
+      "task": "th_mtpq",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.025588044958935536,
+      "note": "err R=16: 2.56e-02",
+      "secs": 0.19
+    },
+    {
       "cell": "th_mtpq-su2-tri9-cpu",
       "task": "th_mtpq",
       "content": "su2",
@@ -2544,6 +4117,17 @@
       "secs": 0.02
     },
     {
+      "cell": "th_mtpq-sz_all-tri9h-cpu",
+      "task": "th_mtpq",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.002483319817163728,
+      "note": "err R=16: 2.48e-03",
+      "secs": 0.01
+    },
+    {
       "cell": "th_mtpq-sz_one-chain12-cpu",
       "task": "th_mtpq",
       "content": "sz_one",
@@ -2555,6 +4139,17 @@
       "secs": 0.24
     },
     {
+      "cell": "th_mtpq-sz_one-sq12ring-cpu",
+      "task": "th_mtpq",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.01968040374943858,
+      "note": "err R=16: 1.97e-02",
+      "secs": 0.18
+    },
+    {
       "cell": "th_mtpq-sz_one-tri9-cpu",
       "task": "th_mtpq",
       "content": "sz_one",
@@ -2564,6 +4159,17 @@
       "metric": 0.009480583299667143,
       "note": "err R=16: 9.48e-03",
       "secs": 0.02
+    },
+    {
+      "cell": "th_mtpq-sz_one-tri9h-cpu",
+      "task": "th_mtpq",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 0.0012005591657800402,
+      "note": "err R=16: 1.20e-03",
+      "secs": 0.0
     },
     {
       "cell": "th_mtpq-tr-chain12-cpu",
@@ -2643,6 +4249,28 @@
       "secs": 0.04
     },
     {
+      "cell": "vectors-lg-kagome12bq-cpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 4.1744385725905886E-14,
+      "note": "residual 3.7e-14 pairing 4.2e-14 lowest 3.7e-14 |V^dag V - 1| 6.9e-15",
+      "secs": 0.04
+    },
+    {
+      "cell": "vectors-lg-sq12ring-cpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.019806626980426E-14,
+      "note": "residual 2.6e-14 pairing 2.5e-14 lowest 3.0e-14 |V^dag V - 1| 6.7e-15",
+      "secs": 0.06
+    },
+    {
       "cell": "vectors-lg-tri9-cpu",
       "task": "vectors",
       "content": "lg",
@@ -2663,6 +4291,17 @@
       "metric": 1.4210854715202004E-14,
       "note": "residual 3.8e-15 pairing 1.4e-14 lowest 3.6e-15",
       "secs": 0.3
+    },
+    {
+      "cell": "vectors-lg-tri9h-cpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 7.105427357601002E-15,
+      "note": "residual 4.6e-15 pairing 7.1e-15 lowest 5.3e-15 |V^dag V - 1| 4.4e-16",
+      "secs": 0.05
     },
     {
       "cell": "vectors-lg-xyz12-cpu",
@@ -2720,6 +4359,28 @@
       "secs": 0.13
     },
     {
+      "cell": "vectors-su2-kagome12bq-cpu",
+      "task": "vectors",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 3.550883850143067E-14,
+      "note": "residual 3.6e-14 pairing 3.4e-14 lowest 3.1e-14 |V^dag V - 1| 6.2e-15",
+      "secs": 0.12
+    },
+    {
+      "cell": "vectors-su2-sq12ring-cpu",
+      "task": "vectors",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.0125233984581428E-13,
+      "note": "residual 3.1e-14 pairing 1.0e-13 lowest 3.2e-14 |V^dag V - 1| 3.6e-15",
+      "secs": 0.15
+    },
+    {
       "cell": "vectors-su2-tri9-cpu",
       "task": "vectors",
       "content": "su2",
@@ -2764,6 +4425,17 @@
       "secs": 0.01
     },
     {
+      "cell": "vectors-sz_all-tri9h-cpu",
+      "task": "vectors",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.3322676295501878E-14,
+      "note": "residual 7.1e-15 pairing 1.3e-14 lowest 4.4e-15 |V^dag V - 1| 4.4e-16",
+      "secs": 0.0
+    },
+    {
       "cell": "vectors-sz_one-chain12-cpu",
       "task": "vectors",
       "content": "sz_one",
@@ -2775,6 +4447,17 @@
       "secs": 0.3
     },
     {
+      "cell": "vectors-sz_one-sq12ring-cpu",
+      "task": "vectors",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 9.325873406851315E-14,
+      "note": "residual 3.6e-14 pairing 9.3e-14 lowest 3.2e-14 |V^dag V - 1| 3.6e-15",
+      "secs": 0.27
+    },
+    {
       "cell": "vectors-sz_one-tri9-cpu",
       "task": "vectors",
       "content": "sz_one",
@@ -2783,6 +4466,17 @@
       "status": "pass",
       "metric": 1.2434497875801753E-14,
       "note": "residual 6.2e-15 pairing 1.2e-14 lowest 4.4e-15",
+      "secs": 0.0
+    },
+    {
+      "cell": "vectors-sz_one-tri9h-cpu",
+      "task": "vectors",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "cpu",
+      "status": "pass",
+      "metric": 1.7763568394002505E-14,
+      "note": "residual 7.0e-15 pairing 1.8e-14 lowest 6.2e-15 |V^dag V - 1| 1.2e-15",
       "secs": 0.0
     },
     {

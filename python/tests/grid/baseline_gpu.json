@@ -1,7 +1,282 @@
 {
   "commit": "the commit that adds this file",
-  "note": "qed.api baseline, GPU, from gate 62312406; isotypic-block cells refused under the strict device policy (gate 62388005)",
+  "note": "qed.api baseline, GPU, from gate 62312406; isotypic-block cells refused under the strict device policy (gate 62388005) + P3 exit cells (sq12ring, kagome12bq, dyn*_3b, tri9h) measured on ba1a670: jobs 62505566 / 62505614",
   "cells": [
+    {
+      "cell": "dyn0_3b-abelian-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.2736060385377546E-9,
+      "note": "rel L1 0.000",
+      "secs": 5.34
+    },
+    {
+      "cell": "dyn0_3b-abelian-tri9-gpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.4012740980521758E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.03
+    },
+    {
+      "cell": "dyn0_3b-abelian-tri9chi-gpu",
+      "task": "dyn0_3b",
+      "content": "abelian",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.7323075271777822E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.09
+    },
+    {
+      "cell": "dyn0_3b-flip-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "flip",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.584655334860748E-14,
+      "note": "rel L1 0.000",
+      "secs": 6.08
+    },
+    {
+      "cell": "dyn0_3b-lg-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.2736060385377546E-9,
+      "note": "rel L1 0.000",
+      "secs": 5.42
+    },
+    {
+      "cell": "dyn0_3b-lg-kagome12bq-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.1576270536097477E-14,
+      "note": "rel L1 0.000",
+      "secs": 5.41
+    },
+    {
+      "cell": "dyn0_3b-lg-sq12ring-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.000051324764321162925,
+      "note": "rel L1 0.000",
+      "secs": 5.42
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.251290875921316E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.12
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9chi-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.7323075271777822E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.04
+    },
+    {
+      "cell": "dyn0_3b-lg-tri9h-gpu",
+      "task": "dyn0_3b",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.7376154481195193E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.1
+    },
+    {
+      "cell": "dyn0_3b-none-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "none",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.9959358924114966E-14,
+      "note": "rel L1 0.000",
+      "secs": 79.03
+    },
+    {
+      "cell": "dyn0_3b-none-tri9chi-gpu",
+      "task": "dyn0_3b",
+      "content": "none",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.8768103960664814E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.54
+    },
+    {
+      "cell": "dyn0_3b-su2-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.196486299542694E-15,
+      "note": "rel L1 0.000",
+      "secs": 78.96
+    },
+    {
+      "cell": "dyn0_3b-su2-kagome12bq-gpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.797915943894384E-9,
+      "note": "rel L1 0.000",
+      "secs": 3.65
+    },
+    {
+      "cell": "dyn0_3b-su2-sq12ring-gpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.0580072988901194E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.68
+    },
+    {
+      "cell": "dyn0_3b-su2-tri9-gpu",
+      "task": "dyn0_3b",
+      "content": "su2",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.583422810649882E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.2
+    },
+    {
+      "cell": "dyn0_3b-sz_all-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.584655334860748E-14,
+      "note": "rel L1 0.000",
+      "secs": 6.06
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.0086187572773504E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.17
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9chi-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.646332875810621E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.08
+    },
+    {
+      "cell": "dyn0_3b-sz_all-tri9h-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.5555768166488086E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.15
+    },
+    {
+      "cell": "dyn0_3b-sz_one-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.751010469855042E-14,
+      "note": "rel L1 0.000",
+      "secs": 4.68
+    },
+    {
+      "cell": "dyn0_3b-sz_one-sq12ring-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 9.040265328242286E-14,
+      "note": "rel L1 0.000",
+      "secs": 4.63
+    },
+    {
+      "cell": "dyn0_3b-sz_one-tri9-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.5908082055716078E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.05
+    },
+    {
+      "cell": "dyn0_3b-sz_one-tri9h-gpu",
+      "task": "dyn0_3b",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.272692691527223E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.04
+    },
+    {
+      "cell": "dyn0_3b-tr-chain12-gpu",
+      "task": "dyn0_3b",
+      "content": "tr",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.2736060385377546E-9,
+      "note": "rel L1 0.000",
+      "secs": 5.39
+    },
     {
       "cell": "dyn0_pm-abelian-chain12-gpu",
       "task": "dyn0_pm",
@@ -58,6 +333,28 @@
       "secs": 5.38
     },
     {
+      "cell": "dyn0_pm-lg-kagome12bq-gpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.312826969888469E-14,
+      "note": "rel L1 0.000",
+      "secs": 5.24
+    },
+    {
+      "cell": "dyn0_pm-lg-sq12ring-gpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.525268210960367E-14,
+      "note": "rel L1 0.000",
+      "secs": 5.45
+    },
+    {
       "cell": "dyn0_pm-lg-tri9-gpu",
       "task": "dyn0_pm",
       "content": "lg",
@@ -78,6 +375,17 @@
       "metric": 3.325109478138164E-14,
       "note": "rel L1 0.000",
       "secs": 0.49
+    },
+    {
+      "cell": "dyn0_pm-lg-tri9h-gpu",
+      "task": "dyn0_pm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.518745510605247E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.12
     },
     {
       "cell": "dyn0_pm-none-chain12-gpu",
@@ -111,6 +419,28 @@
       "metric": 9.955632944992256E-15,
       "note": "rel L1 0.000",
       "secs": 3.73
+    },
+    {
+      "cell": "dyn0_pm-su2-kagome12bq-gpu",
+      "task": "dyn0_pm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.45054768526017E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.71
+    },
+    {
+      "cell": "dyn0_pm-su2-sq12ring-gpu",
+      "task": "dyn0_pm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.0137943697227226E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.88
     },
     {
       "cell": "dyn0_pm-su2-tri9-gpu",
@@ -157,6 +487,17 @@
       "secs": 0.45
     },
     {
+      "cell": "dyn0_pm-sz_all-tri9h-gpu",
+      "task": "dyn0_pm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.4192977057058706E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.02
+    },
+    {
       "cell": "dyn0_pm-sz_one-chain12-gpu",
       "task": "dyn0_pm",
       "content": "sz_one",
@@ -168,6 +509,17 @@
       "secs": 4.63
     },
     {
+      "cell": "dyn0_pm-sz_one-sq12ring-gpu",
+      "task": "dyn0_pm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.1612264957963935E-13,
+      "note": "rel L1 0.000",
+      "secs": 4.64
+    },
+    {
       "cell": "dyn0_pm-sz_one-tri9-gpu",
       "task": "dyn0_pm",
       "content": "sz_one",
@@ -175,6 +527,17 @@
       "backend": "gpu",
       "status": "pass",
       "metric": 1.3277076136506587E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.02
+    },
+    {
+      "cell": "dyn0_pm-sz_one-tri9h-gpu",
+      "task": "dyn0_pm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.298978089309708E-15,
       "note": "rel L1 0.000",
       "secs": 0.02
     },
@@ -256,6 +619,28 @@
       "secs": 5.74
     },
     {
+      "cell": "dyn0_zz-lg-kagome12bq-gpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.2156884312885604E-14,
+      "note": "rel L1 0.000",
+      "secs": 5.4
+    },
+    {
+      "cell": "dyn0_zz-lg-sq12ring-gpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.828302955186862E-14,
+      "note": "rel L1 0.000",
+      "secs": 5.42
+    },
+    {
       "cell": "dyn0_zz-lg-tri9-gpu",
       "task": "dyn0_zz",
       "content": "lg",
@@ -276,6 +661,17 @@
       "metric": 3.349149156936892E-14,
       "note": "rel L1 0.000",
       "secs": 0.49
+    },
+    {
+      "cell": "dyn0_zz-lg-tri9h-gpu",
+      "task": "dyn0_zz",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.5131250111497853E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.04
     },
     {
       "cell": "dyn0_zz-lg-xyz12-gpu",
@@ -333,6 +729,28 @@
       "secs": 79.45
     },
     {
+      "cell": "dyn0_zz-su2-kagome12bq-gpu",
+      "task": "dyn0_zz",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.688315816696113E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.61
+    },
+    {
+      "cell": "dyn0_zz-su2-sq12ring-gpu",
+      "task": "dyn0_zz",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.6932524035448613E-14,
+      "note": "rel L1 0.000",
+      "secs": 3.66
+    },
+    {
       "cell": "dyn0_zz-su2-tri9-gpu",
       "task": "dyn0_zz",
       "content": "su2",
@@ -377,6 +795,17 @@
       "secs": 0.44
     },
     {
+      "cell": "dyn0_zz-sz_all-tri9h-gpu",
+      "task": "dyn0_zz",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.4656002463174085E-14,
+      "note": "rel L1 0.000",
+      "secs": 0.05
+    },
+    {
       "cell": "dyn0_zz-sz_one-chain12-gpu",
       "task": "dyn0_zz",
       "content": "sz_one",
@@ -386,6 +815,17 @@
       "metric": 1.0120158094618238E-13,
       "note": "rel L1 0.000",
       "secs": 4.56
+    },
+    {
+      "cell": "dyn0_zz-sz_one-sq12ring-gpu",
+      "task": "dyn0_zz",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.2756406563126975E-13,
+      "note": "rel L1 0.000",
+      "secs": 4.51
     },
     {
       "cell": "dyn0_zz-sz_one-tri9-gpu",
@@ -399,6 +839,17 @@
       "secs": 0.02
     },
     {
+      "cell": "dyn0_zz-sz_one-tri9h-gpu",
+      "task": "dyn0_zz",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.04565858355018E-15,
+      "note": "rel L1 0.000",
+      "secs": 0.02
+    },
+    {
       "cell": "dyn0_zz-tr-chain12-gpu",
       "task": "dyn0_zz",
       "content": "tr",
@@ -408,6 +859,281 @@
       "metric": 2.9112908788868815E-14,
       "note": "rel L1 0.000",
       "secs": 5.32
+    },
+    {
+      "cell": "dynT_3b-abelian-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.368982616048814E-16,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.4e-16",
+      "secs": 7.82
+    },
+    {
+      "cell": "dynT_3b-abelian-tri9-gpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.3874293252745322E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.4e-15",
+      "secs": 1.37
+    },
+    {
+      "cell": "dynT_3b-abelian-tri9chi-gpu",
+      "task": "dynT_3b",
+      "content": "abelian",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.9367562751868754E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.9e-15",
+      "secs": 1.36
+    },
+    {
+      "cell": "dynT_3b-flip-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "flip",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.1846180896290365E-9,
+      "note": "gpu vs cpu, 4 samples: rel L1 3.2e-09",
+      "secs": 0.93
+    },
+    {
+      "cell": "dynT_3b-lg-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.368982616048814E-16,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.4e-16",
+      "secs": 8.01
+    },
+    {
+      "cell": "dynT_3b-lg-kagome12bq-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.7669385399979355E-8,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.8e-08",
+      "secs": 11.33
+    },
+    {
+      "cell": "dynT_3b-lg-sq12ring-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "wrong",
+      "metric": 0.0018404504911160803,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.8e-03",
+      "secs": 8.97
+    },
+    {
+      "cell": "dynT_3b-lg-tri9-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.793486764865636E-16,
+      "note": "gpu vs cpu, 4 samples: rel L1 5.8e-16",
+      "secs": 14.67
+    },
+    {
+      "cell": "dynT_3b-lg-tri9chi-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.9367562751868754E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.9e-15",
+      "secs": 1.37
+    },
+    {
+      "cell": "dynT_3b-lg-tri9h-gpu",
+      "task": "dynT_3b",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.252129730932726E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.3e-15",
+      "secs": 14.55
+    },
+    {
+      "cell": "dynT_3b-none-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "none",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.3789715423287591E-12,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.4e-12",
+      "secs": 0.22
+    },
+    {
+      "cell": "dynT_3b-none-tri9chi-gpu",
+      "task": "dynT_3b",
+      "content": "none",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.508420297239883E-9,
+      "note": "gpu vs cpu, 4 samples: rel L1 8.5e-09",
+      "secs": 0.15
+    },
+    {
+      "cell": "dynT_3b-su2-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.021806447048837465,
+      "note": "rel L1 0.022",
+      "secs": 10.94
+    },
+    {
+      "cell": "dynT_3b-su2-kagome12bq-gpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.02842064048972943,
+      "note": "rel L1 0.028",
+      "secs": 11.27
+    },
+    {
+      "cell": "dynT_3b-su2-sq12ring-gpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.051123867673427754,
+      "note": "rel L1 0.051",
+      "secs": 11.9
+    },
+    {
+      "cell": "dynT_3b-su2-tri9-gpu",
+      "task": "dynT_3b",
+      "content": "su2",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.03873378481265911,
+      "note": "rel L1 0.039",
+      "secs": 9.32
+    },
+    {
+      "cell": "dynT_3b-sz_all-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.1846180896290365E-9,
+      "note": "gpu vs cpu, 4 samples: rel L1 3.2e-09",
+      "secs": 0.95
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9-gpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.985967163582292E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.0e-15",
+      "secs": 0.6
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9chi-gpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9chi",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.853299520132962E-8,
+      "note": "gpu vs cpu, 4 samples: rel L1 3.9e-08",
+      "secs": 0.6
+    },
+    {
+      "cell": "dynT_3b-sz_all-tri9h-gpu",
+      "task": "dynT_3b",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.417686706245716E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 4.4e-15",
+      "secs": 0.59
+    },
+    {
+      "cell": "dynT_3b-sz_one-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.7179644653957873E-14,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.7e-14",
+      "secs": 0.39
+    },
+    {
+      "cell": "dynT_3b-sz_one-sq12ring-gpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.9663589550809966E-11,
+      "note": "gpu vs cpu, 4 samples: rel L1 4.0e-11",
+      "secs": 0.4
+    },
+    {
+      "cell": "dynT_3b-sz_one-tri9-gpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "tri9",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.914757849334315E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 8.9e-15",
+      "secs": 0.11
+    },
+    {
+      "cell": "dynT_3b-sz_one-tri9h-gpu",
+      "task": "dynT_3b",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.1839281363279159E-14,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.2e-14",
+      "secs": 0.1
+    },
+    {
+      "cell": "dynT_3b-tr-chain12-gpu",
+      "task": "dynT_3b",
+      "content": "tr",
+      "model": "chain12",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.368982616048814E-16,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.4e-16",
+      "secs": 7.85
     },
     {
       "cell": "dynT_pm-abelian-chain12-gpu",
@@ -465,6 +1191,28 @@
       "secs": 8.39
     },
     {
+      "cell": "dynT_pm-lg-kagome12bq-gpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.1039211053126692E-8,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.1e-08",
+      "secs": 11.08
+    },
+    {
+      "cell": "dynT_pm-lg-sq12ring-gpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "wrong",
+      "metric": 0.0008371634036289053,
+      "note": "gpu vs cpu, 4 samples: rel L1 8.4e-04",
+      "secs": 8.87
+    },
+    {
       "cell": "dynT_pm-lg-tri9-gpu",
       "task": "dynT_pm",
       "content": "lg",
@@ -485,6 +1233,17 @@
       "metric": 2.068370057603596E-15,
       "note": "gpu vs cpu, 4 samples: rel L1 2.1e-15",
       "secs": 2.97
+    },
+    {
+      "cell": "dynT_pm-lg-tri9h-gpu",
+      "task": "dynT_pm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.904539558547014E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.9e-15",
+      "secs": 4.83
     },
     {
       "cell": "dynT_pm-none-chain12-gpu",
@@ -518,6 +1277,28 @@
       "metric": 0.012671378019881543,
       "note": "rel L1 0.013",
       "secs": 92.18
+    },
+    {
+      "cell": "dynT_pm-su2-kagome12bq-gpu",
+      "task": "dynT_pm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.03641885511767469,
+      "note": "rel L1 0.036",
+      "secs": 11.26
+    },
+    {
+      "cell": "dynT_pm-su2-sq12ring-gpu",
+      "task": "dynT_pm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.05442536351059076,
+      "note": "rel L1 0.054",
+      "secs": 11.73
     },
     {
       "cell": "dynT_pm-su2-tri9-gpu",
@@ -564,6 +1345,17 @@
       "secs": 0.26
     },
     {
+      "cell": "dynT_pm-sz_all-tri9h-gpu",
+      "task": "dynT_pm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.3395672423271295E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 4.3e-15",
+      "secs": 0.63
+    },
+    {
       "cell": "dynT_pm-sz_one-chain12-gpu",
       "task": "dynT_pm",
       "content": "sz_one",
@@ -575,6 +1367,17 @@
       "secs": 0.36
     },
     {
+      "cell": "dynT_pm-sz_one-sq12ring-gpu",
+      "task": "dynT_pm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.576239801534592E-12,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.6e-12",
+      "secs": 0.41
+    },
+    {
       "cell": "dynT_pm-sz_one-tri9-gpu",
       "task": "dynT_pm",
       "content": "sz_one",
@@ -584,6 +1387,17 @@
       "metric": 6.775483936651977E-15,
       "note": "gpu vs cpu, 4 samples: rel L1 6.8e-15",
       "secs": 0.09
+    },
+    {
+      "cell": "dynT_pm-sz_one-tri9h-gpu",
+      "task": "dynT_pm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.716772054607404E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 4.7e-15",
+      "secs": 0.1
     },
     {
       "cell": "dynT_pm-tr-chain12-gpu",
@@ -663,6 +1477,28 @@
       "secs": 7.6
     },
     {
+      "cell": "dynT_zz-lg-kagome12bq-gpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.8256678523298704E-8,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.8e-08",
+      "secs": 10.31
+    },
+    {
+      "cell": "dynT_zz-lg-sq12ring-gpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "wrong",
+      "metric": 0.0009689154987407482,
+      "note": "gpu vs cpu, 4 samples: rel L1 9.7e-04",
+      "secs": 7.81
+    },
+    {
       "cell": "dynT_zz-lg-tri9-gpu",
       "task": "dynT_zz",
       "content": "lg",
@@ -683,6 +1519,17 @@
       "metric": 1.4418293168434913E-15,
       "note": "gpu vs cpu, 4 samples: rel L1 1.4e-15",
       "secs": 2.86
+    },
+    {
+      "cell": "dynT_zz-lg-tri9h-gpu",
+      "task": "dynT_zz",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.5829095815801134E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 1.6e-15",
+      "secs": 5.09
     },
     {
       "cell": "dynT_zz-lg-xyz12-gpu",
@@ -740,6 +1587,28 @@
       "secs": 91.22
     },
     {
+      "cell": "dynT_zz-su2-kagome12bq-gpu",
+      "task": "dynT_zz",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.036169064489409465,
+      "note": "rel L1 0.036",
+      "secs": 11.16
+    },
+    {
+      "cell": "dynT_zz-su2-sq12ring-gpu",
+      "task": "dynT_zz",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.05858715620368905,
+      "note": "rel L1 0.059",
+      "secs": 11.59
+    },
+    {
       "cell": "dynT_zz-su2-tri9-gpu",
       "task": "dynT_zz",
       "content": "su2",
@@ -784,6 +1653,17 @@
       "secs": 0.25
     },
     {
+      "cell": "dynT_zz-sz_all-tri9h-gpu",
+      "task": "dynT_zz",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.37817855146663E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 4.4e-15",
+      "secs": 0.57
+    },
+    {
       "cell": "dynT_zz-sz_one-chain12-gpu",
       "task": "dynT_zz",
       "content": "sz_one",
@@ -795,6 +1675,17 @@
       "secs": 0.35
     },
     {
+      "cell": "dynT_zz-sz_one-sq12ring-gpu",
+      "task": "dynT_zz",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.613890594169353E-12,
+      "note": "gpu vs cpu, 4 samples: rel L1 3.6e-12",
+      "secs": 0.42
+    },
+    {
       "cell": "dynT_zz-sz_one-tri9-gpu",
       "task": "dynT_zz",
       "content": "sz_one",
@@ -804,6 +1695,17 @@
       "metric": 3.676211349243953E-15,
       "note": "gpu vs cpu, 4 samples: rel L1 3.7e-15",
       "secs": 0.09
+    },
+    {
+      "cell": "dynT_zz-sz_one-tri9h-gpu",
+      "task": "dynT_zz",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.9133695115940385E-15,
+      "note": "gpu vs cpu, 4 samples: rel L1 6.9e-15",
+      "secs": 0.12
     },
     {
       "cell": "dynT_zz-tr-chain12-gpu",
@@ -883,6 +1785,28 @@
       "secs": 0.61
     },
     {
+      "cell": "eigs-lg-kagome12bq-gpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 74.3
+    },
+    {
+      "cell": "eigs-lg-sq12ring-gpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.05
+    },
+    {
       "cell": "eigs-lg-tri9-gpu",
       "task": "eigs",
       "content": "lg",
@@ -903,6 +1827,17 @@
       "metric": null,
       "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.31
+    },
+    {
+      "cell": "eigs-lg-tri9h-gpu",
+      "task": "eigs",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.55
     },
     {
       "cell": "eigs-lg-xyz12-gpu",
@@ -960,6 +1895,28 @@
       "secs": 74.06
     },
     {
+      "cell": "eigs-su2-kagome12bq-gpu",
+      "task": "eigs",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 74.73
+    },
+    {
+      "cell": "eigs-su2-sq12ring-gpu",
+      "task": "eigs",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 0.0,
+      "note": "",
+      "secs": 74.76
+    },
+    {
       "cell": "eigs-su2-tri9-gpu",
       "task": "eigs",
       "content": "su2",
@@ -1004,6 +1961,17 @@
       "secs": 0.02
     },
     {
+      "cell": "eigs-sz_all-tri9h-gpu",
+      "task": "eigs",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.329070518200751E-15,
+      "note": "",
+      "secs": 0.61
+    },
+    {
       "cell": "eigs-sz_one-chain12-gpu",
       "task": "eigs",
       "content": "sz_one",
@@ -1015,6 +1983,17 @@
       "secs": 0.31
     },
     {
+      "cell": "eigs-sz_one-sq12ring-gpu",
+      "task": "eigs",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.4638958368304884E-14,
+      "note": "",
+      "secs": 75.3
+    },
+    {
       "cell": "eigs-sz_one-tri9-gpu",
       "task": "eigs",
       "content": "sz_one",
@@ -1024,6 +2003,17 @@
       "metric": 4.440892098500626E-15,
       "note": "",
       "secs": 0.01
+    },
+    {
+      "cell": "eigs-sz_one-tri9h-gpu",
+      "task": "eigs",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.884981308350689E-15,
+      "note": "",
+      "secs": 0.05
     },
     {
       "cell": "eigs-tr-chain12-gpu",
@@ -1103,6 +2093,28 @@
       "secs": 1.37
     },
     {
+      "cell": "expect-lg-kagome12bq-gpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.01
+    },
+    {
+      "cell": "expect-lg-sq12ring-gpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.04
+    },
+    {
       "cell": "expect-lg-tri9-gpu",
       "task": "expect",
       "content": "lg",
@@ -1123,6 +2135,17 @@
       "metric": null,
       "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.64
+    },
+    {
+      "cell": "expect-lg-tri9h-gpu",
+      "task": "expect",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.02
     },
     {
       "cell": "expect-lg-xyz12-gpu",
@@ -1180,6 +2203,28 @@
       "secs": 0.25
     },
     {
+      "cell": "expect-su2-kagome12bq-gpu",
+      "task": "expect",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 9.159339961116607E-15,
+      "note": "3 clusters, matrix elements 0.0e+00",
+      "secs": 0.4
+    },
+    {
+      "cell": "expect-su2-sq12ring-gpu",
+      "task": "expect",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.0064171718228227E-12,
+      "note": "3 clusters, matrix elements 0.0e+00",
+      "secs": 0.43
+    },
+    {
       "cell": "expect-su2-tri9-gpu",
       "task": "expect",
       "content": "su2",
@@ -1224,6 +2269,17 @@
       "secs": 0.06
     },
     {
+      "cell": "expect-sz_all-tri9h-gpu",
+      "task": "expect",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.9429353970415342E-16,
+      "note": "6 clusters, matrix elements 2.1e-17",
+      "secs": 1.61
+    },
+    {
       "cell": "expect-sz_one-chain12-gpu",
       "task": "expect",
       "content": "sz_one",
@@ -1235,6 +2291,17 @@
       "secs": 1.05
     },
     {
+      "cell": "expect-sz_one-sq12ring-gpu",
+      "task": "expect",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.6792123247526372E-13,
+      "note": "9 clusters, matrix elements 3.5e-16",
+      "secs": 1.59
+    },
+    {
       "cell": "expect-sz_one-tri9-gpu",
       "task": "expect",
       "content": "sz_one",
@@ -1244,6 +2311,17 @@
       "metric": 3.3306690738754696E-16,
       "note": "3 clusters, matrix elements 8.3e-17",
       "secs": 0.03
+    },
+    {
+      "cell": "expect-sz_one-tri9h-gpu",
+      "task": "expect",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.326686566233599E-16,
+      "note": "3 clusters, matrix elements 1.4e-17",
+      "secs": 0.08
     },
     {
       "cell": "expect-tr-chain12-gpu",
@@ -1323,6 +2401,28 @@
       "secs": 0.04
     },
     {
+      "cell": "spectrum-lg-kagome12bq-gpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.1760371282653068E-14,
+      "note": "",
+      "secs": 0.06
+    },
+    {
+      "cell": "spectrum-lg-sq12ring-gpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.842170943040401E-14,
+      "note": "",
+      "secs": 0.09
+    },
+    {
       "cell": "spectrum-lg-tri9-gpu",
       "task": "spectrum",
       "content": "lg",
@@ -1343,6 +2443,17 @@
       "metric": 9.769962616701378E-15,
       "note": "",
       "secs": 0.32
+    },
+    {
+      "cell": "spectrum-lg-tri9h-gpu",
+      "task": "spectrum",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.993605777301127E-15,
+      "note": "",
+      "secs": 0.09
     },
     {
       "cell": "spectrum-lg-xyz12-gpu",
@@ -1400,6 +2511,28 @@
       "secs": 0.14
     },
     {
+      "cell": "spectrum-su2-kagome12bq-gpu",
+      "task": "spectrum",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.1102230246251565E-14,
+      "note": "",
+      "secs": 0.15
+    },
+    {
+      "cell": "spectrum-su2-sq12ring-gpu",
+      "task": "spectrum",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.042810365310288E-14,
+      "note": "",
+      "secs": 0.19
+    },
+    {
       "cell": "spectrum-su2-tri9-gpu",
       "task": "spectrum",
       "content": "su2",
@@ -1444,6 +2577,17 @@
       "secs": 0.01
     },
     {
+      "cell": "spectrum-sz_all-tri9h-gpu",
+      "task": "spectrum",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.329070518200751E-15,
+      "note": "",
+      "secs": 0.04
+    },
+    {
       "cell": "spectrum-sz_one-chain12-gpu",
       "task": "spectrum",
       "content": "sz_one",
@@ -1455,6 +2599,17 @@
       "secs": 0.26
     },
     {
+      "cell": "spectrum-sz_one-sq12ring-gpu",
+      "task": "spectrum",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 7.904787935331115E-14,
+      "note": "",
+      "secs": 0.31
+    },
+    {
       "cell": "spectrum-sz_one-tri9-gpu",
       "task": "spectrum",
       "content": "sz_one",
@@ -1462,6 +2617,17 @@
       "backend": "gpu",
       "status": "pass",
       "metric": 5.329070518200751E-15,
+      "note": "",
+      "secs": 0.01
+    },
+    {
+      "cell": "spectrum-sz_one-tri9h-gpu",
+      "task": "spectrum",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.217248937900877E-15,
       "note": "",
       "secs": 0.01
     },
@@ -1543,6 +2709,28 @@
       "secs": 1.09
     },
     {
+      "cell": "th_Oexact-lg-kagome12bq-gpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 66}",
+      "secs": 1.13
+    },
+    {
+      "cell": "th_Oexact-lg-sq12ring-gpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 94}",
+      "secs": 1.18
+    },
+    {
       "cell": "th_Oexact-lg-tri9-gpu",
       "task": "th_Oexact",
       "content": "lg",
@@ -1563,6 +2751,17 @@
       "metric": null,
       "note": "no block ran on the device",
       "secs": 0.32
+    },
+    {
+      "cell": "th_Oexact-lg-tri9h-gpu",
+      "task": "th_Oexact",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 52}",
+      "secs": 0.26
     },
     {
       "cell": "th_Oexact-lg-xyz12-gpu",
@@ -1620,6 +2819,28 @@
       "secs": 0.28
     },
     {
+      "cell": "th_Oexact-su2-kagome12bq-gpu",
+      "task": "th_Oexact",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 1}",
+      "secs": 0.2
+    },
+    {
+      "cell": "th_Oexact-su2-sq12ring-gpu",
+      "task": "th_Oexact",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 1}",
+      "secs": 0.23
+    },
+    {
       "cell": "th_Oexact-su2-tri9-gpu",
       "task": "th_Oexact",
       "content": "su2",
@@ -1664,6 +2885,17 @@
       "secs": 0.02
     },
     {
+      "cell": "th_Oexact-sz_all-tri9h-gpu",
+      "task": "th_Oexact",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 10}",
+      "secs": 0.05
+    },
+    {
       "cell": "th_Oexact-sz_one-chain12-gpu",
       "task": "th_Oexact",
       "content": "sz_one",
@@ -1675,6 +2907,17 @@
       "secs": 1.15
     },
     {
+      "cell": "th_Oexact-sz_one-sq12ring-gpu",
+      "task": "th_Oexact",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 2}",
+      "secs": 0.69
+    },
+    {
       "cell": "th_Oexact-sz_one-tri9-gpu",
       "task": "th_Oexact",
       "content": "sz_one",
@@ -1683,6 +2926,17 @@
       "status": "missing",
       "metric": null,
       "note": "no block ran on the device",
+      "secs": 0.01
+    },
+    {
+      "cell": "th_Oexact-sz_one-tri9h-gpu",
+      "task": "th_Oexact",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "missing",
+      "metric": null,
+      "note": "no solve ran on the device: {'device_krylov': 0, 'device_dense': 0, 'host_krylov': 0, 'host_dense': 1}",
       "secs": 0.01
     },
     {
@@ -1763,6 +3017,28 @@
       "secs": 5.01
     },
     {
+      "cell": "th_Oftlm-lg-kagome12bq-gpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 1.14
+    },
+    {
+      "cell": "th_Oftlm-lg-sq12ring-gpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 1.23
+    },
+    {
       "cell": "th_Oftlm-lg-tri9-gpu",
       "task": "th_Oftlm",
       "content": "lg",
@@ -1783,6 +3059,17 @@
       "metric": null,
       "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.74
+    },
+    {
+      "cell": "th_Oftlm-lg-tri9h-gpu",
+      "task": "th_Oftlm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.03
     },
     {
       "cell": "th_Oftlm-lg-xyz12-gpu",
@@ -1840,6 +3127,28 @@
       "secs": 0.51
     },
     {
+      "cell": "th_Oftlm-su2-kagome12bq-gpu",
+      "task": "th_Oftlm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 6.661922148889492E-16,
+      "note": "gpu vs cpu, 4 samples: 6.7e-16 (limit 1e-08)",
+      "secs": 0.46
+    },
+    {
+      "cell": "th_Oftlm-su2-sq12ring-gpu",
+      "task": "th_Oftlm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.885797528251334E-16,
+      "note": "gpu vs cpu, 4 samples: 3.9e-16 (limit 1e-08)",
+      "secs": 0.42
+    },
+    {
       "cell": "th_Oftlm-su2-tri9-gpu",
       "task": "th_Oftlm",
       "content": "su2",
@@ -1884,6 +3193,17 @@
       "secs": 0.15
     },
     {
+      "cell": "th_Oftlm-sz_all-tri9h-gpu",
+      "task": "th_Oftlm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.2900293831021955E-16,
+      "note": "gpu vs cpu, 4 samples: 2.3e-16 (limit 1e-08)",
+      "secs": 0.62
+    },
+    {
       "cell": "th_Oftlm-sz_one-chain12-gpu",
       "task": "th_Oftlm",
       "content": "sz_one",
@@ -1895,6 +3215,17 @@
       "secs": 0.71
     },
     {
+      "cell": "th_Oftlm-sz_one-sq12ring-gpu",
+      "task": "th_Oftlm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.0258933168773973E-16,
+      "note": "gpu vs cpu, 4 samples: 4.0e-16 (limit 1e-08)",
+      "secs": 0.78
+    },
+    {
       "cell": "th_Oftlm-sz_one-tri9-gpu",
       "task": "th_Oftlm",
       "content": "sz_one",
@@ -1904,6 +3235,17 @@
       "metric": 1.1107927167319238E-16,
       "note": "gpu vs cpu, 4 samples: 1.1e-16 (limit 1e-08)",
       "secs": 0.11
+    },
+    {
+      "cell": "th_Oftlm-sz_one-tri9h-gpu",
+      "task": "th_Oftlm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 8.328284648609894E-17,
+      "note": "gpu vs cpu, 4 samples: 8.3e-17 (limit 1e-08)",
+      "secs": 0.14
     },
     {
       "cell": "th_Oftlm-tr-chain12-gpu",
@@ -1983,6 +3325,28 @@
       "secs": 0.74
     },
     {
+      "cell": "th_exact-lg-kagome12bq-gpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.6653345369377348E-15,
+      "note": "dE/N 1.11e-16 dC/N 1.67e-15",
+      "secs": 0.05
+    },
+    {
+      "cell": "th_exact-lg-sq12ring-gpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.6127248512845352E-14,
+      "note": "dE/N 5.92e-16 dC/N 2.61e-14",
+      "secs": 0.1
+    },
+    {
       "cell": "th_exact-lg-tri9-gpu",
       "task": "th_exact",
       "content": "lg",
@@ -2003,6 +3367,17 @@
       "metric": 7.740721643914287E-15,
       "note": "dE/N 1.09e-15 dC/N 7.74e-15",
       "secs": 0.38
+    },
+    {
+      "cell": "th_exact-lg-tri9h-gpu",
+      "task": "th_exact",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.431822727230206E-14,
+      "note": "dE/N 4.93e-16 dC/N 3.43e-14",
+      "secs": 0.09
     },
     {
       "cell": "th_exact-lg-xyz12-gpu",
@@ -2060,6 +3435,28 @@
       "secs": 74.05
     },
     {
+      "cell": "th_exact-su2-kagome12bq-gpu",
+      "task": "th_exact",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.310988354911539E-14,
+      "note": "dE/N 3.70e-16 dC/N 1.31e-14",
+      "secs": 0.15
+    },
+    {
+      "cell": "th_exact-su2-sq12ring-gpu",
+      "task": "th_exact",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.8154664612951215E-14,
+      "note": "dE/N 1.41e-15 dC/N 3.82e-14",
+      "secs": 0.17
+    },
+    {
       "cell": "th_exact-su2-tri9-gpu",
       "task": "th_exact",
       "content": "su2",
@@ -2104,6 +3501,17 @@
       "secs": 0.01
     },
     {
+      "cell": "th_exact-sz_all-tri9h-gpu",
+      "task": "th_exact",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.4429249574764574E-14,
+      "note": "dE/N 1.06e-15 dC/N 3.44e-14",
+      "secs": 0.04
+    },
+    {
       "cell": "th_exact-sz_one-chain12-gpu",
       "task": "th_exact",
       "content": "sz_one",
@@ -2115,6 +3523,17 @@
       "secs": 0.27
     },
     {
+      "cell": "th_exact-sz_one-sq12ring-gpu",
+      "task": "th_exact",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.523107731477163E-14,
+      "note": "dE/N 8.88e-16 dC/N 3.52e-14",
+      "secs": 0.3
+    },
+    {
       "cell": "th_exact-sz_one-tri9-gpu",
       "task": "th_exact",
       "content": "sz_one",
@@ -2123,6 +3542,17 @@
       "status": "pass",
       "metric": 5.169969390866274E-13,
       "note": "dE/N 1.78e-15 dC/N 5.17e-13",
+      "secs": 0.01
+    },
+    {
+      "cell": "th_exact-sz_one-tri9h-gpu",
+      "task": "th_exact",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.0220219732243802E-14,
+      "note": "dE/N 1.18e-15 dC/N 1.02e-14",
       "secs": 0.01
     },
     {
@@ -2203,6 +3633,28 @@
       "secs": 1.29
     },
     {
+      "cell": "th_ftlm-lg-kagome12bq-gpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.12
+    },
+    {
+      "cell": "th_ftlm-lg-sq12ring-gpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.11
+    },
+    {
       "cell": "th_ftlm-lg-tri9-gpu",
       "task": "th_ftlm",
       "content": "lg",
@@ -2223,6 +3675,17 @@
       "metric": null,
       "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.67
+    },
+    {
+      "cell": "th_ftlm-lg-tri9h-gpu",
+      "task": "th_ftlm",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.12
     },
     {
       "cell": "th_ftlm-lg-xyz12-gpu",
@@ -2280,6 +3743,28 @@
       "secs": 0.5
     },
     {
+      "cell": "th_ftlm-su2-kagome12bq-gpu",
+      "task": "th_ftlm",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 5.181040781584064E-16,
+      "note": "gpu vs cpu, 4 samples: 5.2e-16 (limit 1e-08)",
+      "secs": 0.32
+    },
+    {
+      "cell": "th_ftlm-su2-sq12ring-gpu",
+      "task": "th_ftlm",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.440892098500626E-16,
+      "note": "gpu vs cpu, 4 samples: 4.4e-16 (limit 1e-08)",
+      "secs": 0.41
+    },
+    {
       "cell": "th_ftlm-su2-tri9-gpu",
       "task": "th_ftlm",
       "content": "su2",
@@ -2324,6 +3809,17 @@
       "secs": 0.07
     },
     {
+      "cell": "th_ftlm-sz_all-tri9h-gpu",
+      "task": "th_ftlm",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.440892098500626E-16,
+      "note": "gpu vs cpu, 4 samples: 4.4e-16 (limit 1e-08)",
+      "secs": 0.25
+    },
+    {
       "cell": "th_ftlm-sz_one-chain12-gpu",
       "task": "th_ftlm",
       "content": "sz_one",
@@ -2335,6 +3831,17 @@
       "secs": 0.32
     },
     {
+      "cell": "th_ftlm-sz_one-sq12ring-gpu",
+      "task": "th_ftlm",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.220446049250313E-16,
+      "note": "gpu vs cpu, 4 samples: 2.2e-16 (limit 1e-08)",
+      "secs": 0.37
+    },
+    {
       "cell": "th_ftlm-sz_one-tri9-gpu",
       "task": "th_ftlm",
       "content": "sz_one",
@@ -2344,6 +3851,17 @@
       "metric": 2.3931474086364487E-15,
       "note": "gpu vs cpu, 4 samples: 2.4e-15 (limit 1e-08)",
       "secs": 0.04
+    },
+    {
+      "cell": "th_ftlm-sz_one-tri9h-gpu",
+      "task": "th_ftlm",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 3.4540271877227093E-16,
+      "note": "gpu vs cpu, 4 samples: 3.5e-16 (limit 1e-08)",
+      "secs": 0.03
     },
     {
       "cell": "th_ftlm-tr-chain12-gpu",
@@ -2423,6 +3941,28 @@
       "secs": 7.02
     },
     {
+      "cell": "th_mtpq-lg-kagome12bq-gpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.09
+    },
+    {
+      "cell": "th_mtpq-lg-sq12ring-gpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.32
+    },
+    {
       "cell": "th_mtpq-lg-tri9-gpu",
       "task": "th_mtpq",
       "content": "lg",
@@ -2443,6 +3983,17 @@
       "metric": null,
       "note": "DeviceUnsupported: thermal: block of star 1, irrep 0, n_up -1 (an isotypic block of a multi-dimensional irrep): device='gpu', but this operator (dim 8) has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.77
+    },
+    {
+      "cell": "th_mtpq-lg-tri9h-gpu",
+      "task": "th_mtpq",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: thermal: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.09
     },
     {
       "cell": "th_mtpq-lg-xyz12-gpu",
@@ -2500,6 +4051,28 @@
       "secs": 75.45
     },
     {
+      "cell": "th_mtpq-su2-kagome12bq-gpu",
+      "task": "th_mtpq",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.3322676295501878E-12,
+      "note": "gpu vs cpu, 4 samples: 1.3e-12 (limit 1e-08)",
+      "secs": 0.41
+    },
+    {
+      "cell": "th_mtpq-su2-sq12ring-gpu",
+      "task": "th_mtpq",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.0159225312852035E-11,
+      "note": "gpu vs cpu, 4 samples: 1.0e-11 (limit 1e-08)",
+      "secs": 0.59
+    },
+    {
       "cell": "th_mtpq-su2-tri9-gpu",
       "task": "th_mtpq",
       "content": "su2",
@@ -2544,6 +4117,17 @@
       "secs": 0.11
     },
     {
+      "cell": "th_mtpq-sz_all-tri9h-gpu",
+      "task": "th_mtpq",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.0904857264095983E-14,
+      "note": "gpu vs cpu, 4 samples: 1.1e-14 (limit 1e-08)",
+      "secs": 0.19
+    },
+    {
       "cell": "th_mtpq-sz_one-chain12-gpu",
       "task": "th_mtpq",
       "content": "sz_one",
@@ -2555,6 +4139,17 @@
       "secs": 0.45
     },
     {
+      "cell": "th_mtpq-sz_one-sq12ring-gpu",
+      "task": "th_mtpq",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.9127441199724067E-12,
+      "note": "gpu vs cpu, 4 samples: 2.9e-12 (limit 1e-08)",
+      "secs": 0.38
+    },
+    {
       "cell": "th_mtpq-sz_one-tri9-gpu",
       "task": "th_mtpq",
       "content": "sz_one",
@@ -2564,6 +4159,17 @@
       "metric": 2.9605947323337506E-16,
       "note": "gpu vs cpu, 4 samples: 3.0e-16 (limit 1e-08)",
       "secs": 0.36
+    },
+    {
+      "cell": "th_mtpq-sz_one-tri9h-gpu",
+      "task": "th_mtpq",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.3914795241968628E-14,
+      "note": "gpu vs cpu, 4 samples: 1.4e-14 (limit 1e-08)",
+      "secs": 0.05
     },
     {
       "cell": "th_mtpq-tr-chain12-gpu",
@@ -2643,6 +4249,28 @@
       "secs": 0.16
     },
     {
+      "cell": "vectors-lg-kagome12bq-gpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 5, irrep 2, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.01
+    },
+    {
+      "cell": "vectors-lg-sq12ring-gpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 3, irrep 0, n_up 2 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.04
+    },
+    {
       "cell": "vectors-lg-tri9-gpu",
       "task": "vectors",
       "content": "lg",
@@ -2663,6 +4291,17 @@
       "metric": null,
       "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 1, irrep 0, n_up -1 (dim 8) is an isotypic block of a multi-dimensional irrep, which has no device kernel; use device='auto' or 'cpu'",
       "secs": 0.32
+    },
+    {
+      "cell": "vectors-lg-tri9h-gpu",
+      "task": "vectors",
+      "content": "lg",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "refused",
+      "metric": null,
+      "note": "DeviceUnsupported: eigs: device='gpu', but the block of star 19, irrep 1, n_up 1 (dim 1) is an isotypic (W) block, which has no device kernel; use device='auto' or 'cpu'",
+      "secs": 0.17
     },
     {
       "cell": "vectors-lg-xyz12-gpu",
@@ -2720,6 +4359,28 @@
       "secs": 0.16
     },
     {
+      "cell": "vectors-su2-kagome12bq-gpu",
+      "task": "vectors",
+      "content": "su2",
+      "model": "kagome12bq",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 2.842170943040401E-14,
+      "note": "residual 2.4e-14 pairing 2.8e-14 lowest 2.3e-14 |V^dag V - 1| 6.9e-15",
+      "secs": 0.27
+    },
+    {
+      "cell": "vectors-su2-sq12ring-gpu",
+      "task": "vectors",
+      "content": "su2",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.6387138246054463E-10,
+      "note": "residual 1.6e-10 pairing 4.3e-14 lowest 2.7e-14 |V^dag V - 1| 2.2e-15",
+      "secs": 0.27
+    },
+    {
       "cell": "vectors-su2-tri9-gpu",
       "task": "vectors",
       "content": "su2",
@@ -2764,6 +4425,17 @@
       "secs": 0.03
     },
     {
+      "cell": "vectors-sz_all-tri9h-gpu",
+      "task": "vectors",
+      "content": "sz_all",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 1.3555357949956224E-14,
+      "note": "residual 1.4e-14 pairing 1.3e-14 lowest 9.8e-15 |V^dag V - 1| 6.7e-16",
+      "secs": 0.17
+    },
+    {
       "cell": "vectors-sz_one-chain12-gpu",
       "task": "vectors",
       "content": "sz_one",
@@ -2775,6 +4447,17 @@
       "secs": 0.31
     },
     {
+      "cell": "vectors-sz_one-sq12ring-gpu",
+      "task": "vectors",
+      "content": "sz_one",
+      "model": "sq12ring",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 9.925272079318804E-11,
+      "note": "residual 9.9e-11 pairing 2.7e-14 lowest 3.2e-14 |V^dag V - 1| 3.3e-15",
+      "secs": 0.41
+    },
+    {
       "cell": "vectors-sz_one-tri9-gpu",
       "task": "vectors",
       "content": "sz_one",
@@ -2784,6 +4467,17 @@
       "metric": 6.217248937900877E-15,
       "note": "residual 4.0e-15 pairing 1.8e-15 lowest 6.2e-15",
       "secs": 0.01
+    },
+    {
+      "cell": "vectors-sz_one-tri9h-gpu",
+      "task": "vectors",
+      "content": "sz_one",
+      "model": "tri9h",
+      "backend": "gpu",
+      "status": "pass",
+      "metric": 4.440892098500626E-15,
+      "note": "residual 3.3e-15 pairing 1.8e-15 lowest 4.4e-15 |V^dag V - 1| 4.4e-16",
+      "secs": 0.04
     },
     {
       "cell": "vectors-tr-chain12-gpu",
