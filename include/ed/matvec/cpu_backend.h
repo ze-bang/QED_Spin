@@ -107,7 +107,23 @@ public:
     }
     void copy(const Complex* src, Complex* dst, std::size_t n) const override {
         if (n == 0) return;
-        std::memcpy(dst, src, n * sizeof(Complex));
+        if (n <= 65536) {
+            std::memcpy(dst, src, n * sizeof(Complex));
+            return;
+        }
+        // In parallel, with the static split the kernels use (a serial memcpy of a 3e7-state
+        // vector takes ~50 ms, against ~5 ms on the team).
+        #pragma omp parallel
+        {
+#ifdef _OPENMP
+            const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
+            const std::size_t nt = static_cast<std::size_t>(omp_get_num_threads());
+#else
+            const std::size_t t = 0, nt = 1;
+#endif
+            const std::size_t i0 = n * t / nt, i1 = n * (t + 1) / nt;
+            if (i1 > i0) std::memcpy(dst + i0, src + i0, (i1 - i0) * sizeof(Complex));
+        }
     }
     void copy_from_host(const Complex* host_src, Complex* dst,
                         std::size_t n) const override {
@@ -203,17 +219,19 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // Batched primitives (CGS2 reorth fast path).
+    // Batched primitives (CGS2 reorth fast path), in chunks of kManyChunk elements: within a
+    // chunk the slice of v stays in cache while each basis vector streams past once, through a
+    // vectorised loop. (Interleaving all the basis vectors element by element -- the old form --
+    // ran ~40 memory streams at once and reached a third of the bandwidth at 3e7 states.)
     //
-    // dot_many: each thread sweeps a chunk of `i in [0, n)` and
-    // accumulates partial sums of <basis[k], v> for every k. Final
-    // reduction sums the per-thread partial arrays. One streaming pass over `v` feeds all
-    // k inner products --- bandwidth-bound, but only one read of v.
+    // dot_many: each thread sweeps its static share of the chunks and accumulates partial sums
+    // of <basis[k], v> for every k; the per-thread partials are added in thread order, so the
+    // result does not depend on thread timing.
     //
-    // axpy_many: each thread sweeps a chunk of `i` and accumulates
-    // sum_k alphas[k] * basis[k][i] into v[i]. One streaming pass
-    // over v.
+    // axpy_many: v += sum_k alphas[k] basis[k], each element accumulated in k order.
     // ----------------------------------------------------------------
+    static constexpr std::size_t kManyChunk = 2048;   // 32 KiB of v
+
     void dot_many(const Complex* const* basis,
                   std::size_t           num_basis,
                   const Complex*        v,
@@ -245,6 +263,7 @@ public:
         std::fill_n(scratch_partial_im_.begin(), need, 0.0);
         double* const partial_re = scratch_partial_re_.data();
         double* const partial_im = scratch_partial_im_.data();
+        const long long chunks = static_cast<long long>((n + kManyChunk - 1) / kManyChunk);
 
         #pragma omp parallel if(n > 8192)
         {
@@ -257,15 +276,22 @@ public:
             double* im = &partial_im[tid * num_basis];
 
             #pragma omp for schedule(static) nowait
-            for (long long i = 0; i < static_cast<long long>(n); ++i) {
-                const Complex vi = v[i];
+            for (long long c = 0; c < chunks; ++c) {
+                const std::size_t i0  = static_cast<std::size_t>(c) * kManyChunk;
+                const std::size_t len = std::min(kManyChunk, n - i0);
+                const double* x = reinterpret_cast<const double*>(v + i0);
                 for (std::size_t k = 0; k < num_basis; ++k) {
-                    // <basis[k], v> = sum_i conj(basis[k][i]) * v[i].
-                    const Complex bk = basis[k][i];
-                    // conj(bk) * vi = (br - i*bi)*(vr + i*vi)
-                    //              = br*vr + bi*vi + i*(br*vi - bi*vr)
-                    re[k] += bk.real() * vi.real() + bk.imag() * vi.imag();
-                    im[k] += bk.real() * vi.imag() - bk.imag() * vi.real();
+                    // <basis[k], v> = sum_i conj(b_i) v_i = sum_i (br vr + bi vi) + i (br vi - bi vr)
+                    const double* b = reinterpret_cast<const double*>(basis[k] + i0);
+                    double sr = 0.0, si = 0.0;
+                    #pragma omp simd reduction(+ : sr, si)
+                    for (std::size_t i = 0; i < len; ++i) {
+                        const double br = b[2 * i], bi = b[2 * i + 1], vr = x[2 * i], vi = x[2 * i + 1];
+                        sr += br * vr + bi * vi;
+                        si += br * vi - bi * vr;
+                    }
+                    re[k] += sr;
+                    im[k] += si;
                 }
             }
         }
@@ -286,13 +312,22 @@ public:
                    Complex*              v,
                    std::size_t           n) const override {
         if (num_basis == 0 || n == 0) return;
+        const long long chunks = static_cast<long long>((n + kManyChunk - 1) / kManyChunk);
         #pragma omp parallel for schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            Complex acc = v[i];
+        for (long long c = 0; c < chunks; ++c) {
+            const std::size_t i0  = static_cast<std::size_t>(c) * kManyChunk;
+            const std::size_t len = std::min(kManyChunk, n - i0);
+            double* y = reinterpret_cast<double*>(v + i0);
             for (std::size_t k = 0; k < num_basis; ++k) {
-                acc += alphas[k] * basis[k][i];
+                const double ar = alphas[k].real(), ai = alphas[k].imag();
+                const double* b = reinterpret_cast<const double*>(basis[k] + i0);
+                #pragma omp simd
+                for (std::size_t i = 0; i < len; ++i) {
+                    const double br = b[2 * i], bi = b[2 * i + 1];
+                    y[2 * i]     += ar * br - ai * bi;
+                    y[2 * i + 1] += ar * bi + ai * br;
+                }
             }
-            v[i] = acc;
         }
     }
 

@@ -169,3 +169,44 @@ TEST_CASE("CudaBackend::gemm matches naive reference",
 }
 
 #endif  // WITH_CUDA
+
+// =============================================================================
+// CpuBackend batched level-1 (dot_many / axpy_many in chunks) and the parallel copy, at sizes
+// across the chunk (2048) and the parallel (8192 / 65536) boundaries.
+// =============================================================================
+
+TEST_CASE("CpuBackend dot_many, axpy_many and copy match naive loops", "[backend-blas3][cpu]") {
+    ed::matvec::CpuBackend be;
+    for (const std::size_t n : {std::size_t{1}, std::size_t{2047}, std::size_t{2049}, std::size_t{8193},
+                                std::size_t{70001}, std::size_t{200003}}) {
+        INFO("n " << n);
+        const std::size_t M = 7;
+        std::vector<std::vector<Complex>> basis;
+        std::vector<const Complex*> ptrs;
+        for (std::size_t k = 0; k < M; ++k) {
+            basis.push_back(random_matrix(n, 1, 0x100 + k));
+            ptrs.push_back(basis.back().data());
+        }
+        const auto v = random_matrix(n, 1, 0x2A);
+        std::vector<Complex> c(M);
+        be.dot_many(ptrs.data(), M, v.data(), n, c.data());
+        for (std::size_t k = 0; k < M; ++k) {
+            Complex ref{0, 0};
+            for (std::size_t i = 0; i < n; ++i) ref += std::conj(basis[k][i]) * v[i];
+            REQUIRE(std::abs(c[k] - ref) <= 1e-12 * std::max(1.0, std::abs(ref)) + 1e-13 * static_cast<double>(n));
+        }
+        std::vector<Complex> a(M);
+        for (std::size_t k = 0; k < M; ++k) a[k] = Complex(0.3 * static_cast<double>(k) - 1.0, 0.1 * static_cast<double>(k));
+        auto y = v, y_ref = v;
+        be.axpy_many(a.data(), ptrs.data(), M, y.data(), n);
+        for (std::size_t i = 0; i < n; ++i) {
+            Complex acc = y_ref[i];
+            for (std::size_t k = 0; k < M; ++k) acc += a[k] * basis[k][i];
+            y_ref[i] = acc;
+        }
+        REQUIRE(max_abs_diff(y.data(), y_ref.data(), n) < 1e-13);
+        std::vector<Complex> z(n);
+        be.copy(v.data(), z.data(), n);
+        REQUIRE(z == v);
+    }
+}
