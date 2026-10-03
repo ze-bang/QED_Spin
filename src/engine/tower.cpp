@@ -512,7 +512,7 @@ FlipLadderS2::FlipLadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> se
 
 void FlipLadderS2::apply(const Complex* in, Complex* out, std::size_t n) const {
     const std::size_t m = plain_->reps.size();
-    std::vector<Complex> x(m), y(m);
+    ed::core::NumaVector<Complex> x(m), y(m);   // written whole below and by the ladder: no zero fill
 #ifdef _OPENMP
 #   pragma omp parallel for schedule(static)
 #endif

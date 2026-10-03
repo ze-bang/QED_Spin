@@ -41,6 +41,8 @@
 #include <vector>
 
 #include <ed/core/config.h>
+#include <ed/core/numa_vector.h>
+#include <ed/matvec/cpu_backend.h>
 #include <ed/matvec/linear_operator.h>
 #include <ed/ops/spin_flip.h>
 #include <ed/basis/su2_dims.h>
@@ -139,8 +141,7 @@ public:
     void project(std::complex<double>* v, std::uint64_t dim) const {
         const double norm_in = norm_of(v, dim);
         if (norm_in == 0.0) return;
-        const double scale = project_normalized(v, dim);
-        for (std::uint64_t i = 0; i < dim; ++i) v[i] *= scale;
+        scale_by(v, dim, project_normalized(v, dim));
     }
 
     /// In-place projection leaving a UNIT vector; returns ||P_S v|| (the
@@ -160,36 +161,33 @@ public:
         {
             const double n0 = norm_of(v, dim);
             if (n0 == 0.0) return 0.0;
-            const double inv = 1.0 / n0;
-            for (std::uint64_t i = 0; i < dim; ++i) v[i] *= inv;
+            scale_by(v, dim, 1.0 / n0);
             log_scale += std::log(n0);
         }
-        std::vector<Cx> w(dim);
+        ed::core::NumaVector<Cx> w(dim);   // written whole by every S^2 apply
         for (const double lam : excluded_) {
             s2_->apply(v, w.data(), dim);
-            for (std::uint64_t i = 0; i < dim; ++i) {
-                v[i] = w[i] - lam * v[i];
-            }
+            #pragma omp parallel for schedule(static) if(dim > 8192)
+            for (std::uint64_t i = 0; i < dim; ++i) v[i] = w[i] - lam * v[i];
             const double n = norm_of(v, dim);
             const double denom = lam_t - lam;
             if (n == 0.0) return 0.0;  // annihilated: no target weight
-            const double inv = 1.0 / n;
-            for (std::uint64_t i = 0; i < dim; ++i) v[i] *= inv;
+            scale_by(v, dim, 1.0 / n);
             log_scale += std::log(n) - std::log(std::abs(denom));
             if (denom < 0.0) sign = -sign;
         }
-        if (sign < 0.0) {
-            for (std::uint64_t i = 0; i < dim; ++i) v[i] = -v[i];
-        }
+        if (sign < 0.0) scale_by(v, dim, -1.0);
         return std::exp(log_scale);
     }
 
 private:
-    static double norm_of(const std::complex<double>* v,
-                          std::uint64_t dim) noexcept {
-        double n2 = 0.0;
-        for (std::uint64_t i = 0; i < dim; ++i) n2 += std::norm(v[i]);
-        return std::sqrt(n2);
+    // The host backend's thread-ordered norm: the same value whatever the team (core P4.8).
+    static double norm_of(const std::complex<double>* v, std::uint64_t dim) noexcept {
+        return ed::matvec::default_cpu_backend().nrm2(v, dim);
+    }
+    static void scale_by(std::complex<double>* v, std::uint64_t dim, double s) noexcept {
+        #pragma omp parallel for schedule(static) if(dim > 8192)
+        for (std::uint64_t i = 0; i < dim; ++i) v[i] *= s;
     }
 
     std::shared_ptr<const ed::LinearOperator> s2_;

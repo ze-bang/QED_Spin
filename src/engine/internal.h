@@ -488,18 +488,20 @@ private:
     void maybe_build_csr_() const {
         const std::uint64_t r = rows();
         if (r == 0 || cols() >= (std::uint64_t{1} << 32)) return;
-        // Exact bound before merging: at most one entry per group and row (index + value), d per group
-        // in a sector of an irrep of dimension d.
-        const double est = static_cast<double>(r)
-                               * static_cast<double>(1 + rows_->n_groups() * static_cast<std::size_t>(src_->irrep_dim))
-                               * (sizeof(std::uint32_t) + sizeof(Complex))
-                           + static_cast<double>(r + 1) * sizeof(std::uint64_t);
+        // Exact bound before merging: at most one entry per group and row, d per group in a sector of an
+        // irrep of dimension d, at the dictionary build's 7 bytes an entry (csr_policy.h). It charged full
+        // 20-byte values before and so walked total S+- on every apply of a ladder S^2 (N = 26: 5.2 GB
+        // estimated for a 0.9 GB CSR). A matrix with too many distinct values for a dictionary is built in
+        // full values only within the budget (build_cross_csr's max_full_bytes), else the walk serves it.
+        const std::uint64_t per_row = 1 + rows_->n_groups() * static_cast<std::uint64_t>(src_->irrep_dim);
+        const double est = static_cast<double>(ed::planner::csr_estimate_bytes(r, per_row));
         // Shared by the sectors building at once (the concurrent small dynamics sources).
         const double budget = std::max(0.0, ed::env::real("ED_XSEC_CSR_BUDGET_GIB", 4.0)) * 1073741824.0
                               / static_cast<double>(ed::planner::concurrent_sector_builders());
         if (est > budget) return;
-        csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(
-            ed::matvec::build_cross_csr(rows_->view(), tgt_pol_, src_pol_, same_, r));
+        auto built = ed::matvec::build_cross_csr(rows_->view(), tgt_pol_, src_pol_, same_, r,
+                                                 static_cast<std::uint64_t>(budget));
+        if (built.built()) csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(std::move(built));
     }
 
     std::shared_ptr<const ed::ops::MaskedProgram>      rows_;
@@ -938,12 +940,17 @@ public:
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
-        for (std::size_t i = 0; i < n; ++i) out[i] = shift_ * in[i];
-        if (!plus_) return;
-        std::vector<Complex> mid(up_->states()), back(n);
+        if (!plus_) {
+            #pragma omp parallel for schedule(static) if(n > 8192)
+            for (long long i = 0; i < static_cast<long long>(n); ++i) out[i] = shift_ * in[i];
+            return;
+        }
+        // Both written whole by the cross applies: no zero fill (they are 10 M states at N = 26).
+        ed::core::NumaVector<Complex> mid(up_->states()), back(n);
         plus_->apply(in, mid.data(), mid.size());
         minus_->apply(mid.data(), back.data(), n);
-        for (std::size_t i = 0; i < n; ++i) out[i] += back[i];
+        #pragma omp parallel for schedule(static) if(n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) out[i] = shift_ * in[i] + back[i];
     }
     [[nodiscard]] std::size_t dim() const override { return sec_->states(); }
     [[nodiscard]] bool is_hermitian() const override { return true; }
