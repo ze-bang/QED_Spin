@@ -237,14 +237,72 @@ TEST_CASE("matvec::CudaBackend batched dot_many matches the sequential reference
     }
 }
 
-TEST_CASE("matvec::CudaBackend restages a vector the pool reissued at a staged address",
+TEST_CASE("matvec::CudaBackend batched primitives over contiguous runs and separate vectors",
           "[cuda-backend][batched-primitives]") {
     if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
 
-    // A one-vector basis is staged by dot_many and freed, and a new vector of the same size is
-    // allocated: the pool usually returns the same address. dot_many must read the NEW vector,
-    // not the staged copy of the old one (FTLM samples with a one-dimensional Krylov basis read
-    // the previous sample's vector: audit L3-concurrency-11).
+    // dot_many / axpy_many issue one gemv per run of columns that sit back to back (P7.3): a basis
+    // of 6 columns of one block, then 3 separate vectors, then 2 more columns of the block that do
+    // not continue the first run (columns 8 and 9: a run break), against the sequential reference.
+    ed::matvec::CudaBackend cuda;
+    std::mt19937_64 rng(0x5EEDF00DULL);
+    std::uniform_real_distribution<double> uni(-1.0, 1.0);
+    constexpr std::size_t n = 1000, cols = 10;
+    auto rnd = [&](std::size_t len) {
+        std::vector<Complex> h(len);
+        for (auto& z : h) z = Complex(uni(rng), uni(rng));
+        return h;
+    };
+    auto block = cuda.make_zero_vector(n * cols);
+    const auto h_block = rnd(n * cols);
+    cuda.copy_from_host(h_block.data(), block.get(), n * cols);
+    std::vector<ed::matvec::Backend::UniqueVec> separate;
+    std::vector<const Complex*> basis;
+    for (std::size_t j = 0; j < 6; ++j) basis.push_back(block.get() + j * n);
+    for (int s = 0; s < 3; ++s) {
+        separate.push_back(cuda.make_zero_vector(n));
+        const auto h = rnd(n);
+        cuda.copy_from_host(h.data(), separate.back().get(), n);
+        basis.push_back(separate.back().get());
+    }
+    basis.push_back(block.get() + 8 * n);
+    basis.push_back(block.get() + 9 * n);
+    const std::size_t M = basis.size();
+
+    const auto h_v = rnd(n);
+    auto d_v = cuda.make_zero_vector(n);
+    cuda.copy_from_host(h_v.data(), d_v.get(), n);
+    std::vector<Complex> got(M);
+    cuda.dot_many(basis.data(), M, d_v.get(), n, got.data());
+    for (std::size_t k = 0; k < M; ++k) {
+        const Complex want = cuda.dot(basis[k], d_v.get(), n);
+        INFO("k=" << k);
+        REQUIRE(std::abs(got[k] - want) < 1e-12 * (1.0 + std::abs(want)));
+    }
+
+    const auto alphas = rnd(M);
+    auto d_y = cuda.make_zero_vector(n), d_ref = cuda.make_zero_vector(n);
+    cuda.copy(d_v.get(), d_y.get(), n);
+    cuda.copy(d_v.get(), d_ref.get(), n);
+    cuda.axpy_many(alphas.data(), basis.data(), M, d_y.get(), n);
+    for (std::size_t k = 0; k < M; ++k) cuda.axpy(alphas[k], basis[k], d_ref.get(), n);
+    std::vector<Complex> y(n), ref(n);
+    cuda.copy_to_host(d_y.get(), y.data(), n);
+    cuda.copy_to_host(d_ref.get(), ref.data(), n);
+    double worst = 0.0;
+    for (std::size_t i = 0; i < n; ++i) worst = std::max(worst, std::abs(y[i] - ref[i]));
+    REQUIRE(worst < 1e-12 * static_cast<double>(M));
+}
+
+TEST_CASE("matvec::CudaBackend reads a vector the pool reissued at an address it read before",
+          "[cuda-backend][batched-primitives]") {
+    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+
+    // A one-vector basis is read by dot_many and freed, and a new vector of the same size is
+    // allocated: the pool usually returns the same address. dot_many must read the NEW vector
+    // (the staging cache this locked against is gone since P7.3, which reads the basis in place;
+    // FTLM samples with a one-dimensional Krylov basis read the previous sample's vector:
+    // audit L3-concurrency-11).
     ed::matvec::CudaBackend cuda;
     constexpr std::size_t n = 512;
     std::vector<Complex> h_v(n, Complex(1.0, 0.0));
@@ -476,7 +534,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     std::vector<const Complex*> basis_ptrs(M_a);
     for (std::size_t j = 0; j < M_a; ++j) {
         coeffs[j]     = Complex(es_a.eigenvectors()(static_cast<int>(j), 0), 0.0);
-        basis_ptrs[j] = R_a.basis[j].get();
+        basis_ptrs[j] = R_a.basis[j];
     }
     cuda.axpy_many(coeffs.data(),
                    basis_ptrs.data(), M_a,
@@ -518,7 +576,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     // catches "the projection never happened" by a wide margin.
     double max_overlap = 0.0;
     for (std::size_t j = 0; j < M_b; ++j) {
-        const Complex c = cuda.dot(d_y0.get(), R_b.basis[j].get(), dim);
+        const Complex c = cuda.dot(d_y0.get(), R_b.basis[j], dim);
         max_overlap = std::max(max_overlap, std::abs(c));
     }
     INFO("CUDA: max |<y_0, V_j>| after aux_ortho_ptrs = " << max_overlap);

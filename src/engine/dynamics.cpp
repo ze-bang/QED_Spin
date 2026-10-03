@@ -507,7 +507,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
                         op.enable_device(true);
-                        ed::matvec::CudaBackend cbe;
+                        auto& cbe = ed::thread_cuda_backend();
                         spectrum(cbe, op.bind_cuda());
                         ++out.device_blocks;
 #endif
@@ -828,7 +828,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
 #ifdef WITH_CUDA
         auto fo = options(j);
         const std::size_t dim_src = j.src->rd->reps.size();
-        ed::matvec::CudaBackend cbe;
+        auto& cbe = ed::thread_cuda_backend();
         j.src->H->enable_device(true);
         const auto H_src = j.src->H->bind_cuda();
         std::vector<ed::observables::FtlmDynamicsTarget> tg;

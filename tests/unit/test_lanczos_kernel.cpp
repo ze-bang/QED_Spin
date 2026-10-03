@@ -42,7 +42,7 @@ namespace {
 struct KernelResult {
     std::vector<double>                         alpha;
     std::vector<double>                         beta;
-    std::vector<ed::matvec::Backend::UniqueVec> basis;
+    ed::krylov::KrylovBasis<Complex>            basis;
 };
 
 KernelResult run_kernel(const Operator& op,
@@ -126,8 +126,8 @@ TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps",
     double max_diag_err = 0.0;
     for (std::size_t i = 0; i < M; ++i) {
         for (std::size_t j = i; j < M; ++j) {
-            const Complex z = be.dot(kr.basis[i].get(),
-                                     kr.basis[j].get(), dim);
+            const Complex z = be.dot(kr.basis[i],
+                                     kr.basis[j], dim);
             const double mag = std::abs(z);
             if (i == j) {
                 max_diag_err = std::max(max_diag_err, std::abs(mag - 1.0));
@@ -238,7 +238,7 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
     std::vector<Complex> y0(dim, Complex{0.0, 0.0});
     for (std::size_t j = 0; j < M_a; ++j) {
         const double sj = es_a.eigenvectors()(static_cast<int>(j), 0);
-        const Complex* V_j = R_a.basis[j].get();
+        const Complex* V_j = R_a.basis[j];
         for (std::size_t i = 0; i < dim; ++i) y0[i] += sj * V_j[i];
     }
 
@@ -280,7 +280,7 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
     // hand-projected by the caller above. We check ALL of them now.
     double max_overlap = 0.0;
     for (std::size_t j = 0; j < M_b; ++j) {
-        const Complex c = be.dot(y0.data(), R_b.basis[j].get(), dim);
+        const Complex c = be.dot(y0.data(), R_b.basis[j], dim);
         max_overlap = std::max(max_overlap, std::abs(c));
     }
     INFO("max |<y0, V_j>| after aux_ortho_ptrs projection: " << max_overlap);

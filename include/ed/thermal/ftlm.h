@@ -361,7 +361,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
                     out.ritz.clear();
                 } else {
                     std::vector<const Complex*> V(m);
-                    for (std::size_t a = 0; a < m; ++a) V[a] = k.basis[a].get();
+                    for (std::size_t a = 0; a < m; ++a) V[a] = k.basis[a];
                     auto w = be.make_zero_vector(local_n);
                     std::vector<Complex> B(m * m), col(m), T1(m * m);
                     out.A.assign(n_obs, std::vector<Complex>(m * m));

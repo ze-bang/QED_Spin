@@ -827,7 +827,10 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> 
         if (ed::core::mem_guard_off()) return 0;
         return static_cast<std::uint64_t>(ed::core::available_device_bytes(/*fresh=*/true).value_or(0));
     }
-    static constexpr std::size_t gs_kept_basis_max_dim = 0;  // the GS vector always replays
+    /// The host's rule (the GS lane caps what it keeps by the free device memory). It was 0 while
+    /// the backend cached staged copies of the basis: a kept seed rewritten in place read stale
+    /// (gate 2c3da9e); P7.3 reads the basis in place.
+    static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
 };
 #endif
 

@@ -196,6 +196,40 @@ struct LanczosKernelOptionsT {
 };
 using LanczosKernelOptions = LanczosKernelOptionsT<Complex>;
 
+/// An orthonormal Krylov basis in backend memory, its columns back to back in one block (column j
+/// at basis[j] = block + j n): the batched primitives read all of it in one call per pass
+/// (CudaBackend: one gemv, no copy). The capacity is fixed when it is made; a column is written
+/// when it is appended (the CPU backend's first touch, column by column).
+template <class Scalar>
+class KrylovBasis {
+public:
+    using Backend = ed::matvec::BasicBackend<Scalar>;
+
+    KrylovBasis() = default;
+    KrylovBasis(const Backend& be, std::size_t n, std::size_t capacity)
+        : block_(be.allocate(n * capacity), typename Backend::Deleter{&be}), n_(n), cap_(capacity) {
+        ptrs_.reserve(capacity);
+    }
+    /// Append a copy of v (n entries in backend memory).
+    void push_copy(const Backend& be, const Scalar* v) {
+        if (ptrs_.size() == cap_) throw std::logic_error("KrylovBasis: appended past its capacity");
+        Scalar* c = block_.get() + ptrs_.size() * n_;
+        be.copy(v, c, n_);
+        ptrs_.push_back(c);
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return ptrs_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return ptrs_.empty(); }
+    /// Column j.
+    [[nodiscard]] Scalar* operator[](std::size_t j) const noexcept { return block_.get() + j * n_; }
+    /// The column pointers (dot_many / axpy_many).
+    [[nodiscard]] const Scalar* const* data() const noexcept { return ptrs_.data(); }
+
+private:
+    typename Backend::UniqueVec block_{nullptr, typename Backend::Deleter{nullptr}};
+    std::size_t                 n_ = 0, cap_ = 0;
+    std::vector<const Scalar*>  ptrs_;
+};
+
 /// Output of `lanczos_kernel`. `basis` is populated iff
 /// `opts.keep_basis == true`; ownership transfers to the caller.
 template <class Scalar>
@@ -205,9 +239,9 @@ struct LanczosKernelResultT {
     /// Sub-diagonal of the tridiagonal matrix, size = `iters_done + 1`.
     /// `beta[0]` is unused, so `beta[j]` couples `alpha[j-1]` and `alpha[j]`.
     std::vector<double>              beta;
-    /// Orthonormal Krylov basis in backend memory. Each vector is
+    /// Orthonormal Krylov basis in backend memory, contiguous. Each vector is
     /// dimension `local_n`. Empty iff `opts.keep_basis == false`.
-    std::vector<typename ed::matvec::BasicBackend<Scalar>::UniqueVec> basis;
+    KrylovBasis<Scalar>              basis;
     /// Number of iterations actually completed (may be less than
     /// `opts.max_iter` if Lanczos broke down via beta < tol).
     std::size_t                      iters_done = 0;
@@ -292,17 +326,10 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     std::size_t            ring_head  = 0;
     std::size_t            ring_count = 0;
 
-    // Optional basis storage. We keep TWO parallel structures:
-    //
-    //   `basis`      : ownership (UniqueVec per vector),
-    //   `basis_ptrs` : raw pointers, used by dot_many / axpy_many.
-    //
-    // Keeping them in sync requires that we never reallocate `basis`
-    // while `basis_ptrs` is being read --- so we reserve up front.
-    std::vector<UniqueVec>     basis;
-    std::vector<const Scalar*> basis_ptrs;
-
-    const std::size_t expected_total = opts.max_iter;
+    // Optional basis storage: one contiguous block (KrylovBasis), at most one column per step --
+    // and a Krylov space never exceeds the dimension of the space.
+    const std::size_t expected_total = std::min<std::size_t>(opts.max_iter, local_n);
+    KrylovBasis<Scalar> basis;
 
     R.beta.push_back(0.0);  // beta[0] unused (kept for index alignment).
 
@@ -316,12 +343,8 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     be.scale(Scalar(1.0 / v0_norm), v_curr.get(), local_n);
 
     if (opts.keep_basis) {
-        basis.reserve(expected_total);
-        basis_ptrs.reserve(expected_total);
-        auto first = be.make_zero_vector(local_n);
-        be.copy(v_curr.get(), first.get(), local_n);
-        basis_ptrs.push_back(first.get());
-        basis.emplace_back(std::move(first));
+        basis = KrylovBasis<Scalar>(be, local_n, expected_total);
+        basis.push_copy(be, v_curr.get());
     }
     const bool ring_needed =
         (opts.reorth == ReorthPolicy::LocalDGKS3 && opts.local_ring_size > 2);
@@ -347,7 +370,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     if (needs_kept_basis) {
         ortho_ptrs.reserve(n_aux + expected_total);
         for (const Scalar* p : opts.aux_ortho_ptrs) ortho_ptrs.push_back(p);
-        for (auto* p : basis_ptrs) ortho_ptrs.push_back(p);
+        for (std::size_t i = 0; i < basis.size(); ++i) ortho_ptrs.push_back(basis[i]);
     }
 
     // Scratch for CGS2 coefficients.
@@ -557,12 +580,9 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
         // consumers (Krylov-Schur restart, Ritz reconstruction,
         // FTLM tridiag) see a basis of the right length.
         if (opts.keep_basis) {
-            auto next = be.make_zero_vector(local_n);
-            be.copy(v_curr.get(), next.get(), local_n);
-            basis_ptrs.push_back(next.get());
-            basis.emplace_back(std::move(next));
+            basis.push_copy(be, v_curr.get());
             if (needs_kept_basis) {
-                ortho_ptrs.push_back(basis_ptrs.back());
+                ortho_ptrs.push_back(basis[basis.size() - 1]);
             }
         }
     }

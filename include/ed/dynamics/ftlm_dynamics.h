@@ -207,11 +207,11 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             {
                 auto ov = bk.make_zero_vector(dim_dst);
                 std::vector<const Complex*> wb(mS);
-                for (std::size_t b = 0; b < mS; ++b) wb[b] = ks.basis[b].get();
+                for (std::size_t b = 0; b < mS; ++b) wb[b] = ks.basis[b];
                 std::vector<Complex> row(mS);
                 for (std::size_t a = 0; a < mH; ++a) {
                     bk.fill_zero(ov.get(), dim_dst);
-                    tg.A(kh.basis[a].get(), ov.get(), dim_dst);
+                    tg.A(kh.basis[a], ov.get(), dim_dst);
                     bk.dot_many(wb.data(), mS, ov.get(), dim_dst, row.data());
                     for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
                 }

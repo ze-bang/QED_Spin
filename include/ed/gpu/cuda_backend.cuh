@@ -29,15 +29,13 @@
 //     with `cudaMemPoolAttrReleaseThreshold = UINT64_MAX` so freed
 //     allocations stay in the pool ready for reuse (avoids the
 //     ~50us per-cudaMalloc latency that bites Krylov runs at M=100).
-//   * Batched primitives `dot_many` / `axpy_many` as a single
-//     `cublasZgemv` each, instead of the M sequential `cublasZdotc` /
-//     `cublasZaxpy` calls of the Backend default. The kernel passes the
-//     same growing basis pointer set on every CGS2 pass within a Lanczos
-//     step, so the staging copy is cached with a pointer-fingerprint and
-//     incrementally extended (only the new column is staged per
-//     Lanczos iteration). Freeing a vector drops it, and every column
-//     staged after it, from the cache: the pool hands freed addresses
-//     out again, and a new vector at a staged address is not the old one.
+//   * Batched primitives `dot_many` / `axpy_many` as one `cublasZgemv` per
+//     run of basis columns that lie back to back in memory -- a contiguous
+//     basis (Krylov-Schur's V, the Lanczos basis) is one run -- instead of
+//     the M sequential `cublasZdotc` / `cublasZaxpy` calls of the Backend
+//     default, with no copy of the basis and no state kept between calls
+//     (P7.3: the staging cache and its pointer fingerprint are gone, so one
+//     backend may serve any number of solves).
 //   * Fused `axpby` via `cublasZgeam` -- one launch instead of a
 //     `scale` + `axpy` pair.
 // =============================================================================
@@ -160,7 +158,6 @@ public:
         // Use raw cuda* calls (noexcept) inside the destructor; errors
         // here would only surface as `cudaGetLastError()` from a later
         // call. The driver tears down resources at process exit anyway.
-        if (staging_buf_)  cudaFree(staging_buf_);
         if (coeffs_dev_)   cudaFree(coeffs_dev_);
         if (handle_)       cublasDestroy(handle_);
     }
@@ -168,48 +165,33 @@ public:
     BasicCudaBackend(const BasicCudaBackend&)            = delete;
     BasicCudaBackend& operator=(const BasicCudaBackend&) = delete;
 
-    // Move-only. Move transfers ownership of the cuBLAS handle AND the
-    // staging buffer cache to the destination; the source is reset to
-    // a default-constructed state so its destructor is a no-op. Needed
-    // so callers can return a CudaBackend by value (NRVO can't elide
-    // every case once the backend is wrapped in a struct alongside
-    // non-trivial state).
+    // Move-only. Move transfers ownership of the cuBLAS handle and the
+    // coefficient buffer to the destination; the source is reset to a
+    // default-constructed state so its destructor is a no-op. Needed so
+    // callers can return a CudaBackend by value (NRVO can't elide every
+    // case once the backend is wrapped in a struct alongside non-trivial
+    // state).
     BasicCudaBackend(BasicCudaBackend&& other) noexcept
         : handle_(other.handle_),
           pool_available_(other.pool_available_),
-          staging_buf_(other.staging_buf_),
-          staging_capacity_(other.staging_capacity_),
-          staging_n_(other.staging_n_),
-          staging_fingerprint_(std::move(other.staging_fingerprint_)),
           coeffs_dev_(other.coeffs_dev_),
           coeffs_capacity_(other.coeffs_capacity_)
     {
-        other.handle_            = nullptr;
-        other.staging_buf_       = nullptr;
-        other.staging_capacity_  = 0;
-        other.staging_n_         = 0;
-        other.coeffs_dev_        = nullptr;
-        other.coeffs_capacity_   = 0;
+        other.handle_          = nullptr;
+        other.coeffs_dev_      = nullptr;
+        other.coeffs_capacity_ = 0;
     }
     BasicCudaBackend& operator=(BasicCudaBackend&& other) noexcept {
         if (this != &other) {
-            if (staging_buf_) cudaFree(staging_buf_);
-            if (coeffs_dev_)  cudaFree(coeffs_dev_);
-            if (handle_)      cublasDestroy(handle_);
-            handle_              = other.handle_;
-            pool_available_      = other.pool_available_;
-            staging_buf_         = other.staging_buf_;
-            staging_capacity_    = other.staging_capacity_;
-            staging_n_           = other.staging_n_;
-            staging_fingerprint_ = std::move(other.staging_fingerprint_);
-            coeffs_dev_          = other.coeffs_dev_;
-            coeffs_capacity_     = other.coeffs_capacity_;
-            other.handle_            = nullptr;
-            other.staging_buf_       = nullptr;
-            other.staging_capacity_  = 0;
-            other.staging_n_         = 0;
-            other.coeffs_dev_        = nullptr;
-            other.coeffs_capacity_   = 0;
+            if (coeffs_dev_) cudaFree(coeffs_dev_);
+            if (handle_)     cublasDestroy(handle_);
+            handle_                = other.handle_;
+            pool_available_        = other.pool_available_;
+            coeffs_dev_            = other.coeffs_dev_;
+            coeffs_capacity_       = other.coeffs_capacity_;
+            other.handle_          = nullptr;
+            other.coeffs_dev_      = nullptr;
+            other.coeffs_capacity_ = 0;
         }
         return *this;
     }
@@ -254,7 +236,6 @@ public:
     }
     void deallocate(Complex* p) const noexcept override {
         if (!p) return;
-        forget_staged_(p);
         // Noexcept path: ignore errors. The pool/non-pool branch must
         // match the path taken in `allocate`; we track this implicitly
         // by `pool_available_` being a const-ish field (set once in the
@@ -264,13 +245,11 @@ public:
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;
-        forget_written_(p, n);
         cuda_backend_detail::check_cuda(
             cudaMemset(p, 0, n * sizeof(Complex)), "cudaMemset");
     }
     void copy(const Complex* src, Complex* dst, std::size_t n) const override {
         if (n == 0) return;
-        forget_written_(dst, n);
         cuda_backend_detail::check_cuda(
             cudaMemcpy(dst, src, n * sizeof(Complex),
                        cudaMemcpyDeviceToDevice),
@@ -280,7 +259,6 @@ public:
                         Complex* device_dst,
                         std::size_t n) const override {
         if (n == 0) return;
-        forget_written_(device_dst, n);
         cuda_backend_detail::check_cuda(
             cudaMemcpy(device_dst, host_src, n * sizeof(Complex),
                        cudaMemcpyHostToDevice),
@@ -302,7 +280,6 @@ public:
     void axpy(Complex alpha, const Complex* x, Complex* y,
               std::size_t n) const override {
         if (n == 0) return;
-        forget_written_(y, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
             cublasZaxpy(handle_, as_blas_int(n), &a,
@@ -312,7 +289,6 @@ public:
     }
     void scale(Complex alpha, Complex* x, std::size_t n) const override {
         if (n == 0) return;
-        forget_written_(x, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
             cublasZscal(handle_, as_blas_int(n), &a,
@@ -355,7 +331,6 @@ public:
     void axpby(Complex alpha, const Complex* x,
                Complex beta,  Complex* y, std::size_t n) const override {
         if (n == 0) return;
-        forget_written_(y, n);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
         cuda_backend_detail::check_cublas(
@@ -371,24 +346,16 @@ public:
     // ------------------------------------------------------------------
     // Batched primitives (CGS2 reorth fast path).
     //
-    // Both overrides cast the M-vector batched primitive into one
-    // `cublasZgemv` over a contiguous staging buffer that holds the
-    // basis as an (n x M) column-major matrix. Staging is cached
-    // across calls with a pointer fingerprint; the typical Lanczos
-    // pattern (basis grows by one vector each iteration, and CGS2
-    // passes 1 + 2 within an iteration use the same growing basis,
-    // and `axpy_many` is called right after `dot_many` on the same
-    // basis) gets cache hits for everything except the new column.
-    //
     //   dot_many  : `coeffs = B^H * v`     <=> cublasZgemv(OP_C)
     //   axpy_many : `v     += B * alphas`  <=> cublasZgemv(OP_N)
     //
-    // Per CGS2 pass at M=100, n=65536: 1 staging memcpy (the new
-    // column) + 1 cublasZgemv launch + 1 D2H memcpy of M coeffs.
-    // That replaces M individual cublasZdotc launches, each with
-    // its own implicit host-sync. The win is most pronounced at
-    // small/medium n, where per-vector launches are launch-bound
-    // rather than bandwidth-bound.
+    // One `cublasZgemv` per run of columns that sit back to back in device
+    // memory (basis[k + 1] == basis[k] + n): a contiguous basis -- Krylov-
+    // Schur's V, the Lanczos basis -- is a single run, read in place (no
+    // copy, no state kept between calls); a separately allocated vector is
+    // a run of one. The coefficients go through one device buffer: dot_many
+    // reads them back once (the caller needs them at once), axpy_many
+    // uploads them once and never waits.
     // ------------------------------------------------------------------
     void dot_many(const Complex* const* basis,
                   std::size_t           num_basis,
@@ -402,31 +369,19 @@ public:
             }
             return;
         }
-        ensure_staging_(n, num_basis);
         ensure_coeffs_(num_basis);
-        stage_basis_(basis, num_basis, n);
-
-        // coeffs_dev_ = 1 * staging_buf_^H * v + 0 * coeffs_dev_
         const cuDoubleComplex one  = make_cuDoubleComplex(1.0, 0.0);
         const cuDoubleComplex zero = make_cuDoubleComplex(0.0, 0.0);
-        cuda_backend_detail::check_cublas(
-            cublasZgemv(handle_,
-                CUBLAS_OP_C,
-                as_blas_int(n), static_cast<int>(num_basis),
-                &one,
-                reinterpret_cast<const cuDoubleComplex*>(staging_buf_),
-                as_blas_int(n),
-                reinterpret_cast<const cuDoubleComplex*>(v), 1,
-                &zero,
-                reinterpret_cast<cuDoubleComplex*>(coeffs_dev_), 1),
-            "cublasZgemv(dot_many)");
-
-        // Synchronous D2H: subsequent host code reads coeffs_out
-        // immediately to build the negated axpy_many call.
+        for_each_run_(basis, num_basis, n, [&](std::size_t k, std::size_t len) {
+            cuda_backend_detail::check_cublas(
+                cublasZgemv(handle_, CUBLAS_OP_C, as_blas_int(n), as_blas_int(len), &one,
+                            reinterpret_cast<const cuDoubleComplex*>(basis[k]), as_blas_int(n),
+                            reinterpret_cast<const cuDoubleComplex*>(v), 1, &zero,
+                            reinterpret_cast<cuDoubleComplex*>(coeffs_dev_ + k), 1),
+                "cublasZgemv(dot_many)");
+        });
         cuda_backend_detail::check_cuda(
-            cudaMemcpy(coeffs_out, coeffs_dev_,
-                       num_basis * sizeof(Complex),
-                       cudaMemcpyDeviceToHost),
+            cudaMemcpy(coeffs_out, coeffs_dev_, num_basis * sizeof(Complex), cudaMemcpyDeviceToHost),
             "cudaMemcpy(dot_many D2H)");
     }
 
@@ -436,31 +391,20 @@ public:
                    Complex*              v,
                    std::size_t           n) const override {
         if (num_basis == 0 || n == 0) return;
-        ensure_staging_(n, num_basis);
         ensure_coeffs_(num_basis);
-        stage_basis_(basis, num_basis, n);
-        forget_written_(v, n);
-
-        // Stage alphas (host -> device).
         cuda_backend_detail::check_cuda(
-            cudaMemcpyAsync(coeffs_dev_, alphas,
-                            num_basis * sizeof(Complex),
-                            cudaMemcpyHostToDevice, /*stream=*/0),
+            cudaMemcpyAsync(coeffs_dev_, alphas, num_basis * sizeof(Complex), cudaMemcpyHostToDevice,
+                            /*stream=*/0),
             "cudaMemcpyAsync(alphas H2D)");
-
-        // v = 1 * staging_buf_ * alphas + 1 * v
         const cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
-        cuda_backend_detail::check_cublas(
-            cublasZgemv(handle_,
-                CUBLAS_OP_N,
-                as_blas_int(n), static_cast<int>(num_basis),
-                &one,
-                reinterpret_cast<const cuDoubleComplex*>(staging_buf_),
-                as_blas_int(n),
-                reinterpret_cast<const cuDoubleComplex*>(coeffs_dev_), 1,
-                &one,
-                reinterpret_cast<cuDoubleComplex*>(v), 1),
-            "cublasZgemv(axpy_many)");
+        for_each_run_(basis, num_basis, n, [&](std::size_t k, std::size_t len) {
+            cuda_backend_detail::check_cublas(
+                cublasZgemv(handle_, CUBLAS_OP_N, as_blas_int(n), as_blas_int(len), &one,
+                            reinterpret_cast<const cuDoubleComplex*>(basis[k]), as_blas_int(n),
+                            reinterpret_cast<const cuDoubleComplex*>(coeffs_dev_ + k), 1, &one,
+                            reinterpret_cast<cuDoubleComplex*>(v), 1),
+                "cublasZgemv(axpy_many)");
+        });
     }
 
     // ------------------------------------------------------------------
@@ -475,7 +419,6 @@ public:
               Complex beta,
               Complex* C, std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
-        forget_written_(C, ldc * (n - 1) + m);
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
         cuda_backend_detail::check_cublas(
@@ -495,37 +438,12 @@ private:
     cublasHandle_t handle_         = nullptr;
     bool           pool_available_ = false;
 
-    // Persistent staging buffer for batched dot_many / axpy_many. Sized
-    // lazily to fit (n x m) complex<double>. Owned by the backend so
-    // the cost amortises across all Lanczos / FTLM / KS calls on this
-    // instance.
-    mutable Complex*     staging_buf_       = nullptr;
-    mutable std::size_t  staging_capacity_  = 0;  // bytes
-    mutable std::size_t  staging_n_         = 0;  // row count of staged content
-    mutable std::vector<const Complex*> staging_fingerprint_;
-
     // Device buffer for the M coefficients computed by `dot_many` /
     // consumed by `axpy_many`. cuBLAS in HOST pointer-mode wants the
     // x/y vectors of `cublasZgemv` in device memory; we copy to host
     // (`dot_many`) or from host (`axpy_many`) once per call.
     mutable Complex*     coeffs_dev_      = nullptr;
     mutable std::size_t  coeffs_capacity_ = 0;  // bytes
-
-    void ensure_staging_(std::size_t n, std::size_t m) const {
-        const std::size_t needed = n * m * sizeof(Complex);
-        if (needed > staging_capacity_) {
-            if (staging_buf_) cudaFree(staging_buf_);
-            staging_buf_ = nullptr;
-            cuda_backend_detail::check_cuda(
-                cudaMalloc(reinterpret_cast<void**>(&staging_buf_), needed),
-                "cudaMalloc(staging)");
-            staging_capacity_ = needed;
-            // Re-malloc invalidates everything that was previously
-            // staged; force a re-stage on the next call.
-            staging_fingerprint_.clear();
-            staging_n_ = 0;
-        }
-    }
 
     void ensure_coeffs_(std::size_t m) const {
         const std::size_t needed = m * sizeof(Complex);
@@ -539,70 +457,15 @@ private:
         }
     }
 
-    // Stage `num_basis` device pointers into `staging_buf_` as an
-    // (n x num_basis) column-major matrix. Cache layout uses
-    // `staging_fingerprint_` (a copy of the basis pointer array
-    // from the last call); we recognise three cases:
-    //
-    //   (a) exact match (same pointers, same count) -> no work.
-    //   (b) prefix match (cached array is a prefix of current) ->
-    //       stage only the new tail columns. This is the typical
-    //       Lanczos pattern.
-    //   (c) anything else -> re-stage all columns.
-    //
-    // The fingerprint is also invalidated when `staging_n_` changes
-    // (different problem size, or capacity grew). All D2D memcpys
-    // are async on the default stream; the subsequent cublasZgemv
-    // sees them via stream ordering.
-    void stage_basis_(const Complex* const* basis,
-                      std::size_t           num_basis,
-                      std::size_t           n) const {
-        const bool n_match = (staging_n_ == n);
-
-        std::size_t start = 0;
-        if (n_match) {
-            if (staging_fingerprint_.size() == num_basis &&
-                std::equal(staging_fingerprint_.begin(),
-                           staging_fingerprint_.end(), basis)) {
-                return;  // exact cache hit
-            }
-            if (staging_fingerprint_.size() < num_basis &&
-                std::equal(staging_fingerprint_.begin(),
-                           staging_fingerprint_.end(), basis)) {
-                start = staging_fingerprint_.size();  // prefix hit
-            }
-        }
-
-        for (std::size_t k = start; k < num_basis; ++k) {
-            cuda_backend_detail::check_cuda(
-                cudaMemcpyAsync(staging_buf_ + k * n, basis[k],
-                                n * sizeof(Complex),
-                                cudaMemcpyDeviceToDevice, /*stream=*/0),
-                "cudaMemcpyAsync(stage)");
-        }
-        staging_fingerprint_.assign(basis, basis + num_basis);
-        staging_n_ = n;
-    }
-
-    // A freed vector's address can come back from the pool for a new vector: its staged column,
-    // and every column staged after it, no longer mirror anything (the prefix before it does).
-    void forget_staged_(const Complex* p) const noexcept {
-        const auto it = std::find(staging_fingerprint_.begin(), staging_fingerprint_.end(), p);
-        staging_fingerprint_.erase(it, staging_fingerprint_.end());
-    }
-    // A write through the backend to memory a staged column mirrors makes that column stale, and
-    // with it every column staged after it: the Krylov-Schur restart rewrites its basis columns in
-    // place, the GS vector lane its seed. (A kernel writing outside the backend -- an operator's
-    // apply -- never targets a staged vector: the lanes apply into scratch and copy.)
-    void forget_written_(const Complex* p, std::size_t count) const noexcept {
-        if (staging_fingerprint_.empty() || count == 0) return;
-        const Complex* end = p + count;
-        for (std::size_t k = 0; k < staging_fingerprint_.size(); ++k) {
-            const Complex* c = staging_fingerprint_[k];
-            if (c < end && p < c + staging_n_) {
-                staging_fingerprint_.resize(k);
-                return;
-            }
+    // f(k, len) for each maximal run basis[k .. k + len) of columns that sit back to back
+    // (basis[k + i] == basis[k] + i n), in order.
+    template <class F>
+    static void for_each_run_(const Complex* const* basis, std::size_t m, std::size_t n, F&& f) {
+        for (std::size_t k = 0; k < m;) {
+            std::size_t len = 1;
+            while (k + len < m && basis[k + len] == basis[k] + len * n) ++len;
+            f(k, len);
+            k += len;
         }
     }
 };

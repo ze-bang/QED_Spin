@@ -155,14 +155,24 @@ struct DeviceProbe {
     return Lane::DeviceKrylov;
 }
 
-/// fn(backend) on a fresh CpuBackend for a host lane, or a fresh CudaBackend for a device lane.
-/// A device lane in a build without CUDA is a logic error (place() never returns one there).
+#ifdef WITH_CUDA
+/// The calling thread's CudaBackend, made on its first device lane and never destroyed (its cuBLAS
+/// handle would be torn down after the CUDA runtime at exit). It keeps no state between solves
+/// since P7.3, so every device block the thread runs shares it instead of creating a cuBLAS handle
+/// each. Not for transient threads (one per sample): each would leave a backend behind.
+inline ed::matvec::CudaBackend& thread_cuda_backend() {
+    static thread_local ed::matvec::CudaBackend* be = new ed::matvec::CudaBackend;
+    return *be;
+}
+#endif
+
+/// fn(backend) on a fresh CpuBackend for a host lane, or the thread's CudaBackend for a device
+/// lane. A device lane in a build without CUDA is a logic error (place() never returns one there).
 template <class Fn>
 auto with_backend(Lane lane, Fn&& fn) {
     if (on_device(lane)) {
 #ifdef WITH_CUDA
-        ed::matvec::CudaBackend be;
-        return fn(be);
+        return fn(thread_cuda_backend());
 #else
         throw std::logic_error("with_backend: a device lane in a build without CUDA");
 #endif
