@@ -1,5 +1,63 @@
 # Changelog
 
+## 2026-10-03 — 0.6.1: the capability catalogue's findings closed
+
+A source-level catalogue of 0.6.0 (every public function, parameter and refusal, each item checked
+against the code by a second reader) found twelve defects and 79 places where the docs or comments
+disagreed with the code. All are closed here. Behaviour changes are listed first; nothing that
+worked correctly is removed.
+
+- **Environment flags.** `false`, `off` and `no` in any case, and any integer equal to zero
+  (`00`, `+0`, `0 `), now read as off. Mixed-case words such as `False` used to pass the validity
+  check yet read as ON, so `ED_MEM_GUARD_OFF=False` disabled the memory guard. Python reads its
+  flags (`ED_ENV_STRICT`, `ED_SYM_PROFILE`) through the engine's parser (`qed._core.env_flag`).
+- **Irreps of dimension above 8** are refused with `qed.errors.Unsupported` when their sector is
+  built; they used to overrun the sector kernels' fixed 8 x 8 buffers. An explicit
+  `qed.Symmetries` now has the 128-coset cap `spatial="auto"` has, and residues that do not form a
+  group with the abelian part are refused up front (`InvalidRequest`), not at the first star.
+- **Dynamics checks the residues it folds with.** At T > 0 the residues of an explicit
+  `qed.Symmetries` folded the source sectors without being checked against H, so a residue that is
+  not a symmetry gave a silently wrong S(q, w). Every supplied permutation is now checked
+  (`InvalidRequest`), as `eigs` already did. `spatial="auto"` was never affected.
+- **`qed.symmetry.compose`, `power` and `order`** validate their arguments (`InvalidRequest`); an
+  out-of-range entry used to be read past the end of the list.
+- **Errors.** Every deliberate refusal raises a `qed.errors` class. Changed: an uncertified `eigs`
+  window without `allow_partial` raises `ConvergenceError` (was `RuntimeError`, which it still is);
+  a failed host LAPACK solve raises `ConvergenceError`; the builder, `qed.dssf`, the lattice
+  generators and unreadable cluster or positions files raise `InvalidRequest` (a `ValueError`;
+  some were `IndexError` or `RuntimeError`); a dynamics probe that is not an `Operator`, and
+  `matrix_element` with a non-`Operator` or a non-finite operator, raise `InvalidRequest`;
+  `Operator / 0` raises `InvalidRequest` (was `ValueError`); `qed.Operator(n)` with n >= 64 raises
+  `Unsupported` (was `RuntimeError`); under `ED_ENV_STRICT` a misspelt or malformed variable makes
+  the import raise `InvalidRequest` (was `RuntimeError`). Arguments of the wrong Python type still
+  raise `TypeError`, and a site or level index out of range `IndexError`.
+- **`device="gpu"` has no host fallback left.** A failed batched device dense solve is retried in
+  halves on the device and raises `ResourceLimit` if one block alone fails; a dense block too large
+  for the device raises `ResourceLimit`; the spin-tower penalty re-solve without a device kernel
+  raises `DeviceUnsupported`. `device="auto"` keeps its host fallbacks. Dynamics blocks now state
+  their device working set, so `place()` checks it (`ResourceLimit` under `"gpu"`, the host under
+  `"auto"`) instead of failing at allocation.
+- **`ThermalResult.e0`** is the lowest energy the method resolved: the ground state (exact), the
+  lowest weighted Ritz value (FTLM), the lowest certified eigenvalue (OFTLM), the spectral-bounds
+  estimate (mTPQ). It used to be the lowest thermal energy <E>(T), which moved with the
+  temperature grid.
+- **`thermal(method="ftlm")` needs `krylov >= 2`**, checked up front (`krylov=1` passed the checks
+  and failed at the first sampled block).
+- **`result.time_reversal`** names K or Theta only when a returned level was folded by it.
+- **Symmetry discovery** compares coefficients relative to H's largest, so an H at a tiny scale
+  keeps its spatial symmetry (below |c| = 1e-12 the graph used to be empty).
+- **Smaller fixes.** `kitaev` validates the axis of every bond; the `Operator` record readers
+  refuse an operator with terms on four or more sites instead of dropping them;
+  `ED_GPU_SYM_CACHE_GIB=0` pins nothing; `expect` pins threads under `ED_NUMA_PIN_THREADS` like the
+  other verbs; `qed.dssf` positions files are `x y z` or `id x y z`, and other column counts are
+  refused (extra columns were read as coordinates).
+- **Docs and comments**: the 79 disagreements are corrected, including the permutation convention
+  in `qed.symmetry` (site i of the image carries the spin of site `p[i]`).
+- **CI.** The Python lane's coverage grid failed on every observable and dynamics cell (957 of
+  1877) because the grid's dense oracle needs scipy and CI never installed it; reproduced in CI's
+  environment (Python 3.11, OpenBLAS, latest numpy and pynauty, no scipy), where the other 920
+  cells passed. The `test` extra now lists `pynauty` and `scipy`, and CI installs `.[test]`.
+
 ## 2026-10-03 — 0.6.0: correctness, the operator algebra, the device lanes
 
 Breaking changes: a set bit is spin up (`n_up` counts up spins, and full-basis vectors are
@@ -284,7 +342,7 @@ changes, fixes and speed-ups.
   seeded by its identity (n_up, parity, momentum), not by its position in the job: at a fixed
   `seed`, finite-temperature results change at sampling level. A cross-sector operator walks its
   first apply and builds its CSR at the second. FTLM dynamics reorthogonalises locally (DGKS3) in
-  sectors of at least 2^16 states and more than 4x the Krylov depth, full CGS2 elsewhere (chain24,
+  sectors larger than both 2^16 states and 4x the Krylov depth, full CGS2 elsewhere (chain24,
   T = 1: 1.3x less wall time, spectral weight moved by 5e-7..8e-7 against a seed-to-seed spread of
   4e-4; jobs 62586014 / 62586016). Bench `chain30_dyn0` 57.6 s against 258.6 s (probe 62604898;
   62531535), `chain24_dynT` ~85 s against 657 s (62586014/16; 62531536). Fixed: `dynamics` still
