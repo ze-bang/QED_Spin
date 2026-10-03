@@ -249,10 +249,13 @@ std::vector<detail::Member> folded_ground_manifold(const ::Operator& H, int n_si
 
 // A dynamics block's placement request: its sectors are k-sector RepSectorMatVecs, which always
 // have a device kernel. Fields by name -- a positional list silently shifted when one was added.
-ed::BlockRequest dynamics_request(ed::Task task, std::uint64_t dim) {
+// device_bytes: the block's device working set, which place() checks against free device memory
+// (ResourceLimit under device='gpu', the host under 'auto').
+ed::BlockRequest dynamics_request(ed::Task task, std::uint64_t dim, std::uint64_t device_bytes) {
     ed::BlockRequest r;
     r.task = task;
     r.dim = dim;
+    r.device_bytes = device_bytes;
     r.device_kernel = true;
     r.verb = "dynamics";
     return r;
@@ -302,6 +305,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         && !ed::ops::theta_invariant(H.canonical()))
         throw ed::InvalidRequest("dynamics: time_reversal='require', but H is invariant under neither complex "
                                  "conjugation K nor time reversal Theta");
+    // The residues leave the Spec in unfolded(), yet fold T > 0 sources and T = 0 targets: check
+    // them against H here, as subspaces() checks what it is given.
+    detail::require_symmetries(H, s);
     const Spec u = unfolded(s);
     // Under total_spin with an SU(2)-symmetric H a level stands for a whole multiplet, solved at
     // its Sz = S member; in a uniform field every member is a level of its own (subspaces()
@@ -514,7 +520,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                                               std::size_t p) {
                     auto t_cf = std::chrono::steady_clock::now();
                     // k-sector and one-dimensional group-sector RepSectorMatVecs always have a device kernel.
-                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb));
+                    ed::core::Shape cf_shape;
+                    cf_shape.dim = nb;
+                    cf_shape.device = true;
+                    const std::uint64_t cf_bytes = ed::core::footprint(ed::core::Path::GsTwoPass, cf_shape).device
+                                                   + (ya ? 16 * static_cast<std::uint64_t>(nb) : 0); // a cross pair's a
+                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb, cf_bytes));
                     auto spectrum = [&](auto& bk, auto&& apply) {
                         if (!ya) {
                             const auto r = ed::observables::cf_spectral_from_vector(bk, apply, nb, yb, d.omega, cf);
@@ -972,7 +983,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         std::vector<std::size_t> host_jobs, device_jobs;
         for (std::size_t i = 0; i < jobs.size(); ++i) {
             const std::size_t dim = jobs[i].src->rd->reps.size();
-            const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsFtlm, dim));
+            ed::core::Shape sh = job_shape(jobs[i]);
+            sh.device = true;
+            const std::uint64_t ftlm_bytes = ed::core::footprint(ed::core::Path::DynamicsFtlm, sh).device;
+            const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsFtlm, dim, ftlm_bytes));
             (ed::on_device(lane) ? device_jobs : host_jobs).push_back(i);
             out.placement.add(lane);
         }

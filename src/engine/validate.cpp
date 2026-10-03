@@ -87,7 +87,8 @@ void validate_thermal_spec(const ThermalSpec& t, int n_sites) {
         if (!std::isfinite(T) || !(T > 0.0)) refuse("thermal", "temperatures must be finite and > 0, got " + num(T));
     if (t.method != ThermalSpec::Method::Exact) {
         if (t.samples < 1) refuse("thermal", "samples must be >= 1");
-        if (t.method == ThermalSpec::Method::FTLM && t.krylov < 1) refuse("thermal", "krylov must be >= 1");
+        if (t.method == ThermalSpec::Method::FTLM && t.krylov < 2)
+            refuse("thermal", "krylov must be >= 2 (a Lanczos run of depth 1 has no tridiagonal)");
     }
     for (std::size_t i = 0; i < t.observables.size(); ++i) validate_observable(t.observables[i], n_sites, "thermal", i);
 }

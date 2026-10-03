@@ -40,13 +40,20 @@ TEST_CASE("env registry: a flag set to 0 is OFF, presence alone never enables", 
     REQUIRE(ed::env::flag(n, false) == false);
     REQUIRE(ed::env::flag(n, true) == true);
     REQUIRE_FALSE(ed::env::tristate(n).has_value());
-    for (const char* off : {"0", "false", "off", "no", "OFF"}) {
+    // Any case, zero in any integer spelling, trailing blanks: every one parses (not malformed)
+    // and every one is off. "False" used to parse but read as ON.
+    for (const char* off :
+         {"0", "false", "off", "no", "OFF", "False", "Off", "No", "fAlSe", "00", "+0", "-0", "0 ", "false\t"}) {
         ScopedEnv e(n, off);
+        INFO(off);
+        REQUIRE(ed::env::parses_flag(off));
         REQUIRE(ed::env::flag(n, true) == false);
         REQUIRE(ed::env::tristate(n).value() == false);
     }
-    for (const char* on : {"1", "true", "yes", "2"}) {
+    for (const char* on : {"1", "true", "yes", "2", "True", "ON", "Yes", "-1", "01"}) {
         ScopedEnv e(n, on);
+        INFO(on);
+        REQUIRE(ed::env::parses_flag(on));
         REQUIRE(ed::env::flag(n, false) == true);
     }
     {

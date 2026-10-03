@@ -29,8 +29,13 @@ def _operator_to_graph_records(
     onsite: dict[int, dict[int, complex]] = {i: {} for i in range(num_sites)}
     edges: list[dict[str, Any]] = []
     triples: list[tuple] = []
-    for coeff, ops, sites in operator.terms():
-        c = complex(coeff)
+    terms = list(operator.terms())
+    # Colours compare coefficients relative to H's largest, so the graph's zero threshold (1e-12)
+    # and its 8-decimal rounding do not depend on H's overall scale. A common factor changes no
+    # automorphism.
+    scale = max((abs(complex(c)) for c, _, _ in terms), default=0.0) or 1.0
+    for coeff, ops, sites in terms:
+        c = complex(coeff) / scale
         codes = [_OP_CODE[o] for o in ops]
         sites = [int(s) for s in sites]
         if len(sites) == 1:  # every one-body term on the site colours it

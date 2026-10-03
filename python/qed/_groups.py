@@ -12,7 +12,7 @@ The engine works through the co-group G'/A per star, so :func:`spatial_split` ke
 ``_CO_GROUP_CAP``: a group without a large normal abelian subgroup (S_n of an all-to-all or
 field-only H) uses a maximal abelian subgroup A and its normaliser G' = N_G(A) instead.
 
-Permutations follow :mod:`qed._perm` (images; compose(a, b)[i] = a[b[i]]).
+Permutations follow :mod:`qed._perm` (compose(a, b)[i] = a[b[i]]).
 """
 
 from __future__ import annotations
@@ -325,8 +325,10 @@ def normaliser_split(G, A) -> tuple[list[list[int]], list[list[int]]]:
 
 def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list[int]], list[list[int]]]:
     """``(A, residues)`` for an explicit split: A the group the generators close (the identity alone
-    without generators), residues one per coset of A among ``star_perms``. Raises InvalidRequest when
-    A is not abelian or a residue does not normalise it."""
+    without generators), residues one per coset of A among ``star_perms`` (a permutation in A or in
+    an earlier residue's coset is dropped). Raises InvalidRequest when A is not abelian, a residue
+    does not normalise it, the residues give more than ``_CO_GROUP_CAP`` cosets, or the cosets do
+    not form a group (a product or an inverse of residues in no listed coset)."""
     star = [tuple(int(x) for x in p) for p in star_perms]
     gens = [tuple(int(x) for x in g) for g in generators]
     n = len(gens[0]) if gens else (len(star[0]) if star else n_sites)
@@ -356,6 +358,26 @@ def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list
             )
         residues.append(list(p))
         covered.update(compose(p, a) for a in A)
+    if len(residues) + 1 > _CO_GROUP_CAP:
+        # The same cap spatial_split applies: a larger co-group can carry irreps above the
+        # dimension the sector kernels hold (8), and its stars are costly to build.
+        raise InvalidRequest(
+            f"the residues give {len(residues) + 1} cosets of the abelian part, above the "
+            f"{_CO_GROUP_CAP}-element co-group cap; pass fewer residues (or point_group=False)"
+        )
+    # The cosets must form a group: every product and inverse of residues lands in a listed coset
+    # (else the engine finds the gap only at the first star that needs it).
+    for p in residues:
+        if inverse(tuple(p)) not in covered:
+            raise InvalidRequest(
+                f"the residues do not form a group with the abelian part: the inverse of {p} is in no listed coset"
+            )
+        for q in residues:
+            if compose(tuple(p), tuple(q)) not in covered:
+                raise InvalidRequest(
+                    f"the residues do not form a group with the abelian part: {p} o {q} is in no listed coset "
+                    "(pass every coset representative, or the permutations as one list)"
+                )
     return [list(a) for a in A], residues
 
 

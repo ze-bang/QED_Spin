@@ -1847,3 +1847,88 @@ def test_version_is_pyprojects():
     text = (pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
     assert qed.__version__ == re.search(r'^version = "([0-9.]+)"$', text, re.M).group(1)
     assert qed._core.__version__ == qed.__version__
+
+
+def _dm_chain(N=8):
+    """Heisenberg + Dz DM ring: translation invariant, but the reflection reverses every bond and
+    flips the sign of the DM term, so it is not a symmetry."""
+    b = qed.input.HamiltonianBuilder(N)
+    bonds = [(i, (i + 1) % N) for i in range(N)]
+    b.heisenberg(bonds, 1.0)
+    b.dm(bonds, [(0.0, 0.0, 0.3)] * N)
+    T = [(i - 1) % N for i in range(N)]
+    R = [N - 1 - i for i in range(N)]
+    return b.to_operator(), T, R
+
+
+@pytest.mark.parametrize("temps", [None, [1.0]])
+def test_dynamics_refuses_a_residue_that_is_not_a_symmetry(temps):
+    """dynamics drops the residues from the Spec it solves in, yet folds T > 0 sources with them:
+    a supplied residue H does not commute with must be refused (it gave a silently wrong S(w))."""
+    H, T, R = _dm_chain()
+    sym = qed.Symmetry(spatial=qed.Symmetries(abelian=[T], residues=[R]), sz=4)
+    O = qed.Operator(8)
+    O.add_one_body(qed.OP_SZ, 0, 1.0)
+    with pytest.raises(qed.errors.InvalidRequest):
+        qed.dynamics(H, O, np.linspace(0.0, 3.0, 5), T=temps, sym=sym, krylov=10)
+    with pytest.raises(qed.errors.InvalidRequest):  # the verbs agree
+        qed.eigs(H, 1, sym=sym)
+
+
+def test_thermal_e0_is_the_lowest_resolved_energy():
+    """e0 used to be the lowest thermal energy <E>_b(T) over blocks and temperatures, so it moved
+    with the grid (far above E0 for a warm one). It is now the lowest energy the method resolved."""
+    N = 12
+    b = qed.input.HamiltonianBuilder(N)
+    b.heisenberg([(i, (i + 1) % N) for i in range(N)], 1.0)
+    H = b.to_operator()
+    E0 = float(qed.eigs(H, 1).energies[0])
+    common = dict(method="ftlm", samples=3, krylov=60, seed=7, dense_max_dim=0)
+    cold = qed.thermal(H, [0.05, 0.5], **common)
+    warm = qed.thermal(H, [5.0, 20.0], **common)
+    assert cold.e0 == warm.e0  # independent of the temperature grid
+    assert abs(cold.e0 - E0) < 1e-8  # the lowest Ritz value of a converged Lanczos run
+    assert abs(qed.thermal(H, [1.0], method="exact").e0 - E0) < 1e-10
+    with pytest.raises(qed.errors.InvalidRequest, match="krylov must be >= 2"):
+        qed.thermal(H, [1.0], method="ftlm", krylov=1)
+
+
+@pytest.mark.parametrize("spatial", [None, "auto"])
+def test_result_time_reversal_names_a_map_only_when_a_level_was_folded(spatial):
+    """time_reversal used to name K whenever the context engaged it, even with no level folded
+    (spatial=None: no momenta for K to pair). It now agrees with the levels' own fold labels."""
+    N = 8
+    b = qed.input.HamiltonianBuilder(N)
+    b.heisenberg([(i, (i + 1) % N) for i in range(N)], 1.0)
+    r = qed.spectrum(b.to_operator(), sym=qed.Symmetry(spatial=spatial))
+    folds = {L.fold for L in r.levels} - {None}
+    assert r.time_reversal == (folds.pop() if folds else None)
+    assert not folds  # one antiunitary map at most
+
+
+@pytest.mark.parametrize("scale", [1e-13, 1e-6, 1e6])
+def test_symmetry_discovery_does_not_depend_on_the_scale_of_h(scale):
+    """The coloured graph compared coefficients against absolute thresholds: at |c| <= 1e-12 the
+    graph was empty, |Aut| = N! and spatial='auto' fell back to no spatial symmetry."""
+    pytest.importorskip("pynauty")
+    n = 10
+    b = qed.input.HamiltonianBuilder(n)
+    bonds = [(i, (i + 1) % n) for i in range(n)]
+    b.heisenberg(bonds, 1.0).dm(bonds, [(0.0, 0.0, 0.4)] * n)
+    H1 = b.to_operator()
+    ref, got = qed.find_symmetries(H1, verbose=False), qed.find_symmetries(H1 * scale, verbose=False)
+    assert len(ref.abelian) >= 1 and len(got.abelian) == len(ref.abelian)  # the translations
+    assert len(got.residues) == len(ref.residues)
+    assert not any(code == "aut_capped" for code, _ in got.diagnostics)
+
+
+def test_record_readers_refuse_terms_on_four_or_more_sites():
+    """The record readers saw only the records and dropped a term on four sites silently; they now
+    refuse such an operator (its canonical terms are Operator.terms())."""
+    O = qed.Operator.product(6, "zzzz", [0, 1, 2, 3], 1.0)
+    for read in (O.iter_one_body_terms, O.iter_two_body_terms, O.iter_three_body_terms, O.transform_tuples):
+        with pytest.raises(qed.errors.Unsupported):
+            read()
+    assert len(O.terms()) == 1
+    two = qed.Operator.product(6, "zz", [0, 1], 1.0)
+    assert len(two.iter_two_body_terms()) + len(two.iter_one_body_terms()) >= 1

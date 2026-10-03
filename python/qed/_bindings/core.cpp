@@ -2,7 +2,7 @@
 // python/qed/_bindings/core.cpp -- the pybind11 module `qed._core`.
 //
 //   * Operator: the spin-1/2 Hamiltonian / observable builder (terms,
-//     apply, and the term iterators symmetry discovery reads);
+//     apply, and the record readers; discovery reads Operator.terms());
 //   * input (input.cpp): the lattices (the builder and qed.dssf are Python);
 //   * sectors (sectors.cpp): the symmetry-sector verbs behind qed._verbs;
 //   * symmetry: site-permutation helpers;
@@ -82,13 +82,8 @@ void op_add_one_body(Operator& op, int op_type, uint64_t site, Complex coeff) {
     t.coefficient = coeff;
     t.is_two_body = false;
     op.add_record(t);
-    // Mark the SoA + isReal() + matvec backend caches stale so a subsequent
-    // apply()/isReal() rebuilds. The size-aware commitPendingTransforms()
-    // would also catch this, but invalidating eagerly here also
-    // resets the isReal() cache --- without this, a real-coeff operator that
-    // had isReal() probed once will keep claiming real even after a complex
-    // coefficient is added, and apply() would take the real specialisation
-    // with the wrong matvec.
+    // add_record already resets the cached canonical terms, isReal() answer and apply lane;
+    // this call repeats it (as the two- and three-body adders do).
     op.invalidateMatrixCaches();
 }
 
@@ -142,11 +137,21 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
 
 
 // =============================================================================
-// Term iterators, read by symmetry discovery (qed.discovery).
+// Record readers (tests and tools; symmetry discovery reads Operator.terms()).
 // =============================================================================
+
+// The readers see the records only: an operator with terms on four or more sites (which no record
+// holds) would be read incompletely, so they refuse it instead of dropping those terms.
+void require_records_only(const Operator& op, const char* what) {
+    if (op.has_extra_terms())
+        throw ed::Unsupported(std::string(what)
+                              + ": the operator has terms on four or more sites, which no record holds; read "
+                                "Operator.terms() (the canonical terms) instead");
+}
 
 // Yields (op_type, site, coeff) tuples for every one-body term.
 py::list op_iter_one_body(const Operator& op) {
+    require_records_only(op, "iter_one_body_terms");
     py::list out;
     for (const auto& t : op.records()) {
         if (t.is_two_body) continue;
@@ -158,6 +163,7 @@ py::list op_iter_one_body(const Operator& op) {
 // Yields (op_type_1, site_1, op_type_2, site_2, coeff) tuples for every
 // two-body term.
 py::list op_iter_two_body(const Operator& op) {
+    require_records_only(op, "iter_two_body_terms");
     py::list out;
     for (const auto& t : op.records()) {
         if (!t.is_two_body) continue;
@@ -170,6 +176,7 @@ py::list op_iter_two_body(const Operator& op) {
 // Yields (op_type_1, site_1, op_type_2, site_2, op_type_3, site_3, coeff)
 // tuples for every three-body term.
 py::list op_iter_three_body(const Operator& op) {
+    require_records_only(op, "iter_three_body_terms");
     py::list out;
     for (const auto& t : op.three_body_records()) {
         out.append(py::make_tuple(static_cast<int>(t.op_type_1), static_cast<uint64_t>(t.site_index_1),
@@ -275,10 +282,10 @@ PYBIND11_MODULE(_core, m) {
         .def(
             "transform_tuples",
             [](const Operator& op) {
-                 // The one-/two-body terms in the canonical (op_type,
-                 // site, coeff, is_two_body, op_type_2, site_2) layout,
-                 // a list of 6-tuples mirroring ``Operator::TransformData``
-                 // (three-body terms are not included).
+                // The one-/two-body records as (op_type, site, coeff, is_two_body, op_type_2,
+                // site_2) 6-tuples mirroring Operator::TransformData (three-body records are not
+                // included; an operator with terms on four or more sites is refused).
+                require_records_only(op, "transform_tuples");
                 py::list out;
                 for (const auto& t : op.records()) {
                     out.append(py::make_tuple(static_cast<int>(t.op_type), t.site_index, t.coefficient, t.is_two_body,
@@ -287,17 +294,18 @@ PYBIND11_MODULE(_core, m) {
                 return out;
             },
             R"pbdoc(
-             Return the operator's one-/two-body terms as a list of
+             Return the operator's one-/two-body records as a list of
              6-tuples ``(op_type, site, coeff, is_two_body, op_type_2,
-             site_2)``. Used by symmetry discovery (qed.discovery) to
-             read the operator's TransformData without exposing the SoA
-             internals directly. Three-body terms are not included.
+             site_2)``, in insertion order. Three-body records are not
+             included. Raises qed.errors.Unsupported when the operator has
+             terms on four or more sites (no record holds them); the
+             canonical terms are ``Operator.terms()``.
              )pbdoc")
         .def("add_three_body", &op_add_three_body, py::arg("op_type_1"), py::arg("site_1"), py::arg("op_type_2"),
              py::arg("site_2"), py::arg("op_type_3"), py::arg("site_3"), py::arg("coeff"),
              "Append a three-body term `coeff * Op1[s1] Op2[s2] Op3[s3]`.")
         .def("apply", &op_apply, py::arg("vec"), "Compute H * v on a 1-D complex128 array.")
-        // In-process introspection used by symmetry discovery (qed.discovery).
+        // Record readers (insertion order; terms on four or more sites are refused).
         .def("iter_one_body_terms", &op_iter_one_body,
              "List of ``(op_type, site, coeff)`` tuples for every one-body "
              "term currently in the operator. ``op_type`` is one of "
@@ -314,7 +322,7 @@ PYBIND11_MODULE(_core, m) {
             "_extend",
             [](Operator& a, const Operator& b) {
                 if (a.getNumBits() != b.getNumBits())
-                    throw py::value_error("Operator._extend: the operators act on different numbers of sites");
+                    throw ed::InvalidRequest("Operator._extend: the operators act on different numbers of sites");
                 for (const auto& r : b.records()) a.add_record(r);
                 for (const auto& r : b.three_body_records()) a.add_record(r);
                 for (const auto& t : b.extra_terms()) a.add_extra_term(t);
@@ -354,7 +362,7 @@ PYBIND11_MODULE(_core, m) {
         .def(
             "__truediv__",
             [](const Operator& a, Complex s) {
-                if (s == Complex(0.0, 0.0)) throw py::value_error("Operator: division by zero");
+                if (s == Complex(0.0, 0.0)) throw ed::InvalidRequest("Operator: division by zero");
                 return ed::ops::to_operator(a.canonical().scaled(Complex(1.0, 0.0) / s));
             },
             py::is_operator())
@@ -429,8 +437,9 @@ PYBIND11_MODULE(_core, m) {
         "environment-dependent inputs of this run, for result metadata.");
     m.def(
         "env_unknown", [] { return ed::env::unknown(); },
-        "ED_* / QED_* names present in the environment that the registry does not "
-        "declare. Nothing reads them: almost always a misspelt variable.");
+        "ED_* names present in the environment that the registry does not declare "
+        "(ED_BUILD_*, ED_TEST_* and ED_BENCH_* excepted; QED_* is not scanned). Nothing "
+        "reads them: almost always a misspelt variable.");
     m.def(
         "env_malformed", [] { return ed::env::malformed(); },
         "'NAME=value' for every set registered variable whose value does not parse as its "
@@ -443,6 +452,11 @@ PYBIND11_MODULE(_core, m) {
             return out;
         },
         "Names of all registered environment variables.");
+    m.def(
+        "env_flag", [](const std::string& name, bool dflt) { return ed::env::flag(name.c_str(), dflt); },
+        py::arg("name"), py::arg("default"),
+        "The engine's reading of flag `name` (ed::env::flag): unset or empty gives `default`; "
+        "'false', 'off', 'no' in any case or an integer equal to zero is off; anything else is on.");
     m.def(
         "has_cuda_build",
         [] {
@@ -532,10 +546,40 @@ PYBIND11_MODULE(_core, m) {
                                              "reflections, swaps, and the closure of a generating set.");
 
     m_sym.def("identity", &ed::sym::identity, py::arg("n_sites"), "Identity permutation on `n_sites` sites.");
-    m_sym.def("compose", &ed::sym::compose, py::arg("a"), py::arg("b"),
-              "Composition (a o b)[i] = a[b[i]]. b is applied first.");
-    m_sym.def("power", &ed::sym::power, py::arg("g"), py::arg("k"), "g^k for k >= 0; g^0 is the identity.");
-    m_sym.def("order", &ed::sym::order, py::arg("g"), "Smallest positive integer k with g^k == identity.");
+    // compose and power index one permutation by another unchecked (they run in the closure
+    // loops), so every argument from Python is validated here first.
+    auto checked = [](const ed::sym::Permutation& p, const char* what) {
+        try {
+            ed::sym::validate(p, static_cast<int>(p.size()));   // narrow-ok: a site count
+        } catch (const std::invalid_argument& e) { throw ed::InvalidRequest(std::string(what) + ": " + e.what()); }
+    };
+    m_sym.def(
+        "compose",
+        [checked](const ed::sym::Permutation& a, const ed::sym::Permutation& b) {
+            checked(a, "compose");
+            checked(b, "compose");
+            if (a.size() != b.size()) throw ed::InvalidRequest("compose: the permutations have different lengths");
+            return ed::sym::compose(a, b);
+        },
+        py::arg("a"), py::arg("b"),
+        "Composition (a o b)[i] = a[b[i]]. b is applied first. Raises InvalidRequest unless a and b are "
+        "permutations of the same length.");
+    m_sym.def(
+        "power",
+        [checked](const ed::sym::Permutation& g, int k) {
+            checked(g, "power");
+            if (k < 0) throw ed::InvalidRequest("power: k must be >= 0 (use the inverse for negative powers)");
+            return ed::sym::power(g, k);
+        },
+        py::arg("g"), py::arg("k"),
+        "g^k for k >= 0; g^0 is the identity. Raises InvalidRequest unless g is a permutation.");
+    m_sym.def(
+        "order",
+        [checked](const ed::sym::Permutation& g) {
+            checked(g, "order");
+            return ed::sym::order(g);
+        },
+        py::arg("g"), "Smallest positive integer k with g^k == identity.");
     m_sym.def("translation", &ed::sym::translation, py::arg("n_sites"), py::arg("shift") = 1,
               "Cyclic translation by `shift` sites on a 1D ring of `n_sites` sites.");
     m_sym.def("reflection_1d", &ed::sym::reflection_1d, py::arg("n_sites"),

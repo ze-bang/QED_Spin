@@ -22,7 +22,7 @@ using namespace ed::solvers::lg_detail;
 namespace {
 
 using Policy = ed::matvec::basis::RepSymmetryBasisPolicy;
-constexpr int kMaxIrrepDim = 8;
+using ed::matvec::kMaxIrrepDim;   // the one limit the sector kernels share (sector_rows.h)
 
 // <s|v> for v in sector rd, as expand() writes it: one pass over the sector's group.
 Complex amplitude(const ed::symmetry::RepSectorData& rd, const Policy& pol, const Complex* v, std::uint64_t s) {
@@ -194,9 +194,9 @@ std::shared_ptr<const ed::symmetry::RepSectorData> MomentumSectors::of(const std
 
 std::vector<Member> members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s,
                                MemberSectors& ms) {
-    if (!v.basis) throw std::invalid_argument("members_of: the level has no vector");
+    if (!v.basis) throw ed::InvalidRequest("members_of: the level has no vector");
     if (v.basis->irrep_dim > kMaxIrrepDim)
-        throw std::invalid_argument("members_of: irreps of dimension above " + std::to_string(kMaxIrrepDim));
+        throw ed::Unsupported("members_of: irreps of dimension above " + std::to_string(kMaxIrrepDim));
     const int N = ms.n_sites;
     const std::uint64_t full = N >= 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << N) - 1);
     // multiplet()'s operations: the residues, the level's antiunitary fold, its flip / Theta mirror.

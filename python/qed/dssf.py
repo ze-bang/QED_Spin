@@ -42,6 +42,7 @@ import operator as _op
 from typing import List, Optional, Sequence
 
 from . import _core
+from .errors import InvalidRequest
 
 __all__ = [
     "Observables",
@@ -186,9 +187,9 @@ def compute_transverse_bases(Q: Sequence[float], polarization: Sequence[float]):
     ``Q x polarization`` (along ``y x pol`` or ``x x pol`` when Q is parallel to it)."""
     Q, pol = [float(x) for x in Q], [float(x) for x in polarization]
     if len(Q) != 3:
-        raise ValueError("ed::dssf::compute_transverse_bases: Q must be a 3-vector")
+        raise InvalidRequest("ed::dssf::compute_transverse_bases: Q must be a 3-vector")
     if len(pol) != 3:
-        raise ValueError("ed::dssf::compute_transverse_bases: polarization must be a 3-vector")
+        raise InvalidRequest("ed::dssf::compute_transverse_bases: polarization must be a 3-vector")
     c = _cross(Q, pol)
     if math.sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) < _ZERO_TOL:
         e2 = _normalize(_cross([0.0, 1.0, 0.0] if abs(pol[0]) > 0.5 else [1.0, 0.0, 0.0], pol))
@@ -198,12 +199,15 @@ def compute_transverse_bases(Q: Sequence[float], polarization: Sequence[float]):
 
 
 def _read_positions(path: str, n: int) -> List[List[float]]:
-    """One ``x y z`` line per site (more columns are ignored); empty lines, lines starting with
-    '#' and lines whose first field is not a number are skipped. Exactly ``n`` sites."""
+    """One line per site, ``x y z`` or ``id x y z`` (the id is the site's index, counting from 0;
+    the 4-column form of ``qed.input.lattice.from_cluster_file``); empty lines, lines starting with
+    '#' and lines whose first field is not a number are skipped. Exactly ``n`` sites. Any other
+    column count, an id that is not the site's index, a coordinate that is not a number and a
+    file that cannot be opened raise InvalidRequest."""
     try:
         f = open(path)
     except OSError:
-        raise RuntimeError(f"ed::core::detail::read_positions_file: could not open {path}") from None
+        raise InvalidRequest(f"ed::core::detail::read_positions_file: could not open {path}") from None
     out = []
     with f:
         for k, line in enumerate(f, 1):
@@ -214,14 +218,27 @@ def _read_positions(path: str, n: int) -> List[List[float]]:
                 float(fields[0])
             except ValueError:
                 continue
+            if len(fields) not in (3, 4):
+                raise InvalidRequest(
+                    f"qed.dssf: {path} line {k}: a site is 'x y z' or 'id x y z', read {len(fields)} columns"
+                )
+            if len(fields) == 4:
+                try:
+                    site_id = int(fields[0])
+                except ValueError:
+                    site_id = -1
+                if site_id != len(out):
+                    raise InvalidRequest(
+                        f"qed.dssf: {path} line {k}: the id must be the site's index, counting from 0: "
+                        f"expected {len(out)}, read {fields[0]!r}"
+                    )
+                fields = fields[1:]
             try:
-                out.append([float(x) for x in fields[:3]])
+                out.append([float(x) for x in fields])
             except ValueError:
-                out.append([])
-            if len(out[-1]) != 3:
-                raise ValueError(f"qed.dssf: {path} line {k}: a site needs three coordinates x y z")
+                raise InvalidRequest(f"qed.dssf: {path} line {k}: a coordinate is not a number") from None
     if len(out) != n:
-        raise ValueError(f"qed.dssf: {path} lists {len(out)} sites for num_sites = {n}")
+        raise InvalidRequest(f"qed.dssf: {path} lists {len(out)} sites for num_sites = {n}")
     return out
 
 
@@ -287,29 +304,29 @@ def build_observables(spec: OperatorSpec) -> Observables:
     t = spec._operator_type
     experimental = t in ("experimental", "transverse_experimental")
     if t not in _TYPES:
-        raise ValueError(f"ed::dssf::build_observables: unknown operator_type '{t}'")
+        raise InvalidRequest(f"ed::dssf::build_observables: unknown operator_type '{t}'")
     if not spec._components and not experimental:
-        raise ValueError("ed::dssf::build_observables: components is empty")
+        raise InvalidRequest("ed::dssf::build_observables: components is empty")
     if not spec._momentum_points:
-        raise ValueError("ed::dssf::build_observables: momentum_points is empty")
+        raise InvalidRequest("ed::dssf::build_observables: momentum_points is empty")
     if len(spec._polarization) != 3:
-        raise ValueError("ed::dssf::build_observables: polarization must be a 3-vector")
+        raise InvalidRequest("ed::dssf::build_observables: polarization must be a 3-vector")
     n = spec._num_sites
     if n == 0:
-        raise ValueError("ed::dssf::build_observables: num_sites must be > 0")
+        raise InvalidRequest("ed::dssf::build_observables: num_sites must be > 0")
     for Q in spec._momentum_points:
         if len(Q) != 3:
-            raise ValueError(f"ed::dssf::build_observables: momentum point {Q} is not a 3-vector")
+            raise InvalidRequest(f"ed::dssf::build_observables: momentum point {Q} is not a 3-vector")
     if not experimental:
         for c in spec._components:
             if c not in (0, 1, 2):
-                raise ValueError(f"ed::dssf::build_observables: component {c} is not 0, 1 or 2")
+                raise InvalidRequest(f"ed::dssf::build_observables: component {c} is not 0, 1 or 2")
     U = spec._unit_cell_size
     if t == "sublattice":
         if U == 0:
-            raise ValueError("ed::dssf::build_observables: unit_cell_size must be >= 1")
+            raise InvalidRequest("ed::dssf::build_observables: unit_cell_size must be >= 1")
         if spec._sublattice is not None and spec._sublattice >= U:
-            raise ValueError(
+            raise InvalidRequest(
                 f"ed::dssf::build_observables: sublattice {spec._sublattice} is not below " f"unit_cell_size {U}"
             )
     xyz = spec._basis == "xyz"

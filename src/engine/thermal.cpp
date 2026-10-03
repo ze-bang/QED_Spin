@@ -162,8 +162,8 @@ ed::BlockRequest sampled_request(const ed::LinearOperator& op, const ThermalSpec
 }
 
 // One sampled block: FTLM, OFTLM (FTLM with exact_states) or mTPQ on the lane place() chooses,
-// or -- at most dense_max_dim states, with no tower and no observables -- its exact
-// thermodynamics on the host. `tower`: the seeds are projected onto it, and Z counts its states
+// or -- at most dense_max_dim states, a spin tower or observables included -- its exact
+// thermodynamics on the host (exact_block). `tower`: the seeds are projected onto it, and Z counts its states
 // instead of the block's. `obs`: the block's averaged observables; with `folded` (a time-reversal
 // pair in one block) each comes with its conjugate, and the pair gives (<O> + conj <O*>) / 2.
 // `tag` names the block in a device refusal.
@@ -237,8 +237,9 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t, co
             const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, space - 1));
             if (want > 0) {
                 const auto ask = static_cast<std::size_t>(std::min<std::uint64_t>(space, want + kLevelSlack));
-                BlockSolution ex = tower ? solve_block_tower(be, op, *tower->tower, ask, /*vectors=*/true)
-                                         : solve_block_eigenpairs(be, op, ask);
+                BlockSolution ex =
+                    tower ? solve_block_tower(be, op, *tower->tower, ask, /*vectors=*/true, 0, t.device == Device::Gpu)
+                          : solve_block_eigenpairs(be, op, ask);
                 const std::size_t got = ex.values.size();
                 if (ex.vectors.size() == got && got > 0) {
                     const double window = ed::numerics::kClusterRel * ed::numerics::scale_or_one(op.norm_bound());
@@ -306,7 +307,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t, co
                 if (tower) ko.min_weight = ed::numerics::kRoundoffWeight; // drop the roundoff copies outside the tower
                 for (const auto& A : obs) {
                     if (device && !A->has_device_kernel())
-                        throw std::invalid_argument(
+                        throw ed::DeviceUnsupported(
                             "ed::thermal: an observable has no device kernel for the selected GPU lane");
                     ko.observables.push_back(A->template bind<B>());
                 }
@@ -553,7 +554,10 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     }
     if (t.method != ThermalSpec::Method::Exact)
         for (const auto& b : blocks)
-            for (double e : b.c.E) out.e0 = std::min(out.e0, e);
+            // The lowest energy each block's method resolved (curves.h): a Ritz value or an eigenvalue,
+            // not the lowest thermal energy <E>_b(T), which would move with the temperature grid.
+            out.e0 =
+                std::min(out.e0, std::isfinite(b.c.e_min) ? b.c.e_min : *std::min_element(b.c.E.begin(), b.c.E.end()));
     batch.solve();
     if (t.method == ThermalSpec::Method::Exact) {
         // Fill in the batched blocks (those solved with observables are complete already).

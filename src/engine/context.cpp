@@ -36,10 +36,10 @@ namespace lg_detail {
     const bool admissible = ed::symmetry::flip_subspace_admissible(opt.n_up, opt.sz_parity, n_sites);
     if (opt.spin_flip == 1) {
         if (!fe.symmetric)
-            throw std::runtime_error("little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
+            throw ed::InvalidRequest("little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
                                      "(e.g. a Zeeman term breaks the flip).");
         if (!admissible)
-            throw std::runtime_error("little_group: spin_flip='require' but the subspace is not "
+            throw ed::InvalidRequest("little_group: spin_flip='require' but the subspace is not "
                                      "flip-invariant (needs n_up = N/2, an Sz-parity half with N "
                                      "even, or the full space).");
     }
@@ -235,14 +235,14 @@ void make_engine_context(const ::Operator& op, const std::vector<std::vector<int
                          const std::vector<std::vector<int>>& residue_perms, int n_sites, const LittleGroupOptions& opt,
                          EngineContext& cx, bool& tr_on) {
     if (opt.n_up >= 0 && opt.sz_parity >= 0)
-        throw std::invalid_argument("little_group: n_up and sz_parity are mutually exclusive.");
+        throw ed::InvalidRequest("little_group: n_up and sz_parity are mutually exclusive.");
 
     cx.A = abelian_group;
     cx.n_sites = n_sites;
     cx.giA = ed::symmetry::decompose_irreps(cx.A, n_sites); // throws if not closed
     if (!cx.giA.is_abelian())
-        throw std::invalid_argument("little_group: `abelian_group` is not abelian -- pass the clique "
-                                    "group; residues go in `residue_perms`.");
+        throw ed::InvalidRequest("little_group: `abelian_group` is not abelian -- pass the clique "
+                                 "group; residues go in `residue_perms`.");
     cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
 
     cx.terms = &op.canonical();

@@ -13,7 +13,8 @@ trajectory did not reach) is issued as a :class:`qed.errors.QEDWarning`. Then,
   otherwise through a handler on the logger after the verb returns.
 
 At import, ``QED_LOG_LEVEL`` sets the level (above ``"warn"`` it also streams to stderr);
-``ED_SYM_PROFILE=1`` without it means ``"info"`` on stderr, as the profile used to print.
+without it, ``ED_SYM_PROFILE`` set to a true flag word (as the engine reads it,
+``_core.env_flag``) means ``"info"`` on stderr, where the profile records then appear.
 """
 
 from __future__ import annotations
@@ -118,13 +119,13 @@ def flush() -> None:
 
 
 def configure_from_env() -> None:
-    """The import-time level: ``QED_LOG_LEVEL``, else ``"info"`` on stderr under
-    ``ED_SYM_PROFILE=1``, else ``"warn"``."""
+    """The import-time level: ``QED_LOG_LEVEL``, else ``"info"`` on stderr when the engine
+    reads ``ED_SYM_PROFILE`` as on, else ``"warn"``."""
     name = os.environ.get("QED_LOG_LEVEL", "").strip()
     if name:
         idx = _level_index(name)
         set_log_level(idx, stream=sys.stderr if idx > WARN else None)
-    elif os.environ.get("ED_SYM_PROFILE", "").strip().lower() not in ("", "0", "false", "no", "off"):
+    elif _core.env_flag("ED_SYM_PROFILE", False):
         set_log_level(INFO, stream=sys.stderr)
     else:
         set_log_level(WARN)

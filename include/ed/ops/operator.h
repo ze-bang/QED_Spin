@@ -30,6 +30,7 @@
 #include <ed/basis/bits.h>
 #include <ed/matvec/linear_operator.h>
 #include <ed/core/config.h>        // ed::env (ED_CSR_FORCE, ED_CSR_DIM_MAX)
+#include <ed/core/errors.h>        // ed::Unsupported
 #include <ed/matvec/reduced_csr.h>  // the full-space CSR
 #include <ed/ops/invariance.h>     // canonical terms, verdicts
 #include <ed/ops/row_walk.h>       // for_each_connection
@@ -221,8 +222,8 @@ public:
 
     Operator(uint64_t n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {
         if (n_bits >= 64) {
-            throw std::runtime_error("Operator: n_bits = " + std::to_string(n_bits)
-                                     + " >= 64 is not supported (would cause undefined behavior in 1ULL << n_bits)");
+            throw ed::Unsupported("Operator: n_bits = " + std::to_string(n_bits)
+                                  + " >= 64 is not supported (the states are 64-bit words: 1ULL << n_bits)");
         }
     }
 

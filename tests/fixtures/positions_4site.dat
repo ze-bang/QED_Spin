@@ -1,5 +1,5 @@
-# site_id matrix_idx sublattice x y z
-0 0 0 0.0 0.0 0.0
-1 1 1 1.0 0.0 0.0
-2 2 0 0.0 1.0 0.0
-3 3 1 1.0 1.0 0.0
+# id x y z  (one line per site, the id counting from 0; qed.dssf positions_file format)
+0 0.0 0.0 0.0
+1 1.0 0.0 0.0
+2 0.0 1.0 0.0
+3 1.0 1.0 0.0

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <vector>
 
 namespace ed::thermal {
@@ -25,6 +26,10 @@ namespace ed::thermal {
 struct Curves {
     std::vector<double> lnZ, E, V;
     std::vector<std::vector<std::complex<double>>> O;   ///< O[o][beta index]
+    /// The lowest energy the method resolved in the block: exact, its lowest eigenvalue; FTLM, the
+    /// lowest Ritz value that carries weight; OFTLM, its lowest certified eigenvalue (or Ritz value);
+    /// mTPQ, the spectral-bounds Lanczos estimate. Infinity when the method resolved none.
+    double e_min = std::numeric_limits<double>::infinity();
 };
 
 /// The exact curves of a block from its eigenvalues; with `diag_obs` (diag_obs[o][n] =
@@ -35,6 +40,7 @@ struct Curves {
     Curves c;
     const std::vector<double>& ev = eigenvalues;
     const double e0 = *std::min_element(ev.begin(), ev.end());
+    c.e_min = e0;
     if (diag_obs) c.O.assign(diag_obs->size(), {});
     for (double bt : betas) {
         double z = 0.0, e = 0.0;

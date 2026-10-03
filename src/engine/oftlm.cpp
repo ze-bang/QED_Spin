@@ -138,6 +138,7 @@ Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Compl
     // 4. Combine per beta.
     // -------------------------------------------------------------------------
     Curves out;
+    out.e_min = e_min;   // the lowest certified eigenvalue, or the lowest Ritz value below it
     out.lnZ.assign(nT, 0.0);
     out.E.assign(nT, 0.0);
     out.V.assign(nT, 0.0);

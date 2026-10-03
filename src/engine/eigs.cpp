@@ -223,26 +223,31 @@ std::uint64_t state_index(std::uint64_t st, int n_up) {
 
 }  // namespace
 
-SzContent sz_content(const ::Operator& H) { return ed::ops::sz_content(H.canonical()); }
-
-std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
-    const int n_sites = static_cast<int>(H.getNumBits());
-    // A permutation H does not commute with would give silently wrong spectra; a residue that
-    // does not normalise the abelian group, wrong stars, multiplets and labels.
-    require_normal(s, n_sites);
+// A permutation H does not commute with would give silently wrong spectra; a residue that does
+// not normalise the abelian group, wrong stars, multiplets and labels.
+void detail::require_symmetries(const ::Operator& H, const Spec& s) {
+    require_normal(s, static_cast<int>(H.getNumBits()));
     const ed::ops::MaskedOperator& h = H.canonical();
     for (const auto* set : {&s.abelian, &s.residues})
         for (const Perm& g : *set)
             if (!ed::ops::commutes_with_permutation(h, g))
                 throw ed::InvalidRequest("sectors: H does not commute with a supplied site permutation");
+}
+
+SzContent sz_content(const ::Operator& H) { return ed::ops::sz_content(H.canonical()); }
+
+std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
+    const int n_sites = static_cast<int>(H.getNumBits());
+    detail::require_symmetries(H, s);
+    const ed::ops::MaskedOperator& h = H.canonical();
     const SzContent c = ed::ops::sz_content(h);
     if (s.n_up >= 0 && c != SzContent::U1)
-        throw std::invalid_argument("sectors: n_up names an Sz sector, but H does not conserve Sz");
+        throw ed::InvalidRequest("sectors: n_up names an Sz sector, but H does not conserve Sz");
     if (s.sz_parity >= 0 && c == SzContent::None)
-        throw std::invalid_argument("sectors: sz_parity names a parity half, but H does not conserve Sz parity");
+        throw ed::InvalidRequest("sectors: sz_parity names a parity half, but H does not conserve Sz parity");
     const bool flip_sym = ed::ops::flip_invariant(h);
     if (s.spin_flip == 1 && !flip_sym)
-        throw std::invalid_argument("sectors: spin_flip='require', but H is not spin-flip symmetric");
+        throw ed::InvalidRequest("sectors: spin_flip='require', but H is not spin-flip symmetric");
     // The Sz -> -Sz pairing of subspaces: the spin flip, or -- for an H that is not real, where K
     // does not fold inside a sector -- time reversal Theta, which also takes k to -k and sigma to
     // sigma*: not under a selection, whose ensemble it would not keep (walk() drops it there too).
@@ -258,11 +263,11 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
         // level of its own, solved in its own Sz sector (audit C07-su2-06).
         const bool whole = c == SzContent::U1 && ed::ops::su2_invariant(h);
         if (!whole && !(c == SzContent::U1 && ed::ops::su2_field(h)))
-            throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H "
-                                        "(a uniform field along z is allowed)");
+            throw ed::InvalidRequest("sectors: a total-spin restriction needs an SU(2)-symmetric H "
+                                     "(a uniform field along z is allowed)");
         if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
-            throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S)
-                                        + "/2 does not exist for N = " + std::to_string(n_sites));
+            throw ed::InvalidRequest("sectors: total spin S = " + std::to_string(s.two_S)
+                                     + "/2 does not exist for N = " + std::to_string(n_sites));
         const int n = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);   // the Sz = S member
         if (!whole) {
             for (int m = n - s.two_S; m <= n; ++m)
@@ -275,7 +280,7 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
             return out;
         }
         if (s.n_up >= 0 && s.n_up != n)
-            throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
+            throw ed::InvalidRequest("sectors: n_up and the total-spin restriction disagree");
         if (s.sz_parity >= 0 && n % 2 != s.sz_parity)
             throw ed::InvalidRequest("sectors: sz_parity and the total-spin restriction name disjoint sectors "
                                      "(the spin-S tower is solved at n_up = "
@@ -389,7 +394,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
             lane == ed::Lane::HostDense
                 ? (tower ? solve_block_dense_tower(mv, *tower, w, o.vectors) : solve_block_dense(mv, w, o.vectors))
                 : ed::with_backend(lane, mv, [&](auto& be) {
-                      if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors);
+                      if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors, 0, o.device == Device::Gpu);
                       return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
                   });
         ev = std::move(sol.values);
@@ -468,7 +473,6 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
-            detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
@@ -583,12 +587,12 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     for (const auto& e : ends)
         if (e.short_ && e.last <= cut + o.window) res.complete = false;
     if (!res.complete && !o.allow_partial)
-        throw std::runtime_error("eigs: " + std::to_string(res.partial_blocks)
-                                 + " block(s) could not certify their "
-                                   "lowest levels, and the uncertified levels may lie inside the requested window of "
-                                 + std::to_string(o.k)
-                                 + ". Raise the iteration budget or the dense crossover, or "
-                                   "allow a partial window.");
+        throw ed::ConvergenceError("eigs: " + std::to_string(res.partial_blocks)
+                                   + " block(s) could not certify their "
+                                     "lowest levels, and the uncertified levels may lie inside the requested window of "
+                                   + std::to_string(o.k)
+                                   + ". Raise the iteration budget or the dense crossover, or "
+                                     "pass allow_partial=True for the certified part (complete=False).");
     if (!res.complete)
         res.diagnostics.emplace_back("partial_window", std::to_string(res.partial_blocks)
                                                            + " block(s) could not certify their lowest levels; "
@@ -603,6 +607,7 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         }
         res.vectors = std::move(kept);
     }
+    res.time_reversal = detail::folded_map(res.levels);
     return res;
 }
 
@@ -635,7 +640,6 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
         const LittleGroupOptions opt = detail::engine_options(s, sub);
         n_blocks += detail::walk(H, n_sites, s, opt, [&](const EngineContext& cx, bool, StarBuild& sb) {
             res.flip_engaged = res.flip_engaged || cx.flip_half;
-            detail::note_time_reversal(res.time_reversal, cx, sub);
             for (const auto& bi : sb.blocks) {
                 if (bi->tag.dim == 0) continue;
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
@@ -679,13 +683,15 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     }
     detail::require_some_level(s, res.levels.empty(), "spectrum");
     order_levels(res.levels, [](const Level& L) -> const Level& { return L; });
+    res.time_reversal = detail::folded_map(res.levels);
     return res;
 }
 
 std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::vector<Complex>& u, int n_up) {
-    if (u.size() != rd.states()) throw std::invalid_argument("expand: vector length != number of basis states");
+    if (u.size() != rd.states()) throw ed::InvalidRequest("expand: vector length != number of basis states");
     const int N = rd.n_sites;
-    if (n_up < 0 && N > 34) throw std::invalid_argument("expand: the full 2^N space is limited to N <= 34");
+    if (n_up < 0 && N > 34)
+        throw ed::ResourceLimit("expand: the full 2^N space is limited to N <= 34 (use basis='sz')");
     const std::uint64_t dim = n_up < 0 ? (std::uint64_t{1} << N) : binomial(N, n_up);
     std::vector<Complex> psi(dim, Complex(0, 0));
     const auto pol = rd.make_policy();
@@ -712,7 +718,7 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
         for (int g = 0; g < rd.group_size; ++g) {
             const std::uint64_t st = pol.apply_perm(rd.reps[a], g);
             if (n_up >= 0 && __builtin_popcountll(st) != n_up)
-                throw std::invalid_argument("expand: the sector is not inside Sz sector n_up");
+                throw ed::InvalidRequest("expand: the sector is not inside Sz sector n_up");
             Complex c(0, 0);   // sum_j y_j conj(D(g)_{0j}); 1-dim: y conj(chi(g))
             if (d == 1)
                 c = y[0] * std::conj(rd.characters[static_cast<std::size_t>(g)]);
@@ -733,7 +739,7 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
 
 std::vector<std::vector<Complex>> multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v,
                                             int n_up, std::size_t max_vectors) {
-    if (!v.basis) throw std::invalid_argument("multiplet: level has no vector");
+    if (!v.basis) throw ed::InvalidRequest("multiplet: level has no vector");
     if (n_up < -1 || n_up > n_sites)
         throw ed::InvalidRequest("multiplet: the Sz sector n_up = " + std::to_string(n_up) + " is outside 0.."
                                  + std::to_string(n_sites));

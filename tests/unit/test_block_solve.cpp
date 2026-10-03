@@ -116,9 +116,9 @@ TEST_CASE("place: the auto table", "[place]") {
     REQUIRE(ed::auto_row(Task::DenseBatch).floor == 0);
     REQUIRE_FALSE(ed::auto_row(Task::DenseBatch).fit);
     REQUIRE(ed::auto_row(Task::DynamicsCf).floor == 16384);
-    REQUIRE_FALSE(ed::auto_row(Task::DynamicsCf).fit);
+    REQUIRE(ed::auto_row(Task::DynamicsCf).fit);   // dynamics states its device working set (0.6.1)
     REQUIRE(ed::auto_row(Task::DynamicsFtlm).floor == 65536);
-    REQUIRE_FALSE(ed::auto_row(Task::DynamicsFtlm).fit);
+    REQUIRE(ed::auto_row(Task::DynamicsFtlm).fit);
     REQUIRE(ed::kHostGatherFloor == (std::uint64_t{1} << 20));
     REQUIRE(ed::kHostPoolMaxDim == (std::uint64_t{1} << 16));
     REQUIRE(ed::kDeviceDenseMaxDim == 32);
@@ -188,12 +188,27 @@ TEST_CASE("place: Gpu refuses in order and says why", "[place]") {
 }
 
 TEST_CASE("place: tasks without a memory row never query memory", "[place]") {
-    for (Task t : {Task::DenseBatch, Task::DynamicsCf, Task::DynamicsFtlm})
-        for (Device d : {Device::Gpu, Device::Auto}) {
-            FakeMachine::reset(true, std::nullopt);
-            REQUIRE(ed::on_device(ed::place(d, req(t, std::uint64_t{1} << 20), FakeMachine::probe())));
-            REQUIRE(FakeMachine::free_calls == 0);
-        }
+    for (Device d : {Device::Gpu, Device::Auto}) {
+        FakeMachine::reset(true, std::nullopt);
+        REQUIRE(ed::on_device(ed::place(d, req(Task::DenseBatch, std::uint64_t{1} << 20), FakeMachine::probe())));
+        REQUIRE(FakeMachine::free_calls == 0);
+    }
+}
+
+TEST_CASE("place: dynamics blocks check their device working set", "[place]") {
+    // They were placed without a fit check and failed at allocation instead of raising (0.6.1).
+    for (Task t : {Task::DynamicsCf, Task::DynamicsFtlm}) {
+        auto r = req(t, std::uint64_t{1} << 20);
+        r.verb = "dynamics";
+        r.device_bytes = std::uint64_t{256} << 20;
+        FakeMachine::reset(true, (std::size_t{256} << 20) - 1);
+        REQUIRE(message_of<ed::ResourceLimit>(Device::Gpu, r)
+                == "device='gpu', but a block of dim 1048576 needs 256 MiB of device memory and 255 MiB are free");
+        FakeMachine::reset(true, (std::size_t{256} << 20) - 1);
+        REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::HostKrylov);
+        FakeMachine::reset(true, std::size_t{256} << 20);
+        REQUIRE(ed::place(Device::Gpu, r, FakeMachine::probe()) == Lane::DeviceKrylov);
+    }
 }
 
 TEST_CASE("place: Auto floors", "[place]") {

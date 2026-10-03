@@ -89,6 +89,36 @@ def test_compose_rejects_size_mismatch():
         sym.compose([0, 1, 2], [0, 1])
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: sym.compose([0, 1, 2], [0, 1, 5]),  # out of range: used to index past the end
+        lambda: sym.compose([0, 1, -1], [0, 1, 2]),
+        lambda: sym.compose([0, 0, 2], [0, 1, 2]),  # not a bijection
+        lambda: sym.power([0, 7, 1], 2),
+        lambda: sym.power([1, 0], -1),
+        lambda: sym.order([0, 0]),
+    ],
+)
+def test_permutation_algebra_refuses_non_permutations(call):
+    with pytest.raises(qed.errors.InvalidRequest):
+        call()
+
+
 def test_translation_rejects_zero_sites():
     with pytest.raises(ValueError):
         sym.translation(0, 1)
+
+
+def test_explicit_split_obeys_the_co_group_cap():
+    """An explicit qed.Symmetries gets the cap spatial='auto' has (128 cosets): beyond it the
+    co-group can carry irreps the sector kernels cannot hold."""
+    import itertools
+
+    n = 6
+    perms = [list(p) for p in itertools.permutations(range(n))][1:131]  # 130 cosets of A = {e}
+    b = qed.input.HamiltonianBuilder(n)
+    b.heisenberg([(i, j) for i in range(n) for j in range(i + 1, n)], 1.0)  # S_6-invariant
+    H = b.to_operator()
+    with pytest.raises(qed.errors.InvalidRequest, match="co-group cap"):
+        qed.Symmetry(spatial=qed.Symmetries(abelian=[], residues=perms)).groups(H)

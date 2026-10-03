@@ -19,6 +19,7 @@ import operator
 from typing import Sequence
 
 from . import _core
+from .errors import InvalidRequest
 
 Op = _core.input.Op
 _OP_CODE = {Op.Sp: 0, Op.Sm: 1, Op.Sz: 2}
@@ -41,7 +42,7 @@ def _entries(items, n: int, what: str) -> list:
     for e in items:
         t = tuple(e)  # TypeError for an entry that is not a sequence
         if len(t) != n:
-            raise ValueError(f"{what} entries must be length-{n} tuples")
+            raise InvalidRequest(f"{what} entries must be length-{n} tuples")
         out.append(t)
     return out
 
@@ -51,7 +52,7 @@ def _bonds(bonds) -> list:
         return [(_site(i), _site(j)) for i, j in _entries(bonds, 2, "bond list")]
     except ValueError as e:
         if "bond list" in str(e):
-            raise ValueError("bond list entries must be (i, j) tuples") from None
+            raise InvalidRequest("bond list entries must be (i, j) tuples") from None
         raise
 
 
@@ -60,7 +61,7 @@ def _vec3s(items) -> list:
         return [tuple(float(x) for x in t) for t in _entries(items, 3, "vector")]
     except ValueError as e:
         if "vector entries" in str(e):
-            raise ValueError("vector entries must be length-3 tuples") from None
+            raise InvalidRequest("vector entries must be length-3 tuples") from None
         raise
 
 
@@ -84,9 +85,9 @@ class HamiltonianBuilder:
     def __init__(self, num_sites: int):
         n = operator.index(num_sites)
         if n <= 0:
-            raise ValueError("HamiltonianBuilder: num_sites must be > 0")
+            raise InvalidRequest("HamiltonianBuilder: num_sites must be > 0")
         if n >= 64:
-            raise ValueError(
+            raise InvalidRequest(
                 "HamiltonianBuilder: num_sites >= 64 is not supported by the "
                 "underlying matrix-free Operator (1ULL << num_sites overflow)"
             )
@@ -105,7 +106,7 @@ class HamiltonianBuilder:
 
     def _check(self, method: str, *sites: int) -> None:
         if any(s >= self._n for s in sites):
-            raise IndexError(f"HamiltonianBuilder::{method}: site index >= num_sites")
+            raise InvalidRequest(f"HamiltonianBuilder::{method}: site index >= num_sites")
 
     def add_one_body(self, op, site, coeff) -> "HamiltonianBuilder":
         """Append ``coeff * op[site]``."""
@@ -207,11 +208,11 @@ class HamiltonianBuilder:
         pairs = _bonds(bonds)
         axes = [operator.index(a) for a in bond_axis]
         if len(pairs) != len(axes):
-            raise ValueError("HamiltonianBuilder::kitaev: bonds and bond_axis must have the same length")
+            raise InvalidRequest("HamiltonianBuilder::kitaev: bonds and bond_axis must have the same length")
         self._in_range(pairs)
-        for (i, j), a in zip(pairs, axes):
-            if i != j and a not in (0, 1, 2):
-                raise ValueError("HamiltonianBuilder::kitaev: bond_axis must be 0(x), 1(y), or 2(z)")
+        for a in axes:  # every bond, also a self-bond the loop below skips
+            if a not in (0, 1, 2):
+                raise InvalidRequest("HamiltonianBuilder::kitaev: bond_axis must be 0(x), 1(y), or 2(z)")
         K = float(K)
         k, kq, kqn = complex(K, 0.0), complex(K / 4.0, 0.0), complex(-K / 4.0, 0.0)
         for (i, j), a in zip(pairs, axes):
@@ -234,7 +235,7 @@ class HamiltonianBuilder:
         pairs = _bonds(bonds)
         Ds = _vec3s(D_per_bond)
         if len(pairs) != len(Ds):
-            raise ValueError("HamiltonianBuilder::dm: bonds and D_per_bond must have the same length")
+            raise InvalidRequest("HamiltonianBuilder::dm: bonds and D_per_bond must have the same length")
         self._in_range(pairs)
         inv_2i, inv_4i = complex(0.0, -0.5), complex(0.0, -0.25)
         for (i, j), (Dx, Dy, Dz) in zip(pairs, Ds):
@@ -278,7 +279,7 @@ class HamiltonianBuilder:
         if not isinstance(h, tuple):
             raise TypeError("zeeman h must be a tuple (hx, hy, hz)")
         if len(h) != 3:
-            raise ValueError("zeeman h must be a length-3 tuple")
+            raise InvalidRequest("zeeman h must be a length-3 tuple")
         h = tuple(float(x) for x in h)
         for i in range(self._n):
             self._field(i, h)
@@ -288,7 +289,7 @@ class HamiltonianBuilder:
         """-h_i . S_i, one 3-vector per site."""
         hs = _vec3s(h_per_site)
         if len(hs) != self._n:
-            raise ValueError("HamiltonianBuilder::zeeman_per_site: h_per_site.size() must equal num_sites")
+            raise InvalidRequest("HamiltonianBuilder::zeeman_per_site: h_per_site.size() must equal num_sites")
         for i, h in enumerate(hs):
             self._field(i, h)
         return self
@@ -310,7 +311,7 @@ class HamiltonianBuilder:
             plaqs = [tuple(_site(x) for x in t) for t in _entries(plaquettes, 4, "plaquette")]
         except ValueError as e:
             if "plaquette entries" in str(e):
-                raise ValueError("plaquette entries must be length-4 site tuples") from None
+                raise InvalidRequest("plaquette entries must be length-4 site tuples") from None
             raise
         K = float(K)
         if K == 0.0:
@@ -318,7 +319,7 @@ class HamiltonianBuilder:
         for p in plaqs:
             self._check("ring_exchange", *p)
             if len(set(p)) != 4:
-                raise ValueError(f"HamiltonianBuilder::ring_exchange: plaquette {p} repeats a site")
+                raise InvalidRequest(f"HamiltonianBuilder::ring_exchange: plaquette {p} repeats a site")
         one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}  # (new, old), 1 = up
         for p in plaqs:
             for s in range(16):
@@ -337,11 +338,11 @@ class HamiltonianBuilder:
                 b1, b2 = tuple(e)
                 (i, j), (k, l) = tuple(b1), tuple(b2)
             except (TypeError, ValueError):
-                raise ValueError("ss_ss pairs must be ((i, j), (k, l))") from None
+                raise InvalidRequest("ss_ss pairs must be ((i, j), (k, l))") from None
             q = tuple(_site(x) for x in (i, j, k, l))
             self._check("ss_ss", *q)
             if q[0] == q[1] or q[2] == q[3]:
-                raise ValueError(f"HamiltonianBuilder::ss_ss: bond pair {((i, j), (k, l))} has a bond on one site")
+                raise InvalidRequest(f"HamiltonianBuilder::ss_ss: bond pair {((i, j), (k, l))} has a bond on one site")
             quads.append(q)
         K = float(K)
         if K == 0.0:
@@ -379,11 +380,10 @@ class HamiltonianBuilder:
         """The non-Kramers pyrochlore model on ``lattice``'s nearest-neighbour bonds: the XXZ part
         (Jxx + Jyy)/2, Jzz (when ``include_isotropic``) plus J_pmpm = (Jxx - Jyy)/4 times the
         sublattice phases on S-S- and their conjugates on S+S+."""
-        from .errors import InvalidRequest
 
         Jxx, Jyy, Jzz = float(Jxx), float(Jyy), float(Jzz)
         if lattice.num_sites != self._n:
-            raise ValueError("pyrochlore_non_kramers: lattice/builder num_sites mismatch")
+            raise InvalidRequest("pyrochlore_non_kramers: lattice/builder num_sites mismatch")
         sub = list(lattice.sublattice)
         if len(sub) != lattice.num_sites:
             raise InvalidRequest(
@@ -428,7 +428,7 @@ class HamiltonianBuilder:
     def emit_into(self, operator) -> None:
         """Append the accumulated terms onto an existing :class:`qed.Operator` (in place)."""
         if operator.num_sites != self._n:
-            raise ValueError("HamiltonianBuilder::emit_into: Operator num_bits != builder num_sites")
+            raise InvalidRequest("HamiltonianBuilder::emit_into: Operator num_bits != builder num_sites")
         for op, i, c in self._one:
             operator.add_one_body(_OP_CODE[op], i, c)
         for oi, i, oj, j, c in self._two:

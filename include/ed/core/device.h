@@ -15,8 +15,11 @@
 namespace ed {
 
 /// Where a verb's blocks may run. Cpu: the host only, and CUDA is never initialised.
-/// Gpu: every Krylov solve runs on the device, or the verb raises naming the block.
-/// Auto: the device for blocks above the 'auto' floor of their task (auto_row).
+/// Gpu: every Krylov solve and every dense batch runs on the device, or the verb raises
+/// (DeviceUnsupported, ResourceLimit); nothing falls back to the host. Blocks a verb solves
+/// densely (BlockRequest::dense) stay on the host.
+/// Auto: the device for blocks above the 'auto' floor of their task (auto_row) that fit; the
+/// host for the rest, and as the fallback of a failed device dense batch.
 enum class Device { Cpu, Gpu, Auto };
 
 /// Where one block's solve runs: the four Placement counters.
@@ -49,8 +52,8 @@ struct AutoRow {
     case Task::Sampled: return {std::uint64_t{1} << 14, true};
     case Task::Oftlm: return {std::uint64_t{1} << 14, true};
     case Task::DenseBatch: return {0, false};
-    case Task::DynamicsCf: return {std::uint64_t{1} << 14, false};
-    case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, false};
+    case Task::DynamicsCf: return {std::uint64_t{1} << 14, true};
+    case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, true};
     }
     return {std::numeric_limits<std::uint64_t>::max(), false};
 }

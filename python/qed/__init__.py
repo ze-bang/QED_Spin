@@ -15,8 +15,9 @@ Operators come from :class:`qed.input.HamiltonianBuilder` or :class:`qed.Operato
 
 A run that goes well prints nothing; warnings arrive as :class:`qed.errors.QEDWarning`.
 :func:`set_log_level` (or ``QED_LOG_LEVEL``) routes the engine's progress into
-``logging.getLogger("qed")`` or straight to a stream. Errors are the classes of
-:mod:`qed.errors`, each also the builtin it refines (``ValueError``, ...).
+``logging.getLogger("qed")`` or straight to a stream. Refusals raise the classes of
+:mod:`qed.errors`, each also the builtin it refines (``ValueError``, ...); an argument of
+the wrong type raises ``TypeError`` and an index out of range ``IndexError``.
 
     >>> import qed
     >>> b = qed.input.HamiltonianBuilder(6)
@@ -65,9 +66,6 @@ def env_snapshot() -> dict:
     return dict(_core.env_snapshot())
 
 
-# The C++ registry's flag spelling (ed::env::is_false_word): these, or unset, are off.
-_FALSE_WORDS = ("", "0", "false", "FALSE", "off", "OFF", "no", "NO")
-
 # Variables that were removed: what replaces each (named in the import warning).
 _REMOVED_ENV = {
     "ED_SYM_LG_DENSE_FLOOR": "pass qed.eigs(..., dense_max_dim=...)",
@@ -78,9 +76,11 @@ _REMOVED_ENV = {
 
 
 def _check_environment() -> None:
-    """A misspelt ``ED_*`` variable is read by nothing and would fail silently.
-    Unknown names warn once at import; ``ED_ENV_STRICT=1`` turns the warning into an
-    error (job scripts that must not run with a typo)."""
+    """A misspelt ``ED_*`` variable is read by nothing and would fail silently, and a
+    malformed value of a registered one makes every verb refuse. Both warn once at import;
+    ``ED_ENV_STRICT`` set to a true flag word (``1``, ``true``, ...; read by the engine's
+    parser, ``_core.env_flag``) turns the warnings into :class:`qed.errors.InvalidRequest` (job scripts that
+    must not run with a typo)."""
     import difflib
     import warnings
 
@@ -91,8 +91,8 @@ def _check_environment() -> None:
             + ", ".join(malformed)
             + ". Every verb refuses to run until they are fixed; see qed.debug_env()."
         )
-        if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
-            raise RuntimeError(msg)
+        if _core.env_flag("ED_ENV_STRICT", False):
+            raise errors.InvalidRequest(msg)
         warnings.warn(msg, RuntimeWarning, stacklevel=3)
     unknown = list(_core.env_unknown())
     if not unknown:
@@ -110,8 +110,8 @@ def _check_environment() -> None:
         + ", ".join(parts)
         + ". See qed.debug_env() for the variables that exist."
     )
-    if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
-        raise RuntimeError(msg)
+    if _core.env_flag("ED_ENV_STRICT", False):
+        raise errors.InvalidRequest(msg)
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
 
 

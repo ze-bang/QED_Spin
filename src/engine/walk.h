@@ -34,6 +34,11 @@ inline std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
     return {id};
 }
 
+/// Every supplied site permutation (the abelian generators and the residues) commutes with H and
+/// every residue normalises the abelian group, else InvalidRequest (eigs.cpp). Each verb runs it
+/// on the Spec as given, before any folding drops part of it.
+void require_symmetries(const ::Operator& H, const Spec& s);
+
 /// The walk options of one subspace.
 inline ed::solvers::LittleGroupOptions engine_options(const Spec& s, const Subspace& sub) {
     ed::solvers::LittleGroupOptions o;
@@ -133,14 +138,14 @@ inline Antiunitary fold_of(Antiunitary star_tr, const Subspace& sub, const ed::s
     return sub.mirror == 2 && sub.theta ? Antiunitary::Theta : Antiunitary::None;
 }
 
-/// Records in a result which antiunitary map folded anything: the stars' (cx.tr), or Theta for a
-/// subspace mirrored by it.
-inline void note_time_reversal(Antiunitary& seen, const ed::solvers::lg_detail::EngineContext& cx,
-                               const Subspace& sub) {
-    if (cx.tr != Antiunitary::None)
-        seen = cx.tr;
-    else if (sub.mirror == 2 && sub.theta)
-        seen = Antiunitary::Theta;
+/// The antiunitary map that folded any of `levels` (fold_of: a folded star, or a subspace Theta
+/// mirrors), None when no level was folded -- also when the context engaged K or Theta but no
+/// star or subspace it serves made it into the levels.
+inline Antiunitary folded_map(const std::vector<Level>& levels) {
+    Antiunitary seen = Antiunitary::None;
+    for (const Level& L : levels)
+        if (L.fold != Antiunitary::None) seen = L.fold;
+    return seen;
 }
 
 /// Whether a level's mirror is its Theta image (else the spin flip's, when it has one).
@@ -168,13 +173,15 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
 /// before it outgrows a quarter of the free device memory or of the RAM the job may still allocate
 /// (cuSOLVER's workspace and the eigenvalues come on top), and never holds more than 2 GiB of
 /// matrices; a block larger than that is solved by itself on the device when it fits there
-/// (fits_device_alone), else on the host, and so is a batch whose device solve fails. The last
-/// batch and the host queue are solved at once. On the host every block is queued (up to
+/// (fits_device_alone). Under device='auto' a block that does not fit, and a batch whose device
+/// solve fails, are solved on the host; under 'gpu' the block raises ResourceLimit and the failed
+/// batch is retried in halves on the device (solve_device_split). The last batch and the host
+/// queue are solved at once. On the host every block is queued (up to
 /// host_budget()) and the queue solved concurrently, one serial LAPACK call per thread, largest
 /// first; only a block larger than the budget is solved alone. Concurrency across blocks is the
 /// parallelism: this platform's threaded zheevd does not scale (n = 4200: 19.2 s on one thread,
 /// 19.4 s on 32; dsyevd 3.1 / 2.4 s; dev/p67/lapack_scale.py), so a threaded solve of one block
-/// after another left all but one core idle (tri20 exact thermal: 3256 s, probe 62624309).
+/// after another would leave all but one core idle (tri20 exact thermal: 3256 s, probe 62624309).
 // DenseBatch's packing of a matrix make() forms into the device batch: real when real_block says so.
 template <class Make> auto pack_formed(const Make& make) {
     return [&make](ed::solvers::LgBlocksPacked& p) {
@@ -269,7 +276,17 @@ private:
             const std::uint64_t dev_bytes = real.value_or(false) ? bytes / 2 : bytes;
             if (dev_bytes > budget_) {
                 alone = fits_device_alone(dim, real.value_or(false));
-                if (!alone) lanes_.back() = ed::Lane::HostDense;   // too large for the device
+                if (!alone) {   // too large for the device
+                    // device='gpu' never moves a block to the host: a full spectrum has no Krylov
+                    // stand-in, so the block cannot run on the device at all.
+                    if (device_ == Device::Gpu)
+                        throw ed::ResourceLimit(std::string(verb_ ? verb_ : "dense spectra") + ": a dense block of "
+                                                + std::to_string(dim)
+                                                + " states does not fit the device (matrix and cuSOLVER workspace "
+                                                  "need more than half the free device memory); device='auto' "
+                                                  "solves it on the host");
+                    lanes_.back() = ed::Lane::HostDense;
+                }
             } else if (packed_.bytes() + dev_bytes > budget_) {
                 solve_device();
             }
@@ -304,8 +321,8 @@ private:
 
     // A block larger than a batch is solved by itself on the device when its matrix and cuSOLVER's
     // workspace for it fit in half the free device memory (`real`: a real block; one whose
-    // realness is not known before it is formed counts as complex); else on the host. Not checked
-    // under ED_MEM_GUARD_OFF.
+    // realness is not known before it is formed counts as complex); else on the host under
+    // 'auto', and add_lazy raises ResourceLimit under 'gpu'. Not checked under ED_MEM_GUARD_OFF.
     static bool fits_device_alone(std::uint64_t dim, bool real) {
 #ifdef WITH_CUDA
         if (ed::core::mem_guard_off()) return true;
@@ -319,7 +336,7 @@ private:
         } catch (const std::exception& e) {
             ED_LOG(Warn,
                    "dense spectra: cuSOLVER's workspace query for a block of %llu states failed (%s); "
-                   "solving it on the host",
+                   "the block counts as too large for the device",
                    static_cast<unsigned long long>(dim), e.what());
             return false;
         }
@@ -330,7 +347,40 @@ private:
 #endif
     }
 
-    // The device batch (and its host fallback when the device solve fails).
+#ifdef WITH_CUDA
+    // Blocks [lo, hi) of the packed batch solved on the device, halving the batch on a failure;
+    // a single block that still fails raises (device='gpu' does not fall back to the host).
+    std::vector<double> solve_device_split(std::size_t lo, std::size_t hi) {
+        ed::solvers::LgBlocksPacked part;
+        for (std::size_t q = lo; q < hi; ++q) {
+            const double* d = packed_.data.data() + packed_.offset[q];
+            if (packed_.real[q])
+                part.add_real(d, packed_.block_dim[q]);
+            else
+                part.add_complex(reinterpret_cast<const std::complex<double>*>(d), packed_.block_dim[q]);
+        }
+        try {
+            return ed::solvers::lg_blocks_batched_eigenvalues_gpu(part);
+        } catch (const std::exception& e) {
+            if (hi - lo == 1)
+                throw ed::ResourceLimit(std::string(verb_ ? verb_ : "dense spectra")
+                                        + ": the device solve of a dense "
+                                          "block of "
+                                        + std::to_string(packed_.block_dim[lo]) + " states failed (" + e.what()
+                                        + "); device='auto' solves it on the host");
+            ED_LOG(Info, "dense spectra: a device batch of %zu blocks failed (%s); retrying it in halves", hi - lo,
+                   e.what());
+            const std::size_t mid = lo + (hi - lo) / 2;
+            std::vector<double> ev = solve_device_split(lo, mid);
+            const std::vector<double> rest = solve_device_split(mid, hi);
+            ev.insert(ev.end(), rest.begin(), rest.end());
+            return ev;
+        }
+    }
+#endif
+
+    // The device batch. Under device='auto' a failed device solve falls back to the host; under
+    // 'gpu' it is retried in halves on the device (solve_device_split), and raises if a block alone fails.
     void solve_device() {
         if (queued_.empty()) return;
         const Timed timed(prof_.dev_s);
@@ -342,8 +392,19 @@ private:
             ev = ed::solvers::lg_blocks_batched_eigenvalues_gpu(packed_);
             on_device = true;
         } catch (const std::exception& e) {
-            ED_LOG(Warn, "dense spectra: the batched device solve of %zu blocks failed (%s); solving them on the host",
-                   queued_.size(), e.what());
+            if (device_ == Device::Gpu) {
+                ED_LOG(Info, "dense spectra: the batched device solve of %zu blocks failed (%s); retrying in halves",
+                       queued_.size(), e.what());
+                const std::size_t mid = queued_.size() / 2;
+                ev = queued_.size() > 1 ? solve_device_split(0, mid) : std::vector<double>{};
+                const std::vector<double> rest = solve_device_split(queued_.size() > 1 ? mid : 0, queued_.size());
+                ev.insert(ev.end(), rest.begin(), rest.end());
+                on_device = true;
+            } else {
+                ED_LOG(Warn,
+                       "dense spectra: the batched device solve of %zu blocks failed (%s); solving them on the host",
+                       queued_.size(), e.what());
+            }
         }
 #endif
         std::size_t off = 0;
@@ -414,10 +475,9 @@ private:
         host_budget_ = 0;   // measured afresh for the next queue
     }
 
-    // The host queue holds at most 2 GiB of matrices, or a quarter of the RAM the job may still
-    // allocate when that is smaller (not checked under ED_MEM_GUARD_OFF).
-    // A team's worth of large blocks at once (32 blocks of 4600 states are 11 GB), within a quarter
-    // of the RAM the job may still allocate.
+    // The host queue holds at most 16 GiB of matrices, or a quarter of the RAM the job may still
+    // allocate when that is smaller (not checked under ED_MEM_GUARD_OFF): a team's worth of large
+    // blocks at once (32 blocks of 4600 states are 11 GB).
     static std::uint64_t host_budget() {
         std::uint64_t b = std::uint64_t{16} << 30;
         if (ed::core::mem_guard_off()) return b;
@@ -497,7 +557,8 @@ inline std::vector<Perm> close_group(const std::vector<Perm>& gens, int n) {
             for (std::size_t i = 0; i < y.size(); ++i) y[i] = g[static_cast<std::size_t>(out[head][i])];
             if (seen.insert(y).second) out.push_back(std::move(y));
             if (out.size() > 1'000'000)
-                throw std::runtime_error("symmetry group too large to average an operator over");
+                throw ed::ResourceLimit(
+                    "symmetry group too large to average an operator over (more than 10^6 elements)");
         }
     return out;
 }

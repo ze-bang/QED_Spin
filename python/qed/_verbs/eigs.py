@@ -24,15 +24,16 @@ class EigResult(Labelled):
     ``diagnostics``: (code, message) pairs for fallbacks the run took (e.g. an incomplete
     window under ``allow_partial``).
     ``block_stats``: one dict per solved block -- dimension, the lane that applied H
-    (dense, csr, walk, gpu-gather, device), phase seconds (orbit tables, star build, CSR
-    build, applies, the rest of the solve), nnz and the number of applies.
+    (dense, csr, csr-real, walk, gpu-gather, device-csr, device-gather), phase seconds (orbit
+    tables, star build, CSR build, applies, the rest of the solve), nnz and the number of applies.
     ``placement``: how many solves ran as a Krylov or a dense solve on the device or the host
     (``device_krylov``, ``device_dense``, ``host_krylov``, ``host_dense``). Under
     ``device="gpu"`` no Krylov solve runs on the host: a block that cannot run on the device
-    raises :class:`qed.errors.DeviceUnsupported`; small blocks may be solved densely there.
-    ``time_reversal``: the antiunitary map that folded levels -- ``"K"`` (complex conjugation,
-    a real H), ``"theta"`` (time reversal, an H that is not real) -- or None; each level's
-    ``fold`` names its own.
+    raises :class:`qed.errors.DeviceUnsupported` (or :class:`qed.errors.ResourceLimit` when it
+    does not fit); small blocks may be solved densely there.
+    ``time_reversal``: the antiunitary map that folded a returned level -- ``"K"`` (complex
+    conjugation, a real H), ``"theta"`` (time reversal, an H that is not real) -- or None when no
+    returned level was folded; each level's ``fold`` names its own.
     """
 
     energies: np.ndarray
@@ -90,6 +91,8 @@ class EigResult(Labelled):
         """<v_i| O |v_j> between the vectors of ``levels[i]`` and ``levels[j]`` -- the
         partners the solver returned, from which each level's multiplet is expanded.
         ``O`` is arbitrary: it may change Sz and break every symmetry."""
+        if not isinstance(O, _core.Operator):
+            raise InvalidRequest(f"matrix_element: O must be a qed.Operator, got {type(O).__name__}")
         return complex(self._raw.matrix_element(O, int(i), int(j)))
 
     def save(self, path) -> None:
@@ -118,13 +121,16 @@ def eigs(
 ) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
-    ``sym`` defaults to :meth:`Symmetry.auto`. Raises when a block cannot certify levels
-    that may fall inside the window, unless ``allow_partial``. ``prune`` solves only the blocks
+    ``sym`` defaults to :meth:`Symmetry.auto`. Raises :class:`qed.errors.ConvergenceError` when a
+    block cannot certify levels that may fall inside the window, unless ``allow_partial`` (then
+    ``complete`` is False). ``prune`` solves only the blocks
     whose short Lanczos estimate lies near the window (``prune=False``: every block).
     ``window > 0`` also returns every block's lowest level within ``window`` above the k-th
     (the partners of a degenerate level in other blocks); ``energies`` then lists them all.
     ``dense_max_dim``: blocks up to this dimension are diagonalised densely (exact, and they
-    resolve every copy of a degenerate level at once), larger ones by Krylov-Schur; ``None``
+    resolve every copy of a degenerate level at once), larger ones by Krylov (the Lanczos scan,
+    or the certified ground-state vector with ``vectors``, for one owed level; thick-restart
+    Krylov-Schur for several); ``None``
     picks it from ``k`` (1600 for ``k <= 10``), 0 sends every block above dimension 2 to Krylov.
     """
     if dense_max_dim is not None and int(dense_max_dim) < 0:

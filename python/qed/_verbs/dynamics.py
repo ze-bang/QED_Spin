@@ -35,7 +35,10 @@ class DynamicsResult:
 def _probes(O, B):
     """The (A, B) pairs of a call, the shape of their probe axes, and whether any is a cross pair."""
     single = isinstance(O, _core.Operator)
-    ops = [O] if single else list(O)
+    try:
+        ops = [O] if single else list(O)
+    except TypeError:
+        ops = []  # not an Operator and not iterable (a number, None)
     if not ops or not all(isinstance(o, _core.Operator) for o in ops):
         raise InvalidRequest("O must be a qed.Operator or a non-empty sequence of them")
     if B is None:
@@ -46,7 +49,10 @@ def _probes(O, B):
         return [(a, b) for a in ops for b in ops], [len(ops), len(ops)], True
     if isinstance(B, _core.Operator):
         return [(o, B) for o in ops], ([] if single else [len(ops)]), True
-    bs = list(B)
+    try:
+        bs = list(B)
+    except TypeError:
+        raise InvalidRequest(f"B must be None, a qed.Operator, a sequence of them or 'all', got {B!r}") from None
     if len(bs) != len(ops) or not all(isinstance(b, _core.Operator) for b in bs):
         raise InvalidRequest(f"B as a sequence pairs with O: {len(ops)} qed.Operator(s) expected, got {len(bs)}")
     return list(zip(ops, bs)), ([] if single else [len(ops)]), True

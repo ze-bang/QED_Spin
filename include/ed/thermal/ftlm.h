@@ -193,6 +193,7 @@ struct SampleMoments {
     const std::size_t nT = betas.size(), R = samples.size();
     double e_ref = samples.front().e_min;
     for (const auto& s : samples) e_ref = std::min(e_ref, s.e_min);
+    c.e_min = e_ref;
     const double ln_n = std::log(static_cast<double>(n));
     c.lnZ.resize(nT);
     c.E.resize(nT);

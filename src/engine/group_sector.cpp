@@ -80,8 +80,13 @@ ed::symmetry::RepSectorData group_sector_irrep_from_table(const ed::symmetry::Or
                                                           int n_up, bool flip, int d, const std::vector<Complex>& D) {
     const std::size_t Gx = (flip ? 2 : 1) * perms.size();
     const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
-    if (d < 1 || d > 255 || D.size() != Gx * dd)
+    if (d < 1 || D.size() != Gx * dd)
         throw std::invalid_argument("group sector: an irrep of dimension d needs |G| d x d matrices (2|G| with flip)");
+    // The sector kernels hold a block's d x d matrices in fixed buffers (sector_rows.h, members.cpp).
+    if (d > ed::matvec::kMaxIrrepDim)
+        throw ed::Unsupported("group sector: an irrep of dimension " + std::to_string(d) + " (the sector kernels hold "
+                              + std::to_string(ed::matvec::kMaxIrrepDim)
+                              + " at most); pass fewer residues or point_group=False");
     std::vector<Complex> chi(Gx, Complex(0.0, 0.0)); // the characters, for the label and 1-dim readers
     for (std::size_t g = 0; g < Gx; ++g)
         for (int i = 0; i < d; ++i) chi[g] += D[g * dd + static_cast<std::size_t>(i) * static_cast<std::size_t>(d + 1)];

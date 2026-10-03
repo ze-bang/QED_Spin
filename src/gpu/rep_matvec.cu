@@ -142,6 +142,7 @@ acquire_gpu_shared_rank(const std::shared_ptr<const ed::symmetry::SharedRankLook
     };
     double total = 0.0;
     for (const auto& kv : keep) total += bytes_of(kv.second);
+    if (kBudgetBytes <= 0.0) keep.clear();   // ED_GPU_SYM_CACHE_GIB=0: pin none (the caller holds sp)
     while (keep.size() > 1 && total > kBudgetBytes) {
         total -= bytes_of(keep.front().second);
         keep.erase(keep.begin());
@@ -599,6 +600,7 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     };
     double total = 0.0;
     for (const auto& mm : keep) total += bytes_of(mm);
+    if (kKeepBudget <= 0.0) keep.clear();   // ED_GPU_SYM_CACHE_GIB=0: pin none (the caller holds mirror)
     while (keep.size() > 1 && total > kKeepBudget) {
         total -= bytes_of(keep.front());
         keep.erase(keep.begin());

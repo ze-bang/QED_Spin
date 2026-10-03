@@ -69,8 +69,9 @@ namespace {
 //   table            p_e . p_f = a_ef . p_g, factor system omega(e, f) = chi_k0(a_ef);
 //   irreps           those of P_k0 for omega (decompose_projective_irreps; omega = 1: decompose_irreps_tables);
 //   G_k0             { a . p_e }, D(a p_e) = chi_k0(a) D(e), the flip half +-D.
-// False only for a trivial little co-group (the caller's plain momentum block); the group sectors not tiling the
-// momentum sector (Burnside) and the other guards are bugs and throw.
+// False only for a trivial little co-group (the caller's plain momentum block). Coset representatives that do not
+// close raise InvalidRequest (the residues miss a coset of the group they generate); the group sectors not tiling
+// the momentum sector (Burnside) and the other guards are bugs and throw.
 [[nodiscard]] bool build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
                                       const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag,
                                       std::uint64_t dim_k, StarBuild& sb) {
@@ -133,7 +134,9 @@ namespace {
                 break;
             }
             if (mult[static_cast<std::size_t>(e)][static_cast<std::size_t>(f)] < 0)
-                return broken("the coset representatives do not close");
+                throw ed::InvalidRequest("little group: star k0=" + std::to_string(k0)
+                                         + ": the coset representatives do not close (the residues miss a coset of "
+                                           "the group they generate)");
         }
     ed::symmetry::GroupIrreps giP;
     try {

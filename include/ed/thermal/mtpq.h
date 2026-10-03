@@ -277,7 +277,10 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
         if (betas.empty()) return Curves{};
         MtpqThermo mt =
             mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, betas, static_cast<double>(n));
-        if (mt.unconverged.empty()) return std::move(mt.curves);
+        if (mt.unconverged.empty()) {
+            mt.curves.e_min = e_min_est;   // the spectral-bounds Lanczos: an upper bound on the block's E0
+            return std::move(mt.curves);
+        }
         // Too cold for the trajectory. An auto-sized run had underestimated the spectral range:
         // run once more with twice the steps. Never clamp.
         double T_reached = std::numeric_limits<double>::infinity();

@@ -1500,3 +1500,15 @@ TEST_CASE("tower: S^2 on a spin-flip sector through the sector without the flip 
     }
     CHECK(checked > 0);
 }
+
+TEST_CASE("rep sectors: an irrep above the kernels' dimension is refused before any buffer is used",
+          "[row_walk][irrep]") {
+    // The sector kernels keep a block's d x d matrices in fixed kMaxIrrepDim^2 buffers; a larger
+    // irrep (a co-group above 64 elements) used to overrun them instead of raising.
+    const Dihedral G;
+    const auto tab = ring_table(G.probe, N / 2);
+    const int d = ed::matvec::kMaxIrrepDim + 1;
+    const std::vector<Cx> D(G.perms.size() * static_cast<std::size_t>(d * d), Cx(0.0, 0.0));
+    REQUIRE_THROWS_AS(ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, N / 2, false, d, D),
+                      ed::Unsupported);
+}

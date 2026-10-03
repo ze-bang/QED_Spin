@@ -298,10 +298,10 @@ private:
     // default); the arithmetic-regeneration gather walk is the memory-budget
     // fallback only. Without this, every Lanczos iteration re-derives the
     // matrix elements and the gather cost eats the entire projection win.
-    // force_gpu_ (GS-DSSF GPU lane): an explicit GPU request tries the device
-    // rep-gather FIRST (dimension floor dropped) instead of letting the
-    // reduced CSR short-circuit it; if the device build fails the CSR is still
-    // built as fallback.
+    // force_gpu_: try the device rep-gather FIRST (dimension floor dropped)
+    // instead of letting the reduced CSR short-circuit it; if the device build
+    // fails the CSR is still built as fallback. No engine path sets it today
+    // (a constructor argument for tests and tools).
     // GPU rep gather: when the reduced CSR is over budget (the 36-site
     // regime: ~0.5 TB per momentum block) the arithmetic gather walk is the
     // only representation, and it is exactly the workload the resident device
@@ -323,12 +323,14 @@ private:
     }
 
     // Lazily build the reduced sector matrix when (a) the policy hook
-    // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 /
-    // ED_SYM_REP=0 fall back to the gather walk) and (b) an UPPER-BOUND
-    // memory estimate fits the budget (ED_SYM_SECTOR_CSR_BUDGET_GIB,
-    // default 8; each off-diagonal canonical term contributes at most one entry
-    // per row). col_idx is uint32, so > 2^32-row sectors always
-    // stay on the gather walk.
+    // resolves to RepReducedCsr (the default; ED_SYM_REDUCED_CSR=0 falls back
+    // to the gather walk) and (b) an UPPER-BOUND memory estimate fits the
+    // block's budget, or without one the default rule (csr_policy.h
+    // block_csr_budget_bytes: ED_SYM_SECTOR_CSR_BUDGET_GIB when set, else 0.55 x
+    // available RAM); each off-diagonal canonical term contributes at most one
+    // entry per row, d in a sector of a d-dim irrep, and a sampled row length
+    // decides when that bound does not fit. col_idx is uint32, so sectors of
+    // 2^32 or more rows always stay on the gather walk.
     void maybe_build_csr_() const {
         if (ed::planner::resolved_sym_matvec_repr() != static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr))
             return;
@@ -582,9 +584,9 @@ private:
         const std::uint64_t r = rows();
         if (r == 0 || cols() >= (std::uint64_t{1} << 32)) return;
         // Exact bound before merging: at most one entry per group and row, d per group in a sector of an
-        // irrep of dimension d, at the dictionary build's 7 bytes an entry (csr_policy.h). It charged full
-        // 20-byte values before and so walked total S+- on every apply of a ladder S^2 (N = 26: 5.2 GB
-        // estimated for a 0.9 GB CSR). A matrix with too many distinct values for a dictionary is built in
+        // irrep of dimension d, at the dictionary build's 7 bytes an entry (csr_policy.h); charging full
+        // 20-byte values would overestimate a ladder S^2's CSR about sixfold (N = 26: 5.2 GB for 0.9 GB)
+        // and walk total S+- on every apply. A matrix with too many distinct values for a dictionary is built in
         // full values only within the budget (build_cross_csr's max_full_bytes), else the walk serves it.
         const std::uint64_t per_row = 1 + rows_->n_groups() * static_cast<std::uint64_t>(src_->irrep_dim);
         const double est = static_cast<double>(ed::planner::csr_estimate_bytes(r, per_row));
@@ -672,24 +674,24 @@ template <class T> inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr
 
 // The per-call engine state shared by the star walk and every consumer.
 struct EngineContext {
-    std::vector<std::vector<int>> A;             // RAW abelian perms
-    ed::symmetry::GroupIrreps giA;           // irreps of RAW A
-    std::vector<std::vector<int>> residues;      // usable, deduped, no identity
-    std::vector<int> residue_spec;  // per residue: its index in the caller's list
-    std::vector<std::vector<int>> irrep_map;     // per residue: k -> k'
-                                                        // (EXTENDED indices when flip)
+    std::vector<std::vector<int>> A; // RAW abelian perms
+    ed::symmetry::GroupIrreps giA; // irreps of RAW A
+    std::vector<std::vector<int>> residues; // usable, deduped, no identity
+    std::vector<int> residue_spec; // per residue: its index in the caller's list
+    std::vector<std::vector<int>> irrep_map; // per residue: k -> k'
+        // (EXTENDED indices when flip)
     /// The subspace's orbit table under A (A') and, at fixed Sz, its rank lookup: acquired by the
     /// first star that needs its momentum sector (k_sector_table), so a walk whose stars all take
     /// the group-sector path never builds them.
     struct KTable {
         std::once_flag once;
         std::shared_ptr<const ed::symmetry::OrbitTable> otab;
-        std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed Sz: shared rank table, or null
-        std::atomic<double> seconds{0.0};                              // to acquire both (0: not yet)
+        std::shared_ptr<const ed::symmetry::SharedRankLookup> srl; // fixed Sz: shared rank table, or null
+        std::atomic<double> seconds{0.0}; // to acquire both (0: not yet)
     };
     std::shared_ptr<KTable> k_table = std::make_shared<KTable>();
-    int n_up = -1, sz_parity = -1;   // the subspace
-    ed::symmetry::CompiledGroup cg;            // A (or A'), byte-LUT
+    int n_up = -1, sz_parity = -1; // the subspace
+    ed::symmetry::CompiledGroup cg; // A (or A'), byte-LUT
     int n_sites = 0;
     // A' = A x Z2 (global spin flip as an XOR element). Element
     // index convention: a in [0,|A|) pure, a+|A| = flip*a. Irrep index
@@ -697,8 +699,8 @@ struct EngineContext {
     bool flip_half = false;
     std::uint64_t flip_mask = 0;
     int n_irr_raw = 0;
-    const ed::ops::MaskedOperator* terms = nullptr;       // H's canonical terms (the verdicts)
-    Antiunitary tr = Antiunitary::None;   // the map of the stars' time-reversal fold
+    const ed::ops::MaskedOperator* terms = nullptr; // H's canonical terms (the verdicts)
+    Antiunitary tr = Antiunitary::None; // the map of the stars' time-reversal fold
 
     [[nodiscard]] std::size_t nA_ext() const noexcept { return A.size() * (flip_half ? 2u : 1u); }
     [[nodiscard]] int n_irr_ext() const noexcept { return n_irr_raw * (flip_half ? 2 : 1); }
@@ -722,9 +724,9 @@ struct FlipEngagement {
 struct StarBuild {
     std::vector<std::shared_ptr<BlockData>> blocks;
     LittleGroupStarInfo info;
-    std::shared_ptr<RepSectorMatVec> hk;   // null <=> empty sector
-    double t_orbit = 0.0;   // seconds in the star's own orbit table (group-sector path)
-    double t_build = 0.0;   // seconds in build_star_blocks (set by the star walk)
+    std::shared_ptr<RepSectorMatVec> hk; // null <=> empty sector
+    double t_orbit = 0.0; // seconds in the star's own orbit table (group-sector path)
+    double t_build = 0.0; // seconds in build_star_blocks (set by the star walk)
 };
 
 // ---- naming irreps by character ---------------------------------------------
@@ -846,7 +848,7 @@ struct BlockSolution {
     std::vector<std::vector<Complex>> vectors;
     bool converged = true;
     bool whole = false;
-    std::uint64_t applies = 0;   ///< H applies of this solve
+    std::uint64_t applies = 0; ///< H applies of this solve
 };
 
 /// The spin-S tower of one fixed-Sz block (P6.5): its states of total spin S, which the eigs lanes
@@ -858,11 +860,11 @@ struct BlockSolution {
 /// off-tower level took a tower level's place, solve again with every off-tower state lifted above
 /// the band (tower_penalty). No projection runs per apply.
 struct Tower {
-    std::shared_ptr<const ed::symmetry::RepSectorData> sector;   ///< the block's basis
-    std::shared_ptr<const ed::LinearOperator> s2;       ///< S^2 on it (LadderS2, or the S^2 carrier)
+    std::shared_ptr<const ed::symmetry::RepSectorData> sector; ///< the block's basis
+    std::shared_ptr<const ed::LinearOperator> s2; ///< S^2 on it (LadderS2, or the S^2 carrier)
     int two_S = -1;
-    std::vector<int> towers;      ///< the 2S' the block holds (allowed_two_S_in_block)
-    std::int64_t dim = -1;  ///< its spin-S states when known (states less those at n_up + 1), else -1
+    std::vector<int> towers; ///< the 2S' the block holds (allowed_two_S_in_block)
+    std::int64_t dim = -1; ///< its spin-S states when known (states less those at n_up + 1), else -1
 
     [[nodiscard]] double lambda() const { return 0.25 * two_S * (two_S + 2); }
     /// min |S'(S'+1) - S(S+1)| over the block's other towers; 0 when it holds no other.
@@ -929,8 +931,8 @@ struct GsVector {
 
 /// An upper bound on a block's lowest level (40 Lanczos steps); -inf when it failed.
 struct BlockEstimate {
-    double theta = -std::numeric_limits<double>::infinity();   ///< lowest Ritz value
-    double residual = std::numeric_limits<double>::infinity();    ///< its bound |beta_m z_m|
+    double theta = -std::numeric_limits<double>::infinity(); ///< lowest Ritz value
+    double residual = std::numeric_limits<double>::infinity(); ///< its bound |beta_m z_m|
     std::uint64_t applies = 0;
 };
 
@@ -946,10 +948,12 @@ struct BlockEstimate {
 /// for one level, Krylov-Schur with vectors for several, from the tower's valence-bond starts; the
 /// eigenpairs are certified through S^2 and, when an off-tower level took a tower level's place,
 /// solved again on tower_penalty (on the complex lane of B's device when B is the real host lane).
-/// Vectors are returned when `vectors`. max_iter 0 keeps every default (a test seam).
+/// Vectors are returned when `vectors`. max_iter 0 keeps every default (a test seam). strict_device
+/// (device='gpu'): a penalty operator without a device kernel raises DeviceUnsupported instead of
+/// re-solving on the host.
 template <class B>
 [[nodiscard]] BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower& t, std::size_t want,
-                                              bool vectors, std::uint64_t max_iter = 0);
+                                              bool vectors, std::uint64_t max_iter = 0, bool strict_device = false);
 
 /// The `want` lowest values above the dense crossover: the contiguous Paige-gated scan for one
 /// level, Krylov-Schur with locking for several. max_iter 0 keeps every default (a test seam).
@@ -980,7 +984,7 @@ template <class B>
 [[nodiscard]] StarBuild build_star_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0,
                                           const std::vector<int>& members, const LittleGroupOptions& opt);
 
-}  // namespace lg_detail
+} // namespace lg_detail
 
 // =============================================================================
 // BlockData -- one (star, irrep) block: a group sector, or (gop null) the plain momentum
@@ -988,7 +992,7 @@ template <class B>
 // =============================================================================
 struct BlockData {
     LittleGroupBlockTag tag;
-    std::shared_ptr<lg_detail::RepSectorMatVec> hk;    // shared across the star's blocks
+    std::shared_ptr<lg_detail::RepSectorMatVec> hk; // shared across the star's blocks
     // Group-sector block (group_sector.cpp): an irrep solved in the rep basis of the FULL little group
     // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on
     // `gsec`. Null on a plain block.
@@ -1043,7 +1047,7 @@ public:
         const double sz = static_cast<double>(sec_->n_up) - 0.5 * static_cast<double>(N);
         shift_ = sz * (sz + 1.0);
         bound_ = 0.5 * static_cast<double>(N) * (0.5 * static_cast<double>(N) + 1.0);
-        if (sec_->n_up >= N) return;                  // no state above: S+ is zero
+        if (sec_->n_up >= N) return; // no state above: S+ is zero
         up_ = raised_sector(*sec_);
         if (up_->states() == 0) return;
         ed::ops::MaskedOperator plus(N), minus(N);
@@ -1052,7 +1056,7 @@ public:
             minus.add(ed::ops::MaskedOperator::product(N, "-", {i}));
         }
         ed::ops::CompileOptions copt;
-        copt.project = false;                         // total S+- commute with the group
+        copt.project = false; // total S+- commute with the group
         plus_ = std::make_unique<CrossSectorMatVec>(std::make_shared<const ed::ops::MaskedProgram>(
                                                         ed::ops::compile_program({plus.dagger()}, *up_, *sec_, copt)),
                                                     sec_, up_);
@@ -1107,8 +1111,8 @@ public:
 private:
     std::shared_ptr<const ed::symmetry::RepSectorData> sec_, plain_;
     std::unique_ptr<LadderS2> ladder_;
-    std::vector<std::int64_t> from_;    // per state of the plain sector: its flip-sector state (-1: none)
-    std::vector<Complex> coef_;    // and E's entry there
+    std::vector<std::int64_t> from_; // per state of the plain sector: its flip-sector state (-1: none)
+    std::vector<Complex> coef_; // and E's entry there
     std::vector<std::uint64_t> to_ptr_; // per flip-sector state: its plain states (CSR of E^T)
     std::vector<std::uint64_t> to_;
 };
@@ -1120,5 +1124,5 @@ private:
 /// subgroup) onto g's span. The lift is an isometry, so lift(restrict(v)) is that projection.
 [[nodiscard]] std::vector<Complex> restrict_group_vector(const ed::symmetry::RepSectorData& g,
                                                          const ed::symmetry::RepSectorData& k, const Complex* v);
-}  // namespace lg_detail
-}  // namespace ed::solvers
+} // namespace lg_detail
+} // namespace ed::solvers

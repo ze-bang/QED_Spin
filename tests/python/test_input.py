@@ -419,3 +419,12 @@ def test_a_refused_bond_call_adds_nothing():
         with pytest.raises((IndexError, ValueError)):
             call()
         assert len(b) == 3
+
+
+def test_kitaev_validates_the_axis_of_every_bond():
+    """An invalid axis on a self-bond (skipped when the terms are built) used to pass silently."""
+    b = qed.input.HamiltonianBuilder(4)
+    with pytest.raises(qed.errors.InvalidRequest, match="bond_axis"):
+        b.kitaev([(0, 1), (2, 2)], [2, 7])
+    with pytest.raises(TypeError):  # a wrong Python type stays a TypeError
+        b.kitaev([(0, 1)], [1.5])

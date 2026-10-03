@@ -7,6 +7,7 @@
 #include "validate.h"
 #include "walk.h"
 
+#include <ed/parallel/numa.h>   // pin_omp_threads_once
 #include <ed/sectors/expect.h>
 
 #include <array>
@@ -24,6 +25,7 @@ std::vector<std::vector<Complex>> expect(const EigsResult& r, const Spec& s,
     const int n_sites = r.n_sites;
     detail::validate_environment("expect");
     for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], n_sites, "expect", i);
+    ed::parallel::pin_omp_threads_once();   // ED_NUMA_PIN_THREADS, as every verb
     // Every level's vector lives in its own sector basis; the operators averaged over the
     // symmetry group (and the flip where the level folds or projects by it) are invariant, so
     // <v|Obar|v> is one rep_matrix_elements sweep per (basis, flip, keep) over all operators --
@@ -42,7 +44,7 @@ std::vector<std::vector<Complex>> expect(const EigsResult& r, const Spec& s,
     using detail::Keep;
     for (std::size_t li = 0; li < r.levels.size(); ++li) {
         const Level& L = r.levels[li];
-        if (L.vector < 0) throw std::invalid_argument("expect: a level has no vector (solve with vectors)");
+        if (L.vector < 0) throw ed::InvalidRequest("expect: a level has no vector (solve with vectors)");
         const BlockVector& v = r.vectors[static_cast<std::size_t>(L.vector)];
         const bool flip = (L.mirror == 2 && !detail::theta_mirror(L)) || L.tag.flip_parity >= 0 || v.basis->has_flips();
         const Keep keep = v.basis->n_up >= 0 ? Keep::Zero : (L.tag.sz_parity >= 0 ? Keep::Even : Keep::All);
@@ -111,9 +113,11 @@ Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, 
     if (static_cast<int>(O.getNumBits()) != r.n_sites)
         throw ed::InvalidRequest("matrix_element: the operator acts on " + std::to_string(O.getNumBits())
                                  + " sites, the levels on " + std::to_string(r.n_sites));
+    if (!std::isfinite(O.canonical().l1_norm()))
+        throw ed::InvalidRequest("matrix_element: the operator has a coefficient that is not finite (NaN or inf)");
     const Level& Li = r.levels[i];
     const Level& Lj = r.levels[j];
-    if (Li.vector < 0 || Lj.vector < 0) throw std::invalid_argument("matrix_element: a level has no vector");
+    if (Li.vector < 0 || Lj.vector < 0) throw ed::InvalidRequest("matrix_element: a level has no vector");
     const BlockVector& bra = r.vectors[static_cast<std::size_t>(Li.vector)];
     const BlockVector& ket = r.vectors[static_cast<std::size_t>(Lj.vector)];
     const auto& src = *ket.basis;

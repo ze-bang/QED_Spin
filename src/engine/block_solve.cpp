@@ -70,7 +70,7 @@ bool real_block(const Eigen::MatrixXcd& Hb) {
                               w.data());
     }
     if (info != 0)
-        throw std::runtime_error("little_group: dense block eigensolve failed (info = " + std::to_string(info) + ")");
+        throw ed::ConvergenceError("little_group: dense block eigensolve failed (info = " + std::to_string(info) + ")");
     return w;
 }
 
@@ -106,9 +106,9 @@ bool real_block(const Eigen::MatrixXcd& Hb) {
         Hb.resize(0, 0);
     }
     if (info != 0 || static_cast<std::size_t>(found) != want)
-        throw std::runtime_error("little_group: dense block eigensolve with vectors failed (info = "
-                                 + std::to_string(info) + ", " + std::to_string(found) + " of " + std::to_string(want)
-                                 + " pairs)");
+        throw ed::ConvergenceError("little_group: dense block eigensolve with vectors failed (info = "
+                                   + std::to_string(info) + ", " + std::to_string(found) + " of " + std::to_string(want)
+                                   + " pairs)");
     d.values.assign(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(want));
     return d;
 }
@@ -138,7 +138,7 @@ DenseEigenpairs dense_eigenpairs_in_range(Eigen::MatrixXcd& Hb, double lo, doubl
         d.vectors = Z.leftCols(found);
     }
     if (info != 0)
-        throw std::runtime_error(
+        throw ed::ConvergenceError(
             "little_group: dense block eigensolve in a value range failed (info = " + std::to_string(info) + ")");
     d.values.assign(w.begin(), w.begin() + static_cast<std::ptrdiff_t>(found));
     return d;
@@ -862,7 +862,7 @@ static BlockSolution tower_attempt(B& be, const ed::LinearOperator& op, const To
 
 template <class B>
 BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower& t, std::size_t want, bool vectors,
-                                std::uint64_t max_iter) {
+                                std::uint64_t max_iter, bool strict_device) {
     BlockSolution sol;
     const std::size_t nb = H.dim();
     if (nb == 0 || t.dim == 0) {
@@ -896,8 +896,12 @@ BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower&
             pen = tower_attempt(be, *P, t, k, max_iter);
         else if constexpr (std::is_same_v<B, ed::matvec::BasicCpuBackend<double>>)
             pen = on_host();
-        else
+        else {
+            if (!P->has_device_kernel() && strict_device)
+                throw ed::DeviceUnsupported("spin towers: the penalty re-solve of a block of " + std::to_string(nb)
+                                            + " states has no device kernel; device='auto' runs it on the host");
             pen = P->has_device_kernel() ? tower_attempt(be, *P, t, k, max_iter) : on_host();
+        }
         sol.applies += pen.applies;
         std::vector<double> e(pen.vectors.size());
         std::vector<Complex> h(nb);
@@ -934,7 +938,7 @@ BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower&
     template BlockSolution solve_block_lowest<B>(B&, const ed::LinearOperator&, std::size_t, std::uint64_t);           \
     template BlockSolution solve_block_eigenpairs<B>(B&, const ed::LinearOperator&, std::size_t, std::uint64_t);       \
     template BlockSolution solve_block_tower<B>(B&, const ed::LinearOperator&, const Tower&, std::size_t, bool,        \
-                                                std::uint64_t);                                                        \
+                                                std::uint64_t, bool);                                                  \
     template GsVector solve_gs_vector<B>(B&, const ed::LinearOperator&, std::size_t, std::uint64_t);                   \
     template BlockEstimate estimate_lowest<B>(B&, const ed::LinearOperator&, const Tower*);
 // NOLINTEND(bugprone-macro-parentheses)

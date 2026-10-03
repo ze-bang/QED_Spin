@@ -242,3 +242,25 @@ def test_inputs_are_validated(tmp_path):
     sub = qed.dssf.build_observables(spec(operator_type="sublattice", basis="xyz", components=[0], unit_cell_size=1))
     whole = qed.dssf.build_observables(spec(basis="xyz", components=[0]))
     assert sub.names[0].startswith("Sx") and sub.operators[0].equals(whole.operators[0])
+
+
+def test_positions_file_format(tmp_path):
+    """'x y z' or 'id x y z' (id = the site's index); extra columns were read as coordinates."""
+
+    def build(text):
+        p = tmp_path / "p.dat"
+        p.write_text(text)
+        s = qed.dssf.OperatorSpec()
+        s.operator_type, s.components, s.momentum_points = "sum", [2], [[0.5, 0.0, 0.0]]
+        s.num_sites, s.positions_file = 3, str(p)
+        return qed.dssf.build_observables(s)
+
+    xyz = build("0 0 0\n1 0 0\n2 0 0\n")
+    with_id = build("# id x y z\n0 0 0 0\n1 1 0 0\n2 2 0 0\n")
+    assert xyz.operators[0].equals(with_id.operators[0])
+    for bad in (
+        "0 0 0 0 0 0\n1 1 1 1 0 0\n2 2 0 2 0 0\n",  # six columns (the old fixture's layout)
+        "0 0 0 0\n2 1 0 0\n1 2 0 0\n",
+    ):  # an id that is not the index
+        with pytest.raises(qed.errors.InvalidRequest):
+            build(bad)

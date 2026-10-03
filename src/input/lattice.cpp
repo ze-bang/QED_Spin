@@ -355,8 +355,8 @@ Lattice from_neighbor_lists(const std::vector<Position>& positions,
     L.nn_bonds.reserve(nn_pairs.size());
     for (auto [i, j] : nn_pairs) {
         if (i >= L.num_sites || j >= L.num_sites) {
-            throw std::out_of_range("from_neighbor_lists: bond (" + std::to_string(i) + ", " + std::to_string(j)
-                                    + ") has an endpoint out of range");
+            throw InvalidRequest("from_neighbor_lists: bond (" + std::to_string(i) + ", " + std::to_string(j)
+                                 + ") has an endpoint out of range");
         }
         if (i == j) {
             throw InvalidRequest("from_neighbor_lists: bond (" + std::to_string(i) + ", " + std::to_string(j)
@@ -388,7 +388,7 @@ bool parse_real(const std::string& s, double& out) {
 
 Lattice from_cluster_file(const std::string& path) {
     std::ifstream in(path);
-    if (!in) { throw std::runtime_error("from_cluster_file: cannot open " + path); }
+    if (!in) { throw InvalidRequest("from_cluster_file: cannot open " + path); }
     enum Section { None, Positions, Edges };
     Section sect = None;
     std::array<bool, 3> opened{};

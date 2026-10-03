@@ -25,7 +25,11 @@ class ThermalResult:
     spin) is the canonical ensemble of that part -- its entropy tends to the log of the part's
     dimension -- and says so with a ``("restricted_ensemble", ...)`` entry in ``diagnostics``.
     ``O``: <O>(T) per requested observable, a complex array [len(observables), len(T)] (None
-    without observables). ``diagnostics``: (code, message) pairs for fallbacks the run took."""
+    without observables). ``e0``: the lowest energy the method resolved -- exact, the ground
+    state; ``ftlm``, the lowest weighted Ritz value (with ``exact_states``, the lowest certified
+    eigenvalue); ``mtpq``, the spectral-bounds Lanczos estimate. The sampled values are upper
+    bounds on E0, independent of the temperature grid. ``diagnostics``: (code, message) pairs for
+    fallbacks the run took."""
 
     T: np.ndarray
     E: np.ndarray
@@ -68,14 +72,16 @@ def thermal(
     eigenpairs the block eigensolver certified by their residuals -- a block that could not
     certify them all samples the rest and says so in an ``("oftlm_exact_states", ...)``
     diagnostic),
-    or ``"mtpq"`` (microcanonical thermal pure quantum states). ``krylov`` is the FTLM
-    Lanczos depth (default 100), ``steps`` the mTPQ steps per sample (default: enough for the
+    or ``"mtpq"`` (microcanonical thermal pure quantum states); only ``"ftlm"`` reads
+    ``exact_states``. ``krylov`` is the FTLM Lanczos depth (default 100, at least 2), ``steps``
+    the mTPQ steps per sample (default: enough for the
     coldest ``T``). ``samples`` random vectors per block; ``seed`` 0 draws one. ``dense_max_dim``: the sampled methods
     diagonalise blocks up to this dimension exactly instead (a sampled trace needs a dimension
     well above ``samples``); ``None`` is 512, 0 always samples.
 
     ``observables``: operators O whose thermal averages <O>(T) = Tr(e^{-H/T} O) / Z are
-    returned in ``O`` (methods ``"exact"`` and ``"ftlm"`` without ``exact_states``). O may
+    returned in ``O`` (methods ``"exact"`` and ``"ftlm"``, with ``exact_states=0``; ``"mtpq"``
+    or ``exact_states > 0`` raises InvalidRequest). O may
     break the symmetries: each block uses O averaged over the symmetries it resolves, which
     has the same thermal average. Under ``total_spin`` with an SU(2)-symmetric H an O that is
     not SU(2) invariant enters through its SU(2)-scalar part (its average over all spin
@@ -97,8 +103,8 @@ def thermal(
         raise InvalidRequest("method='mtpq' takes steps=, not krylov= (the Lanczos depth of FTLM)")
     if key != "mtpq" and steps is not None:
         raise InvalidRequest(f"steps= is the mTPQ step count; method={key!r} takes krylov=")
-    if krylov is not None and int(krylov) < 1:
-        raise InvalidRequest(f"krylov must be >= 1, got {krylov}")
+    if krylov is not None and int(krylov) < 2:
+        raise InvalidRequest(f"krylov must be >= 2 (the Lanczos depth of FTLM), got {krylov}")
     if steps is not None and int(steps) < 1:
         raise InvalidRequest(f"steps must be >= 1 (or None for automatic), got {steps}")
     t.krylov = 100 if krylov is None else int(krylov)

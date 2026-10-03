@@ -80,8 +80,25 @@ def test_removed_knobs_are_reported():
 
 
 def test_strict_mode_reads_false_words_as_off():
-    r = _import_qed({"ED_SYM_LG_ONLY_KO": "3", "ED_ENV_STRICT": "false"})
-    assert r.returncode == 0 and "imported" in r.stdout
+    for off in ("false", "False", "OFF", "No", "00", "0 "):
+        r = _import_qed({"ED_SYM_LG_ONLY_KO": "3", "ED_ENV_STRICT": off})
+        assert r.returncode == 0 and "imported" in r.stdout, off
+
+
+def test_flag_words_match_the_engine(monkeypatch):
+    """Python reads flags through the engine's parser: 'False' or '00' is off everywhere (it used to
+    parse as valid yet read as ON, so ED_MEM_GUARD_OFF=False disabled the guard)."""
+    from qed import _core
+
+    for off in ("0", "00", "+0", "false", "False", "fAlSe", "off", "Off", "no", "NO", "0 "):
+        monkeypatch.setenv("ED_MEM_GUARD_OFF", off)
+        assert _core.env_flag("ED_MEM_GUARD_OFF", True) is False, off
+        assert not list(_core.env_malformed()), off
+    for on in ("1", "True", "ON", "yes", "-1", "2"):
+        monkeypatch.setenv("ED_MEM_GUARD_OFF", on)
+        assert _core.env_flag("ED_MEM_GUARD_OFF", False) is True, on
+    monkeypatch.delenv("ED_MEM_GUARD_OFF")
+    assert _core.env_flag("ED_MEM_GUARD_OFF", True) is True
 
 
 def test_a_malformed_value_is_refused(monkeypatch):
