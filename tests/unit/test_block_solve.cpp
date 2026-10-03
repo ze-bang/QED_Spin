@@ -750,7 +750,7 @@ TEST_CASE("linear_operator: a host-only operator refuses a device binding", "[li
 }
 #endif
 
-// The host DenseBatch queues blocks up to kHostConcurrentMaxDim and solves them concurrently (one
+// The host DenseBatch queues its blocks (within host_budget()) and solves them concurrently (one
 // serial LAPACK call per thread, largest first): the spectra are those of the single solves.
 TEST_CASE("dense: the host DenseBatch solves its queue concurrently, as single solves do", "[dense]") {
     std::vector<std::shared_ptr<const ed::LinearOperator>> ops;

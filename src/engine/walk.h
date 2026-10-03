@@ -167,14 +167,14 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
 /// the host and uploaded at once, so it is solved before it outgrows a quarter of the free device
 /// memory or of the RAM the job may still allocate (cuSOLVER's workspace and the eigenvalues come
 /// on top), and never holds more than 256 MiB of matrices; a block larger than that is solved on
-/// the host, and so is a batch whose device solve fails. On the host a block above
-/// kHostConcurrentMaxDim is solved at once by the threaded LAPACK; smaller ones are queued (up to
-/// host_budget()) and solved concurrently, one serial LAPACK call per thread.
+/// the host, and so is a batch whose device solve fails. On the host every block is queued (up to
+/// host_budget()) and the queue solved concurrently, one serial LAPACK call per thread, largest
+/// first; only a block larger than the budget is solved alone. Concurrency across blocks is the
+/// parallelism: this platform's threaded zheevd does not scale (n = 4200: 19.2 s on one thread,
+/// 19.4 s on 32; dsyevd 3.1 / 2.4 s; dev/p67/lapack_scale.py), so a threaded solve of one block
+/// after another left all but one core idle (tri20 exact thermal: 3256 s, probe 62624309).
 class DenseBatch {
 public:
-    /// The largest host block queued for the concurrent solve (its serial zheevd takes ~1 s).
-    static constexpr std::uint64_t kHostConcurrentMaxDim = 2048;
-
     DenseBatch(Device device, const char* verb) : device_(device), verb_(verb) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
@@ -218,12 +218,12 @@ private:
         if (!ed::on_device(lanes_.back())) {
             ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host,
                                         "dense spectrum");
-            if (dim > kHostConcurrentMaxDim) {   // large enough for the threaded LAPACK
+            if (host_budget_ == 0) host_budget_ = host_budget();
+            if (bytes > host_budget_) {          // too large for the pool: alone, on the threaded LAPACK
                 Eigen::MatrixXcd M = make();
                 spectra_.back() = dense_eigenvalues_inplace(M);
                 return id;
             }
-            if (host_budget_ == 0) host_budget_ = host_budget();
             if (host_bytes_ + bytes > host_budget_) solve_host();
             host_.push_back({id, make()});
             host_bytes_ += bytes;
@@ -275,12 +275,11 @@ private:
     }
 
     // The queued host blocks, concurrently: one serial LAPACK solve per thread, largest first
-    // (LPT), where one threaded solve after another would spend small blocks on the team's
-    // fork/join. A queue too short to fill half the team keeps the threaded solves.
+    // (LPT); a lone block keeps the threaded solve.
     void solve_host() {
         if (host_.empty()) return;
         const int team = omp_get_max_threads();
-        if (2 * host_.size() < static_cast<std::size_t>(team)) {
+        if (host_.size() < 2 || team < 2) {
             for (auto& [id, M] : host_) spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
         } else {
             std::vector<std::size_t> order(host_.size());
@@ -314,8 +313,10 @@ private:
 
     // The host queue holds at most 2 GiB of matrices, or a quarter of the RAM the job may still
     // allocate when that is smaller (not checked under ED_MEM_GUARD_OFF).
+    // A team's worth of large blocks at once (32 blocks of 4600 states are 11 GB), within a quarter
+    // of the RAM the job may still allocate.
     static std::uint64_t host_budget() {
-        std::uint64_t b = std::uint64_t{2} << 30;
+        std::uint64_t b = std::uint64_t{16} << 30;
         if (ed::core::mem_guard_off()) return b;
         if (const std::uint64_t ram = ed::core::available_ram_bytes()) b = std::min<std::uint64_t>(b, ram / 4);
         return std::max<std::uint64_t>(b, 1);
