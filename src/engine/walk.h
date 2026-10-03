@@ -374,7 +374,11 @@ private:
         if (host_.empty()) return;
         const Timed timed(prof_.host_s);
         prof_.host_blocks += host_.size();
+#ifdef _OPENMP
         const int team = omp_get_max_threads();
+#else
+        const int team = 1;
+#endif
         if (host_.size() < 2 || team < 2) {
             for (auto& [id, M] : host_) spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
         } else {
