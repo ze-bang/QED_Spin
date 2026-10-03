@@ -14,6 +14,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -153,12 +154,13 @@ struct DeviceProbe {
 }
 
 #ifdef WITH_CUDA
-/// The calling thread's CudaBackend, made on its first device lane and never destroyed (its cuBLAS
-/// handle would be torn down after the CUDA runtime at exit). It keeps no state between solves
-/// since P7.3, so every device block the thread runs shares it instead of creating a cuBLAS handle
-/// each. Not for transient threads (one per sample): each would leave a backend behind.
+/// The calling thread's CudaBackend, made on its first device lane and destroyed when the thread
+/// exits -- for the main thread inside exit(), whose thread-local destructors run before the
+/// atexit handlers that tear the CUDA runtime down. It keeps no state between solves since P7.3,
+/// so every device block the thread runs shares it instead of creating a cuBLAS handle each.
 inline ed::matvec::CudaBackend& thread_cuda_backend() {
-    static thread_local ed::matvec::CudaBackend* be = new ed::matvec::CudaBackend;
+    static thread_local const std::unique_ptr<ed::matvec::CudaBackend> be =
+        std::make_unique<ed::matvec::CudaBackend>();
     return *be;
 }
 #endif
