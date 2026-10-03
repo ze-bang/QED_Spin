@@ -3957,9 +3957,9 @@
       "content": "sel_mom",
       "model": "kagome12",
       "backend": "gpu",
-      "status": "pass",
-      "metric": 5.20319327193473e-07,
-      "note": "gpu vs cpu, 4 samples: rel L1 5.2e-07",
+      "status": "wrong",
+      "metric": 2.6e-06,
+      "note": "gpu vs cpu, 4 samples: rel L1 2.6e-06 (gates 62612909, 62618187). Roundoff sensitivity of the cell, not the device: on the CPU alone the walk lanes (CSR budgets 0) move it by 1.1e-6 (srun on gate2 f219ee6f, dev/p67/kagome_sens.py); under 1e-6 with the pre-ad27a34d seeds only",
       "secs": 7.99
     },
     {
