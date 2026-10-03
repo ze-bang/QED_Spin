@@ -81,8 +81,33 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
     }
 
     // Device resources, all null-initialised so the cleanup below is safe on any partial-init
-    // throw path (no leak of memory / handles / streams).
-    const int K = std::max(1, std::min<int>(static_cast<int>(nblk), 8));
+    // throw path (no leak of memory / handles / streams). The pool: up to 8 streams, fewer when
+    // their workspaces (each sized for the largest block) would not fit beside the matrices.
+    int K = std::max(1, std::min<int>(static_cast<int>(nblk), 8));
+    {
+        cusolverDnHandle_t h = nullptr;
+        cusolverDnParams_t p = nullptr;
+        std::size_t ws = 1, d = 0, hb = 0;
+        try {
+            ED_CUSOLVER_CHECK(cusolverDnCreate(&h));
+            ED_CUSOLVER_CHECK(cusolverDnCreateParams(&p));
+            if (max_real > 0)    { workspace(h, p, max_real, true, d, hb);     ws = std::max(ws, d); }
+            if (max_complex > 0) { workspace(h, p, max_complex, false, d, hb); ws = std::max(ws, d); }
+        } catch (...) {
+            if (p) cusolverDnDestroyParams(p);
+            if (h) cusolverDnDestroy(h);
+            throw;
+        }
+        cusolverDnDestroyParams(p);
+        cusolverDnDestroy(h);
+        std::size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+            const std::size_t room = free_b > P.bytes() ? (free_b - P.bytes()) / 5 * 4 : 0;   // 80% of what the matrices leave
+            K = std::max(1, std::min<int>(K, static_cast<int>(room / ws)));
+        } else {
+            cudaGetLastError();
+        }
+    }
     double* d_data = nullptr;
     double* d_eigs = nullptr;
     int*    d_info = nullptr;                           // per-block convergence code
@@ -127,10 +152,20 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
             h_work[k].resize(host);
         }
 
-        // Blocks round-robin over the pool: blocks on one stream serialise (so they share its
+        // Blocks to streams largest first, each to the least-loaded stream (load ~ n^3, a complex
+        // block twice a real one: H100 n = 12870 3.9 s against 1.9 s), so a large block runs beside
+        // the small ones instead of after them. Blocks on one stream serialise (they share its
         // workspace); blocks on different streams overlap. The data / eigs / info slices are disjoint.
-        for (std::size_t b = 0; b < nblk; ++b) {
-            const int k = static_cast<int>(b % static_cast<std::size_t>(K));
+        std::vector<std::size_t> order(nblk);
+        for (std::size_t b = 0; b < nblk; ++b) order[b] = b;
+        std::stable_sort(order.begin(), order.end(),
+                         [&P](std::size_t a, std::size_t c) { return P.block_dim[a] > P.block_dim[c]; });
+        std::vector<double> load(static_cast<std::size_t>(K), 0.0);
+        for (const std::size_t b : order) {
+            const int k = static_cast<int>(std::min_element(load.begin(), load.end()) - load.begin());
+            const double n3 = static_cast<double>(P.block_dim[b]) * static_cast<double>(P.block_dim[b])
+                              * static_cast<double>(P.block_dim[b]);
+            load[static_cast<std::size_t>(k)] += P.real[b] ? n3 : 2.0 * n3;
             const std::int64_t n = P.block_dim[b];
             const cudaDataType t = P.real[b] ? CUDA_R_64F : CUDA_C_64F;
             ED_CUSOLVER_CHECK(cusolverDnXsyevd(

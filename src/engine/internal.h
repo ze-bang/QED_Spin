@@ -603,6 +603,38 @@ private:
     return H;
 }
 
+/// Is the matrix of this CSR real up to roundoff -- real_block's verdict (numerics.h kRealBlockRel,
+/// relative to its largest entry) read from the stored values (a dictionary's few, or nnz) instead
+/// of n^2 entries.
+[[nodiscard]] inline bool csr_is_real(const ed::matvec::ReducedSymmetryCsr<Complex>& c) {
+    double big = 0.0, imag = 0.0;
+    const auto scan = [&](const Complex& v) {
+        big  = std::max(big, std::abs(v));
+        imag = std::max(imag, std::abs(v.imag()));
+    };
+    if (c.dictionary()) for (const auto& v : c.dict) scan(v);
+    else                for (const auto& v : c.val) scan(v);
+    return imag <= ed::numerics::kRealBlockRel * big;
+}
+
+/// The matrix of `c` written whole into `out` (dim x dim, column-major): doubles (its real part,
+/// for a block csr_is_real accepts) or complex values; zeros and entries in parallel.
+template <class T>
+inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr<Complex>& c, T* out) {
+    const std::uint64_t n = c.dim;
+    #pragma omp parallel for schedule(static) if(n > 256)
+    for (long long j = 0; j < static_cast<long long>(n); ++j)
+        std::fill(out + static_cast<std::uint64_t>(j) * n, out + (static_cast<std::uint64_t>(j) + 1) * n, T(0));
+    #pragma omp parallel for schedule(static) if(n > 256)
+    for (long long ir = 0; ir < static_cast<long long>(n); ++ir) {
+        const auto r = static_cast<std::uint64_t>(ir);
+        for (std::uint64_t e = c.row_ptr[r]; e < c.row_ptr[r + 1]; ++e) {
+            if constexpr (std::is_same_v<T, double>) out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e).real();
+            else                                     out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e);
+        }
+    }
+}
+
 // Dense materialization: a sector operator takes the CSR path above; anything else (S^2 through
 // its ladder, a penalty) the column-by-column matvec build.
 [[nodiscard]] inline Eigen::MatrixXcd materialize(const ed::LinearOperator& mv) {

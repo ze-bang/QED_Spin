@@ -180,11 +180,12 @@ def _ring_hopping(n, phi):
 
 
 @gpu
-def test_dense_blocks_larger_than_a_batch_run_on_the_device():
-    # P7.4: a block larger than a batch (256 MiB of matrices) is solved by itself on the device, a
-    # real block in real arithmetic: the 15-ring's Sz = 7 sector, 6435 states (0.66 GB as a complex
-    # matrix), real hopping and then complex. Its spectrum is the union of the 15 momentum blocks
-    # solved on the host (a host solve of the whole complex block alone would take a minute).
+def test_dense_blocks_larger_than_a_batch_run_on_the_device(monkeypatch):
+    # P7.4: a block larger than a batch is solved by itself on the device, a real one in real
+    # arithmetic -- the 15-ring's 6435-state Sz sector, real (0.33 GB) and complex hopping (0.66 GB),
+    # each over a batch cap of 0.25 GiB. Its spectrum is the union of the 15 momentum blocks solved
+    # on the host (a host solve of the whole complex block would take a minute).
+    monkeypatch.setenv("ED_GPU_DENSE_BATCH_GIB", "0.25")
     n = 15
     plain = qed.Symmetry(spatial=None, sz=7, spin_flip="off", time_reversal="off")
     by_k = qed.Symmetry(spatial=[[(i + 1) % n for i in range(n)]], point_group=False, sz=7, spin_flip="off",

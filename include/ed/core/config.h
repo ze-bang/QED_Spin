@@ -86,6 +86,8 @@ struct Row {
       "Byte budget (exact pre-merge bound) for the host CSR of O between two sectors in dynamics; over budget -> row walk")\
     X("ED_GPU_SYM_CACHE_GIB", Real, "gpu", "25% (rank-table cache) / 15% (sector mirror) of the device, at most 24 / 16",\
       "Byte budget for the device-side strong caches that pin recently-used symmetry tables/mirrors; 0 pins none")\
+    X("ED_GPU_DENSE_BATCH_GIB", Real, "gpu", "2 (and at most a quarter of the free device memory and of the RAM)",\
+      "Matrices per batched device dense solve; a larger block is solved by itself on the device when it fits")\
     X("ED_GPU_CSR_BUDGET_GIB", Real, "gpu", "unset -> half the free device memory at the bind",\
       "Byte budget for an operator's reduced CSR built on the device; over it (or 0) the device walk serves")\
     X("ED_AUTO_THREADS", Flag, "threads-numa", "true (auto-threading enabled)",\

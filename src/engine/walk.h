@@ -165,29 +165,66 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
 /// Dense spectra of many blocks, materialised as the walk visits them (the walk streams stars, so
 /// the matrices are the only thing that outlives a star). place(Task::DenseBatch) chooses each
 /// entry's lane (under 'auto' the host below kDeviceDenseMinDim). On a device lane they are solved
-/// in batched cuSOLVER calls, a real block in real arithmetic: a batch is packed on the host and
-/// uploaded at once, so it is solved before it outgrows a quarter of the free device memory or of
-/// the RAM the job may still allocate (cuSOLVER's workspace and the eigenvalues come on top), and
-/// never holds more than 256 MiB of matrices; a block larger than that is solved by itself on the
-/// device when it fits there (fits_device_alone), else on the host, and so is a batch whose device
-/// solve fails. The last batch and the host queue are solved at once. On the host every block is queued (up to
+/// in batched cuSOLVER calls, a real block in real arithmetic, a sector operator's block written
+/// in place from its CSR: a batch is packed on the host and uploaded at once, so it is solved
+/// before it outgrows a quarter of the free device memory or of the RAM the job may still allocate
+/// (cuSOLVER's workspace and the eigenvalues come on top), and never holds more than 2 GiB of
+/// matrices; a block larger than that is solved by itself on the device when it fits there
+/// (fits_device_alone), else on the host, and so is a batch whose device solve fails. The last
+/// batch and the host queue are solved at once. On the host every block is queued (up to
 /// host_budget()) and the queue solved concurrently, one serial LAPACK call per thread, largest
 /// first; only a block larger than the budget is solved alone. Concurrency across blocks is the
 /// parallelism: this platform's threaded zheevd does not scale (n = 4200: 19.2 s on one thread,
 /// 19.4 s on 32; dsyevd 3.1 / 2.4 s; dev/p67/lapack_scale.py), so a threaded solve of one block
 /// after another left all but one core idle (tri20 exact thermal: 3256 s, probe 62624309).
+// DenseBatch's packing of a matrix make() forms into the device batch: real when real_block says so.
+template <class Make>
+auto pack_formed(const Make& make) {
+    return [&make](ed::solvers::LgBlocksPacked& p) {
+        const Eigen::MatrixXcd Hb = make();
+        const auto n = static_cast<std::int64_t>(Hb.rows());
+        if (ed::solvers::lg_detail::real_block(Hb)) {   // column-major, real arithmetic on the device
+            const Eigen::MatrixXd R = Hb.real();
+            p.add_real(R.data(), n);
+        } else {
+            p.add_complex(Hb.data(), n);
+        }
+    };
+}
+
 class DenseBatch {
 public:
     DenseBatch(Device device, const char* verb) : device_(device), verb_(verb) {}
 
     /// Queue (or, on the host, solve now) the spectrum of `mv`; returns the entry index.
     std::size_t add(const ed::LinearOperator& mv) {
-        return add_lazy(mv.dim(), [&mv] { return ed::solvers::lg_detail::materialize(mv); });
+        using namespace ed::solvers::lg_detail;
+        const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv);
+        if (!hk) {
+            const auto make = [&mv] { return materialize(mv); };
+            return add_lazy(mv.dim(), std::nullopt, make, pack_formed(make));
+        }
+        // A sector operator: its CSR first -- its stored values say whether the block is real, so
+        // the device sizes it exactly -- then either lane writes the matrix from it in parallel,
+        // the device batch in place (no complex matrix, no n^2 scan, no copy).
+        const auto csr = hk->reduced_csr();
+        const bool real = csr_is_real(csr);
+        const auto n = static_cast<Eigen::Index>(csr.dim);
+        const auto make = [&csr, n] {
+            Eigen::MatrixXcd H(n, n);
+            csr_to_dense(csr, H.data());
+            return H;
+        };
+        return add_lazy(mv.dim(), real, make, [&csr, real, n](ed::solvers::LgBlocksPacked& p) {
+            if (real) csr_to_dense(csr, p.add_block(n, true));
+            else      csr_to_dense(csr, reinterpret_cast<Complex*>(p.add_block(n, false)));
+        });
     }
     /// The same for a block given as its matrix (a spin tower's Q^dag H Q).
     std::size_t add(Eigen::MatrixXcd M) {
         const auto n = static_cast<std::uint64_t>(M.rows());
-        return add_lazy(n, [&M] { return std::move(M); });
+        const auto make = [&M] { return std::move(M); };
+        return add_lazy(n, std::nullopt, make, pack_formed(make));
     }
 
     /// Solve everything queued; afterwards spectrum(id) is valid for every entry. The device batch
@@ -213,9 +250,10 @@ public:
     [[nodiscard]] std::size_t device_blocks() const noexcept { return device_blocks_; }
 
 private:
-    // add(): the block of dimension `dim` whose matrix make() forms.
-    template <class Make>
-    std::size_t add_lazy(std::uint64_t dim, Make&& make) {
+    // add(): the block of dimension `dim` (`real`: whether it is real, when known before it is
+    // formed); make() forms its matrix for the host, pack(packed_) puts it in the device batch.
+    template <class Make, class Pack>
+    std::size_t add_lazy(std::uint64_t dim, std::optional<bool> real, Make&& make, Pack&& pack) {
         using namespace ed::solvers::lg_detail;
         const std::size_t id = spectra_.size();
         spectra_.emplace_back();
@@ -224,14 +262,16 @@ private:
         req.dim  = dim;
         req.verb = verb_;
         lanes_.push_back(ed::place(device_, req));
-        const std::uint64_t bytes = 16 * dim * dim;   // as a complex matrix; a real one packs half
+        const std::uint64_t bytes = 16 * dim * dim;   // as a complex matrix (the host's form)
         bool alone = false;                           // larger than a batch, solved by itself
         if (ed::on_device(lanes_.back())) {
             if (budget_ == 0) budget_ = batch_budget();
-            if (bytes > budget_) {
-                alone = fits_device_alone(dim);
+            // Device bytes: half for a real block; an unknown one counts as complex.
+            const std::uint64_t dev_bytes = real.value_or(false) ? bytes / 2 : bytes;
+            if (dev_bytes > budget_) {
+                alone = fits_device_alone(dim, real.value_or(false));
                 if (!alone) lanes_.back() = ed::Lane::HostDense;   // too large for the device
-            } else if (packed_.bytes() + bytes > budget_) {
+            } else if (packed_.bytes() + dev_bytes > budget_) {
                 solve_device();
             }
         }
@@ -245,36 +285,37 @@ private:
                 return id;
             }
             if (host_bytes_ + bytes > host_budget_) solve_host();
+            const auto t0 = Clock::now();
             host_.push_back({id, make()});
+            prof_.host_form_s += seconds(t0, Clock::now());
             host_bytes_ += bytes;
             return id;
         }
         ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host, "dense spectrum");
         if (alone) solve_device();   // the batch so far first: this block goes up by itself
-        const Eigen::MatrixXcd Hb = make();
-        const auto nb = static_cast<std::int64_t>(Hb.rows());
-        if (real_block(Hb)) {        // column-major, real arithmetic on the device
-            const Eigen::MatrixXd R = Hb.real();
-            packed_.add_real(R.data(), nb);
-        } else {
-            packed_.add_complex(Hb.data(), nb);
-        }
+        if (packed_.data.empty()) packed_.data.reserve(budget_ / sizeof(double));   // a batch grows without copying
+        const auto t0 = Clock::now();
+        pack(packed_);
+        prof_.form_s += seconds(t0, Clock::now());
+        const double nb = static_cast<double>(packed_.block_dim.back());
+        prof_.dev_n3 += nb * nb * nb;
         queued_.push_back(id);
         if (alone) solve_device();
         return id;
     }
 
-    // A block larger than a batch is solved by itself on the device when its matrix (as complex:
-    // its realness is not known before it is formed) and cuSOLVER's workspace for it fit in half
-    // the free device memory; else on the host. Not checked under ED_MEM_GUARD_OFF.
-    static bool fits_device_alone(std::uint64_t dim) {
+    // A block larger than a batch is solved by itself on the device when its matrix and cuSOLVER's
+    // workspace for it fit in half the free device memory (`real`: a real block; one whose
+    // realness is not known before it is formed counts as complex); else on the host. Not checked
+    // under ED_MEM_GUARD_OFF.
+    static bool fits_device_alone(std::uint64_t dim, bool real) {
 #ifdef WITH_CUDA
         if (ed::core::mem_guard_off()) return true;
         const auto free = ed::core::available_device_bytes(/*fresh=*/true);
         if (!free) return false;
         try {
-            const std::uint64_t need = 16 * dim * dim
-                + ed::solvers::lg_block_workspace_bytes_gpu(static_cast<std::int64_t>(dim), /*real=*/false);
+            const std::uint64_t need = (real ? 8 : 16) * dim * dim
+                + ed::solvers::lg_block_workspace_bytes_gpu(static_cast<std::int64_t>(dim), real);
             return need <= *free / 2;
         } catch (const std::exception& e) {
             ED_LOG(Warn, "dense spectra: cuSOLVER's workspace query for a block of %llu states failed (%s); "
@@ -283,6 +324,7 @@ private:
         }
 #else
         (void)dim;
+        (void)real;
         return false;
 #endif
     }
@@ -290,6 +332,8 @@ private:
     // The device batch (and its host fallback when the device solve fails).
     void solve_device() {
         if (queued_.empty()) return;
+        const Timed timed(prof_.dev_s);
+        prof_.dev_blocks += queued_.size();
         std::vector<double> ev;
         bool on_device = false;
 #ifdef WITH_CUDA
@@ -328,6 +372,8 @@ private:
     // (LPT); a lone block keeps the threaded solve.
     void solve_host() {
         if (host_.empty()) return;
+        const Timed timed(prof_.host_s);
+        prof_.host_blocks += host_.size();
         const int team = omp_get_max_threads();
         if (host_.size() < 2 || team < 2) {
             for (auto& [id, M] : host_) spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
@@ -372,11 +418,14 @@ private:
         return std::max<std::uint64_t>(b, 1);
     }
 
-    // 256 MiB of matrices already amortise the launch (many small blocks, or a few large ones);
-    // less when a quarter of the free device memory or of the job's RAM is smaller (those two
-    // are not checked under ED_MEM_GUARD_OFF, or where they cannot be measured).
+    // 2 GiB of matrices: a cluster's blocks share one batch, so its largest block runs beside the
+    // others on the stream pool instead of alone after them (NLCE 16-site clusters, P7.4); less
+    // when a quarter of the free device memory or of the job's RAM is smaller (those two are not
+    // checked under ED_MEM_GUARD_OFF, or where they cannot be measured).
+    // ED_GPU_DENSE_BATCH_GIB replaces the 2 GiB.
     static std::uint64_t batch_budget() {
-        std::uint64_t b = std::uint64_t{256} << 20;
+        const double gib = ed::env::real("ED_GPU_DENSE_BATCH_GIB", -1.0);   // -1: not set
+        std::uint64_t b = gib >= 0.0 ? static_cast<std::uint64_t>(gib * 1073741824.0) : std::uint64_t{2} << 30;
         if (ed::core::mem_guard_off()) return b;
         if (const auto dev = ed::core::available_device_bytes(/*fresh=*/true)) b = std::min<std::uint64_t>(b, *dev / 4);
         if (const std::uint64_t ram = ed::core::available_ram_bytes()) b = std::min<std::uint64_t>(b, ram / 4);
@@ -394,6 +443,32 @@ private:
     std::vector<std::pair<std::size_t, Eigen::MatrixXcd>> host_;   // (entry, matrix) for solve_host
     std::uint64_t                     host_bytes_  = 0;
     std::uint64_t                     host_budget_ = 0;
+
+    // Phase seconds under ED_SYM_PROFILE, one line when the batch dies: forming and packing the
+    // device blocks, the device solves (wall, host fallback included), forming and solving the host
+    // blocks. The two solve times may overlap (solve() runs the last two queues at once).
+    using Clock = std::chrono::steady_clock;
+    static double seconds(Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double>(b - a).count();
+    }
+    struct Timed {   // adds the scope's seconds to `into`
+        double& into;
+        Clock::time_point t = Clock::now();
+        explicit Timed(double& s) : into(s) {}
+        ~Timed() { into += seconds(t, Clock::now()); }
+    };
+    struct Profile {
+        double form_s = 0, dev_s = 0, host_form_s = 0, host_s = 0, dev_n3 = 0;
+        std::size_t dev_blocks = 0, host_blocks = 0;
+    } prof_;
+
+public:
+    ~DenseBatch() {
+        if (prof_.dev_blocks + prof_.host_blocks == 0 || !ed::env::flag("ED_SYM_PROFILE", false)) return;
+        ED_LOG(Info, "[dense] %s: device %zu blocks (sum n^3 %.3g): form %.3f s, solve %.3f s | host %zu "
+               "blocks: form %.3f s, solve %.3f s", verb_, prof_.dev_blocks, prof_.dev_n3, prof_.form_s,
+               prof_.dev_s, prof_.host_blocks, prof_.host_form_s, prof_.host_s);
+    }
 };
 
 /// The S^2 operator a total-spin restriction needs (null without one).

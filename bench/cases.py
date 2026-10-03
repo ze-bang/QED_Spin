@@ -102,10 +102,18 @@ def chain24_dynT_cpu():
     return {"weight": float(np.trapezoid(r.S[0], w))}
 
 
-def tri20_lg_exact_thermal_cpu():
+def _tri20_exact(device):
     m = triangular(5, Ly=4)
-    r = thermal(m.operator(), np.linspace(0.1, 4.0, 20), method="exact", sym=Symmetry.auto())
+    r = thermal(m.operator(), np.linspace(0.1, 4.0, 20), method="exact", sym=Symmetry.auto(), device=device)
     return {"E(Tmin)": float(r.E[0]), "C_max": float(np.max(r.C))}
+
+
+def tri20_lg_exact_thermal_cpu():
+    return _tri20_exact("cpu")
+
+
+def tri20_lg_exact_thermal_gpu():
+    return _tri20_exact("auto")   # dense blocks from kDeviceDenseMinDim on the device, the rest in the host pool
 
 
 # ---- tri36: 6x6 triangular J1 Heisenberg, n_up = 18, flip and TR off (the XDiag twin) -------
@@ -274,6 +282,7 @@ CASES = {
     "chain30_dyn0_cpu":           (chain30_dyn0_cpu,           "-c 32 --mem=64G -t 0:30:00"),
     "chain24_dynT_cpu":           (chain24_dynT_cpu,           "-c 32 --mem=32G -t 1:30:00"),
     "tri20_lg_exact_thermal_cpu": (tri20_lg_exact_thermal_cpu, "-c 32 --mem=64G -t 1:00:00"),
+    "tri20_lg_exact_thermal_gpu": (tri20_lg_exact_thermal_gpu, "-c 16 --mem=64G -t 0:30:00 --gpus-per-node=h100:1"),
     "tri36_G_A1_char_cpu":        (tri36_G_A1_char_cpu,        "-c 32 --mem=180G -t 3:00:00"),
     "tri36_G_A1_char_gpu":        (tri36_G_A1_char_gpu,        "-c 16 --mem=180G -t 3:00:00 --gpus-per-node=h100:1"),
     "tri36_G_E1_cpu":             (tri36_G_E1_cpu,             "-c 32 --mem=240G -t 4:00:00"),
