@@ -10,7 +10,7 @@
 //      its stabiliser.
 //   4. The policy finds the representative and the projection bit for bit (the running sum over
 //      the elements reaching it, ascending).
-//   5. ED_SYM_SUBLATTICE: unset engages at N >= 24 with >= 64 permutations (16 for a device verb), 0 never.
+//   5. ED_SYM_SUBLATTICE: unset engages at N >= 24 with >= 64 permutations (16 under the relaxed rule), 0 never.
 // =============================================================================
 #include "common/catch2_harness.h"
 
@@ -296,8 +296,8 @@ TEST_CASE("sublattice code: ED_SYM_SUBLATTICE unset engages large groups only, 0
         const Perms d8 = dihedral(8);
         const auto f = flat(d8);
         REQUIRE_FALSE(SublatticeCode::of(f.data(), nullptr, static_cast<int>(d8.size()), 8));
-        {   // a verb that runs on the device engages from 16 permutations: D24's 48 suffice
-            const SublatticeDeviceScope device(true);
+        {   // the relaxed rule (device verbs, eigs, spectrum) engages from 16 permutations: D24's 48 suffice
+            const SublatticeRuleScope relaxed(true);
             REQUIRE(code_of(d24));
             REQUIRE_FALSE(SublatticeCode::of(f.data(), nullptr, static_cast<int>(d8.size()), 8));   // N < 24
         }

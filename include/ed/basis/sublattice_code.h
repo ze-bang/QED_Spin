@@ -20,15 +20,18 @@
 // built from the table carries that code (RepSectorData::slc) -- its policies and device mirrors
 // read it there, never the environment, and a saved sector stores its fingerprint.
 //
-// ED_SYM_SUBLATTICE: unset -> on for N >= 24 sites with at least 16 distinct permutations when
-// the verb runs on the device, 64 on the host; 1 -> whenever a block system exists; 0 -> never.
-// The key-least representatives cost a host sparse apply cache locality where the plain order had
-// it -- a chain, whose bonds join neighbouring bits: chain30 k-sector +50% an apply, chain28
-// FTLM +18% wall (jobs 62698687, 62703856) -- and little or nothing on 2D lattices (tri36 +11% an
-// apply, tri30 none) or on the device (chain32 the same; 62697934). The canonicalisation it saves
-// (the CSR build 5x, the orbit table 2.5x, the device gather 1.8x) pays on the device always, and
-// on the host for the large groups of 2D space groups. The physics is the same either way; the
-// representative basis differs by phases, so seeded sampled results move at sampling level.
+// ED_SYM_SUBLATTICE: unset -> on for N >= 24 sites with at least 16 distinct permutations under
+// the relaxed rule (a verb on the device; eigs, spectrum and exact thermodynamics on the host) and
+// 64 under the strict one (host sampled thermodynamics and host dynamics); 1 -> whenever a block
+// system exists; 0 -> never. The key-least representatives cost a host sparse apply cache locality
+// where the plain order had it -- a chain, whose bonds join neighbouring bits: chain30 k-sector
+// +50% an apply, chain28 FTLM +18% wall (jobs 62698687, 62703856) -- and little or nothing on 2D
+// lattices (tri36 +11% an apply, tri30 none) or on the device (chain32 the same; 62697934). The
+// canonicalisation it saves (the CSR build 5x, the orbit table 2.5x, the device gather 1.8x) pays
+// on the device always, on the host whenever H is applied a few times per block (tri30 eigs 74.8
+// -> 54.9 s; even chain30 eigs 1.33 -> 1.21 s), and for thousands of host applies only on the large
+// groups of 2D space groups. The physics is the same either way; the representative basis differs
+// by phases, so seeded sampled results move at sampling level.
 // =============================================================================
 
 #include <algorithm>
@@ -126,22 +129,25 @@ struct SublatticeView {
     }
 };
 
-/// Where the verb that builds the next orbit tables runs its blocks (1: on the device). Unset,
-/// ED_SYM_SUBLATTICE engages from 16 distinct permutations for the device and from 64 for the
-/// host, whose sparse applies pay for key-least representatives in cache locality (see above).
-/// A verb sets it for its own duration (SublatticeDeviceScope); tables and sectors keep the rule
-/// they were built with, so a hint that changes later never mixes rules.
-inline std::atomic<int>& sublattice_device_hint() noexcept {
+/// Whether the verb that builds the next orbit tables takes the relaxed rule (1): unset,
+/// ED_SYM_SUBLATTICE engages from 16 distinct permutations under it and from 64 otherwise. Only a
+/// host sparse apply pays for key-least representatives (in cache locality, see above), so a verb
+/// whose blocks run on the device, and one that applies H a few times per block (eigs, spectrum,
+/// exact thermodynamics), takes the relaxed rule; host sampled thermodynamics and host dynamics,
+/// thousands of applies, the strict one. A verb sets it for its own duration (SublatticeRuleScope);
+/// tables and sectors keep the rule they were built with, so a hint that changes later never
+/// mixes rules.
+inline std::atomic<int>& sublattice_relaxed_hint() noexcept {
     static std::atomic<int> hint{0};
     return hint;
 }
 
-class SublatticeDeviceScope {
+class SublatticeRuleScope {
 public:
-    explicit SublatticeDeviceScope(bool device) noexcept : prev_(sublattice_device_hint().exchange(device ? 1 : 0)) {}
-    ~SublatticeDeviceScope() { sublattice_device_hint().store(prev_); }
-    SublatticeDeviceScope(const SublatticeDeviceScope&) = delete;
-    SublatticeDeviceScope& operator=(const SublatticeDeviceScope&) = delete;
+    explicit SublatticeRuleScope(bool relaxed) noexcept : prev_(sublattice_relaxed_hint().exchange(relaxed ? 1 : 0)) {}
+    ~SublatticeRuleScope() { sublattice_relaxed_hint().store(prev_); }
+    SublatticeRuleScope(const SublatticeRuleScope&) = delete;
+    SublatticeRuleScope& operator=(const SublatticeRuleScope&) = delete;
 
 private:
     int prev_;
@@ -165,7 +171,7 @@ public:
     of(const int* perms, const std::uint64_t* flips, int G, int N, std::optional<bool> mode) {
         if (G <= 1 || N < 4 || N > 64 || G > 65535 || (mode && !*mode)) return nullptr;
         // the rule: forced (1), or unset with the least number of distinct permutations (-16, -64)
-        const int rule = mode ? 1 : -(sublattice_device_hint().load() ? 16 : 64);
+        const int rule = mode ? 1 : -(sublattice_relaxed_hint().load() ? 16 : 64);
         Key key{N, rule,
                 std::vector<int>(perms, perms + static_cast<std::size_t>(G) * static_cast<std::size_t>(N)),
                 flips ? std::vector<std::uint64_t>(flips, flips + G)

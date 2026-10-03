@@ -271,8 +271,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     const int n_sites = static_cast<int>(H.getNumBits());
     detail::validate_hamiltonian(H, "dynamics");
     detail::validate_spec(s, n_sites, "dynamics");
-    // the orbit tables this call builds take the device's or the host's sublattice rule (sublattice_code.h)
-    const ed::symmetry::SublatticeDeviceScope slc_rule(d.device == Device::Gpu || (d.device == Device::Auto && ed::have_cuda()));
+    // the sublattice rule for the tables this call builds (sublattice_code.h): relaxed on the device,
+    // strict on the host (continued fractions and samples: many host applies)
+    const ed::symmetry::SublatticeRuleScope slc_rule(d.device == Device::Gpu || (d.device == Device::Auto && ed::have_cuda()));
     if (probes.empty()) throw ed::InvalidRequest("dynamics: no probe");
     for (std::size_t p = 0; p < probes.size(); ++p) {
         detail::validate_observable(probes[p].A, n_sites, "dynamics", p);
