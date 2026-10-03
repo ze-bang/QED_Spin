@@ -130,8 +130,6 @@ def thermal_cases(m):
         for method, kw in (("ftlm", dict(samples=8, krylov=40)), ("mtpq", dict(samples=4)),
                            ("ftlm", dict(samples=8, krylov=40, exact_states=8))):
             tag = "oftlm" if "exact_states" in kw else method
-            if tag == "oftlm" and DEVICE == "gpu":
-                continue            # OFTLM runs on the host only, and device='gpu' refuses it
             cs.append(GCase(f"{m.name}/api/thermal/{tag}/{label}", "stochastic",
                             lambda sym=sym, method=method, kw=kw: _thermo(quiet(lambda: qed.thermal(
                                 H, T, method=method, sym=sym, seed=11, device=DEVICE, **kw)))))
