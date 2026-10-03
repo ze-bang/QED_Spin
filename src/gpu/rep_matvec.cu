@@ -589,8 +589,9 @@ ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData
 // the walk walk_gather runs and applied by a vector SpMV, so an apply reads each entry once
 // instead of canonicalising every connection over |G|.
 //
-// Build, one thread per row (grid-stride; each thread merges its row in its own scratch slice,
-// at most one entry per program group):
+// Build, one warp per row (grid-stride): lane l walks program groups l, l + 32, ... -- at most 8
+// a lane, so programs up to 256 groups; larger ones keep the device walk -- and the warp merges
+// the row in registers by broadcasting each entry (warp_row), no scratch memory:
 //   1. count: a row's entries merged as merge_row merges them -- columns ascending, equal
 //      columns summed in emission order, exact zeros dropped -- give its length, and its values
 //      enter a device set of distinct values (open addressing: a lookup first, a slot claimed
@@ -630,8 +631,10 @@ namespace {
 
 using DevPolicy = ed::matvec::basis::DeviceRepSymmetryBasisPolicy;
 
-constexpr std::uint32_t kSetSlots = 1u << 18;   // the value set: 4 kCsrDictMax slots
+constexpr std::uint32_t kSetSlots = 1u << 19;   // the value set: 8 kCsrDictMax slots
 constexpr int kSlotEmpty = 0, kSlotBusy = 1, kSlotFull = 2;
+constexpr int kWarp = 32;
+constexpr int kMaxLaneEntries = 8;   // a row's merge holds 32 x 8 = 256 program groups at most
 
 // The distinct values of the count pass, by their exact bits.
 struct ValueSet {
@@ -639,13 +642,22 @@ struct ValueSet {
     unsigned long long* im;
     int*                state;
     unsigned int*       count;
-    int*                overflow;   // more than kCsrDictMax distinct values
+    int*                overflow;   // more than kCsrDictMax distinct values (or no free slot)
 };
 
+// splitmix64's finalizer: every input bit reaches every output bit. A product alone carries bits
+// only upward, and the values of a clean lattice are mostly dyadic (0.5, 0.25, ...: zero low
+// mantissa bits), so a multiplicative hash would send them all to one slot.
+__device__ inline unsigned long long mix64(unsigned long long z) {
+    z ^= z >> 30;
+    z *= 0xBF58476D1CE4E5B9ULL;
+    z ^= z >> 27;
+    z *= 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
 __device__ inline std::uint32_t slot_of(unsigned long long re, unsigned long long im) {
-    unsigned long long h = re * 0x9E3779B97F4A7C15ULL ^ (im + 0x7F4A7C159E3779B9ULL + (re << 6));
-    h ^= h >> 31;
-    return static_cast<std::uint32_t>(h) & (kSetSlots - 1);
+    return static_cast<std::uint32_t>(mix64(re ^ mix64(im + 0x9E3779B97F4A7C15ULL))) & (kSetSlots - 1);
 }
 
 __device__ inline unsigned long long bits_of(double x) {
@@ -653,15 +665,22 @@ __device__ inline unsigned long long bits_of(double x) {
 }
 
 // Put v in the set unless it is there. A slot goes empty -> busy (CAS) -> full (release, after its
-// key is written); a reader acquires the state before it reads the key.
+// key is written); a reader acquires the state before it reads the key. Past kCsrDictMax values,
+// or with no free slot left, the set overflows (the fill then writes whole values).
 __device__ void set_insert(const ValueSet& s, const DC& v) {
     const unsigned long long re = bits_of(v.real()), im = bits_of(v.imag());
-    for (std::uint32_t h = slot_of(re, im);;) {
+    std::uint32_t h = slot_of(re, im);
+    // Fast path for the hot values, through the read-only cache: a slot's key goes from 0 to its value
+    // once, written by the thread that claimed the slot for that value, so finding v's bits there
+    // means v is in the set (zeros never are). A stale read can only miss; then the acquiring walk.
+    if (__ldg(s.re + h) == re && __ldg(s.im + h) == im) return;
+    for (std::uint32_t probes = 0; probes < kSetSlots;) {
         cuda::atomic_ref<int, cuda::thread_scope_device> st(s.state[h]);
         const int now = st.load(cuda::memory_order_acquire);
         if (now == kSlotFull) {
             if (__ldcg(s.re + h) == re && __ldcg(s.im + h) == im) return;
             h = (h + 1) & (kSetSlots - 1);
+            ++probes;
         } else if (now == kSlotEmpty) {
             int expected = kSlotEmpty;
             if (st.compare_exchange_strong(expected, kSlotBusy, cuda::memory_order_relaxed)) {
@@ -673,6 +692,7 @@ __device__ void set_insert(const ValueSet& s, const DC& v) {
             }
         }   // busy: another thread is writing this slot; look again
     }
+    atomicExch(s.overflow, 1);
 }
 
 // The slot holding v in the complete, read-only set of the fill pass; kSetSlots when absent.
@@ -686,92 +706,150 @@ __device__ std::uint32_t set_find(const ValueSet& s, const DC& v) {
     return kSetSlots;
 }
 
-// Row r's entries merged as sector_rows.h merge_row merges them, into a strided scratch slice
-// (entry k at sc[k * stride], sv[k * stride]): columns ascending, equal columns summed in
-// emission order, exact zeros dropped. Returns their count (at most one per program group).
-template <bool Same>
-__device__ int merged_row(const DevPolicy& row, const DevPolicy& col, const ed::ops::ProgramView<DC>& P,
-                          std::uint64_t r, std::uint32_t* sc, DC* sv, std::uint64_t stride) {
+// Row r's merged entries, built by one warp (every lane calls it with the same r). Lane l holds
+// the connections of program groups l, l + 32, ..., l + 32 (E - 1), keyed (column << 16) | group.
+// Each live entry is broadcast in group order (the walk's emission order); an entry heads its
+// column when no entry of that column has a smaller group, and sums the column's values in that
+// order -- sector_rows.h merge_row's sums. Kept: heads with a nonzero sum. Returns the row's
+// length; cols/vals/keep/at give lane l's entries, kept ones at position at[e] (columns ascending).
+template <bool Same, int E>
+__device__ int warp_row(const DevPolicy& row, const DevPolicy& col, const ed::ops::ProgramView<DC>& P,
+                        std::uint64_t r, std::uint32_t (&cols)[E], DC (&vals)[E], bool (&keep)[E], int (&at)[E]) {
+    constexpr std::uint64_t kNone = ~std::uint64_t{0};
+    constexpr unsigned kAll = 0xffffffffu;
+    const unsigned lane = threadIdx.x & (kWarp - 1);
     const std::uint64_t s = row.state_of(r);
     const double w = row.inv_norms[r];
-    std::uint64_t n = 0;
-    ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const DC& h) {
-        DC c;
+    std::uint64_t key[E];
+    DC c[E];
+#pragma unroll
+    for (int e = 0; e < E; ++e) {
+        key[e] = kNone;
+        c[e] = DC(0.0, 0.0);
+        const std::uint32_t g = lane + static_cast<std::uint32_t>(kWarp * e);
+        std::uint64_t t;
+        DC h;
+        if (g >= P.n_groups || !ed::ops::connection(P, s, g, t, h)) continue;
         std::uint64_t j;
         if (Same && t == s) {
-            c = thrust::conj(h);
             j = r;
+            c[e] = thrust::conj(h);
         } else {
             cuDoubleComplex proj;
             j = (Same ? row : col).index_and_projection(t, proj);
-            if (j == ed::matvec::basis::kDeviceNotFound) return;
-            c = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
+            if (j == ed::matvec::basis::kDeviceNotFound) continue;   // the target's orbit cancels
+            c[e] = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
         }
-        const auto jc = static_cast<std::uint32_t>(j);
-        std::uint64_t i = n;
-        while (i > 0 && sc[(i - 1) * stride] > jc) --i;
-        if (i > 0 && sc[(i - 1) * stride] == jc) {   // the column again: add in emission order
-            sv[(i - 1) * stride] += c;
-            return;
+        key[e] = (j << 16) | g;
+    }
+    // Every live entry, in group order, to every lane: heads and their columns' sums.
+    bool head[E];
+#pragma unroll
+    for (int e = 0; e < E; ++e) {
+        vals[e] = DC(0.0, 0.0);
+        head[e] = key[e] != kNone;
+    }
+#pragma unroll
+    for (int eb = 0; eb < E; ++eb) {
+        for (unsigned live = __ballot_sync(kAll, key[eb] != kNone); live != 0u; live &= live - 1u) {
+            const int lb = __ffs(static_cast<int>(live)) - 1;   // the same on every lane
+            const std::uint64_t kb = __shfl_sync(kAll, key[eb], lb);
+            const double re = __shfl_sync(kAll, c[eb].real(), lb);
+            const double im = __shfl_sync(kAll, c[eb].imag(), lb);
+#pragma unroll
+            for (int e = 0; e < E; ++e)
+                if (key[e] != kNone && (kb >> 16) == (key[e] >> 16)) {
+                    if ((kb & 0xffffu) < (key[e] & 0xffffu)) head[e] = false;
+                    vals[e] += DC(re, im);
+                }
         }
-        for (std::uint64_t k = n; k > i; --k) {
-            sc[k * stride] = sc[(k - 1) * stride];
-            sv[k * stride] = sv[(k - 1) * stride];
+    }
+    // A kept entry's position: the kept entries of smaller columns.
+#pragma unroll
+    for (int e = 0; e < E; ++e) {
+        keep[e] = head[e] && vals[e] != DC(0.0, 0.0);
+        at[e] = 0;
+        cols[e] = static_cast<std::uint32_t>(key[e] >> 16);
+    }
+    int n = 0;
+#pragma unroll
+    for (int eb = 0; eb < E; ++eb) {
+        const unsigned kept = __ballot_sync(kAll, keep[eb]);
+        n += __popc(kept);
+        for (unsigned m = kept; m != 0u; m &= m - 1u) {
+            const int lb = __ffs(static_cast<int>(m)) - 1;
+            const std::uint64_t kb = __shfl_sync(kAll, key[eb], lb);
+#pragma unroll
+            for (int e = 0; e < E; ++e)
+                if (keep[e] && (kb >> 16) < (key[e] >> 16)) ++at[e];
         }
-        sc[i * stride] = jc;
-        sv[i * stride] = c;
-        ++n;
-    });
-    std::uint64_t m = 0;
-    for (std::uint64_t i = 0; i < n; ++i)
-        if (sv[i * stride] != DC(0.0, 0.0)) {
-            sc[m * stride] = sc[i * stride];
-            sv[m * stride] = sv[i * stride];
-            ++m;
-        }
-    return static_cast<int>(m);
+    }
+    return n;
 }
 
-// Pass 1: len[r] = row r's merged length; its values enter the set (until it overflows).
-template <bool Same>
-__global__ void csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint32_t* sc, DC* sv,
-                          std::uint64_t* len, ValueSet set) {
-    const std::uint64_t stride = static_cast<std::uint64_t>(gridDim.x) * blockDim.x;
-    const std::uint64_t tid = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    for (std::uint64_t r = tid; r < row.dim(); r += stride) {
-        const int n = merged_row<Same>(row, col, P, r, sc + tid, sv + tid, stride);
-        len[r] = static_cast<std::uint64_t>(n);
+// The warps of a launch and this thread's: rows go to warps grid-stride.
+__device__ inline std::uint64_t warp_id() {
+    return (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / kWarp;
+}
+__device__ inline std::uint64_t warp_count() {
+    return static_cast<std::uint64_t>(gridDim.x) * blockDim.x / kWarp;
+}
+
+// Pass 1: len[r] = row r's merged length; its values enter the set (until it overflows). A value
+// equal to the one this lane put in last skips the set.
+template <bool Same, int E>
+__global__ void csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint64_t* len, ValueSet set) {
+    DC last(0.0, 0.0);   // never inserted: zeros are dropped
+    for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
+        std::uint32_t cols[E];
+        DC vals[E];
+        bool keep[E];
+        int at[E];
+        const int n = warp_row<Same, E>(row, col, P, r, cols, vals, keep, at);
+        if ((threadIdx.x & (kWarp - 1)) == 0) len[r] = static_cast<std::uint64_t>(n);
         if (*static_cast<volatile int*>(set.overflow)) continue;
-        for (int i = 0; i < n; ++i) set_insert(set, sv[tid + static_cast<std::uint64_t>(i) * stride]);
+#pragma unroll
+        for (int e = 0; e < E; ++e) {
+            if (!keep[e]) continue;
+            if (bits_of(vals[e].real()) == bits_of(last.real()) && bits_of(vals[e].imag()) == bits_of(last.imag()))
+                continue;
+            set_insert(set, vals[e]);
+            last = vals[e];
+        }
     }
 }
 
-// Pass 3: the rows again, written at row_ptr. Mode 0: the values whole; 1: uint8 ids; 2: uint16 ids.
-template <bool Same, int Mode>
-__global__ void csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint32_t* sc, DC* sv,
-                         const std::uint64_t* row_ptr, std::uint32_t* out_col, void* out_val, ValueSet set,
-                         const std::uint16_t* id_of_slot, int* missing) {
-    const std::uint64_t stride = static_cast<std::uint64_t>(gridDim.x) * blockDim.x;
-    const std::uint64_t tid = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    for (std::uint64_t r = tid; r < row.dim(); r += stride) {
-        const int n = merged_row<Same>(row, col, P, r, sc + tid, sv + tid, stride);
-        std::uint64_t e = row_ptr[r];
-        for (int i = 0; i < n; ++i, ++e) {
-            const std::uint64_t k = tid + static_cast<std::uint64_t>(i) * stride;
-            out_col[e] = sc[k];
+// Pass 2: the rows again, written at row_ptr. Mode 0: the values whole; 1: uint8 ids; 2: uint16 ids.
+template <bool Same, int E, int Mode>
+__global__ void csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, const std::uint64_t* row_ptr,
+                         std::uint32_t* out_col, void* out_val, ValueSet set, const std::uint16_t* id_of_slot,
+                         int* missing) {
+    for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
+        std::uint32_t cols[E];
+        DC vals[E];
+        bool keep[E];
+        int at[E];
+        warp_row<Same, E>(row, col, P, r, cols, vals, keep, at);
+        const std::uint64_t e0 = row_ptr[r];
+#pragma unroll
+        for (int e = 0; e < E; ++e) {
+            if (!keep[e]) continue;
+            const std::uint64_t k = e0 + static_cast<std::uint64_t>(at[e]);
+            out_col[k] = cols[e];
             if constexpr (Mode == 0) {
-                static_cast<DC*>(out_val)[e] = sv[k];
+                static_cast<DC*>(out_val)[k] = vals[e];
             } else {
-                const std::uint32_t h = set_find(set, sv[k]);
+                const std::uint32_t h = set_find(set, vals[e]);
                 std::uint16_t id = 0;
                 if (h == kSetSlots) atomicExch(missing, 1);
                 else id = id_of_slot[h];
-                if constexpr (Mode == 1) static_cast<std::uint8_t*>(out_val)[e] = static_cast<std::uint8_t>(id);
-                else static_cast<std::uint16_t*>(out_val)[e] = id;
+                if constexpr (Mode == 1) static_cast<std::uint8_t*>(out_val)[k] = static_cast<std::uint8_t>(id);
+                else static_cast<std::uint16_t*>(out_val)[k] = id;
             }
         }
     }
 }
+
 
 template <int Mode>
 __device__ inline DC csr_entry(const void* vals, const DC* dict, std::uint64_t e) {
@@ -882,23 +960,35 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
     const auto t0 = std::chrono::steady_clock::now();
     try {
         const auto op = gm::detail::make_rows(rep, rep, rows);
+        const auto t_mirror = std::chrono::steady_clock::now();
         const auto basis = op->row->basis_view();
         const auto prog = op->program.view();
-        // The scratch: a slice of one entry per program group for each thread, at most 1 GiB in
-        // all and 2^17 threads -- an overflowing count pass adds at most one value per thread past
-        // kCsrDictMax, so the set stays under three quarters full.
-        const std::uint64_t cap = std::max<std::size_t>(1, rows.n_groups());
+        // One warp merges a row, E entries a lane: E = 1, 2, 4 or 8 by the program's groups (at most
+        // 256); a larger program (the S^2 carrier) keeps the device walk.
+        const std::size_t groups = std::max<std::size_t>(1, rows.n_groups());
+        const bool profile = ed::env::flag("ED_SYM_PROFILE", false);
+        if (groups > static_cast<std::size_t>(gm::kWarp * gm::kMaxLaneEntries)) {
+            if (profile)
+                ED_LOG(Info, "[sym_profile] device CSR dim=%llu: %zu program groups, more than a warp's merge "
+                             "holds (%d); the device walk serves", static_cast<unsigned long long>(dim), groups,
+                       gm::kWarp * gm::kMaxLaneEntries);
+            return nullptr;
+        }
+        const int lane_entries = groups <= 32 ? 1 : groups <= 64 ? 2 : groups <= 128 ? 4 : 8;
         int dev = 0, sms = 1;
         cuda_check(cudaGetDevice(&dev), "cudaGetDevice");
         cuda_check(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev), "SM count");
-        constexpr unsigned kThreads = 256;
-        const std::uint64_t most = std::min<std::uint64_t>(
-            {dim, static_cast<std::uint64_t>(sms) * 1024, std::uint64_t{1} << 17,
-             std::max<std::uint64_t>(kThreads, (std::uint64_t{1} << 30) / (cap * (sizeof(std::uint32_t) + sizeof(DC))))});
-        const auto blocks = static_cast<unsigned>((most + kThreads - 1) / kThreads);
-        const std::uint64_t threads = static_cast<std::uint64_t>(blocks) * kThreads;
-        thrust::device_vector<std::uint32_t> sc(threads * cap);
-        thrust::device_vector<DC> sv(threads * cap);
+        constexpr unsigned kThreads = 256;   // 8 warps a block; up to 64 warps an SM, rows grid-stride
+        const std::uint64_t warps = std::min<std::uint64_t>(dim, static_cast<std::uint64_t>(sms) * 64);
+        const auto blocks = static_cast<unsigned>((warps * gm::kWarp + kThreads - 1) / kThreads);
+        const auto with_entries = [lane_entries](auto&& f) {
+            switch (lane_entries) {
+                case 1:  f(std::integral_constant<int, 1>{}); break;
+                case 2:  f(std::integral_constant<int, 2>{}); break;
+                case 4:  f(std::integral_constant<int, 4>{}); break;
+                default: f(std::integral_constant<int, 8>{}); break;
+            }
+        };
         thrust::device_vector<unsigned long long> set_re(gm::kSetSlots, 0), set_im(gm::kSetSlots, 0);
         thrust::device_vector<int> set_state(gm::kSetSlots, gm::kSlotEmpty);
         thrust::device_vector<unsigned int> set_count(1, 0);
@@ -909,11 +999,14 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         auto c = std::make_shared<ed::symmetry::DeviceCsr>();
         c->dim = dim;
         c->row_ptr.assign(dim + 1, 0);
-        gm::csr_count<true><<<blocks, kThreads>>>(basis, basis, prog, raw_pointer_cast(sc.data()),
-                                                  raw_pointer_cast(sv.data()), raw_pointer_cast(c->row_ptr.data()) + 1, set);
+        with_entries([&](auto e_tag) {
+            constexpr int E = decltype(e_tag)::value;
+            gm::csr_count<true, E><<<blocks, kThreads>>>(basis, basis, prog, raw_pointer_cast(c->row_ptr.data()) + 1, set);
+        });
         cuda_check(cudaGetLastError(), "device CSR count launch");
         thrust::inclusive_scan(c->row_ptr.begin() + 1, c->row_ptr.end(), c->row_ptr.begin() + 1);
-        c->nnz = c->row_ptr.back();
+        c->nnz = c->row_ptr.back();   // waits for the count
+        const auto t_count = std::chrono::steady_clock::now();
         const bool overflow = flags[0] != 0;
         // The dictionary: the set's values in ascending bit order.
         std::vector<DC> dict;
@@ -939,6 +1032,7 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
             }
         }
         const std::uint64_t nnz = c->nnz, n_dict = dict.size();
+        const auto t_dict = std::chrono::steady_clock::now();
         const bool narrow = n_dict <= 256;
         // Whole values past the dictionary, or when they are the smaller form (a tiny sector).
         const bool whole = overflow || n_dict * sizeof(DC) + nnz * (narrow ? 1 : 2) >= nnz * sizeof(DC);
@@ -953,10 +1047,12 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         }
         auto fill = [&](auto mode_tag, void* out) {
             constexpr int Mode = decltype(mode_tag)::value;
-            gm::csr_fill<true, Mode><<<blocks, kThreads>>>(
-                basis, basis, prog, raw_pointer_cast(sc.data()), raw_pointer_cast(sv.data()),
-                raw_pointer_cast(c->row_ptr.data()), raw_pointer_cast(c->col.data()), out, set,
-                raw_pointer_cast(d_id_of_slot.data()), raw_pointer_cast(flags.data()) + 1);
+            with_entries([&](auto e_tag) {
+                constexpr int E = decltype(e_tag)::value;
+                gm::csr_fill<true, E, Mode><<<blocks, kThreads>>>(
+                    basis, basis, prog, raw_pointer_cast(c->row_ptr.data()), raw_pointer_cast(c->col.data()), out, set,
+                    raw_pointer_cast(d_id_of_slot.data()), raw_pointer_cast(flags.data()) + 1);
+            });
         };
         if (whole) {
             c->val.resize(nnz);
@@ -970,6 +1066,7 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         }
         cuda_check(cudaGetLastError(), "device CSR fill launch");
         cuda_check(cudaDeviceSynchronize(), "device CSR build");
+        const auto t_fill = std::chrono::steady_clock::now();
         if (flags[1] != 0) {   // the two passes disagree: never seen; the gather is still right
             ED_LOG(Warn, "[device_csr] the fill pass met a value the count pass did not record "
                          "(dim=%llu); using the device gather", static_cast<unsigned long long>(dim));
@@ -977,11 +1074,16 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         }
         c->lanes = gm::lanes_for(static_cast<double>(nnz) / static_cast<double>(dim));
         c->build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        if (ed::env::flag("ED_SYM_PROFILE", false))
-            ED_LOG(Info, "[sym_profile] device CSR dim=%llu nnz=%llu dict=%llu (%s) %.1f B/nnz, %d lanes, build %.3f s",
+        if (profile) {
+            const auto s = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
+            ED_LOG(Info, "[sym_profile] device CSR dim=%llu nnz=%llu dict=%llu (%s) %.1f B/nnz, %d SpMV lanes; merge of "
+                   "%zu groups on %llu warps (%d a lane): build %.3f s (mirror %.3f, count %.3f, dictionary %.3f, fill %.3f)",
                    static_cast<unsigned long long>(dim), static_cast<unsigned long long>(nnz),
                    static_cast<unsigned long long>(whole ? 0 : n_dict), whole ? "whole" : narrow ? "u8" : "u16",
-                   nnz ? static_cast<double>(c->bytes()) / static_cast<double>(nnz) : 0.0, c->lanes, c->build_s);
+                   nnz ? static_cast<double>(c->bytes()) / static_cast<double>(nnz) : 0.0, c->lanes, groups,
+                   static_cast<unsigned long long>(blocks) * kThreads / gm::kWarp, lane_entries, c->build_s,
+                   s(t0, t_mirror), s(t_mirror, t_count), s(t_count, t_dict), s(t_dict, t_fill));
+        }
         return c;
     } catch (const std::bad_alloc&) {   // thrust's bad_alloc: out of device memory; the gather serves
         cudaGetLastError();

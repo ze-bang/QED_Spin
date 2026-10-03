@@ -24,6 +24,28 @@
 
 namespace ed::ops {
 
+/// Group g of P on the basis state s: true, with its target t = s ^ F and h, when it acts on s.
+template <class C>
+ED_OPS_HD bool connection(const ProgramView<C>& P, std::uint64_t s, std::uint32_t g, std::uint64_t& t, C& h) {
+    const std::uint64_t F = P.group_flip[g];
+    const std::uint64_t v = s & F;
+    if (P.group_setbits[g] >= 0 && masked_popcount(v) != P.group_setbits[g]) return false;
+    // the subgroup whose value is v (values ascending within the group)
+    std::uint32_t lo = P.group_vbegin[g], hi = P.group_vbegin[g + 1];
+    while (lo < hi) {
+        const std::uint32_t mid = lo + (hi - lo) / 2;
+        if (P.vsub_val[mid] < v) lo = mid + 1; else hi = mid;
+    }
+    if (lo == P.group_vbegin[g + 1] || P.vsub_val[lo] != v) return false;
+    h = C(0);
+    for (std::uint32_t k = P.vsub_tbegin[lo]; k < P.vsub_tbegin[lo + 1]; ++k) {
+        if (masked_popcount(s & P.term_sign[k]) & 1) h += -P.term_coeff[k];
+        else                                          h += P.term_coeff[k];
+    }
+    t = s ^ F;
+    return true;
+}
+
 // Instantiated in kernels with device-only emit lambdas: no host-side execution check.
 #if defined(__CUDACC__)
 #pragma nv_exec_check_disable
@@ -31,22 +53,9 @@ namespace ed::ops {
 template <class C, class Emit>
 ED_OPS_HD void for_each_connection(const ProgramView<C>& P, std::uint64_t s, Emit&& emit) {
     for (std::uint32_t g = 0; g < P.n_groups; ++g) {
-        const std::uint64_t F = P.group_flip[g];
-        const std::uint64_t v = s & F;
-        if (P.group_setbits[g] >= 0 && masked_popcount(v) != P.group_setbits[g]) continue;
-        // the subgroup whose value is v (values ascending within the group)
-        std::uint32_t lo = P.group_vbegin[g], hi = P.group_vbegin[g + 1];
-        while (lo < hi) {
-            const std::uint32_t mid = lo + (hi - lo) / 2;
-            if (P.vsub_val[mid] < v) lo = mid + 1; else hi = mid;
-        }
-        if (lo == P.group_vbegin[g + 1] || P.vsub_val[lo] != v) continue;
-        C h(0);
-        for (std::uint32_t k = P.vsub_tbegin[lo]; k < P.vsub_tbegin[lo + 1]; ++k) {
-            if (masked_popcount(s & P.term_sign[k]) & 1) h += -P.term_coeff[k];
-            else                                          h += P.term_coeff[k];
-        }
-        emit(s ^ F, h);
+        std::uint64_t t;
+        C h;
+        if (connection(P, s, g, t, h)) emit(t, h);
     }
 }
 

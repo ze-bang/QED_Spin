@@ -706,7 +706,9 @@ void on_device(const ed::LinearOperator::MatvecFn& f, const Cx* in, Cx* out, std
 }
 
 // The entries of two CSRs: the same rows and columns, values within tol (the device contracts
-// products into FMAs, the host need not), the same storage form.
+// products into FMAs, the host need not). Not the storage form: a tiny sector stores whole values
+// when its distinct values outnumber the dictionary's saving, and a last-bit difference can merge or
+// split two of them (gate 62664486: a 3-state ring-exchange sector, dictionary on the device only).
 void check_same_entries(const ed::matvec::ReducedSymmetryCsr<Cx>& got, const ed::matvec::ReducedSymmetryCsr<Cx>& ref,
                         double tol) {
     REQUIRE(got.dim == ref.dim);
@@ -716,8 +718,6 @@ void check_same_entries(const ed::matvec::ReducedSymmetryCsr<Cx>& got, const ed:
     double worst = 0.0;
     for (std::uint64_t e = 0; e < ref.nnz(); ++e) worst = std::max(worst, std::abs(got.value(e) - ref.value(e)));
     CHECK(worst <= tol);
-    CHECK(got.dictionary() == ref.dictionary());
-    CHECK(got.id8.empty() == ref.id8.empty());
 }
 
 TEST_CASE("device: the CSR built on the device is the host's, and applies as the block of H", "[row_walk][cuda]") {
@@ -755,6 +755,63 @@ TEST_CASE("device: the CSR built on the device is the host's, and applies as the
     CHECK(sectors > 200);
 }
 
+TEST_CASE("device: the warp merge at every lane width, and its limit", "[row_walk][cuda]") {
+    if (!ed::have_cuda()) SKIP("no CUDA device");
+    // Products of x over every subset of at most k sites, with random coefficients: one program group
+    // per subset, so k = 1..8 gives 9, 37, 93, 163, 219, 247, 255, 256 groups -- 1, 2, 4 and 8
+    // entries a lane -- on the full space (no symmetry, no Sz). On 9 sites, 512 groups: declined.
+    auto x_products = [](int n, int k, std::mt19937& rng) {
+        std::normal_distribution<double> g(0.0, 1.0);
+        MaskedOperator h(n);
+        for (std::uint32_t m = 1; m < (1u << n); ++m) {
+            if (__builtin_popcount(m) > k) continue;
+            std::string ops;
+            std::vector<int> sites;
+            for (int i = 0; i < n; ++i)
+                if ((m >> i) & 1u) { ops += 'x'; sites.push_back(i); }
+            h.add(MaskedOperator::product(n, ops, sites, Cx(g(rng), 0.0)));
+        }
+        h.add(MaskedOperator::product(n, "z", {0}, Cx(0.3, 0.0)));   // a diagonal
+        return h;
+    };
+    auto full_space = [](int n) {
+        RepSectorData rd;
+        rd.n_sites = n;
+        rd.group_size = 1;
+        rd.n_up = -1;
+        rd.characters = {Cx(1.0, 0.0)};
+        for (int i = 0; i < n; ++i) rd.perms_flat.push_back(i);
+        for (std::uint64_t s = 0; s < (std::uint64_t{1} << n); ++s) {
+            rd.reps.push_back(s);
+            rd.inv_norms.push_back(1.0);
+        }
+        rd.build_perm_lut();
+        return rd;
+    };
+    std::mt19937 rng(20261002);
+    const RepSectorData rd = full_space(N);
+    const std::uint64_t d = rd.reps.size();
+    for (int k = 1; k <= N; ++k) {
+        const MaskedOperator h = x_products(N, k, rng);
+        const auto P = ed::ops::compile_program({h.dagger()}, rd, rd);
+        INFO("k " << k << " groups " << P.n_groups());
+        const Mat Hd = h.to_dense();
+        const double tol = 1e-12 * std::max(1.0, max_abs(Hd));
+        const auto dc = ed::symmetry::build_sector_csr_gpu(rd, P, ~std::uint64_t{0});
+        REQUIRE(dc);
+        check_same_entries(ed::symmetry::download_csr(*dc), ed::matvec::build_sector_csr(P.view(), rd.make_policy(), d),
+                           tol);
+        const auto f = ed::symmetry::csr_matvec_gpu(dc);
+        const Mat M = columns(d, [&](const Cx* in, Cx* out) { on_device(f, in, out, d); });
+        CHECK(max_diff(M, Hd) <= tol);
+    }
+    const RepSectorData rd9 = full_space(N + 1);
+    const MaskedOperator h9 = x_products(N + 1, N + 1, rng);
+    const auto P9 = ed::ops::compile_program({h9.dagger()}, rd9, rd9);
+    REQUIRE(P9.n_groups() > 256);
+    CHECK(ed::symmetry::build_sector_csr_gpu(rd9, P9, ~std::uint64_t{0}) == nullptr);
+}
+
 TEST_CASE("device: too many distinct values keep the device CSR's values whole; its budget is exact",
           "[row_walk][cuda]") {
     if (!ed::have_cuda()) SKIP("no CUDA device");
@@ -788,7 +845,9 @@ TEST_CASE("device: too many distinct values keep the device CSR's values whole; 
     REQUIRE_FALSE(ref.dictionary());
     const auto dc = ed::symmetry::build_sector_csr_gpu(rd, P, ~std::uint64_t{0});
     REQUIRE(dc);
-    check_same_entries(ed::symmetry::download_csr(*dc), ref, 1e-12);
+    const auto got = ed::symmetry::download_csr(*dc);
+    CHECK_FALSE(got.dictionary());
+    check_same_entries(got, ref, 1e-12);
     const std::uint64_t whole = ref.nnz() * (sizeof(Cx) + sizeof(std::uint32_t)) + (d + 1) * sizeof(std::uint64_t);
     CHECK(ed::symmetry::device_csr_info(*dc).bytes == whole);
     CHECK(ed::symmetry::build_sector_csr_gpu(rd, P, whole) != nullptr);
