@@ -55,7 +55,6 @@ endif()
 add_custom_target(sphinx
     COMMAND ${CMAKE_COMMAND} -E env
             "ED_DOXYGEN_XML=${DOXYGEN_OUT}/xml"
-            "ED_DOC_VERSION=${PROJECT_VERSION}"
             ${_sphinx_cmd}
                 -b html
                 --keep-going

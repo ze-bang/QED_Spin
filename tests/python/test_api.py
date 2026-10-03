@@ -1768,3 +1768,12 @@ def test_dynamics_probe_axes(T):
     np.testing.assert_allclose(pairs[1], full[1, 0], atol=1e-12)
     with pytest.raises(qed.errors.InvalidRequest):
         qed.dynamics(H, [A, B], omega, [B], **kw)
+
+
+def test_version_is_pyprojects():
+    """qed.__version__ is pyproject.toml's version (compiled into _core through CMake)."""
+    import pathlib
+    import re
+    text = (pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+    assert qed.__version__ == re.search(r'^version = "([0-9.]+)"$', text, re.M).group(1)
+    assert qed._core.__version__ == qed.__version__

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [
-    { name = "QED collaborators" },
+    { name = "Zhengbang Zhou" },
 ]
 keywords = [
     "exact-diagonalization",
@@ -38,7 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 symmetry = ["pynauty"]                 # qed.find_symmetries / Symmetry(spatial="auto")
 test = ["pytest>=7", "pytest-xdist"]
-docs = ["sphinx>=7", "sphinx_rtd_theme", "breathe"]
+docs = ["sphinx>=7.2,<9", "furo>=2024.1", "breathe>=4.35", "myst-parser>=2.0"]   # docs/conf.py's extensions
 dev = [
     "pytest>=7",
     "pytest-xdist",
@@ -47,9 +47,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ze-bang/QED"
-Documentation = "https://ze-bang.github.io/QED/"
-Repository = "https://github.com/ze-bang/QED"
+Homepage = "https://github.com/ze-bang/QED_Spin"
+Documentation = "https://ze-bang.github.io/QED_Spin/"
+Repository = "https://github.com/ze-bang/QED_Spin"
 
 # -----------------------------------------------------------------------------
 # scikit-build-core configuration.

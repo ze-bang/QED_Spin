@@ -18,11 +18,17 @@ if(WITH_CUDA AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAAR
     set(CMAKE_CUDA_ARCHITECTURES "90" CACHE STRING "CUDA architectures to build for")
 endif()
 
-# The version is mirrored in CITATION.cff and CHANGELOG.md; bump in lockstep when releasing.
+# The version is pyproject.toml's, and only there: the project, qed._core.__version__ (and so
+# qed.__version__) and the docs read it from that line.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" QED_VERSION_LINE REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+string(REGEX REPLACE "^version = \"([0-9.]+)\"$" "\\1" QED_VERSION "${QED_VERSION_LINE}")
+if(NOT QED_VERSION)
+    message(FATAL_ERROR "pyproject.toml has no line version = \"X.Y.Z\"")
+endif()
 if(WITH_CUDA)
-    project(QED VERSION 0.1.0 LANGUAGES CXX CUDA)
+    project(QED VERSION ${QED_VERSION} LANGUAGES CXX CUDA)
 else()
-    project(QED VERSION 0.1.0 LANGUAGES CXX)
+    project(QED VERSION ${QED_VERSION} LANGUAGES CXX)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -98,7 +104,7 @@ if(ED_BUILD_PYTHON)
 endif()
 
 # =============================================================================
-# Documentation site (Doxygen + Sphinx + Breathe; docs/requirements.txt): targets `doxygen`
+# Documentation site (Doxygen + Sphinx + Breathe; pyproject.toml's docs extra): targets `doxygen`
 # and `sphinx`. CI publishes it (.github/workflows/docs.yml).
 # =============================================================================
 option(ED_BUILD_DOCS "Build the Doxygen + Sphinx documentation site" OFF)

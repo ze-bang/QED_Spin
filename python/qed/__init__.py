@@ -114,7 +114,7 @@ _check_environment()
 from ._verbs import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
                   ThermalResult, dynamics, eigs, expect, load_eigs, spectrum, thermal)
 
-__version__: Final[str] = "0.5.0"
+__version__: Final[str] = _core.__version__   # pyproject.toml's version, compiled into _core
 
 __all__ = [
     "Operator", "OP_SPLUS", "OP_SMINUS", "OP_SZ",

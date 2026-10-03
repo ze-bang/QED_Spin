@@ -275,6 +275,7 @@ PYBIND11_MODULE(_core, m) {
     m.doc() =
         "qed._core: pybind11 binding for the C++ exact-diagonalization "
         "engine. See qed.__init__ for the user-facing facade.";
+    m.attr("__version__") = QED_VERSION_STRING;   // pyproject.toml's, through CMake
 
     // Operator op-type constants. Keep in sync with TransformData::op_type.
     m.attr("OP_SPLUS")  = py::int_(0);

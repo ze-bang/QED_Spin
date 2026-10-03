@@ -4,8 +4,6 @@ cff-version: 1.2.0
 title: "QED_Spin: exact diagonalization of spin-1/2 Hamiltonians on CPUs and GPUs"
 message: "If you use this software in your research, please cite it as below."
 type: software
-version: "0.5.0"
-date-released: "2026-09-30"
 url: "https://github.com/ze-bang/QED_Spin"
 repository-code: "https://github.com/ze-bang/QED_Spin"
 license: MIT

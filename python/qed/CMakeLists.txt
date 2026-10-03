@@ -37,6 +37,8 @@ else()
 endif()
 
 target_link_libraries(_core PRIVATE qed_engine)
+# qed._core.__version__ (and qed.__version__): the project version, read from pyproject.toml.
+target_compile_definitions(_core PRIVATE QED_VERSION_STRING="${PROJECT_VERSION}")
 
 if(WITH_CUDA)
     # qed_engine is built with CUDA_SEPARABLE_COMPILATION=ON (device

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,12 +29,11 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 # -- Project information -----------------------------------------------------
 
 project = "QED_Spin"
-author = "Hauke Bui-Janzso and contributors"
+author = "Zhengbang Zhou"
 copyright = f"2024-2026, {author}"
 
-# Pulled from CMake when invoked via the docs target; default for standalone.
-release = os.environ.get("ED_DOC_VERSION", "0.1.0")
-version = release
+# pyproject.toml's version, the only one.
+release = version = re.search(r'^version = "([0-9.]+)"$', (REPO_ROOT / "pyproject.toml").read_text(), re.M).group(1)
 
 # -- General configuration ---------------------------------------------------
 

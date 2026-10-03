@@ -50,10 +50,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python docs requirements
+      - name: Install Python docs requirements (pyproject.toml's docs extra)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r docs/requirements.txt
+          python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["docs"]))' \
+            | xargs -d "\n" python -m pip install
 
       - name: Configure (docs only -- no tests, no CUDA, no Python ext)
         run: |
