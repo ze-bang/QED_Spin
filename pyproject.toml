@@ -106,10 +106,23 @@ markers = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py39"
 extend-exclude = ["build", "_deps"]
 
+[tool.ruff.format]
+quote-style = "preserve"     # the tree mixes both; the format pass changes layout only
+
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
-ignore = ["E501"]
+# pyflakes, pycodestyle and bugbear; import order (I) is meaningful in qed/__init__.py and the test
+# conftest, and pyupgrade (UP) is churn at py39.
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",   # line length: the formatter's
+    "E731",   # a lambda bound to a name
+    "E741",   # O, I, l: operators, identities and sites in physics notation
+    "E402",   # imports after sys.path set-up (tests, scripts, examples)
+    "B023",   # closures over a loop variable that are called within the same iteration
+    "B904",   # exception chaining is not part of the API
+    "B019",   # lru_cache on methods of long-lived objects (symmetry groups, models)
+]

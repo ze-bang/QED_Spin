@@ -10,7 +10,6 @@ Model: 4x4 square torus J1-J2 (J2=0.3), sz/spin_flip/time_reversal off so the bl
 large (momentum sectors 4096). dense_max_dim=100 keeps every block above the host
 dense crossover. eigs(k=1, prune=False, window=1e6) returns one level per block, carrying
 block_dim, irrep_dim and k0; a star is a W star when any of its levels has irrep_dim > 1."""
-import numpy as np
 import qed
 
 if qed._core.cuda_device_count() == 0:

@@ -12,7 +12,9 @@ time (the reorthogonalisation term).
 
 RESTATED 2026-10-02 (P6.2 step 5): the applies are the block's from result.block_stats (the lane is its
 own recurrence now and emits no [lanczos_kernel] profile line, which made the old count INCONCLUSIVE)."""
-import json, os, subprocess, sys
+import json
+import subprocess
+import sys
 import numpy as np
 
 N, NUP, SEED = 22, 11, 1234

@@ -58,7 +58,6 @@ def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> lis
     are the intersection of two groups, hence a group."""
     if not autos:
         return autos
-    from . import _core
     keep = list(_core.check_generators_commute(operator, [list(map(int, p)) for p in autos]))
     return [p for p, ok in zip(autos, keep) if ok]
 

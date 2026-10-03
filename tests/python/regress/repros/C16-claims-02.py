@@ -11,7 +11,6 @@ remain, wait out the 1 s free-memory cache, and run eigs and FTLM with device='g
 chain in the Sz=0 sector without spatial symmetry (dim C(22,11) = 705,432, needing 90 MB by the
 fit test, below the 2^20-rep threshold of the host-staged GPU gather). The risky part runs in a
 child process."""
-import os
 import subprocess
 import sys
 

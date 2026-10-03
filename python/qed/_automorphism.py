@@ -165,16 +165,16 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
         for s in t:
             adjacency_dict[vid_to_idx[s]].append(aux_idx)
             adjacency_dict[aux_idx].append(vid_to_idx[s])
-    
+
     # Build vertex coloring
     # Original vertices: color from WL
     # Auxiliary vertices: color based on bond signature (offset by max vertex color + 1)
     max_vertex_color = max(vertex_colors.values()) + 1 if vertex_colors else 0
-    
+
     color_to_vertices = defaultdict(list)
     for v, c in vertex_colors.items():
         color_to_vertices[c].append(vid_to_idx[v])
-    
+
     for bond_idx, pair in enumerate(bond_pairs):
         aux_idx = n_original + bond_idx
         bond_color = max_vertex_color + sig_to_color[bonds[pair]]
@@ -183,11 +183,11 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
         color_to_vertices[max_vertex_color + triple_to_color[triple_signatures[t]]].append(
             n_original + n_bonds + t_idx)
 
-    coloring = [set(sorted(ids)) for _, ids in 
+    coloring = [set(sorted(ids)) for _, ids in
                 sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
-    
+
     # Create pynauty graph
-    g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict, 
+    g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict,
               vertex_coloring=coloring)
     return g, idx_to_vid, vid_to_idx
 

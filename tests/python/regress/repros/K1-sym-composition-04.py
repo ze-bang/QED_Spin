@@ -6,7 +6,6 @@ block above the dense floor gets a full Casimir-projected solve, and prune=True 
 Test: Heisenberg ring N=20 (translation + reflection, flip at n_up=10); most blocks (dims ~2e3-5e3) lie above
 the default dense floor (1600 at k=1) and are prune-eligible. Compare pruned_blocks and wall time of qed.eigs(H, 1, prune=True) with
 Symmetry(sz=10) vs Symmetry(total_spin=0); both must give the same E0 (the S=0 ground state)."""
-import os
 import signal
 import time
 import types

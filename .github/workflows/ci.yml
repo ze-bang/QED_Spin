@@ -1,12 +1,15 @@
 name: CI
 
+# Hosted runners have no NVIDIA device: here the CUDA build is compiled only. The device lanes
+# are tested by the gate on the cluster (scripts/gate), which also runs the golden records, the
+# regression ratchet, the fuzzer and the sanitizers.
+
 on:
   push:
     branches: [main]
-  pull_request:          # PRs into any branch
-  workflow_dispatch:     # manual re-runs from the Actions tab
+  pull_request:
+  workflow_dispatch:
 
-# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -14,485 +17,192 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  APT_BUILD: build-essential cmake ninja-build libopenblas-dev liblapacke-dev libeigen3-dev pkg-config
+
 jobs:
   # ---------------------------------------------------------------------------
-  # Linux / GCC / OpenBLAS Release build; every ctest must pass.
+  # C++: GCC Release, every unit test (CMakePresets.json "ci-linux").
   # ---------------------------------------------------------------------------
-  linux-gcc-openblas:
-    name: Linux / GCC / OpenBLAS / Release
+  cpp-gcc-release:
+    name: C++ / GCC / Release
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Print toolchain versions
-        run: |
-          gcc --version | head -1
-          g++ --version | head -1
-          cmake --version | head -1
-          pkg-config --modversion openblas || true
-
-      - name: Configure (preset ci-linux)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $APT_BUILD
+      - name: Configure
         run: cmake --preset ci-linux
-
       - name: Build
         run: cmake --build --preset ci-linux -- -j$(nproc)
-
-      - name: Test (ctest)
+      - name: Test
         run: ctest --preset ci-linux
-
       - name: Upload CTest logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-linux-gcc-openblas
-          path: |
-            build/ci-linux/Testing/Temporary/LastTest.log
-            build/ci-linux/Testing/Temporary/LastTestsFailed.log
+          name: ctest-logs-gcc-release
+          path: build/ci-linux/Testing/Temporary/LastTest*.log
           if-no-files-found: ignore
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Python lane: install the wheel via scikit-build-core (which builds the
-  # pybind11 extension against the C++ qed_engine library) and run the
-  # pytest smoke suite. This is independent of the C++-only lane above so a
-  # broken Python surface doesn't mask C++ regressions and vice versa.
+  # C++: Clang Debug with AddressSanitizer + UndefinedBehaviorSanitizer, every unit test.
+  # Test discovery runs each test binary at build time, so the sanitizer options are set for
+  # the whole job. Leaks inside the BLAS and OpenMP runtimes are suppressed
+  # (scripts/gate/lsan.supp, shared with the gate's sanitizer stage).
   # ---------------------------------------------------------------------------
-  linux-python:
-    name: Linux / Python wheel + pytest
+  cpp-clang-asan:
+    name: C++ / Clang / Debug + ASan/UBSan
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
+    timeout-minutes: 60
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      SAN: -O1 -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
+      - uses: actions/checkout@v4
+      - name: Install build dependencies (clang needs libomp-dev for omp.h)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $APT_BUILD clang libomp-dev
+      - name: Configure
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_ED_TESTS=ON -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS \
+            -DCMAKE_CXX_FLAGS="$SAN" -DCMAKE_EXE_LINKER_FLAGS="$SAN" -DCMAKE_SHARED_LINKER_FLAGS="$SAN"
+      - name: Build
+        run: LSAN_OPTIONS=suppressions=$PWD/scripts/gate/lsan.supp cmake --build build-asan -- -j$(nproc)
+      - name: Test
+        run: LSAN_OPTIONS=suppressions=$PWD/scripts/gate/lsan.supp ctest --test-dir build-asan --output-on-failure
+      - name: Upload CTest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-clang-asan
+          path: build-asan/Testing/Temporary/LastTest*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+  # ---------------------------------------------------------------------------
+  # Python: the wheel built once, then pytest, every example and the CPU half of the coverage
+  # grid (every task x symmetry cell against an independent dense reference).
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python / wheel, pytest, examples, CPU grid
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $APT_BUILD
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Upgrade pip + install build tooling
+      - name: Build and install the wheel
+        env:
+          CMAKE_ARGS: -DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS
         run: |
           python -m pip install --upgrade pip
           python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" pytest numpy pynauty
-
-      - name: Build + install qed wheel (editable not yet supported by scikit-build-core fully)
-        env:
-          # Force the configure step to skip the C++ test build to keep the
-          # wheel build short -- the C++ tests already ran in the previous job.
-          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
-        run: |
           python -m pip install -v .
-
-      - name: Run pytest (slow guards and the grid deselected)
-        run: |
-          python -m pytest tests/python -v
-
-  # ---------------------------------------------------------------------------
-  # Examples lane: build the wheel and run every script in examples/.
-  # ---------------------------------------------------------------------------
-  linux-examples:
-    name: Linux / Examples (CPU)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build wheel
-        env:
-          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy pynauty
-          python -m pip install -v .
-
-      - name: Run the examples
+      - name: pytest
+        run: python -m pytest tests/python -q -rf -p no:cacheprovider
+      - name: Examples
         run: |
           for f in examples/[0-9]*.py; do
             echo "== $f =="
             python "$f"
           done
-
-  # ---------------------------------------------------------------------------
-  # Correctness lane: the CPU half of the coverage grid (tests/python/grid), every
-  # task x symmetry cell against an independent dense reference.
-  # ---------------------------------------------------------------------------
-  linux-correctness:
-    name: Linux / coverage grid (CPU)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Build wheel
-        env:
-          CMAKE_ARGS: "-DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS"
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "scikit-build-core>=0.10" "pybind11>=2.13" numpy pynauty
-          python -m pip install -v .
-
-      - name: Run the CPU coverage grid
+      - name: CPU coverage grid
         env:
           OMP_NUM_THREADS: "4"
           QED_GRID_REPORT: grid-cpu.json
         run: python -m pytest tests/python/grid -m grid -k cpu -q -rf -p no:cacheprovider
-
-      - name: Upload the cell table
+      - name: Upload the grid's cell table
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: grid-cpu
           path: grid-cpu.json
-
-  # ---------------------------------------------------------------------------
-  # Clang Debug lane: catch UB / signed-overflow / strict-aliasing issues that
-  # GCC Release silently optimizes away. Builds the same TUs and runs ctest
-  # again so we get coverage on the alternate compiler.
-  # ---------------------------------------------------------------------------
-  linux-clang-debug:
-    name: Linux / Clang / OpenBLAS / Debug
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        # NOTE: clang ships *without* its own libomp on Ubuntu, so the
-        # `omp.h` that construct_ham.h includes is unresolved unless we
-        # also pull in libomp-dev. The GCC lane gets libgomp transitively
-        # via build-essential, which is why it doesn't need this.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang \
-            cmake \
-            libomp-dev \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Print toolchain versions
-        run: |
-          clang --version | head -1
-          clang++ --version | head -1
-          cmake --version | head -1
-
-      - name: Configure (clang Debug, no CUDA)
-        env:
-          CC: clang
-          CXX: clang++
-        run: |
-          cmake -S . -B build-clang-debug \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DBUILD_ED_TESTS=ON \
-            -DWITH_CUDA=OFF \
-            -DBLAS_PROFILE=OPENBLAS
-
-      - name: Build
-        run: cmake --build build-clang-debug -- -j$(nproc)
-
-      - name: Test (ctest)
-        run: ctest --test-dir build-clang-debug --output-on-failure
-
-      - name: Upload CTest logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-linux-clang-debug
-          path: |
-            build-clang-debug/Testing/Temporary/LastTest.log
-            build-clang-debug/Testing/Temporary/LastTestsFailed.log
           if-no-files-found: ignore
-          retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # clang-tidy lane: pure analysis, warnings only (||true). Runs against the
-  # qed_engine translation units using the
-  # checks defined in .clang-tidy at repo root. We deliberately do NOT fail
-  # the build on warnings yet -- that flip will happen once the existing
-  # technical debt is triaged. The lane exists today so newly-added code is
-  # reviewed under the same lens.
+  # CUDA: compile the engine and the extension against nvcc (no device to run them on).
+  # The toolkit packages follow the CUDA::* targets the build links (cudart, cublas, curand,
+  # cusolver); cusolver's link needs cusparse and nvJitLink as well.
   # ---------------------------------------------------------------------------
-  linux-clang-tidy:
-    name: Linux / clang-tidy (warnings only)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        # NOTE: see the libomp-dev comment in the linux-clang-debug job --
-        # clang needs an explicit libomp install for `#include <omp.h>`.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            clang \
-            clang-tidy \
-            cmake \
-            libomp-dev \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Configure with compile_commands.json
-        env:
-          CC: clang
-          CXX: clang++
-        run: |
-          cmake -S . -B build-tidy \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DBUILD_ED_TESTS=OFF \
-            -DWITH_CUDA=OFF \
-            -DBLAS_PROFILE=OPENBLAS
-
-      - name: Build (needed so generated headers exist)
-        run: cmake --build build-tidy --target qed_engine -- -j$(nproc)
-
-      - name: Run clang-tidy on src/basis and src/dynamics (warnings only)
-        run: |
-          # Bounded for hosted runners: src/basis and src/dynamics only.
-          shopt -s globstar nullglob
-          files=(src/basis/**/*.cpp src/dynamics/**/*.cpp)|
-          # Bounded for hosted runners: src/dssf and src/core only.
-          shopt -s globstar nullglob
-          files=(src/dssf/**/*.cpp src/core/**/*.cpp)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No source files matched -- skipping."
-            exit 0
-          fi
-          echo "Linting ${#files[@]} files..."
-          clang-tidy -p build-tidy --quiet "${files[@]}" || true
-
-  # ---------------------------------------------------------------------------
-  # CUDA build-only lane: install the CUDA toolkit and configure+build the
-  # GPU TUs. We do NOT run the GPU tests because hosted runners have no NVIDIA
-  # device -- but compiling against nvcc catches header / API breakage that
-  # the CPU-only lanes cannot see. Disabled by default; uncomment the
-  # `runs-on:` pin to a self-hosted GPU runner to actually execute tests.
-  # ---------------------------------------------------------------------------
-  linux-cuda-build:
-    name: Linux / CUDA build-only (no GPU)
+  cuda-build:
+    name: CUDA / compile only
     runs-on: ubuntu-22.04
     timeout-minutes: 45
-    # Skip on PRs from forks (no access to the CUDA-keyring secret) and skip
-    # if WITH_CUDA is set to OFF in the workflow_dispatch payload.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install CUDA toolkit (12.6) via NVIDIA apt repo
-        # Replaces the third-party Jimver/cuda-toolkit action, which has
-        # been failing on every recent run regardless of version --
-        # v0.2.16 404s on retired 12.4.1 deb URLs, v0.2.34/35 broke on
-        # node24 + the deprecated GH Actions cache v1 API
-        # (Jimver/cuda-toolkit#390), and v0.2.32 (network method) exits in
-        # ~20s before any install. Going straight to NVIDIA's official
-        # apt repo is more reliable and follows their canonical install
-        # instructions for Ubuntu 22.04.
+      - uses: actions/checkout@v4
+      - name: Install the CUDA toolkit (12.6) from NVIDIA's apt repository
         run: |
           set -euxo pipefail
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          # NOTE: keep this list in sync with the CUDA::* targets used in
-          # cmake/EDLibraries.cmake / CMakeLists.txt. We currently link
-          # cudart, cublas, cusparse, cusolver and curand, so we need the
-          # matching -dev packages for each one (curand was missing on the
-          # first apt-based attempt and broke `find_package(CUDAToolkit)`
-          # at configure-time with "Target ... links to CUDA::curand but
-          # the target was not found").
-          #
-          # libnvjitlink-12-6 is a transitive dependency of cusolver/cusparse
-          # 12.6 (their .so files dlopen `libnvJitLink.so.12` at link time),
-          # but the dev metapackages do *not* pull it in automatically, so
-          # the final CUDA link step fails with a flood of
-          # "undefined reference to __nvJitLink*_12_6" without it.
           sudo apt-get install -y --no-install-recommends \
-            cuda-nvcc-12-6 \
-            cuda-cudart-dev-12-6 \
-            cuda-driver-dev-12-6 \
-            libcublas-dev-12-6 \
-            libcusparse-dev-12-6 \
-            libcusolver-dev-12-6 \
-            libcurand-dev-12-6 \
-            libnvjitlink-12-6 \
-            cuda-cccl-12-6
+            cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-driver-dev-12-6 cuda-cccl-12-6 \
+            libcublas-dev-12-6 libcusparse-dev-12-6 libcusolver-dev-12-6 libcurand-dev-12-6 \
+            libnvjitlink-12-6
           echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
           echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
-
       - name: Install host build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends $APT_BUILD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure (the engine and qed._core; one architecture keeps the build short)
+        run: |
+          cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_ED_TESTS=OFF \
+            -DED_BUILD_PYTHON=ON -DWITH_CUDA=ON -DBLAS_PROFILE=OPENBLAS -DCMAKE_CUDA_ARCHITECTURES=90
+      - name: Build
+        run: cmake --build build-cuda -- -j$(nproc)
+
+  # ---------------------------------------------------------------------------
+  # Lint: the pre-commit hooks (whitespace, clang-format 17.0.6, ruff 0.6.9) over every file.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint / pre-commit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: pre-commit
+        run: |
+          python -m pip install pre-commit
+          pre-commit run --all-files --show-diff-on-failure
+
+  # ---------------------------------------------------------------------------
+  # clang-tidy 17 over the engine sources (src/; their headers through HeaderFilterRegex). Every
+  # warning of the checks in .clang-tidy is an error.
+  # ---------------------------------------------------------------------------
+  clang-tidy:
+    name: Lint / clang-tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CC: clang-17
+      CXX: clang++-17
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            libopenblas-dev \
-            liblapacke-dev \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Print toolchain versions
+          sudo apt-get install -y --no-install-recommends $APT_BUILD clang-17 clang-tidy-17 libomp-17-dev
+      - name: Configure (compile_commands.json)
         run: |
-          gcc --version | head -1
-          nvcc --version | head -4
-          cmake --version | head -1
-
-      - name: Configure (CUDA on, single SM 70 to keep build short)
+          cmake -S . -B build-tidy -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DBUILD_ED_TESTS=OFF -DWITH_CUDA=OFF -DBLAS_PROFILE=OPENBLAS
+      # Parsed without OpenMP: the static analyzer of clang 17 and 18 aborts on OpenMP regions
+      # ("non-static stackless VarRegion"), so it checks the serial code.
+      - name: clang-tidy
         run: |
-          cmake -S . -B build-cuda \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_ED_TESTS=OFF \
-            -DWITH_CUDA=ON \
-            -DBLAS_PROFILE=OPENBLAS \
-            -DCMAKE_CUDA_ARCHITECTURES=70
-
-      - name: Build (compile only, no execution)
-        run: cmake --build build-cuda --target qed_engine -- -j$(nproc)
-
-  # ---------------------------------------------------------------------------
-  # CUDA full lane (DISABLED-BY-DEFAULT, opt-in via self-hosted runner).
-  #
-  # GitHub-hosted runners have no NVIDIA GPU, so the ``linux-cuda-build``
-  # lane above only catches header / linker breakage. To actually execute
-  # the CUDA test suites, point this
-  # lane at a runner that has a CUDA-capable device. Three options:
-  #
-  #   1. GitHub-hosted GPU runners (public beta -> GA 2024-2025).
-  #      Available labels include ``gpu_t4`` (T4, 16 GiB VRAM, 4 vCPU,
-  #      ~$0.07/min). Requires a Team or Enterprise GitHub plan and an
-  #      explicit per-runner-group allowlist in repo settings. Replace
-  #      ``runs-on: [self-hosted, linux, x64, gpu]`` below with
-  #      ``runs-on: gpu_t4`` to opt in.
-  #
-  #   2. Self-hosted runner on your own GPU box.
-  #      Install the Actions runner on a Linux host with NVIDIA drivers
-  #      + CUDA toolkit, register it to ``ze-bang/QED`` with labels
-  #      ``[self-hosted, linux, x64, gpu]``, and uncomment the block
-  #      below. This is what we recommend for the QED project today.
-  #
-  #   3. Third-party GPU CI providers (Cirun.io, BuildJet, etc.) that
-  #      proxy GPU hardware behind a ``runs-on:`` label.
-  #
-  # When enabled this job re-uses the CUDA toolkit install from
-  # ``linux-cuda-build`` and additionally:
-  #   * sets ``BUILD_ED_TESTS=ON`` so ctest targets are emitted;
-  #   * runs ``ctest`` which picks up ``test_cuda_backend``,
-  #     ``test_streaming_symmetry_gpu_mirror``, and any other
-  #     ``ed_add_test(...)`` registered under ``WITH_CUDA=ON``;
-  #
-  # Keep this commented until a GPU runner is registered -- a job that
-  # requests a missing label sits in "Queued" forever and looks worse on
-  # the PR check page than no job at all.
-  # ---------------------------------------------------------------------------
-  # linux-cuda-test:
-  #   name: Linux / CUDA + tests (self-hosted GPU)
-  #   runs-on: [self-hosted, linux, x64, gpu]
-  #   timeout-minutes: 60
-  #
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Print GPU + toolchain versions
-  #       run: |
-  #         nvidia-smi
-  #         nvcc --version | head -4
-  #         cmake --version | head -1
-  #
-  #     - name: Configure (CUDA on, runtime test discovery)
-  #       run: |
-  #         cmake -S . -B build-cuda \
-  #           -G Ninja \
-  #           -DCMAKE_BUILD_TYPE=Release \
-  #           -DBUILD_ED_TESTS=ON \
-  #           -DWITH_CUDA=ON \
-  #           -DBLAS_PROFILE=OPENBLAS
-  #
-  #     - name: Build
-  #       run: cmake --build build-cuda -- -j$(nproc)
-  #
-  #     - name: Test (ctest)
-  #       run: ctest --test-dir build-cuda --output-on-failure -j$(nproc)
+          run-clang-tidy-17 -p build-tidy -clang-tidy-binary clang-tidy-17 -j $(nproc) -quiet \
+            -extra-arg=-fno-openmp -extra-arg=-Wno-unknown-pragmas "$PWD/src/.*\.cpp$"

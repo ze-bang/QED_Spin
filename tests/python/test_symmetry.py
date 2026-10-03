@@ -82,10 +82,10 @@ def test_generate_group_dihedral_size():
 # ---------------------------------------------------------------------------
 
 def test_compose_rejects_size_mismatch():
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         sym.compose([0, 1, 2], [0, 1])
 
 
 def test_translation_rejects_zero_sites():
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         sym.translation(0, 1)

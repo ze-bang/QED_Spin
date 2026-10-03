@@ -66,11 +66,14 @@ ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<d
     throw std::logic_error("ed::symmetry::upload_csr_gpu: built without WITH_CUDA.");
 }
 
+// The CUDA definitions take the CSR by value (they keep it in the returned closure); the stubs match.
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
 ed::LinearOperator::MatvecFn ed::symmetry::csr_matvec_gpu(std::shared_ptr<const ed::symmetry::DeviceCsr> /*csr*/) {
     throw std::logic_error("ed::symmetry::csr_matvec_gpu: built without WITH_CUDA.");
 }
 
 ed::LinearOperator::MultiMatvecFn
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
 ed::symmetry::csr_matvec_gpu_multi(std::shared_ptr<const ed::symmetry::DeviceCsr> /*csr*/) {
     throw std::logic_error("ed::symmetry::csr_matvec_gpu_multi: built without WITH_CUDA.");
 }

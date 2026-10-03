@@ -14,7 +14,8 @@ a one-dimensional S=4 tower, so FTLM is exact there. thermal(method='ftlm', samp
 observables=[S0.S1]) on device='cpu' and device='gpu' with the same seed, against an independent
 dense S=4 restricted average. CONFIRMED when CPU matches dense (1e-8) and GPU differs from CPU
 by more than 1e-6."""
-import signal, sys
+import signal
+import sys
 import numpy as np
 
 signal.alarm(110)

@@ -6,7 +6,6 @@ S_tot^2 written as the full double sum sum_{i,j} S_i.S_j (including i == j, a co
 by EigResult.expect under total_spin, although it is SU(2) invariant. (HamiltonianBuilder.heisenberg skips
 i == j, so the records are written with qed.Operator.add_two_body.) Control: the same operator under
 Sz-only symmetry must give <S^2> = 0 for the singlet ground state of an N=8 Heisenberg ring."""
-import numpy as np
 import qed
 
 N = 8

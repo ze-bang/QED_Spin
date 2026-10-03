@@ -35,7 +35,6 @@ from __future__ import annotations
 import argparse
 import cmath
 import copy
-import dataclasses
 import json
 import math
 import multiprocessing as mp
@@ -1329,7 +1328,7 @@ def momentum_labels_ok(ctx, r):
         allowed.add(th)
         allowed.add(tuple((-x) % 1 for x in th))
     bad = []
-    for i, L in enumerate(r.levels):
+    for i, _L in enumerate(r.levels):
         lab = tuple(qcall(r.momentum, i, ctx.model["trans"]))
         if lab not in allowed:
             bad.append((i, [str(x) for x in lab]))
@@ -1415,7 +1414,7 @@ def t_spectrum(ctx):
 
 def _in_restriction(orc, R, v):
     w = 0.0
-    for E, V, idx, _ in orc.levels(R):
+    for _E, V, idx, _ in orc.levels(R):
         w += float(np.linalg.norm(V.conj().T @ v[idx]) ** 2)
     return w
 

@@ -65,7 +65,7 @@ class EigResult(Labelled):
             raise InvalidRequest("basis='sz' needs n_up")
         want = -1 if basis == "full" else int(n_up)
         out = []
-        for i, lvl in enumerate(self.levels):
+        for i, _lvl in enumerate(self.levels):
             if len(out) >= self.k:
                 break
             try:

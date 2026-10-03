@@ -121,10 +121,11 @@ inline void write(Level l, std::string msg) {
     return out;
 }
 
+[[nodiscard]]
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((format(printf, 1, 2)))
 #endif
-[[nodiscard]] inline std::string format(const char* fmt, ...) {
+inline std::string format(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     va_list ap2;

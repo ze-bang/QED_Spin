@@ -13,7 +13,11 @@ independently built sparse sector matrix.  CONFIRMED when QED needs >= 2x ARPACK
 RESTATED 2026-10-02 (P6.2): the matvecs are the block's applies from result.block_stats (the thick-restart
 kernel builds its basis itself and emits no [lanczos_kernel] line, which made the count 0); the profile
 lines are still reported where there are any."""
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator, eigsh

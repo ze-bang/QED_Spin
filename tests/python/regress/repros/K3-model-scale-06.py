@@ -41,7 +41,7 @@ except Exception as e:
     res = f"{type(e).__name__}: {str(e)[:90]}"
 try:
     v2 = float(qed.expect(H, [Ozz], 1, sym=qed.Symmetry(spatial=None)).values[0, 0].real)
-except Exception as e:
+except Exception:
     v2 = float("nan")
 info = (f"E0 gap {E[1]-E[0]:.3f}; total_spin=0 expect(Sz0Sz1) -> {res}; without total_spin {v2:.10f}; "
         f"dense <S0.S1>/3 = {ss/3:.10f}")

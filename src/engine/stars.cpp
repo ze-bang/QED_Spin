@@ -234,7 +234,8 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
         impl->tag.irrep_dim    = d;
         impl->tag.tr_folded    = (jj > ii);
         impl->tag.dim          = sp->states();
-        impl->tag.multiplicity = static_cast<std::uint64_t>((jj > ii ? 2 : 1) * m_star * d);
+        impl->tag.multiplicity = static_cast<std::uint64_t>(jj > ii ? 2 : 1) * static_cast<std::uint64_t>(m_star)
+                                 * static_cast<std::uint64_t>(d);
         impl->hk   = sb.hk;
         impl->gsec = sp;
         impl->gop  = std::make_shared<RepSectorMatVec>(op, std::shared_ptr<const ed::symmetry::RepSectorData>(sp));

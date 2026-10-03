@@ -108,6 +108,7 @@ ExactBlock exact_block(const ed::LinearOperator& mv, const detail::BlockOp* bop,
     const Eigen::MatrixXcd& U = es.vectors;
     // <n|A|n> = sum_i conj(U_in) (A U)_in: one product, not the sandwich U^dag A U.
     std::vector<Eigen::VectorXcd> dg;
+    dg.reserve(obs.size());
     for (const auto& A : obs)
         dg.push_back(U.conjugate().cwiseProduct(materialize(*A) * U).colwise().sum().transpose());
     const std::size_t n_obs = folded ? obs.size() / 2 : obs.size();
@@ -360,6 +361,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                                                      || t.method == ThermalSpec::Method::Exact);
     detail::validate_thermal_spec(t, n_sites);
     std::vector<double> beta;
+    beta.reserve(t.temperatures.size());
     for (double T : t.temperatures) beta.push_back(1.0 / T);
     detail::require_device(t.device, "thermal");
     ed::parallel::pin_omp_threads_once();

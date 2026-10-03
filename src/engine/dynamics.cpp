@@ -430,7 +430,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     reaching[{tsub.n_up, tsub.sz_parity}].push_back({si, p});
         }
         std::size_t reached = 0;
-        for (const auto& [key, who] : reaching) {
+        for (const auto& entry : reaching) {   // named references: OpenMP regions below cannot capture structured bindings
+            const auto& key = entry.first;
+            const auto& who = entry.second;
             const Subspace tsub{key.first, key.second, 1};
             std::vector<ed::ops::MaskedOperator> Bt, At;   // per pair, the parts that reach tsub
             for (const auto& [si, p] : who) {
@@ -523,7 +525,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                 };
                 const std::size_t n = rd->reps.size();
                 for (std::size_t w = 0; w < who.size(); ++w) {
-                    const auto [si, p] = who[w];
+                    const std::size_t si = who[w].first, p = who[w].second;
                     const BlockVector& v = states[si].first;
                     // X|v> in this sector; false when X does not reach it or annihilates v here.
                     auto carry = [&](const ed::ops::MaskedOperator& X, std::vector<Complex>& phi) {
@@ -979,6 +981,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
 #endif
             const std::uint64_t avail = ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
             if (avail > 0)
+                // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by the num_threads clause below
                 team = static_cast<int>(std::max<std::uint64_t>(1, std::min<std::uint64_t>(
                     static_cast<std::uint64_t>(team), static_cast<std::uint64_t>(0.9 * static_cast<double>(avail)) / per_small)));
             // Full team for the loop over sectors; BLAS single-threaded inside it (the kernel's

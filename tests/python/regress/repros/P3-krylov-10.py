@@ -7,7 +7,11 @@ adds 8 dot products plus a serial memcpy per step -- 20-40% on top of the matvec
 XXZ chain (nn+nnn, open), N=24, Sz=0 sector (dim 2,704,156), qed.eigs(k=1, prune=False) with
 ED_LANCZOS_KERNEL_PROFILE=1; compare (reorth + ring) time per step with the matvec time per step.
 CONFIRMED when the ring overhead is >= 20% of the matvec."""
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 import numpy as np
 
 N, NUP, SEED = 24, 12, 1234

@@ -7,7 +7,6 @@ block of the Sz=S sector is solved to convergence. Test: Heisenberg chain N=20 w
 with total_spin=0: compare pruned_blocks, wall time and E0."""
 import signal
 import time
-import numpy as np
 import qed
 
 signal.alarm(290)

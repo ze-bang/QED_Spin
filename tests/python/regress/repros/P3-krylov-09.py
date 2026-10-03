@@ -9,8 +9,11 @@ requested).  Test: random XXZ chain (nn+nnn, open) Sz=0 blocks with ED_LANCZOS_K
 times the convergence callback separately ('check' bucket): CPU eigs(k=1) on N=18 (dim 48620); GPU
 eigs(k=1, vectors=True, device='gpu') on N=20 (dim 184756).  CONFIRMED when the check bucket is >= 25% of
 a factorisation's wall time on either lane."""
-import json, os, re, subprocess, sys
-import numpy as np
+import json
+import os
+import re
+import subprocess
+import sys
 
 SEED = 1234
 CHILD = r'''

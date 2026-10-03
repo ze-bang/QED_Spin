@@ -4,7 +4,6 @@
 """Claim: EigResult.vectors() catches every ValueError as 'no component in this Sz sector', so real
 refusals become a silent empty list: at N >= 35 the default basis='full' hits expand()'s
 'N <= 34' refusal and returns [] (while basis='sz' works), and an impossible n_up returns []."""
-import numpy as np
 import qed
 
 

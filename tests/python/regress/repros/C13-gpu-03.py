@@ -11,7 +11,9 @@ Test (10 GB MIG slice): Heisenberg ring N=26, Sz=0, k=0 block (D ~ 4.0e5, 6.4 MB
 thermal(method='ftlm', krylov=150, observables=[S0.S1], device='gpu'). One sample needs about
 (2*150+6) x 6.4 MB = 2.0 GB; eight batched samples about 15.7 GB. Each run in its own child process.
 CONFIRMED when samples=1 succeeds on the device and samples=8 raises an out-of-memory error."""
-import json, subprocess, sys
+import json
+import subprocess
+import sys
 
 try:
     import qed

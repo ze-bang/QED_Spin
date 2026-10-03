@@ -11,7 +11,9 @@ eigs(k=2, device='gpu') takes the device Krylov-Schur lane with m = 200 (orch_so
 the basis alone is 5.8 GB, basis + staging grows to 11.7 GB. Control: eigs(k=1) on the same block
 (Lanczos, no kept basis). Each run in its own child process. CONFIRMED when the control runs on the
 device and k=2 raises an out-of-memory error although the 200-vector basis alone would fit."""
-import json, subprocess, sys
+import json
+import subprocess
+import sys
 from math import comb
 
 try:

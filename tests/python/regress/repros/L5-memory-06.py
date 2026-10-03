@@ -11,7 +11,11 @@ sectors. sum_b D_b^2 = (C(34,17)-2)/17 + 2 = 1.37e8 entries = 2.20 GB packed; th
 1430 x 1430 = 33 MB. qed.spectrum(device='cpu') and qed.spectrum(device='gpu') run in separate child
 processes that report their own peak RSS. CONFIRMED when the GPU child's peak RSS exceeds the CPU
 child's by >= 0.8 x the predicted packed size and both spectra agree (max |dE| < 1e-8)."""
-import json, os, subprocess, sys, tempfile
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from math import comb
 
 try:

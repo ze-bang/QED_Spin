@@ -250,8 +250,8 @@ std::vector<MaskedOperator::Complex> MaskedOperator::to_dense() const {
     std::vector<Complex> M(dim * dim, Complex(0.0, 0.0));
     for (const auto& t : terms())
         for (std::uint64_t s = 0; s < dim; ++s) {
-            std::uint64_t tt;
-            double sg;
+            std::uint64_t tt = 0;
+            double sg = 0.0;
             if (masked_apply(t, s, tt, sg)) M[tt * dim + s] += sg * t.coeff;
         }
     return M;

@@ -9,7 +9,11 @@ phase time.  Compare with the same two eigs passes (values k=1 window, then k=2 
 run (a) with the full folded symmetry (Symmetry auto: reflection + flip + TR) and (b) with the
 unfolded symmetry (translations only, flip/TR off).  CONFIRMED when the dynamics ground-manifold
 phase costs >= 2x the folded passes and is within ~2x of the unfolded ones."""
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 
 N = 24
 CHILD = r'''

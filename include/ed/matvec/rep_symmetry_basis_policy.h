@@ -273,12 +273,18 @@ struct RepSymmetryBasisPolicy {
         return index_of_rep(rb);
     }
 
-    /// d > 1: rep k's rank, its class's C (d x d, row-major; columns >= rank zero) and its first state.
-    [[nodiscard]] inline int rank_of(std::uint64_t k) const noexcept { return class_rank[rep_class[k]]; }
+    /// Rep k's rank (1 for d = 1), its class's C (d > 1: d x d, row-major; columns >= rank zero) and
+    /// its first state (k for d = 1).
+    [[nodiscard]] inline int rank_of(std::uint64_t k) const noexcept {
+        return irrep_dim == 1 ? 1 : class_rank[rep_class[k]];
+    }
     [[nodiscard]] inline const Complex* C_of(std::uint64_t k) const noexcept {
+        if (irrep_dim == 1) return nullptr;
         return class_C + static_cast<std::size_t>(rep_class[k]) * static_cast<std::size_t>(irrep_dim * irrep_dim);
     }
-    [[nodiscard]] inline std::uint64_t first_state_of(std::uint64_t k) const noexcept { return state_offset[k]; }
+    [[nodiscard]] inline std::uint64_t first_state_of(std::uint64_t k) const noexcept {
+        return irrep_dim == 1 ? k : state_offset[k];
+    }
 
     // ----- Trait surface --------------------------------------------------
     // ``is_rep_symmetry`` selects the dedicated rep-symmetry kernel + forces

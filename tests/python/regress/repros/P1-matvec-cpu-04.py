@@ -12,7 +12,6 @@ RESTATED 2026-10-02 (P6 groundwork): the >= 5x thresholds sat above the audit's 
 script read NOT_REPRODUCED while the cost stood. Plan target (P6.5): eigs and FTLM with total_spin within
 1.2x of the plain sector. CONFIRMED when either slowdown exceeds 1.2x."""
 import time
-import numpy as np
 import qed
 
 N = 22

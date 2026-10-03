@@ -11,7 +11,11 @@ models), device='gpu', ED_LANCZOS_KERNEL_PROFILE=1.  Heisenberg (N SzSz terms + 
 which pass per row) versus XY (the same off-diagonal terms, no SzSz).  If diagonal terms were free the
 per-iteration times would match; the claim predicts Heisenberg/XY ~ (N + N/2)/(N/2) ~ 2.9 when lookups
 dominate.  CONFIRMED when the ratio is >= 1.8, NOT_REPRODUCED when it is < 1.3."""
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 
 try:
     import qed

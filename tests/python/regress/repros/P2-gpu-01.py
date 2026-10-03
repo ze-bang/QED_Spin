@@ -14,7 +14,11 @@ threads; ED_SYM_PROFILE confirms the host reduced CSR engaged), with ED_LANCZOS_
 the per-iteration Lanczos time.  CONFIRMED when the GPU lane is >= 2x slower per iteration than the
 4-thread host CSR on both configs (a CSR SpMV on the same device slice, with several times the
 bandwidth of 4 host cores, would therefore be far faster than the current device lane)."""
-import json, os, re, subprocess, sys
+import json
+import os
+import re
+import subprocess
+import sys
 
 try:
     import qed

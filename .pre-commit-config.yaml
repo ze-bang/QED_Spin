@@ -1,10 +1,10 @@
 # https://pre-commit.com
 # Install once:  pip install pre-commit && pre-commit install
 # Run on demand: pre-commit run --all-files
+# CI runs the same hooks on every push and pull request (.github/workflows/ci.yml, job "lint").
 #
-# All checks are intentionally LOCAL ONLY (no network) so collaborators
-# without internet during a flight or on a cluster compute node can still
-# commit. The clang-format hook expects clang-format >= 17 on PATH.
+# The tree was brought to these hooks in one format-only commit (listed in .git-blame-ignore-revs,
+# so `git blame` skips it). Pinned versions: a newer clang-format or ruff can format differently.
 
 minimum_pre_commit_version: "3.5.0"
 
@@ -20,33 +20,28 @@ repos:
       - id: end-of-file-fixer
       - id: check-merge-conflict
       - id: check-added-large-files
-        args: ['--maxkb=512']
-        exclude: '^tests/fixtures/'
+        args: ['--maxkb=1024']   # the golden references and grid baselines are 0.55-0.85 MB
       - id: check-case-conflict
       - id: mixed-line-ending
         args: ['--fix=lf']
       - id: check-yaml
       - id: check-json
-        exclude: '\.vscode/.*\.json$'
       - id: check-toml
       - id: check-symlinks
       - id: destroyed-symlinks
-      - id: no-commit-to-branch
-        args: ['--branch', 'main']
 
   # ---------------------------------------------------------------------------
-  # C++ formatting (uses local clang-format binary; respects .clang-format)
+  # C++ / CUDA formatting (.clang-format)
   # ---------------------------------------------------------------------------
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v17.0.6
     hooks:
       - id: clang-format
         types_or: [c, c++, cuda]
-        files: \.(c|h|cc|cxx|cpp|hh|hpp|hxx|cu|cuh|inl|ipp|tpp)$
-        exclude: '^(build|build-.*|_skbuild|.*third_party).*'
+        files: \.(h|hpp|cpp|cu|cuh)$
 
   # ---------------------------------------------------------------------------
-  # Python formatting + lint (helpers + future qed/ bindings)
+  # Python lint and formatting (pyproject.toml [tool.ruff])
   # ---------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
@@ -54,28 +49,3 @@ repos:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-
-  # ---------------------------------------------------------------------------
-  # CMake formatting + lint
-  # ---------------------------------------------------------------------------
-  - repo: https://github.com/cheshirekow/cmake-format-precommit
-    rev: v0.6.13
-    hooks:
-      - id: cmake-format
-        args: ['--line-width', '100', '--tab-size', '4']
-
-  # ---------------------------------------------------------------------------
-  # YAML lint (catches CI workflow typos before they hit GitHub)
-  # ---------------------------------------------------------------------------
-  - repo: https://github.com/adrienverge/yamllint.git
-    rev: v1.35.1
-    hooks:
-      - id: yamllint
-        args: ['-d', '{extends: relaxed, rules: {line-length: {max: 200}}}']
-
-ci:
-  # When running in CI mode (https://pre-commit.ci/), skip the no-commit-to-branch
-  # check because CI legitimately commits to PR branches.
-  skip: [no-commit-to-branch]
-  autofix_commit_msg: 'style: pre-commit autofixes'
-  autoupdate_schedule: monthly

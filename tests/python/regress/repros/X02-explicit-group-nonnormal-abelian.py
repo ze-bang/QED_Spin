@@ -7,7 +7,6 @@ translations) plus 35 residues (python/qed/_groups.py greedy_maximal_abelian, 'a
 valid'). Test whether the spectrum is still correct when the explicit-list split picks an abelian
 subgroup that is not the (normal) translation group, against dense ED per Sz sector, on small
 triangular tori with full C6v; also report the split chosen by the explicit-list and auto paths."""
-import itertools
 import numpy as np
 import qed
 from qed._groups import close_group

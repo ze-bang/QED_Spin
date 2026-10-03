@@ -1,8 +1,12 @@
 # clang-tidy >= 17 expected.
 #
-# A conservative set: catches likely bugs, leaves stylistic checks off. Silence a
-# justified warning with NOLINT at the call site, not with a global exclusion.
-# CI runs clang-tidy as warnings only.
+# A conservative set: catches likely bugs and leaves style to the code (braces, declaration
+# grouping, emplace, range loops and boolean rewrites are not checked). Every warning is an error:
+# silence a justified one with NOLINT(check) at the call site and say why, not with a global
+# exclusion. CI runs it over src/ (the clang-tidy job of .github/workflows/ci.yml).
+# bugprone-unchecked-optional-access is off: clang-tidy 17 aborts in it ("maximum number of
+# iterations reached") on the long sector drivers (eigs, dynamics, thermal). Sources are parsed without
+# OpenMP (-fno-openmp in CI): the analyzer of clang 17 and 18 aborts on OpenMP regions.
 
 ---
 Checks: >
@@ -14,11 +18,9 @@ Checks: >
   cppcoreguidelines-pro-type-member-init,
   cppcoreguidelines-slicing,
   modernize-deprecated-headers,
-  modernize-loop-convert,
   modernize-make-shared,
   modernize-make-unique,
   modernize-redundant-void-arg,
-  modernize-use-emplace,
   modernize-use-equals-default,
   modernize-use-equals-delete,
   modernize-use-nullptr,
@@ -27,13 +29,11 @@ Checks: >
   performance-*,
   portability-*,
   readability-avoid-const-params-in-decls,
-  readability-braces-around-statements,
   readability-const-return-type,
   readability-container-size-empty,
   readability-delete-null-pointer,
   readability-deleted-default,
   readability-duplicate-include,
-  readability-isolate-declaration,
   readability-make-member-function-const,
   readability-misleading-indentation,
   readability-misplaced-array-index,
@@ -42,7 +42,6 @@ Checks: >
   readability-redundant-declaration,
   readability-redundant-string-cstr,
   readability-redundant-string-init,
-  readability-simplify-boolean-expr,
   readability-static-accessed-through-instance,
   readability-string-compare,
   readability-uniqueptr-delete-release,
@@ -50,12 +49,12 @@ Checks: >
   -bugprone-narrowing-conversions,
   -bugprone-implicit-widening-of-multiplication-result,
   -bugprone-branch-clone,
+  -bugprone-unchecked-optional-access,
   -clang-analyzer-cplusplus.NewDeleteLeaks,
   -performance-no-int-to-ptr,
   -performance-avoid-endl
 
-# Warnings-only mode for now. Flip to '*' once the codebase is clean.
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 
 # Don't lint third-party headers we don't control.
 HeaderFilterRegex: '^.*/(include|src|tests)/(?!.*third_party).*\.(h|hpp|hh|hxx|cuh|tpp|inl|ipp)$'
@@ -63,8 +62,6 @@ HeaderFilterRegex: '^.*/(include|src|tests)/(?!.*third_party).*\.(h|hpp|hh|hxx|c
 FormatStyle: file
 
 CheckOptions:
-  - key: readability-braces-around-statements.ShortStatementLines
-    value: '2'
   - key: readability-identifier-naming.ClassCase
     value: 'CamelCase'
   - key: readability-identifier-naming.NamespaceCase

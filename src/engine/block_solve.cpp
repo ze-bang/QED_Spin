@@ -60,7 +60,7 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
     const lapack_int n = static_cast<lapack_int>(Hb.rows());
     std::vector<double> w(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return w;
-    lapack_int info;
+    lapack_int info = 0;
     if (real_block(Hb)) {
         Eigen::MatrixXd R = Hb.real();  // symmetric; LAPACK reads upper only
         info = LAPACKE_dsyevd(LAPACK_COL_MAJOR, 'N', 'U', n, R.data(), n,
@@ -92,7 +92,7 @@ dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb) {
     const char range = want == nb ? 'A' : 'I';
     std::vector<double> w(nb, 0.0);
     std::vector<lapack_int> isuppz(2 * nb);
-    lapack_int found = 0, info;
+    lapack_int found = 0, info = 0;
     if (real_block(Hb)) {
         Eigen::MatrixXd R = Hb.real();
         Hb.resize(0, 0);
@@ -125,7 +125,7 @@ DenseEigenpairs dense_eigenpairs_in_range(Eigen::MatrixXcd& Hb, double lo, doubl
     const lapack_int n = static_cast<lapack_int>(nb);
     std::vector<double> w(nb, 0.0);
     std::vector<lapack_int> isuppz(2 * nb);
-    lapack_int found = 0, info;
+    lapack_int found = 0, info = 0;
     if (real_block(Hb)) {
         Eigen::MatrixXd R = Hb.real();
         Hb.resize(0, 0);
@@ -927,6 +927,7 @@ BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower&
     return sol;
 }
 
+// NOLINTBEGIN(bugprone-macro-parentheses): B is a type in explicit instantiations
 #define ED_LG_LANES(B)                                                                            \
     template BlockSolution solve_block_lowest<B>(B&, const ed::LinearOperator&, std::size_t,      \
                                                  std::uint64_t);                                  \
@@ -937,6 +938,7 @@ BlockSolution solve_block_tower(B& be, const ed::LinearOperator& H, const Tower&
     template GsVector solve_gs_vector<B>(B&, const ed::LinearOperator&, std::size_t,              \
                                          std::uint64_t);                                          \
     template BlockEstimate estimate_lowest<B>(B&, const ed::LinearOperator&, const Tower*);
+// NOLINTEND(bugprone-macro-parentheses)
 ED_LG_LANES(ed::matvec::CpuBackend)
 ED_LG_LANES(ed::matvec::BasicCpuBackend<double>)
 #ifdef WITH_CUDA

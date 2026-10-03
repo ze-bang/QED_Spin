@@ -76,6 +76,7 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
             continue;
         }
         std::vector<ed::ops::MaskedOperator> avgs;
+        avgs.reserve(2 * ops.size());
         for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep));
         if (g.image != Antiunitary::None)
             for (const ::Operator* O : ops) avgs.push_back(avg.average(*O, flip, keep, g.image));

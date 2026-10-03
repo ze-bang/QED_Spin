@@ -114,7 +114,7 @@ except Exception as ex:
     print(f"REPRO: INCONCLUSIVE raised {type(ex).__name__}: {str(ex)[:200]}")
     raise SystemExit(0)
 
-for name, base_ok, part_ok, ng, nr, per, nA, nres in out:
+for name, base_ok, _part_ok, ng, nr, per, nA, nres in out:
     print(f"{name}: |A|={nA} residues={nres} unselected spectrum matches dense: {base_ok}; "
           f"partition union {ng} vs dense {nr}; per dimension {per}")
 if not all(o[1] for o in out):

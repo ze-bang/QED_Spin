@@ -400,7 +400,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
                 const std::size_t vi = static_cast<std::size_t>(it - prog.vsub_val.begin());
 
                 Complex proj;
-                std::int64_t j;
+                std::int64_t j = -1;
                 if (same_sector && F == 0) {        // diagonal term inside one sector
                     j = static_cast<std::int64_t>(r);
                     proj = Complex(1.0 / w, 0.0);

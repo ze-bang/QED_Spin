@@ -11,7 +11,6 @@ Model: 16-site Heisenberg ring scaled by s, Symmetry(spatial=None): the Sz = 0 b
 is above the k = 1 dense floor (1600), so the vector goes through the FullCGS2 Lanczos lane with the
 absolute residual guard. Reference: E0(s) = s * E0(1) from the values-only call at s = 1."""
 import signal
-import numpy as np
 import qed
 
 signal.alarm(280)

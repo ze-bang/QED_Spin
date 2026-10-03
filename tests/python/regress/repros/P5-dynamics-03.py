@@ -22,7 +22,11 @@ the sectors building at once (csr_policy.h concurrent_sector_builders): T>0 dyna
 small sectors in a pool of T threads, so a budget of three merged CSRs admits none of them when
 T > 3 -- which measures the sharing rule, not the claim (gate 62545019 failed both; at T = 4 they read
 ratios 1.7-2.3, jobs 62546238/62546239)."""
-import json, math, os, subprocess, sys, time
+import json
+import math
+import os
+import subprocess
+import sys
 
 N, NUP, NQ = 18, 9, 3
 CHILD = r'''

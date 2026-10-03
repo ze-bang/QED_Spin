@@ -8,7 +8,6 @@ staggered h_x and a uniform h_z (zeeman_per_site emits Sz last) is therefore rep
 the full dihedral group; translation by one site does not commute with H, and the default
 qed.eigs(H, 1) raises 'H does not commute with a supplied site permutation'."""
 import signal
-import numpy as np
 import qed
 
 signal.alarm(120)

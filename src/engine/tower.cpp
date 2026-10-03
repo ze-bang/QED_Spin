@@ -65,7 +65,7 @@ Matching random_matching(int N, int two_S, std::mt19937_64& gen) {
         for (int v = 0; v < 256; ++v) {
             std::uint64_t r = 0;
             for (int i = 0; i < 8 && 8 * b + i < N; ++i)
-                if ((v >> i) & 1) r |= std::uint64_t{1} << partner[static_cast<std::size_t>(8 * b + i)];
+                if ((v >> i) & 1) r |= std::uint64_t{1} << partner[8 * static_cast<std::size_t>(b) + static_cast<std::size_t>(i)];
             m.swap_lut[static_cast<std::size_t>(b) * 256 + static_cast<std::size_t>(v)] = r;
         }
     std::normal_distribution<double> nd(0.0, 1.0);
@@ -200,6 +200,7 @@ std::vector<Complex> valence_bond_start(const ed::symmetry::RepSectorData& rd, i
     constexpr int kMatchings = 4;
     std::mt19937_64 gen(s ^ 0x7A3E5C1D9B2F4E68ULL);
     std::vector<Matching> M;
+    M.reserve(kMatchings);
     for (int c = 0; c < kMatchings; ++c) M.push_back(random_matching(N, two_S, gen));
     auto phi = [&M](std::uint64_t st) {
         double a = 0.0;

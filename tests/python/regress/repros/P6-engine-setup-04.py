@@ -5,7 +5,11 @@
 three times (block_dims at Sz=S, block_dims at Sz=S+1, then the solve walk at Sz=S), building every
 star's blocks (group-sector orbit scans included) in each walk although the first two only read
 tag.dim. Observed through the ED_SYM_PROFILE=1 per-star '[little_group] ... group-sector path' lines."""
-import os, re, subprocess, sys, signal
+import os
+import re
+import subprocess
+import sys
+import signal
 from collections import Counter
 
 CHILD = r'''

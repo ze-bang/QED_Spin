@@ -1,4 +1,5 @@
 leak:libgomp
+leak:libomp
 leak:libflexiblas
 leak:libblis
 leak:libflame

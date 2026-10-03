@@ -138,6 +138,7 @@ void fill_shells(Lattice& L, const Cells& C, const Layout& lay, const std::vecto
                         if (r > 1e-9) all.push_back({u, v, d, r});
                     }
     std::vector<double> radii;
+    radii.reserve(all.size());
     for (const auto& w : all) radii.push_back(w.r);
     std::sort(radii.begin(), radii.end());
     std::vector<double> shells;              // the three smallest distinct distances

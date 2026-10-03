@@ -87,8 +87,8 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
     if (es.info() != Eigen::Success) return false;
-    const Eigen::VectorXd evals = es.eigenvalues();
-    const Eigen::MatrixXcd evecs = es.eigenvectors();
+    const Eigen::VectorXd& evals = es.eigenvalues();
+    const Eigen::MatrixXcd& evecs = es.eigenvectors();
 
     // ---- Cluster eigenvalues into eigenspaces (each = one irreducible copy) --
     const double span = std::max(1.0, evals(n - 1) - evals(0));
@@ -104,7 +104,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
     // ---- Per eigenspace: D(g)_{mn} = <v_m| L(g) |v_n>, character = tr --------
     // L(g) e_x = e_{mult[g][x]} : (L(g) v)[mult[g][x]] = v[x].
-    struct Cand { int dim; std::vector<std::vector<Complex>> mats;
+    struct Cand { int dim = 0; std::vector<std::vector<Complex>> mats;
                   std::vector<Complex> chi; };
     std::vector<Cand> cands;
     for (const auto& cl : clusters) {
@@ -264,8 +264,8 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     const Eigen::MatrixXcd M = M0 + M0.adjoint();
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
     if (es.info() != Eigen::Success) return false;
-    const Eigen::VectorXd evals = es.eigenvalues();
-    const Eigen::MatrixXcd evecs = es.eigenvectors();
+    const Eigen::VectorXd& evals = es.eigenvalues();
+    const Eigen::MatrixXcd& evecs = es.eigenvectors();
     const double span = std::max(1.0, evals(n - 1) - evals(0));
     const double tol  = 1e-6 * span;
     std::vector<IrrepData> irreps;

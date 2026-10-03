@@ -196,6 +196,7 @@ members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec
     const std::uint64_t full = N >= 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << N) - 1);
     // multiplet()'s operations: the residues, the level's antiunitary fold, its flip / Theta mirror.
     std::vector<StateMap> ops;
+    ops.reserve(s.residues.size() + 2);
     for (const auto& p : s.residues) ops.push_back(residue_map(p, N));
     StateMap K;
     K.n_sites = N;

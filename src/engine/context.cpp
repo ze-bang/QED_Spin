@@ -107,7 +107,7 @@ conjugate_irrep_map(const EngineContext& cx) {
     for (int k = 0; k < n_raw; ++k) {
         if (raw[static_cast<std::size_t>(k)] < 0) continue;
         ext[static_cast<std::size_t>(k)] = raw[static_cast<std::size_t>(k)];
-        ext[static_cast<std::size_t>(k + n_raw)] =
+        ext[static_cast<std::size_t>(k) + static_cast<std::size_t>(n_raw)] =
             raw[static_cast<std::size_t>(k)] + n_raw;
     }
     return ext;
@@ -176,7 +176,7 @@ void build_residue_maps(EngineContext& cx,
             std::vector<int> mp2(static_cast<std::size_t>(2 * n_irr), -1);
             for (int k = 0; k < n_irr; ++k) {
                 mp2[static_cast<std::size_t>(k)] = mp[static_cast<std::size_t>(k)];
-                mp2[static_cast<std::size_t>(k + n_irr)] =
+                mp2[static_cast<std::size_t>(k) + static_cast<std::size_t>(n_irr)] =
                     mp[static_cast<std::size_t>(k)] + n_irr;
             }
             mp = std::move(mp2);

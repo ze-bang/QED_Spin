@@ -7,7 +7,6 @@ while the emitted name says 'Sx'. With unit_cell_size=1 the sublattice operator 
 'sum' operator, which does honour basis='xyz' (S+/2 + S-/2 per site)."""
 import os
 import tempfile
-import numpy as np
 import qed
 
 outdir = os.environ.get("QED_REGRESS_TMP") or tempfile.mkdtemp(prefix="qed_regress_")

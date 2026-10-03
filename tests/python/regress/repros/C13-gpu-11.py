@@ -57,7 +57,7 @@ for name in ("12", "16"):
     for irr in range(6):
         try:
             r = qed.eigs(H, 4, sym=base.select(irrep=[irr]), vectors=True)
-        except Exception as e:
+        except Exception:
             continue
         for li, L in enumerate(r.levels):
             if L.vector < 0:

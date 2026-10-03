@@ -7,7 +7,6 @@ runs on the host; ThermalResult.device_blocks just counts the other blocks.
 Test: 4x4 square-lattice Heisenberg at n_up=8, FTLM on the GPU. With the point group (spatial='auto')
 we expect device_blocks < blocks; the translations-only control (no W path) should give device_blocks == blocks."""
 import signal
-import numpy as np
 import qed
 from grid.models import Model, dot
 

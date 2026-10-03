@@ -6,7 +6,11 @@ build_orbit_table_fixed_sz_streaming) bypasses the orbit-table registry, so it i
 full C(N, n_up) scan on every walk: two identical eigs calls in one process rebuild it twice
 (while the abelian table is served from the registry), and a default pruned eigs re-walks a
 surviving star and scans again. Observed through the ED_SYM_PROFILE=1 stderr profile lines."""
-import os, re, subprocess, sys, signal
+import os
+import re
+import subprocess
+import sys
+import signal
 
 CHILD = r'''
 import sys, qed

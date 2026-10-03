@@ -7,7 +7,9 @@ Test (restated in P7.3 terms: the profile line of the original is gone): random 
 open), N=22, Sz=0 block (dim 705432, 11 MB vectors), solved on the device with and without vectors;
 block_stats gives the device lane's applies. CONFIRMED when the vectors run applies H at least
 1.8x as often as the eigenvalue-only run (a replayed recurrence)."""
-import json, subprocess, sys
+import json
+import subprocess
+import sys
 
 try:
     import qed
