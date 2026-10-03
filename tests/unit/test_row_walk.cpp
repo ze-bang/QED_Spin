@@ -647,11 +647,14 @@ TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly",
 #ifdef WITH_CUDA
 #include <cuda_runtime.h>
 
-TEST_CASE("device: the multi-vector walk equals single applies bit for bit", "[row_walk][cuda]") {
+TEST_CASE("device: the multi-vector walk and CSR equal single applies bit for bit", "[row_walk][cuda]") {
     if (!ed::have_cuda()) SKIP("no CUDA device");
-    for (const auto& m : zoo()) {
+    for (const auto& m : zoo())
+    for (const bool walk : {true, false}) {
         if (m.name != "chirality" && m.name != "random_none") continue;
-        INFO("model " << m.name);
+        INFO("model " << m.name << " walk " << walk);
+        EnvGuard env;
+        if (walk) env.set("ED_GPU_CSR_BUDGET_GIB", "0");   // no device CSR fits: the device walk
         const auto G = ring_group(false, false);
         const int n_up = m.u1 ? N / 2 : -1;
         auto rds = std::make_shared<const RepSectorData>(make_sector(G, characters(G, false, false)[1], n_up));
@@ -661,7 +664,8 @@ TEST_CASE("device: the multi-vector walk equals single applies bit for bit", "[r
         const auto single = op.bind_cuda();
         const auto multi = op.bind_cuda_multi();
         REQUIRE(multi);
-        constexpr std::size_t K = 5;               // one launch of 4 vectors, one of 1
+        CHECK(std::string(op.device_lane()) == (walk ? "device-gather" : "device-csr"));
+        constexpr std::size_t K = 15;              // launches of 8, 4, 2 and 1 vectors
         std::mt19937 rng(7);
         std::normal_distribution<double> g(0.0, 1.0);
         std::vector<std::vector<Cx>> x(K, std::vector<Cx>(d));
@@ -687,6 +691,118 @@ TEST_CASE("device: the multi-vector walk equals single applies bit for bit", "[r
             cudaFree(din[i]); cudaFree(dout_m[i]); cudaFree(dout_s[i]);
         }
     }
+}
+
+// A device apply on host vectors.
+void on_device(const ed::LinearOperator::MatvecFn& f, const Cx* in, Cx* out, std::size_t d) {
+    Cx *din = nullptr, *dout = nullptr;
+    REQUIRE(cudaMalloc(&din, d * sizeof(Cx)) == cudaSuccess);
+    REQUIRE(cudaMalloc(&dout, d * sizeof(Cx)) == cudaSuccess);
+    REQUIRE(cudaMemcpy(din, in, d * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
+    f(din, dout, d);
+    REQUIRE(cudaMemcpy(out, dout, d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+    cudaFree(din);
+    cudaFree(dout);
+}
+
+// The entries of two CSRs: the same rows and columns, values within tol (the device contracts
+// products into FMAs, the host need not), the same storage form.
+void check_same_entries(const ed::matvec::ReducedSymmetryCsr<Cx>& got, const ed::matvec::ReducedSymmetryCsr<Cx>& ref,
+                        double tol) {
+    REQUIRE(got.dim == ref.dim);
+    CHECK(std::equal(got.row_ptr.begin(), got.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
+    REQUIRE(got.nnz() == ref.nnz());
+    CHECK(std::equal(got.col_idx.begin(), got.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
+    double worst = 0.0;
+    for (std::uint64_t e = 0; e < ref.nnz(); ++e) worst = std::max(worst, std::abs(got.value(e) - ref.value(e)));
+    CHECK(worst <= tol);
+    CHECK(got.dictionary() == ref.dictionary());
+    CHECK(got.id8.empty() == ref.id8.empty());
+}
+
+TEST_CASE("device: the CSR built on the device is the host's, and applies as the block of H", "[row_walk][cuda]") {
+    if (!ed::have_cuda()) SKIP("no CUDA device");
+    int sectors = 0;
+    for (const auto& m : zoo()) {
+        const Mat Hd = m.H->canonical().to_dense();
+        const double tol = 1e-12 * std::max(1.0, max_abs(Hd));
+        for (bool dihedral : {false, true}) {
+            if (dihedral && !m.dihedral) continue;
+            for (bool with_flip : {false, true}) {
+                if (with_flip && !m.flip) continue;
+                const auto G = ring_group(dihedral, with_flip);
+                std::vector<int> n_ups{-1};
+                if (m.u1) n_ups = with_flip ? std::vector<int>{N / 2, -1} : std::vector<int>{N / 2, N / 2 - 1, -1};
+                for (const auto& chi : characters(G, dihedral, with_flip))
+                    for (int n_up : n_ups) {
+                        RepSectorData rd = make_sector(G, chi, n_up);
+                        const std::size_t d = rd.reps.size();
+                        if (d == 0) continue;
+                        ++sectors;
+                        INFO("model " << m.name << " dihedral " << dihedral << " flip " << with_flip
+                             << " n_up " << n_up << " dim " << d << " chi[1] " << chi[1]);
+                        auto rds = std::make_shared<const RepSectorData>(std::move(rd));
+                        const auto dc = ed::symmetry::build_sector_csr_gpu(*rds, *m.H->row_program(), ~std::uint64_t{0});
+                        REQUIRE(dc);
+                        check_same_entries(ed::symmetry::download_csr(*dc), RepSectorMatVec(*m.H, rds).reduced_csr(), tol);
+                        const auto f = ed::symmetry::csr_matvec_gpu(dc);
+                        const Mat M = columns(d, [&](const Cx* in, Cx* out) { on_device(f, in, out, d); });
+                        CHECK(max_diff(M, reference_block(Hd, *rds)) <= tol);
+                    }
+            }
+        }
+    }
+    CHECK(sectors > 200);
+}
+
+TEST_CASE("device: too many distinct values keep the device CSR's values whole; its budget is exact",
+          "[row_walk][cuda]") {
+    if (!ed::have_cuda()) SKIP("no CUDA device");
+    // The disordered 20-ring of the host test above: more distinct values than one dictionary.
+    const int n = 20;
+    std::mt19937_64 rng(7);
+    std::uniform_real_distribution<double> J(0.5, 1.5);
+    MaskedOperator h(n);
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        const double jxy = J(rng), jz = J(rng);
+        h.add(MaskedOperator::product(n, "+-", {i, j}, Cx(0.5 * jxy, 0.0)));
+        h.add(MaskedOperator::product(n, "-+", {i, j}, Cx(0.5 * jxy, 0.0)));
+        h.add(MaskedOperator::product(n, "zz", {i, j}, Cx(jz, 0.0)));
+    }
+    RepSectorData rd;
+    rd.n_sites = n;
+    rd.group_size = 1;
+    rd.n_up = n / 2;
+    rd.characters = {Cx(1.0, 0.0)};
+    for (int i = 0; i < n; ++i) rd.perms_flat.push_back(i);
+    for (std::uint64_t s = 0; s < (std::uint64_t{1} << n); ++s)
+        if (__builtin_popcountll(s) == n / 2) {
+            rd.reps.push_back(s);
+            rd.inv_norms.push_back(1.0);
+        }
+    rd.build_perm_lut();
+    const auto P = ed::ops::compile_program({h.dagger()}, rd, rd);
+    const std::uint64_t d = rd.reps.size();
+    const auto ref = ed::matvec::build_sector_csr(P.view(), rd.make_policy(), d);
+    REQUIRE_FALSE(ref.dictionary());
+    const auto dc = ed::symmetry::build_sector_csr_gpu(rd, P, ~std::uint64_t{0});
+    REQUIRE(dc);
+    check_same_entries(ed::symmetry::download_csr(*dc), ref, 1e-12);
+    const std::uint64_t whole = ref.nnz() * (sizeof(Cx) + sizeof(std::uint32_t)) + (d + 1) * sizeof(std::uint64_t);
+    CHECK(ed::symmetry::device_csr_info(*dc).bytes == whole);
+    CHECK(ed::symmetry::build_sector_csr_gpu(rd, P, whole) != nullptr);
+    CHECK(ed::symmetry::build_sector_csr_gpu(rd, P, whole - 1) == nullptr);
+    // A dictionary CSR's budget is exact as well (the clean ring: few values).
+    MaskedOperator c(n);
+    for (int i = 0; i < n; ++i) c.add(MaskedOperator::product(n, "zz", {i, (i + 1) % n}, Cx(1.0, 0.0)));
+    const auto Pc = ed::ops::compile_program({c.dagger()}, rd, rd);
+    const auto dcc = ed::symmetry::build_sector_csr_gpu(rd, Pc, ~std::uint64_t{0});
+    REQUIRE(dcc);
+    const std::uint64_t exact = ed::symmetry::device_csr_info(*dcc).bytes;
+    CHECK(exact < whole);
+    CHECK(ed::symmetry::build_sector_csr_gpu(rd, Pc, exact) != nullptr);
+    CHECK(ed::symmetry::build_sector_csr_gpu(rd, Pc, exact - 1) == nullptr);
 }
 #endif
 

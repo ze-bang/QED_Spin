@@ -165,8 +165,10 @@ BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const R
     st.apply_s         = rep.apply_seconds() - apply0;
     st.solve_s         = solve_s;
     if (ed::on_device(lane)) {          // the whole solve ran on the device: the lane counted its applies
-        st.lane    = "device";
-        st.applies = lane_applies;
+        st.lane      = rep.device_lane();
+        st.applies   = lane_applies;
+        st.nnz       = rep.device_csr_nnz();
+        st.csr_bytes = rep.device_csr_bytes();
     } else {
         st.lane = st.applies == 0 ? "dense" : rep.lane();
     }

@@ -145,19 +145,26 @@ def test_gpu_refuses_oftlm():
 
 
 @gpu
-def test_gpu_and_cpu_certify_the_same_blocks():
+def test_gpu_and_cpu_certify_the_same_blocks(monkeypatch):
     # Device eigs blocks run the host's certified lanes (P2.4 C5): the same levels, the same
-    # completeness, every Krylov solve on the device.
+    # completeness, every Krylov solve on the device -- on the device CSR (P7.1), and on the device
+    # walk when the CSR budget admits nothing.
     H = _ring(16)
     sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")   # one 12870-state block
-    for k in (1, 3):
-        for vectors in (False, True):
-            c = qed.eigs(H, k, sym=sym, vectors=vectors, device="cpu")
-            g = qed.eigs(H, k, sym=sym, vectors=vectors, device="gpu")
-            np.testing.assert_allclose(g.energies, c.energies, atol=1e-10)
-            assert g.complete == c.complete
-            assert g.placement["device_krylov"] >= 1 and g.placement["host_krylov"] == 0
-            assert all(b["lane"] == "device" and b["applies"] > 0 for b in g.block_stats)
+    for budget, lane in ((None, "device-csr"), ("0", "device-gather")):
+        if budget is None:
+            monkeypatch.delenv("ED_GPU_CSR_BUDGET_GIB", raising=False)
+        else:
+            monkeypatch.setenv("ED_GPU_CSR_BUDGET_GIB", budget)
+        for k in (1, 3):
+            for vectors in (False, True):
+                c = qed.eigs(H, k, sym=sym, vectors=vectors, device="cpu")
+                g = qed.eigs(H, k, sym=sym, vectors=vectors, device="gpu")
+                np.testing.assert_allclose(g.energies, c.energies, atol=1e-10)
+                assert g.complete == c.complete
+                assert g.placement["device_krylov"] >= 1 and g.placement["host_krylov"] == 0
+                assert all(b["lane"] == lane and b["applies"] > 0 for b in g.block_stats)
+                assert all((b["nnz"] > 0) == (lane == "device-csr") for b in g.block_stats)
 
 
 @gpu

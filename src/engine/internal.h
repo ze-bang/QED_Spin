@@ -144,10 +144,24 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
     return inv;
 }
 
+// The device CSR an operator built last outlives its bound applies until another operator builds
+// one or the operator dies: pruning's estimate and the solve of one block bind twice and build
+// once. Never destroyed (a static's destructor could run after the CUDA runtime unloads).
+struct IdleDeviceCsr {
+    std::mutex                                     m;
+    const void*                                    owner = nullptr;
+    std::shared_ptr<const ed::symmetry::DeviceCsr> csr;
+    static IdleDeviceCsr& get() {
+        static IdleDeviceCsr* slot = new IdleDeviceCsr;
+        return *slot;
+    }
+};
+
 // -----------------------------------------------------------------------------
 // An operator on one symmetry sector (RepSectorData: reps + 1/norms + characters + group
 // perms), its rows from the row walk of the operator's program (sector_rows.h): the
-// reduced CSR when it fits the budget, else the walk per apply, or the same walk on a device.
+// reduced CSR when it fits the budget, else the walk per apply; on a device the reduced CSR
+// built there when it fits, else the same walk.
 // Memory O(#reps), never O(2^N).
 // -----------------------------------------------------------------------------
 class RepSectorMatVec final : public ed::LinearOperator {
@@ -181,6 +195,15 @@ public:
             if (rows_->group_flip[g] != 0)
                 offdiag_terms_ += rows_->vsub_tbegin[rows_->group_vbegin[g + 1]] - rows_->vsub_tbegin[rows_->group_vbegin[g]];
         for (const auto& c : rows_->term_coeff) norm_bound_ += std::abs(c);
+    }
+
+    ~RepSectorMatVec() override {
+        auto& idle = IdleDeviceCsr::get();
+        std::lock_guard<std::mutex> g(idle.m);
+        if (idle.owner == this) {
+            idle.csr.reset();
+            idle.owner = nullptr;
+        }
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
@@ -223,15 +246,23 @@ public:
         return false;
 #endif
     }
+    /// The device apply: the reduced CSR built on the device when it fits (device_csr_), else the
+    /// device walk.
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
-        if (has_device_kernel()) return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
+        if (has_device_kernel()) {
+            if (auto c = device_csr_()) return ed::symmetry::csr_matvec_gpu(std::move(c));
+            return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
+        }
 #endif
         return ed::LinearOperator::bind_cuda();   // throws DeviceUnsupported
     }
     [[nodiscard]] MultiMatvecFn bind_cuda_multi() const override {
 #ifdef WITH_CUDA
-        if (has_device_kernel()) return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
+        if (has_device_kernel()) {
+            if (auto c = device_csr_()) return ed::symmetry::csr_matvec_gpu_multi(std::move(c));
+            return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
+        }
 #endif
         return {};
     }
@@ -352,6 +383,42 @@ private:
         }
     }
 
+    // The device CSR (P7.1), built on a device bind when it fits ED_GPU_CSR_BUDGET_GIB (unset: half
+    // the free device memory, leaving the rest to the Krylov vectors, which the lanes size after
+    // binding) and the operator is not one applied only once or twice (defer_csr); null: the device
+    // walk serves. A bound apply holds it, and so does the idle slot (IdleDeviceCsr) until another
+    // operator builds one. Declined once, it is not tried again.
+    std::shared_ptr<const ed::symmetry::DeviceCsr> device_csr_() const {
+        std::lock_guard<std::mutex> lk(dcsr_mtx_);
+        if (auto c = dcsr_.lock()) return c;
+        if (dcsr_declined_ || defer_csr_ > 0) return nullptr;
+        auto& idle = IdleDeviceCsr::get();
+        {   // free the idle one first: its memory may be what this one needs
+            std::lock_guard<std::mutex> g(idle.m);
+            idle.csr.reset();
+            idle.owner = nullptr;
+        }
+        std::uint64_t room = 0;
+        const double gib = ed::env::real("ED_GPU_CSR_BUDGET_GIB", -1.0);   // -1: not set
+        if (gib >= 0.0) room = static_cast<std::uint64_t>(gib * 1073741824.0);
+        else if (const auto free = ed::core::available_device_bytes(/*fresh=*/true)) room = *free / 2;
+        auto c = room > 0 ? ed::symmetry::build_sector_csr_gpu(*rd_, *rows_, room) : nullptr;
+        if (!c) {
+            dcsr_declined_ = true;
+            return nullptr;
+        }
+        const ed::symmetry::DeviceCsrInfo info = ed::symmetry::device_csr_info(*c);
+        dcsr_build_s_ += info.build_s;
+        dcsr_nnz_   = info.nnz;
+        dcsr_bytes_ = info.bytes;
+        dcsr_built_ = true;
+        dcsr_ = c;
+        std::lock_guard<std::mutex> g(idle.m);
+        idle.owner = this;
+        idle.csr   = c;
+        return c;
+    }
+
     // GPU rep-gather engagement (only reached when the reduced CSR was
     // declined, and only for a block the verb allowed onto the device:
     // device='cpu' never touches CUDA). Default: engage when a CUDA device is
@@ -404,6 +471,12 @@ private:
     mutable std::optional<ed::matvec::RealCsrView> real_;     // csr_'s real part, when the block is real
     mutable std::once_flag                         gpu_once_;
     mutable ed::LinearOperator::MatvecFn           gpu_fn_;
+    mutable std::mutex                             dcsr_mtx_;
+    mutable std::weak_ptr<const ed::symmetry::DeviceCsr> dcsr_;   // the device CSR while anything holds it
+    mutable bool                                   dcsr_declined_ = false;
+    mutable bool                                   dcsr_built_ = false;
+    mutable double                                 dcsr_build_s_ = 0.0;
+    mutable std::uint64_t                          dcsr_nnz_ = 0, dcsr_bytes_ = 0;
     bool                                           force_gpu_ = false;
     bool                                           device_ok_ = false;
     std::shared_ptr<ed::planner::CsrBudget>        budget_;      // the block's, or null: the default rule
@@ -421,10 +494,15 @@ public:
         // scale-free: ns -> s
         return 1e-9 * static_cast<double>(apply_ns_.load(std::memory_order_relaxed));
     }
-    /// Seconds spent building the representation apply() engaged (reduced CSR or device mirror).
-    [[nodiscard]] double build_seconds() const noexcept { return csr_build_s_ + gpu_build_s_; }
+    /// Seconds spent building the representations engaged (reduced CSR, device mirror, device CSR).
+    [[nodiscard]] double build_seconds() const noexcept { return csr_build_s_ + gpu_build_s_ + dcsr_build_s_; }
     [[nodiscard]] std::uint64_t csr_nnz() const noexcept { return csr_ ? csr_->nnz() : 0; }
     [[nodiscard]] std::uint64_t csr_bytes() const noexcept { return csr_ ? csr_->bytes() : 0; }
+    /// The device lanes' representation: "device-csr" once a device CSR was built, else
+    /// "device-gather"; and that CSR's size.
+    [[nodiscard]] const char* device_lane() const noexcept { return dcsr_built_ ? "device-csr" : "device-gather"; }
+    [[nodiscard]] std::uint64_t device_csr_nnz() const noexcept { return dcsr_nnz_; }
+    [[nodiscard]] std::uint64_t device_csr_bytes() const noexcept { return dcsr_bytes_; }
     /// The representation host applies use: "csr", "csr-real" (its real part on real vectors),
     /// "gpu-gather" (device kernel, host vectors), "walk" (CSR-free gather), or "none" before the
     /// first apply.
