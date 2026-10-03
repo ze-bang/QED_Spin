@@ -28,11 +28,11 @@ def build(j2, h):
 
 
 Hu, Hj, Hh = build(0, 0), build(0.5, 0), build(0, 0.3)
-ku = _find_symmetries_key(Hu, None, False)
-kj = _find_symmetries_key(Hj, None, False)
-kh = _find_symmetries_key(Hh, None, False)
-try:
-    sorted(tuple(t) for t in Hj.transform_tuples())
+ku = _find_symmetries_key(Hu)
+kj = _find_symmetries_key(Hj)
+kh = _find_symmetries_key(Hh)
+try:  # the failure mode of the claim: sorting the key's terms
+    sorted(kj[1])
     sort_err = None
 except TypeError as e:
     sort_err = str(e)[:80]
@@ -42,7 +42,8 @@ for _ in range(2):
     qed.find_symmetries(Hj, verbose=False)
     times.append(time.time() - t0)
 info = (
-    f"key(uniform)={'set' if ku is not None else None} key(J1-J2)={kj} key(Heis+field)={kh} "
+    f"key(uniform)={'set' if ku is not None else None} key(J1-J2)={'set' if kj is not None else None} "
+    f"key(Heis+field)={'set' if kh is not None else None} "
     f"sort error={sort_err!r}; J1-J2 find_symmetries call1={times[0]:.3f}s call2={times[1]:.3f}s"
 )
 if ku is not None and kj is None and kh is None:
