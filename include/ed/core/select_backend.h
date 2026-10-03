@@ -124,7 +124,7 @@ struct DeviceProbe {
     const std::uint64_t need = fit ? device_need(r) : 0;
     const bool small_eigs = r.task == Task::Eigs && (r.dim <= kDeviceDenseMaxDim || 2 * r.want >= r.dim);
     if (d == Device::Auto) {
-        if (!r.device_kernel || r.task == Task::Oftlm || r.dim < row.floor || !probe.available())
+        if (!r.device_kernel || r.dim < row.floor || !probe.available())
             return Lane::HostKrylov;
         if (fit) {
             const std::optional<std::size_t> free = probe.free_bytes(false);
@@ -134,9 +134,6 @@ struct DeviceProbe {
     }
     if (!probe.available())
         throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
-    if (r.task == Task::Oftlm)
-        throw ed::DeviceUnsupported(std::string(r.verb) + ": OFTLM (exact_states > 0) runs on the host only; with "
-                                    "device='gpu' use FTLM without exact_states, or device='auto' or 'cpu'");
     if (!r.device_kernel)
         throw ed::DeviceUnsupported(std::string(r.verb) + ": device='gpu', but "
                                     + (r.what ? r.what() : "a block of dim " + std::to_string(r.dim)) + " "

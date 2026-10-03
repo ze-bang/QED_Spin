@@ -9,7 +9,12 @@ Setup: 12-site Heisenberg ring, Symmetry.none() (one 4096-state block, above the
 Restated with the fix: device='gpu' refuses OFTLM (DeviceUnsupported), which is not the
 mislabelling claimed. The label itself is then checked under device='auto' on a block above the
 2^14 auto floor (16-site ring, 65536 states), where the backend variant is the GPU but OFTLM
-runs on the host: device_blocks must stay 0."""
+runs on the host: device_blocks must stay 0.
+
+RESTATED 2026-10-03 (P7.5): OFTLM has a device lane -- its exact eigensolve and its samples run on the
+lane place() chooses -- so device_blocks > 0 under device='gpu' is now the truth, and runs on different
+lanes are not identical. The check is the label itself: a block counted on the device must be placed
+there (no host_krylov behind a device count), and device='cpu' counts none. 12-site ring, Symmetry.none()."""
 import numpy as np
 import qed
 
@@ -30,20 +35,16 @@ def ring(N):
 
 T = [0.2, 0.5, 1.0, 2.0]
 sym = qed.Symmetry.none()
-try:
-    g = qed.thermal(ring(12), T, method="ftlm", exact_states=8, samples=20, seed=4, sym=sym, device="gpu")
-    gpu = f"ran, device_blocks={g.device_blocks}"
-    gpu_mislabelled = g.device_blocks > 0
-except qed.errors.DeviceUnsupported as e:
-    gpu, gpu_mislabelled = f"refused: {str(e)[:120]}", False
-H16 = ring(16)
-a = qed.thermal(H16, T, method="ftlm", exact_states=8, samples=4, seed=4, sym=sym, device="auto")
-c = qed.thermal(H16, T, method="ftlm", exact_states=8, samples=4, seed=4, sym=sym, device="cpu")
-d = float(np.max(np.abs(np.asarray(a.E) - np.asarray(c.E))))
-print(f"OFTLM device='gpu': {gpu}; device='auto' (16 sites): device_blocks={a.device_blocks} "
-      f"placement={getattr(a, 'placement', None)} max|E_auto-E_cpu|={d:.2e}")
-if gpu_mislabelled or (a.device_blocks > 0 and d < 1e-9):
-    print(f"REPRO: CONFIRMED OFTLM counted as a GPU block (gpu: {gpu}; auto device_blocks={a.device_blocks}, "
-          f"host-identical to {d:.1e})")
+H = ring(12)
+g = qed.thermal(H, T, method="ftlm", exact_states=8, samples=20, seed=4, sym=sym, device="gpu")
+c = qed.thermal(H, T, method="ftlm", exact_states=8, samples=20, seed=4, sym=sym, device="cpu")
+pg = dict(getattr(g, "placement", {}) or {})
+d = float(np.max(np.abs(np.asarray(g.E) - np.asarray(c.E))))
+print(f"OFTLM 12-ring: gpu device_blocks={g.device_blocks} placement={pg}; cpu device_blocks={c.device_blocks}; "
+      f"max|E_gpu-E_cpu|={d:.2e}")
+mislabelled = (g.device_blocks > 0 and pg.get("host_krylov", 0) > 0) or c.device_blocks > 0
+if mislabelled:
+    print(f"REPRO: CONFIRMED OFTLM blocks counted on the device but solved on the host "
+          f"(gpu device_blocks={g.device_blocks}, placement={pg}; cpu device_blocks={c.device_blocks})")
 else:
-    print(f"REPRO: NOT_REPRODUCED gpu: {gpu}; auto device_blocks={a.device_blocks}")
+    print(f"REPRO: NOT_REPRODUCED gpu device_blocks={g.device_blocks} with placement {pg}; cpu 0")

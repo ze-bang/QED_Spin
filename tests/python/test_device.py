@@ -146,10 +146,25 @@ def test_gpu_thermal_solves_small_e_blocks_densely():
 
 
 @gpu
-def test_gpu_refuses_oftlm():
-    # OFTLM has only a host lane; it used to run there under device='gpu' and count as a GPU block.
-    with pytest.raises(qed.errors.DeviceUnsupported, match="OFTLM"):
-        qed.thermal(_ring(8), [1.0], method="ftlm", exact_states=4, device="gpu")
+def test_gpu_runs_oftlm_on_the_device():
+    # P7.5: OFTLM (FTLM with exact low states) runs its exact eigensolve and its samples on the
+    # device. Every block of the 10-ring (translations; at most 26 states) is sampled (dense floor 0)
+    # with a Krylov space larger than the block, so each sample is exact and the device and host
+    # runs agree to roundoff at one seed.
+    # With S^z unresolved every block holds +-S^z pairs, and an exact set that cut one would be the
+    # solver's pick (lane-dependent); the exact states are whole levels, so the runs still agree.
+    H = _ring(10)
+    T = [0.3, 1.0, 3.0]
+    trans = [[(i + 1) % 10 for i in range(10)]]
+    for sz, exact, krylov in ((None, 2, 40), ("off", 3, 120)):   # blocks of at most 26 / 102 states
+        sym = qed.Symmetry(spatial=trans, point_group=False, spin_flip="off", time_reversal="off",
+                           **({"sz": sz} if sz else {}))
+        kw = dict(method="ftlm", exact_states=exact, samples=4, krylov=krylov, seed=7, sym=sym, dense_max_dim=0)
+        c = qed.thermal(H, T, device="cpu", **kw)
+        g = qed.thermal(H, T, device="gpu", **kw)
+        assert g.placement["device_krylov"] > 0 and g.placement["host_krylov"] == 0, g.placement
+        np.testing.assert_allclose(g.E, c.E, rtol=1e-9)
+        np.testing.assert_allclose(g.C, c.C, rtol=1e-8)
 
 
 @gpu

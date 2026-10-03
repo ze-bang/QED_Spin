@@ -10,7 +10,7 @@
 
 #include <ed/krylov/lanczos.h>
 #include <ed/krylov/tridiag.h>
-#include <ed/matvec/cpu_backend.h>
+#include <ed/matvec/backend.h>
 
 #include <algorithm>
 #include <cmath>
@@ -36,39 +36,18 @@ struct SampleSpectrum {
     std::vector<double> weights;
 };
 
-double norm2(const ComplexVector& v) {
-    double s = 0.0;
-    for (const auto& c : v) s += std::norm(c);
-    return s;
-}
-
-// Lanczos tridiagonal (and optionally the Krylov basis) of apply_H from v0 on
-// the default CPU backend.
-ed::krylov::LanczosKernelResult run_lanczos(
-    const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
-    const ComplexVector& v0,
-    std::uint64_t N,
-    const ed::krylov::LanczosKernelOptions& opts)
-{
-    auto matvec = [&apply_H](const Complex* in, Complex* out, std::size_t n) {
-        apply_H(in, out, n);
-    };
-    return ed::krylov::lanczos_kernel(
-        ed::matvec::default_cpu_backend(), matvec,
-        static_cast<std::size_t>(N), v0.data(), opts);
-}
-
 }  // namespace
 
-Curves oftlm_cpu(
+Curves oftlm(
+    const ed::matvec::Backend& be,
     const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
     std::uint64_t          N,
     const OftlmOptions&    opts)
 {
     if (N == 0)
-        throw std::invalid_argument("oftlm_cpu: N must be > 0");
+        throw std::invalid_argument("oftlm: N must be > 0");
     if (opts.betas.empty())
-        throw std::invalid_argument("oftlm_cpu: opts.betas must be non-empty");
+        throw std::invalid_argument("oftlm: opts.betas must be non-empty");
 
     const std::size_t nT = opts.betas.size();
     const std::size_t R  = std::max<std::size_t>(opts.num_samples, 1);
@@ -85,34 +64,40 @@ Curves oftlm_cpu(
     const std::vector<double>&        exact_eigs = opts.exact_values;
     const std::vector<ComplexVector>& exact_vecs = opts.exact_vectors;
     if (exact_vecs.size() != exact_eigs.size())
-        throw std::invalid_argument("oftlm_cpu: " + std::to_string(exact_eigs.size()) + " exact values but "
+        throw std::invalid_argument("oftlm: " + std::to_string(exact_eigs.size()) + " exact values but "
                                     + std::to_string(exact_vecs.size()) + " exact vectors");
     for (const auto& v : exact_vecs)
         if (v.size() != N)
-            throw std::invalid_argument("oftlm_cpu: an exact vector has length " + std::to_string(v.size())
+            throw std::invalid_argument("oftlm: an exact vector has length " + std::to_string(v.size())
                                         + ", the block " + std::to_string(N));
     const std::size_t Nv = exact_vecs.size();
-    if (Nv > N) throw std::invalid_argument("oftlm_cpu: more exact states than the block holds");
+    if (Nv > N) throw std::invalid_argument("oftlm: more exact states than the block holds");
 
     // -------------------------------------------------------------------------
     // 2. R random samples, each orthogonalized against the N_V exact vectors.
     // -------------------------------------------------------------------------
+    // The exact vectors in backend memory, uploaded once.
+    std::vector<ed::matvec::Backend::UniqueVec> ev;
+    ev.reserve(Nv);
+    for (const auto& x : exact_vecs) {
+        ev.push_back(be.make_zero_vector(N));
+        be.copy_from_host(x.data(), ev.back().get(), N);
+    }
+    auto v = be.make_zero_vector(N);
     std::vector<SampleSpectrum> samples;
     samples.reserve(R);
     for (std::size_t s = 0; s < R; ++s) {
         std::mt19937 gen = ed::thermal::sample_engine(base_seed, s);
 
-        ComplexVector v = gaussian_vector(N, gen);
-        if (opts.seed_transform) opts.seed_transform(v.data(), N);
-        // Gram-Schmidt against the exact eigenvectors: v -= sum_i |i><i|v>.
-        for (const auto& ev : exact_vecs) {
-            Complex ov(0.0, 0.0);
-            for (std::uint64_t n = 0; n < N; ++n) ov += std::conj(ev[n]) * v[n];
-            for (std::uint64_t n = 0; n < N; ++n) v[n] -= ov * ev[n];
-        }
-        const double vn = std::sqrt(norm2(v));
+        // Drawn (and transformed) on the host, then on the backend.
+        ComplexVector h = gaussian_vector(N, gen);
+        if (opts.seed_transform) opts.seed_transform(h.data(), N);
+        be.copy_from_host(h.data(), v.get(), N);
+        // Gram-Schmidt against the exact eigenvectors, one at a time: v -= |i><i|v>.
+        for (const auto& e : ev) be.axpy(-be.dot(e.get(), v.get(), N), e.get(), v.get(), N);
+        const double vn = be.nrm2(v.get(), N);
         if (!(vn > 0.0)) continue;   // degenerate (v fell entirely in the exact span)
-        for (auto& c : v) c /= vn;
+        be.scale(Complex(1.0 / vn, 0.0), v.get(), N);
 
         // Plain three-term recurrence, DELIBERATELY without
         // reorthogonalization: storing the M-vector basis needed for reorth
@@ -127,7 +112,7 @@ Curves oftlm_cpu(
         lopts.reorth        = ed::krylov::ReorthPolicy::None;
         lopts.keep_basis    = false;
         lopts.breakdown_tol = opts.breakdown_tol;
-        auto lres = run_lanczos(apply_H, v, N, lopts);
+        auto lres = ed::krylov::lanczos_kernel(be, apply_H, static_cast<std::size_t>(N), v.get(), lopts);
 
         ed::krylov::TridiagEig t =
             ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);

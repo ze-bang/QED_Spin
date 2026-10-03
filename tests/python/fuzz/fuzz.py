@@ -1676,18 +1676,8 @@ def _sampled(ctx, method, extra_kw, tol, R_samples):
 
     if len(ctx.orc.energies(ctx.base_R())) == 0:
         return empty_case(ctx, lambda: run(ctx.device, 4)), None
-    if ctx.device == "gpu":
-        if extra_kw.get("exact_states"):
-            # OFTLM has no device lane: device='gpu' is documented to refuse it (DeviceUnsupported).
-            # Should it gain one, the comparison with the host below takes over.
-            try:
-                g = run("gpu", 4)
-            except QedRaised as e:
-                if isinstance(e.exc, ctx.qed.errors.DeviceUnsupported) and "OFTLM" in str(e.exc):
-                    return mk("pass", 0.0, f"documented refusal: {e}", error_class="DeviceUnsupported"), None
-                raise
-        else:
-            g = run("gpu", 4)
+    if ctx.device == "gpu":   # OFTLM too: it has a device lane since P7.5
+        g = run("gpu", 4)
         c = run("cpu", 4)
         d = max(float(np.max(np.abs(np.asarray(getattr(g, q)) - np.asarray(getattr(c, q))))) / N
                 for q in ("E", "C", "entropy", "F", "lnZ"))

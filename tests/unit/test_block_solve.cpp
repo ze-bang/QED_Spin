@@ -106,7 +106,8 @@ TEST_CASE("place: the auto table", "[place]") {
     REQUIRE(ed::auto_row(Task::Eigs).fit);
     REQUIRE(ed::auto_row(Task::Sampled).floor == 16384);
     REQUIRE(ed::auto_row(Task::Sampled).fit);
-    REQUIRE_FALSE(ed::auto_row(Task::Oftlm).fit);
+    REQUIRE(ed::auto_row(Task::Oftlm).floor == 16384);
+    REQUIRE(ed::auto_row(Task::Oftlm).fit);
     REQUIRE(ed::auto_row(Task::DenseBatch).floor == 0);
     REQUIRE_FALSE(ed::auto_row(Task::DenseBatch).fit);
     REQUIRE(ed::auto_row(Task::DynamicsCf).floor == 16384);
@@ -153,9 +154,7 @@ TEST_CASE("place: Gpu refuses in order and says why", "[place]") {
     FakeMachine::reset();
     auto o = req(Task::Oftlm, 1u << 20);
     o.verb = "thermal";
-    REQUIRE(message_of<ed::DeviceUnsupported>(Device::Gpu, o)
-            == "thermal: OFTLM (exact_states > 0) runs on the host only; with device='gpu' use FTLM "
-               "without exact_states, or device='auto' or 'cpu'");
+    REQUIRE(ed::place(Device::Gpu, o, FakeMachine::probe()) == Lane::DeviceKrylov);   // P7.5: OFTLM has a device lane
 
     FakeMachine::reset();
     auto w = req(Task::Eigs, 924, /*kernel=*/false);
@@ -193,7 +192,7 @@ TEST_CASE("place: tasks without a memory row never query memory", "[place]") {
 }
 
 TEST_CASE("place: Auto floors", "[place]") {
-    for (Task t : {Task::Eigs, Task::Sampled, Task::DynamicsCf}) {
+    for (Task t : {Task::Eigs, Task::Sampled, Task::Oftlm, Task::DynamicsCf}) {
         FakeMachine::reset();
         REQUIRE(ed::place(Device::Auto, req(t, 16383), FakeMachine::probe()) == Lane::HostKrylov);
         REQUIRE(FakeMachine::available_calls == 0);   // below the floor: CUDA never touched
@@ -202,9 +201,6 @@ TEST_CASE("place: Auto floors", "[place]") {
     FakeMachine::reset();
     REQUIRE(ed::place(Device::Auto, req(Task::DynamicsFtlm, 65535), FakeMachine::probe()) == Lane::HostKrylov);
     REQUIRE(ed::place(Device::Auto, req(Task::DynamicsFtlm, 65536), FakeMachine::probe()) == Lane::DeviceKrylov);
-    // Oftlm never goes to the device, whatever the size.
-    REQUIRE(ed::place(Device::Auto, req(Task::Oftlm, std::uint64_t{1} << 30), FakeMachine::probe())
-            == Lane::HostKrylov);
     // No kernel, or no device: the host, without raising.
     REQUIRE(ed::place(Device::Auto, req(Task::Eigs, 1u << 20, false), FakeMachine::probe()) == Lane::HostKrylov);
     FakeMachine::reset(false);

@@ -148,6 +148,14 @@ ed::BlockRequest sampled_request(const ed::LinearOperator& op, const ThermalSpec
     one.device = true;
     req.device_bytes = ed::core::footprint(mtpq ? Path::Mtpq : obs.empty() ? Path::FtlmSample : Path::FtlmSampleKept,
                                            one).device;   // one sample
+    if (oftlm) {   // the exact states' Krylov-Schur solve, then the exact vectors beside a sample
+        const std::size_t k = static_cast<std::size_t>(t.exact_states);
+        ed::core::Shape ks = one;
+        ks.k      = k;
+        ks.krylov = 2 * (k + std::max<std::size_t>(k / 2, 8)) + 20;
+        req.device_bytes = std::max<std::uint64_t>(req.device_bytes + 16 * n * k,
+                                                   ed::core::footprint(Path::KrylovSchur, ks).device);
+    }
     return req;
 }
 
@@ -205,40 +213,62 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t,
         ExactBlock x = exact_block(op, tower, obs, /*folded=*/false);
         c = ed::thermal::exact_curves(x.levels, beta, obs.empty() ? nullptr : &x.q);
     } else if (oftlm) {
-        auto host_mv = op.bind_cpu();
-        auto apply_H = [&host_mv](const Complex* in, Complex* out, std::size_t m) { host_mv(in, out, m); };
-        ed::thermal::OftlmOptions ko;
-        ko.num_samples = t.samples;
-        ko.krylov_dim  = t.krylov;
-        // The exact states from the block eigensolver, each locked at ||H v - theta v|| <= kLockRel
-        // s_H. An unconverged solve returns only its certified pairs; the random part then
-        // samples the rest of the block, and the shortfall is reported.
-        // On a spin tower the exact states are the tower lanes' certified spin-S states, and the random
-        // starts are projected onto it.
-        const std::uint64_t space = tower ? tower_dim : n;
-        const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, space - 1));
-        if (want > 0) {
-            BlockSolution ex = tower
-                ? solve_block_tower(ed::matvec::default_cpu_backend(), op, *tower->tower, want, /*vectors=*/true)
-                : solve_block_eigenpairs(ed::matvec::default_cpu_backend(), op, want);
-            if (ex.vectors.size() == ex.values.size())
-                for (std::size_t i = 0; i < ex.values.size(); ++i) {
-                    ko.exact_values.push_back(ex.values[i]);
-                    ko.exact_vectors.push_back(std::move(ex.vectors[i]));
+        // The exact states and the samples on the lane place() chose (the host's or a device's).
+        c = ed::with_backend(b.lane, [&](auto& be) {
+            using B = std::decay_t<decltype(be)>;
+            ed::thermal::OftlmOptions ko;
+            ko.num_samples = t.samples;
+            ko.krylov_dim  = t.krylov;
+            // The exact states from the block eigensolver, each locked at ||H v - theta v|| <= kLockRel
+            // s_H. An unconverged solve returns only its certified pairs; the random part then
+            // samples the rest of the block, and the shortfall is reported.
+            // On a spin tower the exact states are the tower lanes' certified spin-S states, and the random
+            // starts are projected onto it.
+            // The exact states are whole levels (within kClusterRel s_H). A cut level's exact vectors
+            // would be the solver's pick of part of its eigenspace, so the complement the samples see --
+            // and the estimate at one seed -- would depend on the lane (fuzz 2-107: a +-Sz pair cut by
+            // exact_states = 4, device and host 2.7e-4 apart). Up to kLevelSlack more pairs are solved
+            // for, and the level the want-th state belongs to is completed; when it runs past the
+            // solved pairs (so its end is not seen) it is dropped instead -- the estimator stays
+            // unbiased with fewer exact states, and the shortfall is reported.
+            constexpr std::size_t kLevelSlack = 16;
+            const std::uint64_t space = tower ? tower_dim : n;
+            const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(t.exact_states, space - 1));
+            if (want > 0) {
+                const auto ask = static_cast<std::size_t>(std::min<std::uint64_t>(space, want + kLevelSlack));
+                BlockSolution ex = tower ? solve_block_tower(be, op, *tower->tower, ask, /*vectors=*/true)
+                                         : solve_block_eigenpairs(be, op, ask);
+                const std::size_t got = ex.values.size();
+                if (ex.vectors.size() == got && got > 0) {
+                    const double window = ed::numerics::kClusterRel * ed::numerics::scale_or_one(op.norm_bound());
+                    const std::size_t last = std::min(want, got) - 1;   // the level to complete
+                    std::size_t end = last + 1;
+                    while (end < got && std::abs(ex.values[end] - ex.values[last]) <= window) ++end;
+                    std::size_t keep = end;
+                    if (end == got && got < space) {   // its end not seen: the level is dropped
+                        keep = last;
+                        while (keep > 0 && std::abs(ex.values[keep - 1] - ex.values[last]) <= window) --keep;
+                    }
+                    for (std::size_t i = 0; i < keep; ++i) {
+                        ko.exact_values.push_back(ex.values[i]);
+                        ko.exact_vectors.push_back(std::move(ex.vectors[i]));
+                    }
                 }
-        }
-        if (tower) {
-            auto p = tower->projector;
-            ko.seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
-            ko.trace_dim      = tower_dim;
-            ko.min_weight     = ed::numerics::kRoundoffWeight;   // drop the roundoff copies outside the tower
-        }
-        b.exact_asked = want;
-        b.exact_got   = ko.exact_values.size();
-        ko.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
-        ko.betas       = beta;
-        ko.random_seed = seed;
-        c = ed::thermal::oftlm_cpu(apply_H, n, ko);
+            }
+            if (tower) {
+                auto p = tower->projector;
+                ko.seed_transform = [p](Complex* v, std::size_t m) { p->project(v, m); };
+                ko.trace_dim      = tower_dim;
+                ko.min_weight     = ed::numerics::kRoundoffWeight;   // drop the roundoff copies outside the tower
+            }
+            b.exact_asked = want;
+            b.exact_got   = ko.exact_values.size();
+            ko.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
+            ko.betas       = beta;
+            ko.random_seed = seed;
+            const auto H = op.template bind<B>();
+            return ed::thermal::oftlm(be, H, n, ko);
+        });
     } else {
         std::function<void(Complex*, std::size_t)> seed_transform;
         if (tower) {
@@ -329,9 +359,6 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     for (double T : t.temperatures) beta.push_back(1.0 / T);
     detail::require_device(t.device, "thermal");
     ed::parallel::pin_omp_threads_once();
-    if (t.device == Device::Gpu && t.method == ThermalSpec::Method::FTLM && t.exact_states > 0)
-        throw ed::DeviceUnsupported("thermal: OFTLM (exact_states > 0) runs on the host only; with device='gpu' "
-                                    "use FTLM without exact_states, or device='auto' or 'cpu'");
     std::uint64_t seed = t.seed ? t.seed : std::random_device{}();
     const bool u1 = sz_content(H) == SzContent::U1 && s.use_sz;
 

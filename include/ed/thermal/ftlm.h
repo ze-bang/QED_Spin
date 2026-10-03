@@ -136,9 +136,12 @@ struct OftlmOptions {
     std::uint64_t random_seed  = 0;
 };
 
-/// OFTLM on one block on the host (src/engine/oftlm.cpp). apply_H: out = H in, length N.
-Curves oftlm_cpu(const std::function<void(const std::complex<double>*, std::complex<double>*, std::size_t)>& apply_H,
-                 std::uint64_t N, const OftlmOptions& opts);
+/// OFTLM on one block on backend `be` -- the host's or a device's (src/engine/oftlm.cpp). apply_H:
+/// out = H in, length N, on `be`'s memory. The exact vectors go up once; every random start is
+/// drawn on the host (seed_transform runs there), then orthogonalised and run on `be`.
+Curves oftlm(const ed::matvec::Backend& be,
+             const std::function<void(const std::complex<double>*, std::complex<double>*, std::size_t)>& apply_H,
+             std::uint64_t N, const OftlmOptions& opts);
 
 namespace detail {
 

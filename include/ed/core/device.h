@@ -33,7 +33,7 @@ enum class Lane : std::uint8_t { HostDense, HostKrylov, DeviceDense, DeviceKrylo
 enum class Task : std::uint8_t {
     Eigs,           ///< lowest levels of a block, and its prune estimate
     Sampled,        ///< FTLM / mTPQ thermal sampling
-    Oftlm,          ///< FTLM with exact low states: host only
+    Oftlm,          ///< FTLM with exact low states (their eigensolve and the samples on one lane)
     DenseBatch,     ///< a whole spectrum, batched (exact thermal, spectrum)
     DynamicsCf,     ///< T = 0 continued fraction of one target sector
     DynamicsFtlm,   ///< T > 0 FTLM dynamics of one source sector
@@ -51,7 +51,7 @@ struct AutoRow {
     switch (t) {
         case Task::Eigs:         return {std::uint64_t{1} << 14, true};
         case Task::Sampled:      return {std::uint64_t{1} << 14, true};
-        case Task::Oftlm:        return {std::numeric_limits<std::uint64_t>::max(), false};
+        case Task::Oftlm:        return {std::uint64_t{1} << 14, true};
         case Task::DenseBatch:   return {0, false};
         case Task::DynamicsCf:   return {std::uint64_t{1} << 14, false};
         case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, false};
