@@ -24,7 +24,7 @@ if [ "${DEVICE}" = gpu ]; then
         exit 3
     fi
 fi
-source scripts/golden/env.sh
+source scripts/env.sh
 MODE="${MODE:-compare}"; REF="${REF:?set REF=<reference file>}"
 echo "host=$(hostname) device=${DEVICE} commit=$(git rev-parse --short HEAD) mode=${MODE} ref=${REF}" \
      "pythonpath=${PYTHONPATH%%:*} core=${QED_CORE_DIR:-<in package>}"

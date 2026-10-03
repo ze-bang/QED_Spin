@@ -9,7 +9,7 @@
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 export QED_VARIANT="${VARIANT:-cuda}"
-source scripts/golden/env.sh
+source scripts/env.sh
 D="logs/gate/${SLURM_JOB_ID}"; mkdir -p "${D}"
 echo "host=$(hostname) variant=${QED_VARIANT} commit=$(git rev-parse --short HEAD) dirty=$(git status --porcelain -uno | wc -l)"
 scripts/check_env_registry.sh;                                                                    echo "env_registry $?" >> "${D}/rc"

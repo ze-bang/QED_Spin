@@ -29,7 +29,7 @@ export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-32} OMP_PROC_BIND=close OMP_PLACES
 echo "node $(hostname) cpus ${OMP_NUM_THREADS} case ${CASE} model ${MODEL}"
 lscpu | grep -m1 "Model name"
 
-( source scripts/golden/env.sh && python -u bench/xdiag/make_model.py "${MODEL}" "${OUT}/model.txt" ) \
+( source scripts/env.sh && python -u bench/xdiag/make_model.py "${MODEL}" "${OUT}/model.txt" ) \
     || { echo "model file failed"; exit 1; }
 
 # XDiag: its own module set. The CVMFS profile is not clean under set -u.
@@ -41,6 +41,6 @@ lscpu | grep -m1 "Model name"
   julia --project="${X}" bench/xdiag/xdiag_bench.jl "${OUT}/model.txt" "${CASE}" "${OUT}/xdiag.json" ) \
     || { echo "XDiag failed"; exit 1; }
 
-( source scripts/golden/env.sh && cd bench \
+( source scripts/env.sh && cd bench \
   && python -u run.py "${CASE}" --repeats "${REPEATS:-3}" --xdiag "${OUT}/xdiag.json" --log info ) \
     || { echo "QED_Spin case failed"; exit 1; }

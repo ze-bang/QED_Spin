@@ -8,7 +8,7 @@ strict `device="gpu"`, validated requests, `dense_max_dim`, canonical mTPQ, cert
 ## Running (compute node only)
 
 ```bash
-source scripts/golden/env.sh                       # this checkout's python/ + build/$QED_VARIANT
+source scripts/env.sh                       # this checkout's python/ + build/$QED_VARIANT
 python tests/python/fuzz/fuzz.py --seed 1 --cases 150 --device cpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
 python tests/python/fuzz/fuzz.py --seed 1 --cases 150 --device gpu --out DIR --budget-seconds 480 --case-timeout 120 --strict
 python tests/python/fuzz/fuzz.py --seed 1 --replay 1-37 --out /tmp/x    # rerun one case in-process, print it

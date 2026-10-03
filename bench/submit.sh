@@ -2,7 +2,7 @@
 # Submit every benchmark case (or the named ones) as its own job.
 #   bench/submit.sh <account> [case ...]
 #   REPEATS=3 (default): runs per job, each a fresh process; the walltime scales with it.
-# Each job runs bench/run.py on the cuda build of this checkout (scripts/golden/env.sh),
+# Each job runs bench/run.py on the cuda build of this checkout (scripts/env.sh),
 # threads pinned to cores. XDiag twins run through bench/xdiag/twin.sbatch instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,5 +24,5 @@ for c in "${cases[@]}"; do
     # shellcheck disable=SC2086
     sbatch --account="$acct" --job-name="bench_$c" --output=logs/%x-%j.out $res \
         --export=ALL,QED_VARIANT=cuda,CASE="$c",REPEATS="$repeats",OMP_PROC_BIND=close,OMP_PLACES=cores \
-        --wrap='source scripts/golden/env.sh && cd bench && python -u run.py "$CASE" --repeats "$REPEATS"'
+        --wrap='source scripts/env.sh && cd bench && python -u run.py "$CASE" --repeats "$REPEATS"'
 done

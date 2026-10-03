@@ -34,7 +34,7 @@ export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0
 
 if [ "${KIND}" = asan ]; then
     export QED_VARIANT=cpu
-    source scripts/golden/env.sh
+    source scripts/env.sh
     SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
     # Set before the build: test discovery runs every test binary at build time.
     export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1
@@ -56,7 +56,7 @@ if [ "${KIND}" = asan ]; then
     tail -3 "${D}/pytest-asan.log"
 elif [ "${KIND}" = cusan ]; then
     export QED_VARIANT=cuda
-    source scripts/golden/env.sh
+    source scripts/env.sh
     export OMP_NUM_THREADS=4
     nvidia-smi -L
     for t in test_cuda_backend test_backend_blas3 test_block_solve test_row_walk test_thermal_dense_ref; do

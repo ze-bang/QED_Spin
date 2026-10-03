@@ -4,11 +4,15 @@ Build, test and gate tooling. Nothing here is imported by the library.
 
 ```
 scripts/
-├── build.sh                 the one build entry point (see its header); clusters/*.env per site
-├── check_env_registry.sh    the ED_* environment contract (registry <-> sources, no raw getenv)
-├── check_no_print.sh        the library writes nothing to stdout/stderr (log channel only)
-├── gate/                    the gate: build job + CPU and GPU task arrays (tasks.sh lists the stages)
-└── golden/                  golden suite: CPU/GPU compare, record, bless
+├── build.sh                    the one build entry point (see its header); clusters/*.env per site
+├── env.sh                      the job environment every job script sources (see its header)
+├── check_env_registry.sh       the ED_* environment contract (registry <-> sources, no raw getenv)
+├── check_no_print.sh           the library writes nothing to stdout/stderr (log channel only)
+├── check_int_narrowing.sh      no static_cast<int> of a size name
+├── check_tolerance_literals.sh numerical tolerances live in core/numerics.h
+├── gate/                       the gate: build job + CPU and GPU task arrays (tasks.sh lists the
+│                               stages), and the sanitizer stage (sanitize.sbatch)
+└── golden/                     golden suite: CPU/GPU compare, record, bless, retire
 ```
 
 ## Gate (Alliance clusters; never on a login node)
