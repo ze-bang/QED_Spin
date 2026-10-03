@@ -1,8 +1,15 @@
 # Changelog
 
-## Unreleased (0.6.0)
+## 2026-10-03 — 0.6.0: correctness, the operator algebra, the device lanes
 
-Breaking changes so far:
+Breaking changes: a set bit is spin up (`n_up` counts up spins, and full-basis vectors are
+indexed that way); `device="gpu"` is strict, raising where it used to run on the host; refusals
+raise the classes in `qed.errors`; `Operator.conserves_sz`, `qed.lattice`, block Krylov-Schur,
+the `spin` parameter and the orbit-table disk cache are removed; time reversal is K or Theta,
+whichever H has; `EigResult.save` writes format 2, the only one `load_eigs` reads; and for large
+groups `ED_SYM_SUBLATTICE` decides which member represents an orbit, so the representative basis,
+though not the physics, can differ from 0.5.0's. Each is detailed below, with the release's other
+changes, fixes and speed-ups.
 
 - **Errors.** Refusals raise the classes in `qed.errors` (`InvalidRequest`, `EmptySelection`,
   `Unsupported`, `DeviceUnavailable`, `DeviceUnsupported`, `ResourceLimit`,
@@ -54,11 +61,18 @@ Breaking changes so far:
 - **mTPQ** uses the canonical estimator (Sugiura and Shimizu 2013): ln Z, S, F and C no longer
   depend on the temperature grid, and a temperature colder than the trajectory reached is
   refused instead of clamped.
-- **OFTLM's exact states are certified eigenpairs** from the block eigensolver (Krylov-Schur,
-  residual <= 1e-10 s_H). They were the Ritz pairs of one 2 N_V + 30-step Lanczos with no
-  residual check, and an unconverged pair biased ln Z low by an amount no number of samples
-  removes. A block that cannot certify all N_V samples the rest and adds an
-  `oftlm_exact_states` diagnostic. C++: `OftlmOptions` takes the pairs (`exact_values`,
+- **OFTLM's exact states are certified eigenpairs and whole levels, on every device.** They come
+  from the block eigensolver (Krylov-Schur, residual <= 1e-10 s_H); they were the Ritz pairs of
+  one 2 N_V + 30-step Lanczos with no residual check, and an unconverged pair biased ln Z low by
+  an amount no number of samples removes. A block that cannot certify all N_V samples the rest and
+  adds an `oftlm_exact_states` diagnostic. A level cut by `exact_states` had only the solver's
+  pick of part of its eigenspace among the exact states, so the estimate at one seed depended on
+  the lane (a +-Sz pair: device and host 2.7e-4 apart). Up to 16 more pairs are solved and the
+  level the requested count ends in is completed; a level whose end is not among them is dropped
+  (unbiased with fewer exact states; the shortfall is reported). Against the exact thermodynamics
+  (8 samples, job 62684820): j1j2_chain12 E 5.2e-3 -> 3.8e-3, C 1.4e-2 -> 5.8e-3; tfim10 E 7.3e-3
+  -> 4.4e-3, C 1.1e-2 -> 9.1e-3. OFTLM runs under `device="gpu"` (it was refused) and is placed
+  like sampled FTLM under `"auto"`. C++: `OftlmOptions` takes the pairs (`exact_values`,
   `exact_vectors`) in place of `num_exact` and `exact_krylov`.
 - **Observables under `total_spin`.** `expect` and thermal `observables` with a total-spin
   restriction take an operator that is not SU(2) invariant through its SU(2)-scalar part (its
@@ -110,8 +124,9 @@ Breaking changes so far:
   device memory), retrying narrower on an allocation failure; `place()` checks each block's own
   device working set; the device Krylov-Schur cycle is capped by free device memory (it was
   uncapped) and the kept-basis GS vector by the RAM; dense batches on a device are solved in
-  pieces of at most 256 MiB (they held every block's matrix at once), with a host fallback; the
-  automatic eigs dense crossover is capped by memory and at 8192 (it grew as 160 k);
+  pieces of at most 2 GiB (`ED_GPU_DENSE_BATCH_GIB`; they held every block's matrix at once), a
+  block larger than a piece alone on the device, with a host fallback; the automatic eigs dense
+  crossover is capped by memory and at 8192 (it grew as 160 k);
   `multiplet()` builds only the vectors asked for (`vectors()` asks for k); dynamics holds one
   target sector at T = 0 and one source subspace with its targets at T > 0 (it cached every
   sector of every subspace), forms its overlap matrix row by row, and sizes its host fan-out and
@@ -125,7 +140,7 @@ Breaking changes so far:
   tables, the point-group monomials) are built only where they fit, the reduced CSR only below
   2^32 states, and the BLAS GEMMs check their dimensions; a dimension is narrowed only through
   `ed::core::checked_narrow`, and a build-stage lint (`scripts/check_int_narrowing.sh`) keeps it so.
-  C++: `oftlm_cpu` applies H with a `std::size_t` length.
+  C++: OFTLM (`ed::thermal::oftlm`) applies H with a `std::size_t` length.
 - **Host Krylov results repeat bit for bit** at a fixed seed and thread count: the BLAS-1 sums
   add per-thread partials in thread order (they combined in arrival order, so T = 0 dynamics
   differed run to run in the 11th digit).
@@ -218,12 +233,16 @@ Breaking changes so far:
   `dynamics`.** Blocks up to that dimension are diagonalised densely. `eigs` used it only as a
   lower bound (the crossover was max(dense_max_dim, 1600) for k <= 10, 160 k above); it now
   honours it exactly, and `None` (the default) keeps the automatic value. `thermal`'s sampled
-  methods diagonalise blocks up to it (default 512; 0 always samples); `dynamics` passes it to
-  its ground-state solve.
+  methods diagonalise blocks up to it (default 512; 0 always samples) whatever is asked of them:
+  a spin tower on Q^dag H Q (its ln Z counts the tower's own levels instead of the block's
+  rescaled by tower_dim / dim), observables through the eigenvectors (either kept such a block
+  sampled). Under `device="auto"` the blocks kept on the host join the concurrent small-block
+  pool (they ran one after another). `dynamics` passes it to its ground-state solve.
 - **One eigensolve per block, on every device.** `eigs` blocks placed on the device
   (`device="gpu"`, or `"auto"` above 2^14 states) run the same certified lanes as
   `device="cpu"`: the k = 1 scan with its contiguous Paige gate and max(40k, 400) steps,
-  Krylov-Schur at tolerance 1e-9 with 2k + 60 vectors per cycle, and residual-guarded vectors.
+  Krylov-Schur at tolerance 1e-9 with a cycle of 2p + 20 vectors, p = k + max(k/2, 8), within
+  2k + 60 and the memory cap, and residual-guarded vectors.
   A device block that cannot certify its levels is partial, so `eigs` (and ground-state
   `dynamics`) raise unless `allow_partial`, where they used to return uncertified values.
   `"auto"` blocks that stay on the host are solved exactly as under `"cpu"` (same lanes,
@@ -246,6 +265,171 @@ Breaking changes so far:
   on), and the GiB budgets (`ED_SYM_SECTOR_CSR_BUDGET_GIB`, `ED_SYM_REP_RANKTABLE_BUDGET_GIB`,
   `ED_XSEC_CSR_BUDGET_GIB`, `ED_GPU_SYM_CACHE_GIB`) honour 0 as "nothing fits" instead of
   falling back to the default. `ED_ENV_STRICT=false` no longer turns strict mode on.
+- **`dynamics` computes cross-correlations, several probes per call.** `qed.dynamics(H, O, omega,
+  B=None, ...)`: `O` is a probe or a sequence of them; `B=None` gives each O's autocorrelation, a
+  `qed.Operator` every <O_i^dag B>, a sequence as long as `O` the pairs <O_i^dag B_i>, and `"all"`
+  the matrix <O_i^dag O_j>. The probes of a call share the ground-manifold solve (T = 0) and each
+  sample's source Lanczos (T > 0). `S` is real for autocorrelations and complex once a probe pairs
+  two operators; the probe axes lead (`[len(O)]`, or `[len(O), len(O)]` for `"all"`; none for a
+  single `O`, whose result keeps its shape). `_core.sectors.dynamics` takes `probes`, a list of
+  `(A, B)` pairs (B None: A's autocorrelation), in place of `O`.
+- **`dynamics` uses the point group and the spin flip.** At T = 0 the ground manifold is solved on
+  the caller's folded blocks (it was solved on bare momentum sectors, residues, flip and time
+  reversal cleared) and each level is expanded into its whole multiplet in the momentum sectors the
+  probes act in; the continued fractions run on the target's one-dimensional irrep blocks, and only
+  the part of O|psi> in irreps of dimension > 1 on the momentum sector. `device="gpu"` and momentum
+  selections keep the momentum-sector solve. At T > 0 each probe sums over the sources its own
+  symmetries relate (the spin flip; momenta in one orbit of the residues the probe follows), so one
+  probe's result no longer depends on the other probes of the call, and a source's samples are
+  seeded by its identity (n_up, parity, momentum), not by its position in the job: at a fixed
+  `seed`, finite-temperature results change at sampling level. A cross-sector operator walks its
+  first apply and builds its CSR at the second. FTLM dynamics reorthogonalises locally (DGKS3) in
+  sectors of at least 2^16 states and more than 4x the Krylov depth, full CGS2 elsewhere (chain24,
+  T = 1: 1.3x less wall time, spectral weight moved by 5e-7..8e-7 against a seed-to-seed spread of
+  4e-4; jobs 62586014 / 62586016). Bench `chain30_dyn0` 57.6 s against 258.6 s (probe 62604898;
+  62531535), `chain24_dynT` ~85 s against 657 s (62586014/16; 62531536). Fixed: `dynamics` still
+  refused `time_reversal="require"` for an H that has Theta but not K; it takes either, as `eigs`
+  and `thermal` do.
+- **Every irrep is a group sector; the isotypic (W) path is gone.** A sector of an irrep of
+  dimension d > 1 holds, per representative, the irrep's partner-0 states (about C(N, n_up) / |G_k|
+  states per row of the irrep); it was the isotypic projection W of the whole momentum sector.
+  Little co-groups whose factor system is a coboundary or genuinely projective (chi_k(a_ef) != 1)
+  take the omega-projective irreps; such a star used to be declined and solved as one unreduced
+  momentum-sector block. Group sectors also serve a parity half and the full space. A level's
+  dimension and multiplicity count states as before; `block_stats` `kind` is `"group"` or
+  `"plain"` (`"isotypic"` is gone); `expect`, `matrix_element`, `vectors()` / `multiplet()` and
+  `EigResult.save` / `load_eigs` read d > 1 sectors (files written before load as d = 1; the
+  format stays 2).
+- **`total_spin` solves the bare H.** No verb applies the Lowdin projector per H apply any more.
+  `eigs` starts its Krylov lanes from random valence-bond states of spin S projected on the block,
+  certifies each pair by ||(S^2 - S(S+1)) psi||, and falls back to H + mu f(S^2) when an off-tower
+  level displaced a tower level; `spectrum` and exact `thermal` diagonalise H on the tower's states
+  (Q^dag H Q); FTLM, OFTLM and FTLM dynamics start from P_S of a Gaussian and drop Ritz pairs of
+  roundoff weight (<= 1e-20); mTPQ re-projects its iterate when it has left the tower. Pruning runs
+  under `total_spin` (it was off). Tower dimensions come from Burnside's count (no engine walk at
+  Sz = S and S + 1), and S^2 is applied as S- S+ + Sz(Sz + 1) through the sector one spin up (~N/2
+  entries a row against ~N^2/4), on a spin-flip sector through the sector without the flip. The
+  P1-matvec-cpu-04 repro (22-ring, S = 0) read eigs 5.5x and FTLM 14.2x the plain sector's cost
+  (dev check 62550806); the su2_overhead bench now reads eigs 1.41x / 1.63x / 1.64x and FTLM 1.86x
+  / 2.29x / 2.26x at N = 22 / 24 / 26 (job 62650876). Fixed: the projected operator put the
+  off-tower levels an absolute 1 above the band, which made the relative tolerances absolute for
+  an H in small units (chain12 `total_spin=0` at H scaled by 1e-6: |dE| / s_H 4.4e-11; GPU chain11,
+  S = 1/2: E0 2.4e-5 relative off).
+- **Krylov-Schur restarts thick.** The k > 1 solver restarted from one Ritz vector every cycle, so
+  the k levels converged one after another: 4.28x ARPACK's matvecs at k = 6, 2.43x at k = 3 (bench
+  62531530). A restart now keeps p = k + max(k/2, 8) Ritz vectors in a cycle of 2p + 20 (within
+  2k + 60 and the memory cap): 1.15x at k = 6, 1.09x at k = 3, 0.73x at k = 1 (job 62538550). The
+  certified ground-state vector is one Paige-gated recurrence on every block size (it ran a kept
+  basis for a fixed min(n, 200) steps below 4.2M states and a two-pass lane above), and its guard's
+  extra apply is gone (141 applies / 1.7 s with vectors against 120 / 1.6 s without, job
+  62539674). The convergence gates read the tridiagonal's ends in O(m) after every step (they read
+  every 10th step), and the k = 1 scan drops its ring of 8 reorthogonalisation vectors (overhead 1%
+  of the matvec at dim 2.7M, job 62542084). The CGS2 primitives stream the basis in 2048-element
+  chunks (they read ~40 vectors element by element: orthogonalisation took 278 s of a 437 s bfg36
+  block, job 62538955), and host vector copies above 65536 entries run in parallel. Blocks of one
+  or two states take the dense lane at any crossover (`dense_max_dim=0` counted them
+  `host_krylov`).
+- **Real blocks run in real arithmetic.** A host block whose reduced CSR is real (a real H in a
+  real sector) runs its `eigs` lanes (k = 1 scan, ground-state vector, Krylov-Schur, pruning
+  estimate) on real vectors, half the bytes an entry; `block_stats` `lane` reads `"csr-real"`.
+  `ED_SYM_REAL=0` (new) keeps every block complex; the two agree to 1e-11 (job 62543421). FTLM,
+  mTPQ, OFTLM and dynamics stay complex.
+- **The sector CSR keeps its values in a dictionary.** Each entry stores a 1- or 2-byte id into the
+  matrix's distinct values (up to 65536; past that, full values): 5-6 bytes an entry against 20
+  (tri36 Gamma A1 took 24 GB at 20.1 B/nnz, bench 62531541). The bits are the same, so applies give
+  the same numbers. The build no longer holds its slabs beside the finished arrays: tri36 Gamma A1
+  peak 15.2 -> 8.2 GiB, wall 96 s unchanged (job 62647282). The CSR budgets
+  (`ED_SYM_SECTOR_CSR_BUDGET_GIB`, `ED_XSEC_CSR_BUDGET_GIB`) charge 7 bytes an entry (they charged
+  20 and sent blocks that fit to the walk: tri36 Gamma E1 builds 4.70e9 entries at 6.07 B/entry, job
+  62550577), and a full-value CSR is built only within the budget, against its exact size.
+  `block_stats` `csr_bytes` is the CSR's own size.
+- **Rank tables only where small; rank buckets elsewhere.** `ED_SYM_REP_RANKTABLE_BUDGET_GIB`
+  defaults to 0.5 (was 8): N <= 28 at half filling. A sector without a rank table finds a
+  representative in its rank bucket (at most 64 MB, a rep or two a lookup) instead of a binary
+  search over all its reps (25 dependent cache misses at tri36 Gamma A1); indices are the same.
+  Against the table the buckets cost 3-7% of the wall time and save 0.3-0.6 GiB at N = 28-30:
+  chain30 k = 0 1.39 -> 1.44 s, peak 1.88 -> 1.30 GiB; chain28 FTLM 134 -> 144 s, 1.25 -> 0.93 GiB
+  (jobs 62644824-29). A device sector without a resident rank lookup narrows its search the same
+  way, with state buckets over its sorted reps (it binary-searched all of them).
+- **Pruned `eigs` builds a block once.** A pruning candidate keeps its star (sectors, operators,
+  CSRs) while the kept stars fit a quarter of the RAM the job may still allocate, and a survivor
+  solves on it; survivors walked their star and built their CSR again (22-ring, k = 4: 33 builds
+  against 28; no extra build now, job 62534980).
+- **Host dense solves are LAPACK's, and concurrent.** Dense eigenpairs with vectors (`eigs` blocks,
+  exact thermal <O>) come from LAPACK MRRR (dsyevr on a real block, else zheevr) for the wanted
+  index range; they came from single-threaded Eigen. Every host block of a dense batch
+  (`spectrum`, exact `thermal`) queues within 16 GiB or a quarter of the RAM left, and the queue is
+  solved concurrently, one serial LAPACK call per thread, largest first (zheevd does not scale with
+  threads on these nodes; a lone block keeps the threaded solve): tri20 exact thermal 3256 -> 876 s
+  (job 62634654), the NLCE <= 16-site exact run 855-912 -> 597 s (62634655). A block's thread team
+  (FTLM, OFTLM, mTPQ) is no longer capped at 8: one thread per 8192 states up to the whole team.
+- **The device builds and applies a reduced CSR.** Device lanes applied every sector operator by
+  the matrix-free walk, canonicalising each connection over |G| on every apply (tri36 Gamma A1:
+  ~3.2 s an apply on an H100). A 1-dim sector's CSR is now built on the device, once, with
+  dictionary values, and applied by a deterministic SpMV (a k-vector apply equals k single applies
+  bit for bit), within `ED_GPU_CSR_BUDGET_GIB` (new; unset: half the free device memory at the
+  bind; 0: the walk). An operator applied only once or twice keeps the walk. `block_stats` `lane`
+  reads `"device-csr"` or `"device-gather"` (was `"device"`), with the device CSR's `nnz` and
+  `csr_bytes`. H100: tri36_G_A1_char_gpu 47.9 s against 221 s (job 62664490), bfg36_k3_gpu 91.0 s
+  against 1443 s (62664492), chain32_abelian_eigs_gpu 64.9 s against 271 s (62664491); an apply
+  0.16-0.21 ms against 0.39-0.62 ms on 4 host cores (62669301). Both device walks canonicalise
+  without idle lanes: the CSR build deals a row's targets densely to the warp's lanes, the
+  per-apply gather lets each lane step its own cursor, and `csr_count` / `csr_fill` take
+  `__launch_bounds__(256, 3)`. Results are bit-identical; H100: tri36 Gamma A1 CSR build 13.4 ->
+  8.4 s (62686313 -> 62689560), bfg36 builds 21.9 -> 15.9 s (62686314 -> 62689561), tri36 gather
+  3.24 -> 2.55 s/apply (62686880 -> 62687416).
+- **Dense spectra on the device: large blocks, real blocks, 2 GiB batches.** The device solves
+  with cuSOLVER's 64-bit syevd, a real block in real arithmetic (H100, n = 6000: 0.44 s against
+  0.56 s complex, job 62670841), and a block larger than a batch alone when it and its workspace
+  fit in half the free device memory (every block above ~4096 states went to the host, even under
+  `"gpu"`). Blocks are formed in place from their CSR. A batch holds up to 2 GiB of matrices:
+  `ED_GPU_DENSE_BATCH_GIB` (new), still capped by a quarter of the free device memory and of the
+  RAM. Under `device="auto"` a dense block below 1024 states goes to the host pool, at or above to
+  the device; under `"gpu"` every block of a dense batch goes to the device unless it does not fit
+  there. H100: nlce_le16_exact_gpu 125.2 s against 648 s (job 62676475);
+  tri20_lg_exact_thermal_gpu 40.9 s against 876 s on the CPU (62676476).
+- **`device="gpu"` runs sectors of irreps of dimension > 1.** Their reduced CSR, built on the
+  host, is uploaded and applied by the device SpMV (they raised `DeviceUnsupported`). `"gpu"` now
+  refuses such a sector only when that CSR does not fit the block's CSR budget or
+  `ED_GPU_CSR_BUDGET_GIB`, and the message says so; a CSR that cannot be uploaded after the block
+  was placed raises `ResourceLimit`. `eigs` blocks of at most 32 states or with 2k >= dim, and
+  blocks within `dense_max_dim`, are still solved densely on the host.
+- **Device Krylov lanes read their basis in place.** `CudaBackend` runs a batched dot or axpy as
+  one gemv per run of contiguous columns, with no staging copy and no state between calls; the
+  Lanczos basis is one contiguous block; the device ground-state lane keeps its basis under the
+  host's rule; every device block of a thread shares one backend (a cuBLAS handle was made per
+  block). H100: chain28_ftlm_gpu 24.3 s (34.4 s after the device CSR, 63.6 s before it) (job
+  62678448), bfg36_k3_gpu 78.2 s (81.7 s; 62678447), results bit for bit the same. Small device
+  blocks stay latency-bound (18-ring FTLM: 3.0 s on 59 device blocks against 0.3 s on the host,
+  62678446); `"auto"` keeps them on the host (auto / cpu 1.0, 62679058).
+- **Representatives through sublattices (`ED_SYM_SUBLATTICE`, new).** When the group permutes the
+  blocks of a block system (the sublattices of a superlattice), an orbit's representative is its
+  member least in a key order where each block is a contiguous bit range: a table gives the
+  leading block of every image, and only the "candidate" elements that reach the least one need a
+  full image, not all |G| (Wietek and Lauchli 2018). Unset, the variable turns it on for N >= 24
+  with at least 16 distinct site permutations for a verb on the device (`device="gpu"`, or `"auto"`
+  with a visible GPU) and for `eigs`, `spectrum` and exact `thermal`, and with at least 64 for host
+  sampled `thermal` and host `dynamics`; `1` turns it on whenever a block system exists, `0` never. The physics is unchanged, but the representative basis differs by phases, so
+  seeded sampled results move at sampling level. A result keeps the rule it was computed with:
+  `EigResult.save` stores each basis's key-order fingerprint as `basisN_sublattice`, a file without
+  it loads as the plain order, and `load_eigs` refuses a basis whose key order this build does not
+  reproduce or whose stored states are not that order's representatives. The host sparse apply
+  loses cache locality on chains (chain28 FTLM +18%, 62703856), hence the host's higher threshold.
+  Before -> after (H100 or a 32-core host): tri36_G_A1_char_gpu 33.3 -> 12.1 s (62702354),
+  tri36_G_A1_char_cpu 86.0 -> 25.8 s (62697938 -> 62702358), bfg36_k3_gpu 73.3 -> 47.0 s
+  (62702356), tri30_lg_eigs_cpu 74.8 -> 54.9 s on one node (62703856), and the device gather of
+  the new bench case tri36_k0_gpu (the Gamma sector of translations alone on the 6x6 triangular
+  torus, whose CSR does not fit the device) 3.63 -> 2.0 s/apply (62697932).
+- **Results that move.** Fixed-seed OFTLM estimates whose exact states are degenerate (no
+  symmetry) change within sampling error: Krylov-Schur returns another basis of each degenerate
+  eigenspace and the chunked CGS2 reorders its sums, so the random part samples other vectors;
+  whole-level exact states move those that cut a level (golden `thermal/oftlm/none` of
+  j1j2_chain12, square4x3, tfim10; as close to the exact thermodynamics as before or closer).
+  Fixed-seed `dynamics` at T > 0 changes with the per-source seeds and the source folding
+  (j1j2_chain12 and square4x3 `dynamics/T=1`, max rel 6.5e-3 to 1.4e-2, as close to the exact
+  Lehmann sum as before). On the device, H applied through its CSR sums each row in CSR order (a
+  sampled T = 1 record moves 1.4e-8). Dense eigenpairs (LAPACK MRRR, cuSOLVER) and real lanes move
+  at roundoff.
 
 C++ API (installed headers; nothing in Python changes):
 
@@ -295,15 +479,16 @@ C++ API (installed headers; nothing in Python changes):
 - The thermal kernels return `ed::thermal::Curves` (`<ed/thermal/curves.h>`): ln Z, E, the
   central second moment V and <O> per beta. `FtlmResult` is `{curves,
   ground_state_estimate}` (its temperatures / partition_function / entropy / free_energy
-  fields and `FtlmOptions::temperatures` are gone; the curves follow `betas`), `oftlm_cpu`
+  fields and `FtlmOptions::temperatures` are gone; the curves follow `betas`), `oftlm`
   and `mtpq<Backend>` return `Curves`, `MtpqThermo` holds `curves`, and
   `mtpq_canonical_thermo` takes betas. `ed::thermal::exact_curves` is the one exact formula.
   Gone: `ThermodynamicData`, `FTLMResults` (`<ed/core/thermal_types.h>`),
   `compute_ftlm_thermodynamics`, `average_ftlm_samples` and
   `<ed/symmetry/canonical_thermo.h>`.
-- `ed::krylov::tridiag_eig(alpha, beta, m, vectors)` (`<ed/krylov/tridiag.h>`) is the one
-  eigensolve of a Lanczos tridiagonal, Krylov-Schur's restart and the k = 1 scan's
-  convergence gate included (they used Eigen's dense solver; eigenvalues move at roundoff).
+- `ed::krylov::tridiag_eig(alpha, beta, m, vectors)` (`<ed/krylov/tridiag.h>`) is the one full
+  eigensolve of a Lanczos tridiagonal (Eigen's dense solver was used; eigenvalues move at
+  roundoff); the convergence gates read `tridiag_ends` and Krylov-Schur's restart solves its
+  projected matrix with `symmetric_eig` (both below).
   `diagonalize_tridiagonal_ritz`, `<ed/krylov/tridiag_eigensolver.h>` and
   `<ed/krylov/ritz_convergence.h>` (`make_smallest_ritz_convergence`) are gone.
 - `ed::thermal::gaussian_vector(n, engine)` (`<ed/thermal/sample_seed.h>`) is the one random
@@ -317,12 +502,11 @@ C++ API (installed headers; nothing in Python changes):
   `thermal` block small enough for the dense solve uses the engine's dense solve, the one
   `method="exact"` uses (results move at roundoff). The continued fraction is
   `ed::observables::continued_fraction` in `<ed/observables/cf_spectral_kernel.h>`.
-- `OftlmOptions` and `oftlm_cpu` are declared in `<ed/thermal/ftlm_kernel.h>`
+- `OftlmOptions` and `ed::thermal::oftlm` (below) are declared in `<ed/thermal/ftlm.h>`
   (`<ed/thermal/oftlm_kernel.h>` is gone). `<ed/observables/ftlm_cross_irrep_kernel.h>` and its
-  host wrapper `ftlm_cross_irrep_kernel_one_sector` are gone: `FtlmCrossIrrepOptions` and
-  `FtlmCrossIrrepSectorResult` live in `<ed/observables/ftlm_dynamics_kernel.h>`, whose
-  `ftlm_dynamics_kernel(backend, ...)` serves the host too. Gone:
-  `CrossSectorOrbitObservable::as_apply_function`.
+  host wrapper `ftlm_cross_irrep_kernel_one_sector` are gone: `FtlmCrossIrrepOptions` lives in
+  `<ed/dynamics/ftlm_dynamics.h>`, whose `ftlm_dynamics_kernel(backend, ...)` serves the host too
+  and returns `FtlmDynamicsResult` (below). Gone: `CrossSectorOrbitObservable::as_apply_function`.
 - The vector element type is a template parameter (only `std::complex<double>` is
   instantiated): `ed::matvec::Backend`, `CpuBackend` and `CudaBackend` are aliases of
   `BasicBackend<Complex>`, `BasicCpuBackend<Complex>` and `BasicCudaBackend<Complex>`, each
@@ -382,15 +566,109 @@ C++ API (installed headers; nothing in Python changes):
 
   The engine's sources are `src/engine/` (the former `src/solvers/little_group/lg_*.cpp` and
   `src/solvers/cpu/oftlm.cpp`), `src/basis/`, `src/dynamics/` and `src/gpu/`.
+- `ed::sectors::dynamics(H, s, probes, d)` takes `std::vector<Probe>` (`Probe{A, B}`, B null: A's
+  autocorrelation) and `DynamicsCurves::S` is complex, `[probe][row][omega]`;
+  `dynamics(H, s, O, d)` stays as O's autocorrelation. In `ed::observables`:
+  `cross_spectral_from_vectors` (`<ed/dynamics/cf.h>`) gives a cross pair's S_AB in pole form, and
+  `ftlm_dynamics_kernel(be, H_src, dim_src, targets, temperatures, omega, opts)` runs one source
+  for every `FtlmDynamicsTarget{dim, H, A, B, batch}` and returns `FtlmDynamicsResult` (Z, S per
+  target, E_min); its per-target form and `FtlmCrossIrrepSectorResult` are gone;
+  `kLocalReorthMinDim`. `LanczosKernelOptions::on_vector` hands each Krylov vector to the caller
+  as it forms. `ed::thermal::block_seed(base, key)` (`<ed/thermal/sample_seed.h>`) seeds a block
+  by its identity.
+- `oftlm_cpu` is `ed::thermal::oftlm(be, apply_H, N, opts)`, on the host's or a device's backend.
+  `FtlmOptions::min_weight` and `OftlmOptions::min_weight` drop Ritz pairs of small start weight,
+  `MtpqOptions::scrub` / `scrub_every` (and `MtpqRun`'s) re-project an mTPQ iterate. `Task::Oftlm`
+  takes Sampled's 'auto' row; `kDeviceDenseMinDim` (`<ed/core/device.h>`) is the 'auto' dense
+  crossover. `<ed/core/numerics.h>`: `kClusterRel` (1e-8), `kRoundoffWeight` (1e-20).
+- `krylov_schur_kernel(be, H, n, seed, opts, fresh = GaussianStart{})` is thick-restart; `fresh`
+  draws its fresh starts. `ed::krylov::KrylovBasis<Scalar>` is a contiguous basis, and
+  `LanczosKernelResult::basis` is one (column j is `basis[j]`; it was a vector of `UniqueVec`).
+  `tridiag_ends(alpha, beta, m, count)` (dstevx, O(m) a value) feeds the convergence gates and
+  `symmetric_eig(a, m)` (dsyevd) solves Krylov-Schur's projected matrix after a restart, in
+  `<ed/krylov/tridiag.h>`.
+- Real arithmetic: `BasicCpuBackend<double>` (one template body with the complex one);
+  `LinearOperator::is_real()` and `bind_cpu_real()` (`RealMatvecFn`); `bind<B>()` returns
+  `BoundFn<B>` on B's scalar type (`bind<BasicCpuBackend<double>>()` is `bind_cpu_real()`);
+  `ed::with_backend(lane, op, fn)` runs a host lane of a real `op` on the real backend unless
+  `ED_SYM_REAL=0`; `ed::matvec::RealCsrView`; `footprint`'s `Shape::scalar_bytes`.
+- `ReducedSymmetryCsr` keeps its values in `val` or as `id8` / `id16` into `dict`: read them with
+  `value(e)`; `dictionary()`, `bytes()`; `nnz()` counts `col_idx`; `spmv_with(value, in, out)` is
+  public. `build_cross_csr` / `build_sector_csr` take `max_full_bytes`; `kCsrDictMax` (65536);
+  `csr_estimate_bytes` is 7 bytes an entry. `ed::core::ReleasingAllocator`
+  (`<ed/core/numa_vector.h>`) unmaps blocks of 1 MiB or more on release.
+- `ed::symmetry::decompose_projective_irreps(mult, omega)` (`<ed/basis/irreps.h>`). `RepSectorData`
+  gains `irrep_dim`, `irrep_D`, `class_rank`, `class_C`, `rep_class`, `state_offset` and `states()`
+  (the basis size: the reps for d = 1), and rank buckets (`build_buckets`, `bucket_off`); irreps of
+  dimension up to `ed::matvec::kMaxIrrepDim` (8). `<ed/ops/row_walk.h>`: `connection(P, s, g, t,
+  h)`, one group's connection.
+- `<ed/gpu/rep_matvec.h>`: `DeviceCsr`, `DeviceCsrInfo`, `build_sector_csr_gpu`, `upload_csr_gpu`,
+  `csr_matvec_gpu`, `csr_matvec_gpu_multi`, `device_csr_info`, `download_csr`.
+  `<ed/gpu/little_group.h>`: `LgBlocksPacked` holds doubles (a real block n^2, a complex one 2 n^2,
+  each on 256 bytes), filled by `add_block(n, real)` / `add_real` / `add_complex`; `block_dim` is
+  int64 and `block_irrep_dim` is gone; `lg_block_workspace_bytes_gpu(n, real)`. `CudaBackend` keeps
+  no staging cache; `ed::thread_cuda_backend()` (`<ed/core/select_backend.h>`) is the calling
+  thread's backend, which `with_backend` uses; it is held in a `thread_local` `unique_ptr` and
+  freed at the thread's exit, so compute-sanitizer's leak check is clean.
+- Gone with the W path: `CasimirProjectedOperator`, `kSu2ReprojectFreq` and
+  `LowdinS2Projector::project_device` (`<ed/ops/casimir_projector.h>` keeps `LowdinS2Projector`);
+  engine-private `ProjectedBlockOp`, `SparseColumns`, `BlockApplyProfile`, `CharAliases`,
+  `lift_to_rep` and `LittleGroupOptions::little_aliases` / `declined`. `auto_threads_for_dim` has
+  no ceiling of 8.
+- **Sublattice coding.** `<ed/basis/sublattice_code.h>` (new): `SublatticeCode` (`of(perms, flips,
+  G, N[, mode])`, cached by the element list; `view()`, `fingerprint()`), `SublatticeView` (the
+  tables a host or device canonicaliser reads: `key`, `least_lead`, `for_each_candidate`), and
+  `SublatticeRuleScope` / `sublattice_relaxed_hint()`, the relaxed-or-strict rule a verb sets for
+  its own duration. `CompiledGroup::sublattice()`, `sublattice_shared()` and `is_canonical(s)`;
+  `content_hash()` includes the key order. `OrbitTable::slc` and `RepSectorData::slc` /
+  `sublattice()` carry the code a sector's representatives were found with, which
+  `RepSymmetryBasisPolicy::slc` and `DeviceRepSymmetryBasisPolicy::slc` read (`for_each_image`);
+  the device policy gains state buckets (`bucket_off`, `bucket_base`, `bucket_count`,
+  `bucket_shift`). `RepSectorData::make_policy()` is no longer `noexcept`.
+- **Tests.** The unit tests link `tests/common/catch2_main.cpp` instead of `Catch2::Catch2WithMain`:
+  any failed assertion exits 1 and a run whose test cases were all skipped exits 77, ctest's new
+  `SKIP_RETURN_CODE`. Catch2's own main exits with the failed-assertion count, so a test with
+  exactly four failures read as skipped (code 4). `test_harness_exit` checks both codes.
 
 Messages: a `thermal` block refused under `device="gpu"` is named like an `eigs` block
-("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is an isotypic (W)
-block, which has no device kernel; use device='auto' or 'cpu'"). A sampled `thermal` block
-small enough for the dense solve whose LAPACK solve fails (a non-finite H) raises
+("thermal: device='gpu', but the block of star K, irrep I, n_up N (dim D) is a sector of an irrep
+of dimension > 1, whose device kernel -- its reduced CSR, built on the host and uploaded -- does
+not fit the block's CSR budget or the device CSR budget; use device='auto' or 'cpu'"). A sampled
+`thermal` block small enough for the dense solve whose LAPACK solve fails (a non-finite H) raises
 RuntimeError instead of falling through to the sampling kernel. A non-finite Lanczos
 tridiagonal (again a non-finite H) raises `ConvergenceError` everywhere: FTLM and OFTLM used to
 drop the sample, dynamics the source, the continued fraction to shift by 0, and the pruning
 estimate to keep the block.
+
+Repository:
+
+- **One version, pyproject.toml's.** CMake reads it (it said 0.1.0, which the installed
+  `QEDConfigVersion.cmake` and the docs reported), `qed._core.__version__` carries it, and
+  `qed.__version__` is `_core`'s, so the module actually loaded reports its version whether it was
+  installed or put on `PYTHONPATH`. The `docs` extra is the one list of docs requirements
+  (`docs/requirements.txt` is gone). One author and one URL, CITATION.cff's, in pyproject.toml and
+  `docs/conf.py`.
+- **One job environment, `scripts/env.sh`** (was `scripts/golden/env.sh`), which the gate, the
+  golden harness, the sanitizer stage and the benches source. It sets no personal paths:
+  `QED_VENV` and `QED_PYBIND11_DIR` default to none, and a site file outside the repository
+  (`QED_SITE_ENV`, default `~/.config/qed/site.env`, sourced first when it exists) sets them. A GPU
+  gate task on a node without a usable device stops at once instead of reporting every
+  `device="gpu"` case as a refusal.
+- **Gate.** New stages run pytest, ctest and the grid's level, thermal and T = 0 dynamics cells
+  with `ED_SYM_SUBLATTICE=1`: unset, it engages only from 24 sites, which no small test reaches
+  (`tests/python/test_sublattice.py` compares the two orders directly). The sanitizer stage's GPU
+  driver (X04) reaches every device path (Krylov lanes forced, sectors of 2-dim irreps, OFTLM,
+  cross dynamics), and compute-sanitizer is clean, 12 of 12 checks (62692162).
+- **CI is rewritten.** GCC Release; Clang Debug with ASan/UBSan; one Python job that builds the
+  wheel and runs pytest, every example and the CPU coverage grid; a CUDA compile-only job (hosted
+  runners have no device; the cluster gate tests the device lanes); and a clang-tidy job.
+  `.clang-tidy` keeps only the bug-finding checks, with `WarningsAsErrors: '*'`, so any of their
+  warnings fails the job (a justified one takes `NOLINT(check)` at the call site).
+- **Formatting.** One clang-format / ruff format pass over the tree; pre-commit enforces both.
+- **Docs and examples.** New guides `docs/symmetry.md`, `docs/operators.md` and
+  `docs/dynamics.md`; `docs/architecture.md`, `README.md`, `CONTRIBUTING.md` and the API pages are
+  rewritten. New examples `05_operator_algebra.py` (the `qed.Operator` algebra, exact symmetry
+  checks, derived observables) and `06_cross_dynamics.py` (several probes, `B="all"`).
 
 ## 2026-09-30 — 0.5.0: one sector engine, five verbs, every symmetry on CPU and GPU
 

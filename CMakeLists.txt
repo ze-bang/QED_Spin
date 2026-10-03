@@ -25,6 +25,7 @@ string(REGEX REPLACE "^version = \"([0-9.]+)\"$" "\\1" QED_VERSION "${QED_VERSIO
 if(NOT QED_VERSION)
     message(FATAL_ERROR "pyproject.toml has no line version = \"X.Y.Z\"")
 endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml")   # a new version reconfigures
 if(WITH_CUDA)
     project(QED VERSION ${QED_VERSION} LANGUAGES CXX CUDA)
 else()
