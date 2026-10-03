@@ -355,18 +355,30 @@ struct WalkPointers {
     DC*       out[NV];
 };
 
+// The warp's rows advance in lockstep over their own connections (P2-gpu-04): each lane steps its
+// cursor to its row's next group that acts, then the lanes canonicalise together. About half the
+// groups act on a given state, so a walk over the groups in step would run each |G| scan with half
+// the lanes idle; this way a warp makes as many scans as its busiest row has connections. Each row
+// still sums in group order. Lanes past the last row stay in the loop (the vote needs the warp).
 template <int NV, bool Same>
 __global__ void walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy row,
                             ed::matvec::basis::DeviceRepSymmetryBasisPolicy col,
                             ed::ops::ProgramView<DC> P, WalkPointers<NV> p) {
     const std::uint64_t r = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (r >= row.dim()) return;
-    const std::uint64_t s = row.state_of(r);
-    const double w = row.inv_norms[r];
+    const bool live = r < row.dim();
+    const std::uint64_t s = live ? row.state_of(r) : 0;
+    const double w = live ? row.inv_norms[r] : 0.0;
     DC acc[NV];
 #pragma unroll
     for (int v = 0; v < NV; ++v) acc[v] = DC(0.0, 0.0);
-    ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const DC& h) {
+    std::uint32_t g = live ? 0 : P.n_groups;
+    for (;;) {
+        std::uint64_t t = 0;
+        DC h;
+        bool have = false;
+        while (!have && g < P.n_groups) have = ed::ops::connection(P, s, g++, t, h);
+        if (!__any_sync(0xffffffffu, have)) break;
+        if (!have) continue;
         DC c;
         std::uint64_t j;
         if (Same && t == s) {
@@ -375,12 +387,13 @@ __global__ void walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy row,
         } else {
             cuDoubleComplex proj;
             j = (Same ? row : col).index_and_projection(t, proj);
-            if (j == ed::matvec::basis::kDeviceNotFound) return;
+            if (j == ed::matvec::basis::kDeviceNotFound) continue;
             c = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
         }
 #pragma unroll
         for (int v = 0; v < NV; ++v) acc[v] += c * p.in[v][j];
-    });
+    }
+    if (!live) return;
 #pragma unroll
     for (int v = 0; v < NV; ++v) p.out[v][r] = acc[v];
 }
@@ -660,6 +673,17 @@ __device__ inline std::uint32_t slot_of(unsigned long long re, unsigned long lon
     return static_cast<std::uint32_t>(mix64(re ^ mix64(im + 0x9E3779B97F4A7C15ULL))) & (kSetSlots - 1);
 }
 
+// The position of the k-th (from 0) set bit of m; k < popc(m).
+__device__ inline int nth_set_bit(unsigned m, int k) {
+    int p = 0;
+#pragma unroll
+    for (int w = 16; w >= 1; w >>= 1) {
+        const int c = __popc((m >> p) & ((1u << w) - 1u));
+        if (k >= c) { k -= c; p += w; }
+    }
+    return p;
+}
+
 __device__ inline unsigned long long bits_of(double x) {
     return static_cast<unsigned long long>(__double_as_longlong(x));
 }
@@ -721,26 +745,65 @@ __device__ int warp_row(const DevPolicy& row, const DevPolicy& col, const ed::op
     const std::uint64_t s = row.state_of(r);
     const double w = row.inv_norms[r];
     std::uint64_t key[E];
-    DC c[E];
+    DC c[E];          // the entry's value; h while its target waits to be canonicalised
+    unsigned bal[E];  // the lanes whose slot e holds a target to canonicalise
+    int need_n = 0;
 #pragma unroll
     for (int e = 0; e < E; ++e) {
         key[e] = kNone;
         c[e] = DC(0.0, 0.0);
         const std::uint32_t g = lane + static_cast<std::uint32_t>(kWarp * e);
-        std::uint64_t t;
+        std::uint64_t t = 0;
         DC h;
-        if (g >= P.n_groups || !ed::ops::connection(P, s, g, t, h)) continue;
-        std::uint64_t j;
-        if (Same && t == s) {
-            j = r;
+        const bool acts = g < P.n_groups && ed::ops::connection(P, s, g, t, h);
+        const bool diag = acts && Same && t == s;
+        if (diag) {
+            key[e] = (r << 16) | g;
             c[e] = thrust::conj(h);
-        } else {
-            cuDoubleComplex proj;
-            j = (Same ? row : col).index_and_projection(t, proj);
-            if (j == ed::matvec::basis::kDeviceNotFound) continue;   // the target's orbit cancels
-            c[e] = w * thrust::conj(h * DC(cuCreal(proj), cuCimag(proj)));
+        } else if (acts) {
+            c[e] = h;
         }
-        key[e] = (j << 16) | g;
+        bal[e] = __ballot_sync(kAll, acts && !diag);
+        need_n += __popc(bal[e]);
+    }
+    // The targets, dealt to the lanes densely (P2-gpu-04): about half the groups act on a given
+    // state, so a |G| scan per lane slot would run with half the lanes idle. Target q (slot e's,
+    // lanes ascending, then slot e + 1's) is canonicalised by lane q % 32 in round q / 32 -- the
+    // row's state is the warp's, so that lane forms the target from the group itself -- and its
+    // index and projection go back to the lane that owns the group.
+    const unsigned below = (1u << lane) - 1u;
+    for (int q0 = 0; q0 < need_n; q0 += kWarp) {
+        std::uint64_t jq = ed::matvec::basis::kDeviceNotFound;
+        cuDoubleComplex pq = make_cuDoubleComplex(0.0, 0.0);
+        if (q0 + static_cast<int>(lane) < need_n) {
+            int k = q0 + static_cast<int>(lane);
+            std::uint32_t g = 0;
+#pragma unroll
+            for (int e = 0; e < E; ++e) {
+                const int cnt = __popc(bal[e]);
+                if (k >= 0 && k < cnt) g = static_cast<std::uint32_t>(nth_set_bit(bal[e], k) + kWarp * e);
+                k -= cnt;
+            }
+            jq = (Same ? row : col).index_and_projection(s ^ P.group_flip[g], pq);
+        }
+        int base = 0;
+#pragma unroll
+        for (int e = 0; e < E; ++e) {
+            const int src = base + __popc(bal[e] & below) - q0;   // the lane that took this lane's slot e
+            const bool mine = ((bal[e] >> lane) & 1u) != 0u && src >= 0 && src < kWarp;
+            base += __popc(bal[e]);
+            const int from = mine ? src : 0;
+            const std::uint64_t j = __shfl_sync(kAll, jq, from);
+            const double pre = __shfl_sync(kAll, cuCreal(pq), from);
+            const double pim = __shfl_sync(kAll, cuCimag(pq), from);
+            if (!mine) continue;
+            if (j == ed::matvec::basis::kDeviceNotFound) {   // the target's orbit cancels
+                c[e] = DC(0.0, 0.0);
+                continue;
+            }
+            c[e] = w * thrust::conj(c[e] * DC(pre, pim));
+            key[e] = (j << 16) | (lane + static_cast<std::uint32_t>(kWarp * e));
+        }
     }
     // Every live entry, in group order, to every lane: heads and their columns' sums.
     bool head[E];
@@ -795,10 +858,16 @@ __device__ inline std::uint64_t warp_count() {
     return static_cast<std::uint64_t>(gridDim.x) * blockDim.x / kWarp;
 }
 
+// The build kernels run 256-thread blocks. Their compaction (warp_row) holds a row's targets in
+// registers; left alone the compiler takes ~96 a thread at E = 4, two blocks an SM, which slows
+// the build of cheap groups (small |G|) more than the compaction saves. Three blocks (<= 85).
+template <int E>
+inline constexpr int kBuildMinBlocks = E <= 4 ? 3 : 2;
+
 // Pass 1: len[r] = row r's merged length; its values enter the set (until it overflows). A value
 // equal to the one this lane put in last skips the set.
 template <bool Same, int E>
-__global__ void csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint64_t* len, ValueSet set) {
+__global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint64_t* len, ValueSet set) {
     DC last(0.0, 0.0);   // never inserted: zeros are dropped
     for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
         std::uint32_t cols[E];
@@ -821,7 +890,7 @@ __global__ void csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC>
 
 // Pass 2: the rows again, written at row_ptr. Mode 0: the values whole; 1: uint8 ids; 2: uint16 ids.
 template <bool Same, int E, int Mode>
-__global__ void csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, const std::uint64_t* row_ptr,
+__global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, const std::uint64_t* row_ptr,
                          std::uint32_t* out_col, void* out_val, ValueSet set, const std::uint16_t* id_of_slot,
                          int* missing) {
     for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
