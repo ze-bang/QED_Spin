@@ -138,6 +138,17 @@ def tri36_G_A1_char_gpu():
     return _tri36("gpu")
 
 
+def tri36_k0_gpu():
+    """The Gamma k-sector of translations alone (dim ~2.5e8, |G| = 36): its CSR does not fit the
+    device, and C(36, 18) is past the rank table, so the gather applies H with a search per
+    connection -- the gather-only regime (P7.6)."""
+    H, lat, _ = bm.tri36()
+    spatial = qed.Symmetries(abelian=[list(p) for p in lat.momentum_generators()], residues=[])
+    sym = Symmetry(spatial=spatial, sz=lat.N // 2, spin_flip="off", time_reversal="off")
+    r = eigs(H, 1, sym=bm.select_block(sym, H), prune=False, device="gpu")
+    return _eigs_metrics(r)
+
+
 def tri36_G_E1_cpu():
     return _tri36("cpu", table=bm.C6V_E1)
 
@@ -285,6 +296,7 @@ CASES = {
     "tri20_lg_exact_thermal_gpu": (tri20_lg_exact_thermal_gpu, "-c 16 --mem=64G -t 0:30:00 --gpus-per-node=h100:1"),
     "tri36_G_A1_char_cpu":        (tri36_G_A1_char_cpu,        "-c 32 --mem=180G -t 3:00:00"),
     "tri36_G_A1_char_gpu":        (tri36_G_A1_char_gpu,        "-c 16 --mem=180G -t 3:00:00 --gpus-per-node=h100:1"),
+    "tri36_k0_gpu":               (tri36_k0_gpu,               "-c 16 --mem=240G -t 2:00:00 --gpus-per-node=h100:1"),
     "tri36_G_E1_cpu":             (tri36_G_E1_cpu,             "-c 32 --mem=240G -t 4:00:00"),
     "tri36_K_E_cpu":              (tri36_K_E_cpu,              "-c 32 --mem=240G -t 4:00:00"),
     "bfg36_k3_cpu":               (bfg36_k3_cpu,               "-c 32 --mem=180G -t 2:30:00"),
