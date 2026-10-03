@@ -1,0 +1,5 @@
+# Commits git blame skips: git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub reads this file by name.)
+
+# Format-only: clang-format 17.0.6, ruff format 0.6.9, the generic hooks
+7917775ff4a89b5de00356359f93dfd959eb473c

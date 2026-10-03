@@ -285,7 +285,9 @@ repeats with the baseline. It exits 1 when a case is more than 10% slower or use
   pyflakes, pycodestyle and bugbear checks.
 - `.pre-commit-config.yaml` runs clang-format, ruff, ruff-format and the generic checks; install
   it once (`pip install pre-commit && pre-commit install`). CI runs `pre-commit run --all-files`
-  and fails on any change it would make.
+  and fails on any change it would make. The tree was brought to these hooks in one format-only
+  commit, listed in `.git-blame-ignore-revs`; `git config blame.ignoreRevsFile
+  .git-blame-ignore-revs` makes `git blame` skip it.
 - `.clang-tidy`: bug-finding checks only, every warning an error. CI runs it over `src/`; silence
   a justified warning with `NOLINT(check)` and a reason on the line.
 - Comments describe the code as it is: what it does and why. History goes in commit messages
