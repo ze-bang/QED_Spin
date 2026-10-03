@@ -50,17 +50,17 @@ namespace ed::symmetry {
 // ---------------------------------------------------------------------------
 // O(1) rep reverse-lookup gate.
 //
-// The CSR-free rep matvec can resolve ``state -> orbit index`` either by a
-// binary search over the sorted ``reps`` array (O(log dim), zero extra memory)
-// or by a dense combinadic rank table (O(1), C(n_sites,n_up) int32). For an
-// iterative solver doing thousands of matvecs the table is reused every
-// iteration, so it pays for itself -- but it costs ~2.4 GiB at N=32, so it is
-// gated by a memory budget: the table is built when its bytes fit in
-// ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 8).
+// The rep matvec resolves ``state -> orbit index`` by a dense combinadic rank table
+// (O(1), C(n_sites,n_up) int32) or else by the sector's rank buckets (a rep or two
+// searched per lookup, at most 64 MB). The table is built when its bytes fit in
+// ED_SYM_REP_RANKTABLE_BUDGET_GIB (default 0.5): measured against the buckets it
+// saves 3-7% of the wall time and costs 0.3-0.6 GiB at N = 28-30 (chain30 k = 0
+// 1.88 -> 1.30 GiB peak, chain28 FTLM 1.25 -> 0.93 GiB; jobs 62644824-29), so it is
+// kept only where it is small; at N = 32 it would take 2.4 GiB.
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
     if (table_entries == 0) return false;
-    const double budget_gib = std::max(0.0, ed::env::real("ED_SYM_REP_RANKTABLE_BUDGET_GIB", 8.0));
+    const double budget_gib = std::max(0.0, ed::env::real("ED_SYM_REP_RANKTABLE_BUDGET_GIB", 0.5));
     const long double table_bytes =
         static_cast<long double>(table_entries) * sizeof(std::int32_t);
     const long double budget_bytes =

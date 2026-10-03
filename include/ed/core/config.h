@@ -66,7 +66,7 @@ struct Row {
 #define ED_ENV_TABLE(X)                                                        \
     X("ED_SYM_PROFILE", Flag, "symmetry", "0",                                 \
       "Logs symmetry-construction / little-group phase timers and lane-decline reasons at Info")\
-    X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "8.0",              \
+    X("ED_SYM_REP_RANKTABLE_BUDGET_GIB", Real, "symmetry", "0.5",              \
       "Memory budget for the per-sector dense int32 rank table; 0 builds none")\
     X("ED_SYM_REDUCED_CSR", Tristate, "symmetry", "unset -> RepReducedCsr",    \
       "A true word (1) forces the reduced-CSR symmetry matvec, a false word (0) the CSR-free rep walk (read once per process)")\
