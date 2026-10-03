@@ -5,6 +5,7 @@
 smoke test: on a CPU-only node with the CUDA build, qed.eigs(H, 3, device="gpu") returned energies
 without error. This checks blocks above the dense floor (N=16 chain) for eigs / thermal / dynamics and
 reports device_blocks and whether anything raised or warned."""
+
 import warnings
 import numpy as np
 import qed

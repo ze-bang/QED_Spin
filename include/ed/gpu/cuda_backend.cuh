@@ -67,44 +67,41 @@ namespace cuda_backend_detail {
 inline void check_cuda(cudaError_t err, const char* what) {
     if (err == cudaErrorMemoryAllocation) {
         cudaGetLastError();
-        throw ed::ResourceLimit(std::string("CudaBackend: ") + what +
-                                " failed: the device is out of memory");
+        throw ed::ResourceLimit(std::string("CudaBackend: ") + what + " failed: the device is out of memory");
     }
     if (err != cudaSuccess) {
-        throw std::runtime_error(std::string("CudaBackend: ") + what +
-                                 " failed: " + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("CudaBackend: ") + what + " failed: " + cudaGetErrorString(err));
     }
 }
 
 inline void check_cublas(cublasStatus_t err, const char* what) {
     if (err != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("CudaBackend: ") + what +
-                                 " failed with cuBLAS status " +
-                                 std::to_string(static_cast<int>(err)) +
-                                 " (last CUDA error: " +
-                                 cudaGetErrorString(cudaPeekAtLastError()) + ")");
+        throw std::runtime_error(std::string("CudaBackend: ") + what + " failed with cuBLAS status "
+                                 + std::to_string(static_cast<int>(err))
+                                 + " (last CUDA error: " + cudaGetErrorString(cudaPeekAtLastError()) + ")");
     }
 }
 
 inline cublasOperation_t to_cublas_op(char op) {
     switch (op) {
-        case 'N': case 'n': return CUBLAS_OP_N;
-        case 'T': case 't': return CUBLAS_OP_T;
-        case 'C': case 'c': case 'H': case 'h': return CUBLAS_OP_C;
-        default:
-            throw std::invalid_argument(
-                std::string("CudaBackend: invalid trans op '") + op + "'");
+    case 'N':
+    case 'n': return CUBLAS_OP_N;
+    case 'T':
+    case 't': return CUBLAS_OP_T;
+    case 'C':
+    case 'c':
+    case 'H':
+    case 'h': return CUBLAS_OP_C;
+    default: throw std::invalid_argument(std::string("CudaBackend: invalid trans op '") + op + "'");
     }
 }
 
 }  // namespace cuda_backend_detail
 
 // The device backend for vectors of Scalar. Only std::complex<double> is defined (below).
-template <class Scalar>
-class BasicCudaBackend;
+template <class Scalar> class BasicCudaBackend;
 
-template <>
-class BasicCudaBackend<Complex> : public BasicBackend<Complex> {
+template <> class BasicCudaBackend<Complex> : public BasicBackend<Complex> {
 public:
     /// Every cuBLAS BLAS-1 entry point takes a 32-bit count. A bare
     /// `static_cast<int>` would silently wrap at n >= 2^31 (a 32 GiB
@@ -112,10 +109,9 @@ public:
     /// guard the narrowing once, loudly.
     [[nodiscard]] static int as_blas_int(std::size_t n) {
         if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-            throw std::length_error(
-                "CudaBackend: vector length " + std::to_string(n) +
-                " exceeds the 32-bit cuBLAS count limit (2^31 - 1); "
-                "split the operation or use a 64-bit BLAS path.");
+            throw std::length_error("CudaBackend: vector length " + std::to_string(n)
+                                    + " exceeds the 32-bit cuBLAS count limit (2^31 - 1); "
+                                      "split the operation or use a 64-bit BLAS path.");
         }
         return static_cast<int>(n);   // narrow-ok: checked above
     }
@@ -129,8 +125,7 @@ public:
         check_cublas(cublasCreate(&handle_), "cublasCreate");
         // Host pointer mode -- dot/nrm2 results go to host memory,
         // which is what the abstract `Backend` interface promises.
-        check_cublas(cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST),
-                     "cublasSetPointerMode(HOST)");
+        check_cublas(cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST), "cublasSetPointerMode(HOST)");
 
         // Configure the default device memory pool to retain freed
         // allocations indefinitely (until OS reclaim). Eliminates the
@@ -145,12 +140,10 @@ public:
         int dev = -1, pools = 0;
         cudaMemPool_t pool = nullptr;
         std::uint64_t threshold = UINT64_MAX;
-        pool_available_ =
-            cudaGetDevice(&dev) == cudaSuccess
-            && cudaDeviceGetAttribute(&pools, cudaDevAttrMemoryPoolsSupported, dev) == cudaSuccess
-            && pools != 0
-            && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
-            && cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold) == cudaSuccess;
+        pool_available_ = cudaGetDevice(&dev) == cudaSuccess
+                          && cudaDeviceGetAttribute(&pools, cudaDevAttrMemoryPoolsSupported, dev) == cudaSuccess
+                          && pools != 0 && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
+                          && cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold) == cudaSuccess;
         if (!pool_available_) cudaGetLastError();
     }
 
@@ -158,11 +151,11 @@ public:
         // Use raw cuda* calls (noexcept) inside the destructor; errors
         // here would only surface as `cudaGetLastError()` from a later
         // call. The driver tears down resources at process exit anyway.
-        if (coeffs_dev_)   cudaFree(coeffs_dev_);
-        if (handle_)       cublasDestroy(handle_);
+        if (coeffs_dev_) cudaFree(coeffs_dev_);
+        if (handle_) cublasDestroy(handle_);
     }
 
-    BasicCudaBackend(const BasicCudaBackend&)            = delete;
+    BasicCudaBackend(const BasicCudaBackend&) = delete;
     BasicCudaBackend& operator=(const BasicCudaBackend&) = delete;
 
     // Move-only. Move transfers ownership of the cuBLAS handle and the
@@ -172,33 +165,28 @@ public:
     // case once the backend is wrapped in a struct alongside non-trivial
     // state).
     BasicCudaBackend(BasicCudaBackend&& other) noexcept
-        : handle_(other.handle_),
-          pool_available_(other.pool_available_),
-          coeffs_dev_(other.coeffs_dev_),
-          coeffs_capacity_(other.coeffs_capacity_)
-    {
-        other.handle_          = nullptr;
-        other.coeffs_dev_      = nullptr;
+        : handle_(other.handle_), pool_available_(other.pool_available_), coeffs_dev_(other.coeffs_dev_),
+          coeffs_capacity_(other.coeffs_capacity_) {
+        other.handle_ = nullptr;
+        other.coeffs_dev_ = nullptr;
         other.coeffs_capacity_ = 0;
     }
     BasicCudaBackend& operator=(BasicCudaBackend&& other) noexcept {
         if (this != &other) {
             if (coeffs_dev_) cudaFree(coeffs_dev_);
-            if (handle_)     cublasDestroy(handle_);
-            handle_                = other.handle_;
-            pool_available_        = other.pool_available_;
-            coeffs_dev_            = other.coeffs_dev_;
-            coeffs_capacity_       = other.coeffs_capacity_;
-            other.handle_          = nullptr;
-            other.coeffs_dev_      = nullptr;
+            if (handle_) cublasDestroy(handle_);
+            handle_ = other.handle_;
+            pool_available_ = other.pool_available_;
+            coeffs_dev_ = other.coeffs_dev_;
+            coeffs_capacity_ = other.coeffs_capacity_;
+            other.handle_ = nullptr;
+            other.coeffs_dev_ = nullptr;
             other.coeffs_capacity_ = 0;
         }
         return *this;
     }
 
-    [[nodiscard]] MemorySpace memory_space() const override {
-        return MemorySpace::CudaDevice;
-    }
+    [[nodiscard]] MemorySpace memory_space() const override { return MemorySpace::CudaDevice; }
     [[nodiscard]] std::string description() const override {
         int dev = -1;
         cudaGetDevice(&dev);
@@ -225,12 +213,9 @@ public:
         if (n == 0) return nullptr;
         void* p = nullptr;
         if (pool_available_) {
-            cuda_backend_detail::check_cuda(
-                cudaMallocAsync(&p, n * sizeof(Complex), /*stream=*/0),
-                "cudaMallocAsync");
+            cuda_backend_detail::check_cuda(cudaMallocAsync(&p, n * sizeof(Complex), /*stream=*/0), "cudaMallocAsync");
         } else {
-            cuda_backend_detail::check_cuda(
-                cudaMalloc(&p, n * sizeof(Complex)), "cudaMalloc");
+            cuda_backend_detail::check_cuda(cudaMalloc(&p, n * sizeof(Complex)), "cudaMalloc");
         }
         return static_cast<Complex*>(p);
     }
@@ -245,75 +230,55 @@ public:
     }
     void fill_zero(Complex* p, std::size_t n) const override {
         if (n == 0 || !p) return;
-        cuda_backend_detail::check_cuda(
-            cudaMemset(p, 0, n * sizeof(Complex)), "cudaMemset");
+        cuda_backend_detail::check_cuda(cudaMemset(p, 0, n * sizeof(Complex)), "cudaMemset");
     }
     void copy(const Complex* src, Complex* dst, std::size_t n) const override {
         if (n == 0) return;
-        cuda_backend_detail::check_cuda(
-            cudaMemcpy(dst, src, n * sizeof(Complex),
-                       cudaMemcpyDeviceToDevice),
-            "cudaMemcpy(D2D)");
+        cuda_backend_detail::check_cuda(cudaMemcpy(dst, src, n * sizeof(Complex), cudaMemcpyDeviceToDevice),
+                                        "cudaMemcpy(D2D)");
     }
-    void copy_from_host(const Complex* host_src,
-                        Complex* device_dst,
-                        std::size_t n) const override {
+    void copy_from_host(const Complex* host_src, Complex* device_dst, std::size_t n) const override {
         if (n == 0) return;
-        cuda_backend_detail::check_cuda(
-            cudaMemcpy(device_dst, host_src, n * sizeof(Complex),
-                       cudaMemcpyHostToDevice),
-            "cudaMemcpy(H2D)");
+        cuda_backend_detail::check_cuda(cudaMemcpy(device_dst, host_src, n * sizeof(Complex), cudaMemcpyHostToDevice),
+                                        "cudaMemcpy(H2D)");
     }
-    void copy_to_host(const Complex* device_src,
-                      Complex* host_dst,
-                      std::size_t n) const override {
+    void copy_to_host(const Complex* device_src, Complex* host_dst, std::size_t n) const override {
         if (n == 0) return;
-        cuda_backend_detail::check_cuda(
-            cudaMemcpy(host_dst, device_src, n * sizeof(Complex),
-                       cudaMemcpyDeviceToHost),
-            "cudaMemcpy(D2H)");
+        cuda_backend_detail::check_cuda(cudaMemcpy(host_dst, device_src, n * sizeof(Complex), cudaMemcpyDeviceToHost),
+                                        "cudaMemcpy(D2H)");
     }
 
     // ------------------------------------------------------------------
     // Level-1 BLAS, complex-double. Direct cuBLAS pass-through.
     // ------------------------------------------------------------------
-    void axpy(Complex alpha, const Complex* x, Complex* y,
-              std::size_t n) const override {
+    void axpy(Complex alpha, const Complex* x, Complex* y, std::size_t n) const override {
         if (n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
-        cuda_backend_detail::check_cublas(
-            cublasZaxpy(handle_, as_blas_int(n), &a,
-                        reinterpret_cast<const cuDoubleComplex*>(x), 1,
-                        reinterpret_cast<cuDoubleComplex*>(y), 1),
-            "cublasZaxpy");
+        cuda_backend_detail::check_cublas(cublasZaxpy(handle_, as_blas_int(n), &a,
+                                                      reinterpret_cast<const cuDoubleComplex*>(x), 1,
+                                                      reinterpret_cast<cuDoubleComplex*>(y), 1),
+                                          "cublasZaxpy");
     }
     void scale(Complex alpha, Complex* x, std::size_t n) const override {
         if (n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
         cuda_backend_detail::check_cublas(
-            cublasZscal(handle_, as_blas_int(n), &a,
-                        reinterpret_cast<cuDoubleComplex*>(x), 1),
-            "cublasZscal");
+            cublasZscal(handle_, as_blas_int(n), &a, reinterpret_cast<cuDoubleComplex*>(x), 1), "cublasZscal");
     }
-    [[nodiscard]] Complex dot(const Complex* x, const Complex* y,
-                              std::size_t n) const override {
+    [[nodiscard]] Complex dot(const Complex* x, const Complex* y, std::size_t n) const override {
         if (n == 0) return Complex{0.0, 0.0};
         cuDoubleComplex result{0.0, 0.0};
-        cuda_backend_detail::check_cublas(
-            cublasZdotc(handle_, as_blas_int(n),
-                        reinterpret_cast<const cuDoubleComplex*>(x), 1,
-                        reinterpret_cast<const cuDoubleComplex*>(y), 1,
-                        &result),
-            "cublasZdotc");
+        cuda_backend_detail::check_cublas(cublasZdotc(handle_, as_blas_int(n),
+                                                      reinterpret_cast<const cuDoubleComplex*>(x), 1,
+                                                      reinterpret_cast<const cuDoubleComplex*>(y), 1, &result),
+                                          "cublasZdotc");
         return Complex{cuCreal(result), cuCimag(result)};
     }
     [[nodiscard]] double nrm2(const Complex* x, std::size_t n) const override {
         if (n == 0) return 0.0;
         double result = 0.0;
         cuda_backend_detail::check_cublas(
-            cublasDznrm2(handle_, as_blas_int(n),
-                         reinterpret_cast<const cuDoubleComplex*>(x), 1,
-                         &result),
+            cublasDznrm2(handle_, as_blas_int(n), reinterpret_cast<const cuDoubleComplex*>(x), 1, &result),
             "cublasDznrm2");
         return result;
     }
@@ -328,19 +293,15 @@ public:
     // C and B can overlap). One launch + the per-launch ~3us
     // overhead, vs a two-launch `scale` + `axpy` pair with an
     // implicit sync between the two kernels.
-    void axpby(Complex alpha, const Complex* x,
-               Complex beta,  Complex* y, std::size_t n) const override {
+    void axpby(Complex alpha, const Complex* x, Complex beta, Complex* y, std::size_t n) const override {
         if (n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
-        const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
-        cuda_backend_detail::check_cublas(
-            cublasZgeam(handle_,
-                CUBLAS_OP_N, CUBLAS_OP_N,
-                as_blas_int(n), /*cols=*/1,
-                &a, reinterpret_cast<const cuDoubleComplex*>(x), as_blas_int(n),
-                &b, reinterpret_cast<const cuDoubleComplex*>(y), as_blas_int(n),
-                    reinterpret_cast<cuDoubleComplex*>(y),       as_blas_int(n)),
-            "cublasZgeam(axpby)");
+        const cuDoubleComplex b = make_cuDoubleComplex(beta.real(), beta.imag());
+        cuda_backend_detail::check_cublas(cublasZgeam(handle_, CUBLAS_OP_N, CUBLAS_OP_N, as_blas_int(n), /*cols=*/1, &a,
+                                                      reinterpret_cast<const cuDoubleComplex*>(x), as_blas_int(n), &b,
+                                                      reinterpret_cast<const cuDoubleComplex*>(y), as_blas_int(n),
+                                                      reinterpret_cast<cuDoubleComplex*>(y), as_blas_int(n)),
+                                          "cublasZgeam(axpby)");
     }
 
     // ------------------------------------------------------------------
@@ -357,53 +318,45 @@ public:
     // reads them back once (the caller needs them at once), axpy_many
     // uploads them once and never waits.
     // ------------------------------------------------------------------
-    void dot_many(const Complex* const* basis,
-                  std::size_t           num_basis,
-                  const Complex*        v,
-                  std::size_t           n,
-                  Complex*              coeffs_out) const override {
+    void dot_many(const Complex* const* basis, std::size_t num_basis, const Complex* v, std::size_t n,
+                  Complex* coeffs_out) const override {
         if (num_basis == 0) return;
         if (n == 0) {
-            for (std::size_t k = 0; k < num_basis; ++k) {
-                coeffs_out[k] = Complex{0.0, 0.0};
-            }
+            for (std::size_t k = 0; k < num_basis; ++k) { coeffs_out[k] = Complex{0.0, 0.0}; }
             return;
         }
         ensure_coeffs_(num_basis);
-        const cuDoubleComplex one  = make_cuDoubleComplex(1.0, 0.0);
+        const cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
         const cuDoubleComplex zero = make_cuDoubleComplex(0.0, 0.0);
         for_each_run_(basis, num_basis, n, [&](std::size_t k, std::size_t len) {
-            cuda_backend_detail::check_cublas(
-                cublasZgemv(handle_, CUBLAS_OP_C, as_blas_int(n), as_blas_int(len), &one,
-                            reinterpret_cast<const cuDoubleComplex*>(basis[k]), as_blas_int(n),
-                            reinterpret_cast<const cuDoubleComplex*>(v), 1, &zero,
-                            reinterpret_cast<cuDoubleComplex*>(coeffs_dev_ + k), 1),
-                "cublasZgemv(dot_many)");
+            cuda_backend_detail::check_cublas(cublasZgemv(handle_, CUBLAS_OP_C, as_blas_int(n), as_blas_int(len), &one,
+                                                          reinterpret_cast<const cuDoubleComplex*>(basis[k]),
+                                                          as_blas_int(n), reinterpret_cast<const cuDoubleComplex*>(v),
+                                                          1, &zero, reinterpret_cast<cuDoubleComplex*>(coeffs_dev_ + k),
+                                                          1),
+                                              "cublasZgemv(dot_many)");
         });
         cuda_backend_detail::check_cuda(
             cudaMemcpy(coeffs_out, coeffs_dev_, num_basis * sizeof(Complex), cudaMemcpyDeviceToHost),
             "cudaMemcpy(dot_many D2H)");
     }
 
-    void axpy_many(const Complex*        alphas,
-                   const Complex* const* basis,
-                   std::size_t           num_basis,
-                   Complex*              v,
-                   std::size_t           n) const override {
+    void axpy_many(const Complex* alphas, const Complex* const* basis, std::size_t num_basis, Complex* v,
+                   std::size_t n) const override {
         if (num_basis == 0 || n == 0) return;
         ensure_coeffs_(num_basis);
-        cuda_backend_detail::check_cuda(
-            cudaMemcpyAsync(coeffs_dev_, alphas, num_basis * sizeof(Complex), cudaMemcpyHostToDevice,
-                            /*stream=*/0),
-            "cudaMemcpyAsync(alphas H2D)");
+        cuda_backend_detail::check_cuda(cudaMemcpyAsync(coeffs_dev_, alphas, num_basis * sizeof(Complex),
+                                                        cudaMemcpyHostToDevice,
+                                                        /*stream=*/0),
+                                        "cudaMemcpyAsync(alphas H2D)");
         const cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
         for_each_run_(basis, num_basis, n, [&](std::size_t k, std::size_t len) {
-            cuda_backend_detail::check_cublas(
-                cublasZgemv(handle_, CUBLAS_OP_N, as_blas_int(n), as_blas_int(len), &one,
-                            reinterpret_cast<const cuDoubleComplex*>(basis[k]), as_blas_int(n),
-                            reinterpret_cast<const cuDoubleComplex*>(coeffs_dev_ + k), 1, &one,
-                            reinterpret_cast<cuDoubleComplex*>(v), 1),
-                "cublasZgemv(axpy_many)");
+            cuda_backend_detail::check_cublas(cublasZgemv(handle_, CUBLAS_OP_N, as_blas_int(n), as_blas_int(len), &one,
+                                                          reinterpret_cast<const cuDoubleComplex*>(basis[k]),
+                                                          as_blas_int(n),
+                                                          reinterpret_cast<const cuDoubleComplex*>(coeffs_dev_ + k), 1,
+                                                          &one, reinterpret_cast<cuDoubleComplex*>(v), 1),
+                                              "cublasZgemv(axpy_many)");
         });
     }
 
@@ -411,56 +364,45 @@ public:
     // Level-3 BLAS via cuBLAS. All matrices column-major;
     // pointers are device pointers.
     // ------------------------------------------------------------------
-    void gemm(char opA, char opB,
-              std::size_t m, std::size_t n, std::size_t k,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              const Complex* B, std::size_t ldb,
-              Complex beta,
-              Complex* C, std::size_t ldc) const override {
+    void gemm(char opA, char opB, std::size_t m, std::size_t n, std::size_t k, Complex alpha, const Complex* A,
+              std::size_t lda, const Complex* B, std::size_t ldb, Complex beta, Complex* C,
+              std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
         const cuDoubleComplex a = make_cuDoubleComplex(alpha.real(), alpha.imag());
-        const cuDoubleComplex b = make_cuDoubleComplex(beta.real(),  beta.imag());
+        const cuDoubleComplex b = make_cuDoubleComplex(beta.real(), beta.imag());
         cuda_backend_detail::check_cublas(
-            cublasZgemm(handle_,
-                cuda_backend_detail::to_cublas_op(opA),
-                cuda_backend_detail::to_cublas_op(opB),
-                as_blas_int(m), as_blas_int(n), as_blas_int(k),
-                &a,
-                reinterpret_cast<const cuDoubleComplex*>(A), as_blas_int(lda),
-                reinterpret_cast<const cuDoubleComplex*>(B), as_blas_int(ldb),
-                &b,
-                reinterpret_cast<cuDoubleComplex*>(C), as_blas_int(ldc)),
+            cublasZgemm(handle_, cuda_backend_detail::to_cublas_op(opA), cuda_backend_detail::to_cublas_op(opB),
+                        as_blas_int(m), as_blas_int(n), as_blas_int(k), &a, reinterpret_cast<const cuDoubleComplex*>(A),
+                        as_blas_int(lda), reinterpret_cast<const cuDoubleComplex*>(B), as_blas_int(ldb), &b,
+                        reinterpret_cast<cuDoubleComplex*>(C), as_blas_int(ldc)),
             "cublasZgemm");
     }
 
 private:
-    cublasHandle_t handle_         = nullptr;
-    bool           pool_available_ = false;
+    cublasHandle_t handle_ = nullptr;
+    bool pool_available_ = false;
 
     // Device buffer for the M coefficients computed by `dot_many` /
     // consumed by `axpy_many`. cuBLAS in HOST pointer-mode wants the
     // x/y vectors of `cublasZgemv` in device memory; we copy to host
     // (`dot_many`) or from host (`axpy_many`) once per call.
-    mutable Complex*     coeffs_dev_      = nullptr;
-    mutable std::size_t  coeffs_capacity_ = 0;  // bytes
+    mutable Complex* coeffs_dev_ = nullptr;
+    mutable std::size_t coeffs_capacity_ = 0;  // bytes
 
     void ensure_coeffs_(std::size_t m) const {
         const std::size_t needed = m * sizeof(Complex);
         if (needed > coeffs_capacity_) {
             if (coeffs_dev_) cudaFree(coeffs_dev_);
             coeffs_dev_ = nullptr;
-            cuda_backend_detail::check_cuda(
-                cudaMalloc(reinterpret_cast<void**>(&coeffs_dev_), needed),
-                "cudaMalloc(coeffs)");
+            cuda_backend_detail::check_cuda(cudaMalloc(reinterpret_cast<void**>(&coeffs_dev_), needed),
+                                            "cudaMalloc(coeffs)");
             coeffs_capacity_ = needed;
         }
     }
 
     // f(k, len) for each maximal run basis[k .. k + len) of columns that sit back to back
     // (basis[k + i] == basis[k] + i n), in order.
-    template <class F>
-    static void for_each_run_(const Complex* const* basis, std::size_t m, std::size_t n, F&& f) {
+    template <class F> static void for_each_run_(const Complex* const* basis, std::size_t m, std::size_t n, F&& f) {
         for (std::size_t k = 0; k < m;) {
             std::size_t len = 1;
             while (k + len < m && basis[k + len] == basis[k] + len * n) ++len;

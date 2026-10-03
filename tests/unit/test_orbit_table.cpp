@@ -41,7 +41,7 @@ constexpr double kNormSqEps = 1e-10;
 // its 1-D irreps (chars[k][g] for element g).
 struct AbelianGroup {
     std::vector<std::vector<int>> elems;
-    std::vector<std::vector<Cx>>  chars;
+    std::vector<std::vector<Cx>> chars;
 };
 
 // Z_N ring translations T^m (m = 0 .. N-1): chi_k(T^m) = exp(2 pi i k m / N).
@@ -65,9 +65,7 @@ AbelianGroup reflection(int N) {
     return g;
 }
 
-CompiledGroup compile(const AbelianGroup& g, int N) {
-    return CompiledGroup::from_permutations(g.elems, N);
-}
+CompiledGroup compile(const AbelianGroup& g, int N) { return CompiledGroup::from_permutations(g.elems, N); }
 
 std::uint64_t surviving_total(const OrbitTable& tab, const AbelianGroup& g) {
     std::uint64_t total = 0;
@@ -79,8 +77,7 @@ std::uint64_t surviving_total(const OrbitTable& tab, const AbelianGroup& g) {
 
 }  // namespace
 
-TEST_CASE("OrbitTable content hash distinguishes subspaces and groups",
-          "[orbit_table]") {
+TEST_CASE("OrbitTable content hash distinguishes subspaces and groups", "[orbit_table]") {
     const int N = 12;
     const CompiledGroup t = compile(translations(N), N);
     const OrbitTable a = build_orbit_table_fixed_sz_streaming(N, 5, t);
@@ -93,15 +90,13 @@ TEST_CASE("OrbitTable content hash distinguishes subspaces and groups",
     REQUIRE(a.content_hash != d.content_hash);
 }
 
-TEST_CASE("Burnside sum rule: closed-form sector dims tile the subspace",
-          "[orbit_table]") {
+TEST_CASE("Burnside sum rule: closed-form sector dims tile the subspace", "[orbit_table]") {
     const int N = 12;
     for (const AbelianGroup& g : {translations(N), reflection(N)}) {
         const CompiledGroup cg = compile(g, N);
         SECTION("fixed-Sz, |G|=" + std::to_string(g.elems.size())) {
             for (int n_up : {2, 5, N / 2}) {
-                const OrbitTable tab =
-                    build_orbit_table_fixed_sz_streaming(N, n_up, cg);
+                const OrbitTable tab = build_orbit_table_fixed_sz_streaming(N, n_up, cg);
                 REQUIRE(surviving_total(tab, g) == tab.subspace_dim);
             }
         }
@@ -134,9 +129,9 @@ TEST_CASE("Orbit tables are the same at any thread count", "[orbit_table]") {
         return build();
 #endif
     };
-    const auto fixed  = [&] { return build_orbit_table_fixed_sz_streaming(N, N / 2, cg); };
+    const auto fixed = [&] { return build_orbit_table_fixed_sz_streaming(N, N / 2, cg); };
     const auto parity = [&] { return build_orbit_table_parity_compiled(N, 1, cg); };
-    const auto full   = [&] { return build_orbit_table_full_compiled(N, cg); };
+    const auto full = [&] { return build_orbit_table_full_compiled(N, cg); };
     for (int threads : {2, 7}) {
         REQUIRE(same(at(1, fixed), at(threads, fixed)));
         REQUIRE(same(at(1, parity), at(threads, parity)));
@@ -158,5 +153,6 @@ TEST_CASE("A fixed-Sz table keeps one rank lookup", "[orbit_table]") {
                        fresh->shared_of_rank.end()));
     for (std::size_t i = 0; i < tab.reps.size(); ++i)
         REQUIRE(a->shared_of_rank[static_cast<std::size_t>(
-                    ed::core::combinadic::rank_state(tab.reps[i], N, n_up, a->binom))] == static_cast<std::int32_t>(i));
+                    ed::core::combinadic::rank_state(tab.reps[i], N, n_up, a->binom))]
+                == static_cast<std::int32_t>(i));
 }

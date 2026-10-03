@@ -6,6 +6,7 @@ whole automorphism group by BFS (_automorphism.py:338-378) before any budget, so
 coupling graph has |Aut| = N! (field-only paramagnet, all-to-all, central spin) never reaches
 the solver. Test: paramagnet sum_i Sz_i, default qed.eigs(H, 1) at N=7 and N=10 (10! = 3.6e6
 permutations; 12! would be 4.8e8) in a subprocess with a timeout, vs Symmetry(spatial=None)."""
+
 import subprocess
 import sys
 import time
@@ -27,8 +28,7 @@ print("ELAPSED", time.time() - t0, "E0", float(r.energies[0]))
 def run(N, timeout):
     t0 = time.time()
     try:
-        p = subprocess.run([sys.executable, "-c", CODE.format(N=N)], capture_output=True,
-                           text=True, timeout=timeout)
+        p = subprocess.run([sys.executable, "-c", CODE.format(N=N)], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return ("timeout", time.time() - t0)
     for line in p.stdout.splitlines():
@@ -47,8 +47,10 @@ t_none = time.time() - t0
 
 s7, t7 = run(7, 60)
 s10, t10 = run(10, 200)
-info = (f"N=10 spatial=None: {t_none:.2f}s E0={e_none:.6f} (exact {-N/2}); default N=7: {s7} {t7:.1f}s; "
-        f"default N=10: {s10} {t10:.1f}s")
+info = (
+    f"N=10 spatial=None: {t_none:.2f}s E0={e_none:.6f} (exact {-N/2}); default N=7: {s7} {t7:.1f}s; "
+    f"default N=10: {s10} {t10:.1f}s"
+)
 if s10 != "ok" or t10 > 30:
     print("REPRO: CONFIRMED " + info)
 elif t10 < 5:

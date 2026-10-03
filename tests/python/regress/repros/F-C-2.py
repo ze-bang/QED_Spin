@@ -10,6 +10,7 @@ applies all of spec.residues, so the expanded multiplet of one level leaks into 
 owned by another level and EigResult.vectors() is not orthonormal. Fuzzer case 114-64 saw
 max|Gram - I| = 0.8165 = sqrt(2/3) (the same value as the K4 repro of C01-pyapi-03) with
 residuals ~1e-14. Reference: dense numpy H in the library basis (set bit = spin up)."""
+
 import signal
 import sys
 
@@ -83,7 +84,7 @@ def comp(p, q):
 
 
 try:
-    sym = qed.Symmetry()                       # spatial='auto', point_group=True: the default
+    sym = qed.Symmetry()  # spatial='auto', point_group=True: the default
     A, res = sym.groups(H)
     A = [tuple(a) for a in A]
     Aset = set(A)
@@ -116,10 +117,14 @@ resid = max(float(np.linalg.norm(HV[:, m] - ray[m] * V[:, m])) for m in range(K)
 low = float(np.max(np.abs(np.sort(ray) - ref[:K])))
 # rank of the returned set: a dependent set cannot span the k lowest eigenvectors
 sv = np.linalg.svd(V, compute_uv=False)
-print(f"energies max|dE|={dE:.1e}; vectors: max|Gram-I|={orth:.4e} residual={resid:.1e} "
-      f"lowest={low:.1e} singular values={np.round(sv, 6).tolist()}")
+print(
+    f"energies max|dE|={dE:.1e}; vectors: max|Gram-I|={orth:.4e} residual={resid:.1e} "
+    f"lowest={low:.1e} singular values={np.round(sv, 6).tolist()}"
+)
 if orth > 1e-8 or low > 1e-8:
-    print(f"REPRO: CONFIRMED vectors() not the k lowest orthonormal eigenvectors: max|Gram-I|={orth:.4e}, "
-          f"Rayleigh-vs-exact {low:.1e} (|A|={len(A)}, A normal={normal}, {n_norm}/{len(res)} residues normalise A)")
+    print(
+        f"REPRO: CONFIRMED vectors() not the k lowest orthonormal eigenvectors: max|Gram-I|={orth:.4e}, "
+        f"Rayleigh-vs-exact {low:.1e} (|A|={len(A)}, A normal={normal}, {n_norm}/{len(res)} residues normalise A)"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED vectors orthonormal (max|Gram-I|={orth:.1e}); A normal={normal}")

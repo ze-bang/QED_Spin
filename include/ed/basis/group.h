@@ -42,9 +42,8 @@ using Permutation = std::vector<int>;
 /// Identity permutation on `n_sites` sites.
 [[nodiscard]] inline Permutation identity(int n_sites) {
     if (n_sites <= 0) {
-        throw std::invalid_argument(
-            "ed::sym::identity: n_sites must be positive (got " +
-            std::to_string(n_sites) + ")");
+        throw std::invalid_argument("ed::sym::identity: n_sites must be positive (got " + std::to_string(n_sites)
+                                    + ")");
     }
     Permutation p(static_cast<std::size_t>(n_sites));
     for (int i = 0; i < n_sites; ++i) p[static_cast<std::size_t>(i)] = i;
@@ -54,35 +53,28 @@ using Permutation = std::vector<int>;
 /// Throws if `g` is not a valid permutation of `{0, ..., n_sites-1}`.
 inline void validate(const Permutation& g, int n_sites) {
     if (static_cast<int>(g.size()) != n_sites) {
-        throw std::invalid_argument(
-            "ed::sym::validate: permutation length " +
-            std::to_string(g.size()) + " != n_sites " +
-            std::to_string(n_sites));
+        throw std::invalid_argument("ed::sym::validate: permutation length " + std::to_string(g.size()) + " != n_sites "
+                                    + std::to_string(n_sites));
     }
     std::vector<char> seen(static_cast<std::size_t>(n_sites), 0);
     for (int x : g) {
         if (x < 0 || x >= n_sites) {
-            throw std::invalid_argument(
-                "ed::sym::validate: permutation entry " + std::to_string(x) +
-                " out of range [0, " + std::to_string(n_sites) + ")");
+            throw std::invalid_argument("ed::sym::validate: permutation entry " + std::to_string(x)
+                                        + " out of range [0, " + std::to_string(n_sites) + ")");
         }
         if (seen[static_cast<std::size_t>(x)]) {
-            throw std::invalid_argument(
-                "ed::sym::validate: permutation is not a bijection (entry " +
-                std::to_string(x) + " appears twice)");
+            throw std::invalid_argument("ed::sym::validate: permutation is not a bijection (entry " + std::to_string(x)
+                                        + " appears twice)");
         }
         seen[static_cast<std::size_t>(x)] = 1;
     }
 }
 
 /// `(a o b)[i] = a[b[i]]`. `a` and `b` must have equal length.
-[[nodiscard]] inline Permutation compose(const Permutation& a,
-                                         const Permutation& b) {
+[[nodiscard]] inline Permutation compose(const Permutation& a, const Permutation& b) {
     if (a.size() != b.size()) {
-        throw std::invalid_argument(
-            "ed::sym::compose: length mismatch (" +
-            std::to_string(a.size()) + " vs " +
-            std::to_string(b.size()) + ")");
+        throw std::invalid_argument("ed::sym::compose: length mismatch (" + std::to_string(a.size()) + " vs "
+                                    + std::to_string(b.size()) + ")");
     }
     Permutation out(a.size());
     for (std::size_t i = 0; i < a.size(); ++i) out[i] = a[b[i]];
@@ -92,9 +84,8 @@ inline void validate(const Permutation& g, int n_sites) {
 /// `g^k` for `k >= 0` (`g^0 = identity`).
 [[nodiscard]] inline Permutation power(const Permutation& g, int k) {
     if (k < 0) {
-        throw std::invalid_argument(
-            "ed::sym::power: negative exponent " + std::to_string(k) +
-            " not supported (use inverse() first)");
+        throw std::invalid_argument("ed::sym::power: negative exponent " + std::to_string(k)
+                                    + " not supported (use inverse() first)");
     }
     Permutation out = identity(static_cast<int>(g.size()));
     for (int i = 0; i < k; ++i) out = compose(g, out);
@@ -136,9 +127,8 @@ inline void validate(const Permutation& g, int n_sites) {
 /// matching the Bloch-momentum sign convention `e^{+i k r}`.
 [[nodiscard]] inline Permutation translation(int n_sites, int shift = 1) {
     if (n_sites <= 0) {
-        throw std::invalid_argument(
-            "ed::sym::translation: n_sites must be positive (got " +
-            std::to_string(n_sites) + ")");
+        throw std::invalid_argument("ed::sym::translation: n_sites must be positive (got " + std::to_string(n_sites)
+                                    + ")");
     }
     Permutation p(static_cast<std::size_t>(n_sites));
     for (int i = 0; i < n_sites; ++i) {
@@ -153,22 +143,18 @@ inline void validate(const Permutation& g, int n_sites) {
 /// Z2 spin-flip would be a bit-XOR, which is not a site permutation).
 [[nodiscard]] inline Permutation reflection_1d(int n_sites) {
     if (n_sites <= 0) {
-        throw std::invalid_argument(
-            "ed::sym::reflection_1d: n_sites must be positive (got " +
-            std::to_string(n_sites) + ")");
+        throw std::invalid_argument("ed::sym::reflection_1d: n_sites must be positive (got " + std::to_string(n_sites)
+                                    + ")");
     }
     Permutation p(static_cast<std::size_t>(n_sites));
-    for (int i = 0; i < n_sites; ++i) {
-        p[static_cast<std::size_t>(i)] = n_sites - 1 - i;
-    }
+    for (int i = 0; i < n_sites; ++i) { p[static_cast<std::size_t>(i)] = n_sites - 1 - i; }
     return p;
 }
 
 /// Swap exactly two sites `(a, b)`; identity on every other site.
 [[nodiscard]] inline Permutation site_swap(int n_sites, int a, int b) {
     if (a < 0 || b < 0 || a >= n_sites || b >= n_sites) {
-        throw std::invalid_argument(
-            "ed::sym::site_swap: indices out of range");
+        throw std::invalid_argument("ed::sym::site_swap: indices out of range");
     }
     Permutation p = identity(n_sites);
     std::swap(p[static_cast<std::size_t>(a)], p[static_cast<std::size_t>(b)]);
@@ -182,7 +168,6 @@ inline void validate(const Permutation& g, int n_sites) {
 /// Expand a list of generators into the full group (BFS by left-multiplication).
 /// Result is sorted (by lexicographic permutation order) so every caller gets
 /// a canonical, deterministic ordering.
-[[nodiscard]] std::vector<Permutation>
-generate_group(const std::vector<Permutation>& generators);
+[[nodiscard]] std::vector<Permutation> generate_group(const std::vector<Permutation>& generators);
 
 } // namespace ed::sym

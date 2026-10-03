@@ -33,9 +33,7 @@ enum class Op : std::uint8_t {
     Sz = 2,
 };
 
-inline constexpr std::uint8_t op_to_int(Op op) noexcept {
-    return static_cast<std::uint8_t>(op);
-}
+inline constexpr std::uint8_t op_to_int(Op op) noexcept { return static_cast<std::uint8_t>(op); }
 
 // A bond from site i to site j, kept in that orientation: it matters for
 // antisymmetric couplings such as Dzyaloshinskii-Moriya. The optional

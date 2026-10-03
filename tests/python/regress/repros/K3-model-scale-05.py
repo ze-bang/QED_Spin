@@ -4,6 +4,7 @@
 """Claim: EigResult.matrix_element raises for any O with three-body terms
 (lg_sectors_expect.cpp:72-73), although its docstring says O is arbitrary, and the value is
 well defined (computed here from the full-basis vectors and O.apply)."""
+
 import signal
 import numpy as np
 import qed
@@ -21,8 +22,7 @@ O = qed.Operator(N)
 O.add_three_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, qed.OP_SZ, 2, 1j)
 O.add_three_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, qed.OP_SZ, 2, -1j)
 O.add_one_body(qed.OP_SZ, 3, 0.1)
-r = qed.eigs(H, 2, vectors=True, sym=qed.Symmetry(spatial=None, sz=N // 2, spin_flip="off",
-                                                  time_reversal="off"))
+r = qed.eigs(H, 2, vectors=True, sym=qed.Symmetry(spatial=None, sz=N // 2, spin_flip="off", time_reversal="off"))
 vs = r.vectors(basis="full")
 ref = complex(np.vdot(vs[0], np.asarray(O.apply(np.asarray(vs[0], complex)))))
 try:

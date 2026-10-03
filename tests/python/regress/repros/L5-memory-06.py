@@ -11,6 +11,7 @@ sectors. sum_b D_b^2 = (C(34,17)-2)/17 + 2 = 1.37e8 entries = 2.20 GB packed; th
 1430 x 1430 = 33 MB. qed.spectrum(device='cpu') and qed.spectrum(device='gpu') run in separate child
 processes that report their own peak RSS. CONFIRMED when the GPU child's peak RSS exceeds the CPU
 child's by >= 0.8 x the predicted packed size and both spectra agree (max |dE| < 1e-8)."""
+
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from math import comb
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -61,19 +63,19 @@ print("RESULT_JSON:" + json.dumps(res), flush=True)
 def run(dev):
     out = os.path.join(OUT, f"L5-memory-06_{dev}.npy")
     try:
-        p = subprocess.run([sys.executable, "-c", CHILD, dev, str(N), out],
-                           capture_output=True, text=True, timeout=200)
+        p = subprocess.run([sys.executable, "-c", CHILD, dev, str(N), out], capture_output=True, text=True, timeout=200)
     except subprocess.TimeoutExpired:
         return {"err": "timeout"}, None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
+            res = json.loads(line[len("RESULT_JSON:") :])
             return res, out
     return {"err": f"rc={p.returncode} stderr_tail={p.stderr[-300:]!r}"}, None
 
 
 try:
     import numpy as np
+
     rc, fc = run("cpu")
     rg, fg = run("gpu")
     if rc.get("err") or rg.get("err"):
@@ -86,9 +88,11 @@ try:
     dE = float(np.max(np.abs(Ec - Eg))) if Ec.size == Eg.size else float("inf")
     rss_c, rss_g = rc["maxrss_kb"] * 1024, rg["maxrss_kb"] * 1024
     extra = rss_g - rss_c
-    msg = (f"N={N} predicted_packed={PACKED/1e9:.2f}GB rss_cpu={rss_c/1e9:.2f}GB rss_gpu={rss_g/1e9:.2f}GB "
-           f"extra={extra/1e9:.2f}GB n_levels={Ec.size}/{Eg.size} max|dE|={dE:.2e} "
-           f"device_blocks={rg['device_blocks']} wall_cpu={rc['wall']:.1f}s wall_gpu={rg['wall']:.1f}s")
+    msg = (
+        f"N={N} predicted_packed={PACKED/1e9:.2f}GB rss_cpu={rss_c/1e9:.2f}GB rss_gpu={rss_g/1e9:.2f}GB "
+        f"extra={extra/1e9:.2f}GB n_levels={Ec.size}/{Eg.size} max|dE|={dE:.2e} "
+        f"device_blocks={rg['device_blocks']} wall_cpu={rc['wall']:.1f}s wall_gpu={rg['wall']:.1f}s"
+    )
     if extra >= 0.8 * PACKED and dE < 1e-8:
         print("REPRO: CONFIRMED " + msg)
     elif dE >= 1e-8:

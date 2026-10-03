@@ -1,4 +1,5 @@
 """``qed.thermal``: finite-temperature thermodynamics over every symmetry sector of H."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -45,10 +46,21 @@ class ThermalResult:
 
 
 @_log.replays
-def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmetry] = None,
-            samples: int = 40, krylov: Optional[int] = None, steps: Optional[int] = None,
-            exact_states: int = 0, seed: int = 0, device: str = "cpu", observables: Optional[Sequence] = None,
-            dense_max_dim: Optional[int] = None) -> ThermalResult:
+def thermal(
+    H,
+    T: Sequence[float],
+    *,
+    method: str = "ftlm",
+    sym: Optional[Symmetry] = None,
+    samples: int = 40,
+    krylov: Optional[int] = None,
+    steps: Optional[int] = None,
+    exact_states: int = 0,
+    seed: int = 0,
+    device: str = "cpu",
+    observables: Optional[Sequence] = None,
+    dense_max_dim: Optional[int] = None,
+) -> ThermalResult:
     """Thermodynamics of ``H`` at the temperatures ``T``.
 
     ``method``: ``"exact"`` (every block's full spectrum), ``"ftlm"`` (finite-temperature
@@ -74,8 +86,11 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
         raise InvalidRequest(f"method must be one of {sorted(_METHODS)}, got {method!r}")
     sym = Symmetry.auto() if sym is None else sym
     t = _core.sectors.ThermalSpec()
-    t.method = {"exact": _core.sectors.ThermalMethod.Exact, "ftlm": _core.sectors.ThermalMethod.FTLM,
-                "mtpq": _core.sectors.ThermalMethod.mTPQ}[key]
+    t.method = {
+        "exact": _core.sectors.ThermalMethod.Exact,
+        "ftlm": _core.sectors.ThermalMethod.FTLM,
+        "mtpq": _core.sectors.ThermalMethod.mTPQ,
+    }[key]
     t.temperatures = [float(x) for x in T]
     t.samples = int(samples)
     if key == "mtpq" and krylov is not None:
@@ -100,10 +115,21 @@ def thermal(H, T: Sequence[float], *, method: str = "ftlm", sym: Optional[Symmet
     diagnostics: list = []
     r = _core.sectors.thermal(H, sym.resolve(H, diagnostics), t)
     arr = lambda v: np.asarray(v, float)  # noqa: E731
-    return ThermalResult(T=arr(r.T), E=arr(r.E), C=arr(r.C), entropy=arr(r.S), F=arr(r.F), lnZ=arr(r.lnZ),
-                         M=arr(r.M) if len(r.M) else None, chi=arr(r.chi) if len(r.chi) else None,
-                         O=np.asarray(r.O, complex) if ops else None,
-                         method=key, e0=float(r.e0), blocks=int(r.blocks),
-                         device_blocks=int(r.device_blocks), symmetry=sym,
-                         diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
-                         placement=dict(r.placement))
+    return ThermalResult(
+        T=arr(r.T),
+        E=arr(r.E),
+        C=arr(r.C),
+        entropy=arr(r.S),
+        F=arr(r.F),
+        lnZ=arr(r.lnZ),
+        M=arr(r.M) if len(r.M) else None,
+        chi=arr(r.chi) if len(r.chi) else None,
+        O=np.asarray(r.O, complex) if ops else None,
+        method=key,
+        e0=float(r.e0),
+        blocks=int(r.blocks),
+        device_blocks=int(r.device_blocks),
+        symmetry=sym,
+        diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+        placement=dict(r.placement),
+    )

@@ -5,6 +5,7 @@ vertex per interacting pair whose colour encodes the bond's couplings, and one p
 sites carrying three-body terms. Its automorphisms that leave H invariant are the site
 symmetries; ``qed._groups`` splits them for the sector engine.
 """
+
 import itertools
 from collections import defaultdict
 from typing import Optional
@@ -76,14 +77,14 @@ def compute_vertex_colors(vertex_weights, bonds, wl_iterations=10):
     final = {c: i for i, c in enumerate(sorted(set(colors.values())))}
     return {v: final[colors[v]] for v in vertex_ids}
 
+
 def _triple_signature(triple, terms):
     """A label of the three-body terms on a site triple that does not depend on how the triple
     is ordered: the least, over its six orderings, of the terms written by position."""
     best = None
     for order in itertools.permutations(triple):
         pos = {s: k for k, s in enumerate(order)}
-        sig = tuple(sorted(tuple(sorted((pos[s], o) for s, o in zip(sites, ops))) + (w,)
-                           for sites, ops, w in terms))
+        sig = tuple(sorted(tuple(sorted((pos[s], o) for s, o in zip(sites, ops))) + (w,) for sites, ops, w in terms))
         if best is None or sig < best:
             best = sig
     return best
@@ -135,8 +136,10 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     for t, terms in by_triple.items():
         m = _merged(terms)
         if m:
-            triple_terms[t] = [(tuple(s for s, _ in key), tuple(o for _, o in key),
-                                _round_tuple((c.real, c.imag))) for key, c in sorted(m.items())]
+            triple_terms[t] = [
+                (tuple(s for s, _ in key), tuple(o for _, o in key), _round_tuple((c.real, c.imag)))
+                for key, c in sorted(m.items())
+            ]
     triple_list = sorted(triple_terms)
     triple_signatures = {t: _triple_signature(t, triple_terms[t]) for t in triple_list}
     unique_triple_sigs = sorted(set(triple_signatures.values()))
@@ -145,9 +148,15 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
     n_bonds = len(bond_pairs)
     n_total = n_original + n_bonds + len(triple_list)  # original vertices + auxiliary vertices
 
-    _log.log(_log.DEBUG, "edge-coloured graph: %d vertices + %d auxiliary bond vertices (%d types) "
-             "+ %d triple vertices (%d types)", n_original, n_bonds, len(unique_sigs),
-             len(triple_list), len(unique_triple_sigs))
+    _log.log(
+        _log.DEBUG,
+        "edge-coloured graph: %d vertices + %d auxiliary bond vertices (%d types) " "+ %d triple vertices (%d types)",
+        n_original,
+        n_bonds,
+        len(unique_sigs),
+        len(triple_list),
+        len(unique_triple_sigs),
+    )
 
     # Build adjacency for expanded graph
     adjacency_dict = {i: [] for i in range(n_total)}
@@ -180,15 +189,12 @@ def construct_colored_graph(vertex_weights, edges, triples=()):
         bond_color = max_vertex_color + sig_to_color[bonds[pair]]
         color_to_vertices[bond_color].append(aux_idx)
     for t_idx, t in enumerate(triple_list):
-        color_to_vertices[max_vertex_color + triple_to_color[triple_signatures[t]]].append(
-            n_original + n_bonds + t_idx)
+        color_to_vertices[max_vertex_color + triple_to_color[triple_signatures[t]]].append(n_original + n_bonds + t_idx)
 
-    coloring = [set(sorted(ids)) for _, ids in
-                sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
+    coloring = [set(sorted(ids)) for _, ids in sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
 
     # Create pynauty graph
-    g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict,
-              vertex_coloring=coloring)
+    g = Graph(n_total, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
     return g, idx_to_vid, vid_to_idx
 
 
@@ -198,6 +204,7 @@ def automorphisms(vertex_weights, edges, triples, cap: int) -> tuple[Optional[li
     term check of :func:`qed.discovery.find_symmetries` follows). Above ``cap`` nothing is
     enumerated and the list is None (|Aut| reaches N! for field-only, empty or all-to-all H)."""
     from ._perm import close_group
+
     graph, idx_to_vid, vid_to_idx = construct_colored_graph(vertex_weights, edges, triples)
     aut = autgrp(graph)
     # One auxiliary vertex per interacting pair, so the group of the expanded graph is that

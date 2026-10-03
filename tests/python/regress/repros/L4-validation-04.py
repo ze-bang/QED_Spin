@@ -8,6 +8,7 @@ reaches burnside_dim (lg_stars.cpp:42,56) which reads poly[n_up] past a vector o
 (UB), giving empty 'complete' results, NaN, a logic_error, or -- for T=0 dynamics, which calls
 first.levels.front() on an empty vector (lg_sectors_dynamics.cpp:164) -- a crash.
 A clean ValueError for every bad input would refute the claim."""
+
 import signal
 import subprocess
 import sys
@@ -37,8 +38,9 @@ silent = []
 
 # reference: global and sector ground energies from qed with no Sz restriction
 full = np.sort(np.asarray(qed.spectrum(H, sym=qed.Symmetry.none()).energies))
-sec = {n: float(np.min(np.asarray(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=n)).energies)))
-       for n in range(N + 1)}
+sec = {
+    n: float(np.min(np.asarray(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=n)).energies))) for n in range(N + 1)
+}
 print(f"global E0 {full[0]:.10f}; sector minima {[round(sec[n], 6) for n in range(N + 1)]}")
 
 # (a) negative sz
@@ -77,8 +79,12 @@ for name, code in cases.items():
             silent.append(f"sz=9 {name} killed by signal {-p.returncode}")
         elif p.returncode == 0:
             silent.append(f"sz=9 {name} returned {out}")
-        elif ("ValueError" not in err and "InvalidRequest" not in err      # InvalidRequest is a ValueError
-              and "invalid_argument" not in err and "out of range" not in err.lower()):
+        elif (
+            "ValueError" not in err
+            and "InvalidRequest" not in err  # InvalidRequest is a ValueError
+            and "invalid_argument" not in err
+            and "out of range" not in err.lower()
+        ):
             silent.append(f"sz=9 {name} rc={p.returncode} {err[:60]}")
     except subprocess.TimeoutExpired:
         print(f"sz=9 {name}: timed out")

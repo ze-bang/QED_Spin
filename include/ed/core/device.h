@@ -22,12 +22,8 @@ enum class Device { Cpu, Gpu, Auto };
 /// Where one block's solve runs: the four Placement counters.
 enum class Lane : std::uint8_t { HostDense, HostKrylov, DeviceDense, DeviceKrylov };
 
-[[nodiscard]] constexpr bool on_device(Lane l) noexcept {
-    return l == Lane::DeviceDense || l == Lane::DeviceKrylov;
-}
-[[nodiscard]] constexpr bool is_dense(Lane l) noexcept {
-    return l == Lane::HostDense || l == Lane::DeviceDense;
-}
+[[nodiscard]] constexpr bool on_device(Lane l) noexcept { return l == Lane::DeviceDense || l == Lane::DeviceKrylov; }
+[[nodiscard]] constexpr bool is_dense(Lane l) noexcept { return l == Lane::HostDense || l == Lane::DeviceDense; }
 
 /// What a block is solved for.
 enum class Task : std::uint8_t {
@@ -43,18 +39,18 @@ enum class Task : std::uint8_t {
 /// device working set (BlockRequest::device_bytes) fits in free device memory.
 struct AutoRow {
     std::uint64_t floor;
-    bool          fit;
+    bool fit;
 };
 
 /// THE 'auto' table.
 [[nodiscard]] constexpr AutoRow auto_row(Task t) noexcept {
     switch (t) {
-        case Task::Eigs:         return {std::uint64_t{1} << 14, true};
-        case Task::Sampled:      return {std::uint64_t{1} << 14, true};
-        case Task::Oftlm:        return {std::uint64_t{1} << 14, true};
-        case Task::DenseBatch:   return {0, false};
-        case Task::DynamicsCf:   return {std::uint64_t{1} << 14, false};
-        case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, false};
+    case Task::Eigs: return {std::uint64_t{1} << 14, true};
+    case Task::Sampled: return {std::uint64_t{1} << 14, true};
+    case Task::Oftlm: return {std::uint64_t{1} << 14, true};
+    case Task::DenseBatch: return {0, false};
+    case Task::DynamicsCf: return {std::uint64_t{1} << 14, false};
+    case Task::DynamicsFtlm: return {std::uint64_t{1} << 16, false};
     }
     return {std::numeric_limits<std::uint64_t>::max(), false};
 }
@@ -79,21 +75,21 @@ inline constexpr std::uint64_t kDeviceDenseMinDim = 1024;
 
 /// One block, as place() sees it.
 struct BlockRequest {
-    Task          task = Task::Eigs;
-    std::uint64_t dim  = 0;
+    Task task = Task::Eigs;
+    std::uint64_t dim = 0;
     /// The verb solves this block exactly on the host (eigs: dim <= its dense floor; thermal:
     /// the exact-small fallback).
-    bool          dense = false;
-    std::uint64_t want  = 1;               ///< Eigs only: levels owed (the transitional rule)
+    bool dense = false;
+    std::uint64_t want = 1;               ///< Eigs only: levels owed (the transitional rule)
     /// The least device memory the solve needs (ed/core/footprint.h), checked where the task's
     /// row says so; 0: place() estimates it from the task (Eigs: the two-pass GS vector, or
     /// Krylov-Schur at its smallest cycle of want + 8; Sampled: one FTLM sample).
     std::uint64_t device_bytes = 0;
-    bool          device_kernel = false;   ///< H and every operator the solve applies bind to a device
-    const char*   verb = "";
+    bool device_kernel = false;   ///< H and every operator the solve applies bind to a device
+    const char* verb = "";
     /// Built only for a refusal: "the block of star K, irrep I, n_up N (dim D)".
     std::function<std::string()> what;
-    const char*   why = "has no device kernel";
+    const char* why = "has no device kernel";
 };
 
 }  // namespace ed

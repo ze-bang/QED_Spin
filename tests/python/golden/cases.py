@@ -8,6 +8,7 @@ Tiers (golden.py): exact -- deterministic; stochastic -- fixed-seed sampling. Ev
 spectrum of a model up to DENSE_MAX_N sites must also equal its dense spectrum (support.oracle),
 checked at record and compare time (golden.py dense_inconsistencies).
 """
+
 from __future__ import annotations
 
 import cmath
@@ -55,8 +56,7 @@ def fl(x):
 
 
 def levels(r):
-    return {"energy": fl([L.energy for L in r.levels]),
-            "multiplicity": [int(L.multiplicity) for L in r.levels]}
+    return {"energy": fl([L.energy for L in r.levels]), "multiplicity": [int(L.multiplicity) for L in r.levels]}
 
 
 # -----------------------------------------------------------------------------
@@ -65,9 +65,12 @@ def levels(r):
 def symmetry_options(m):
     """(label, Symmetry) pairs the model physically carries."""
     half = m.N // 2
-    out = [("none", Symmetry.none()), ("auto", Symmetry.auto()),
-           ("auto/point_group=off", Symmetry(point_group=False)),
-           ("spatial=none", Symmetry(spatial=None))]
+    out = [
+        ("none", Symmetry.none()),
+        ("auto", Symmetry.auto()),
+        ("auto/point_group=off", Symmetry(point_group=False)),
+        ("spatial=none", Symmetry(spatial=None)),
+    ]
     if m.u1:
         out.append((f"sz={half}", Symmetry(spatial=None, sz=half)))
         out.append((f"auto/sz={half}", Symmetry(sz=half)))
@@ -88,12 +91,22 @@ def spectrum_cases(m):
     for label, sym in symmetry_options(m):
         # a full spectrum without spatial symmetry is 2^N levels: only for small N
         if not label.startswith("total_spin") and (m.N <= 12 or label.startswith("auto")):
-            cs.append(GCase(f"{m.name}/api/spectrum/{label}", "exact",
-                            lambda sym=sym: {"eigenvalues": fl(np.sort(quiet(
-                                lambda: qed.spectrum(H, sym=sym, device=DEVICE)).energies))}))
-        cs.append(GCase(f"{m.name}/api/eigs/{label}/k=4", "exact",
-                        lambda sym=sym: {"energies": fl(quiet(
-                            lambda: qed.eigs(H, 4, sym=sym, device=DEVICE)).energies)}))
+            cs.append(
+                GCase(
+                    f"{m.name}/api/spectrum/{label}",
+                    "exact",
+                    lambda sym=sym: {
+                        "eigenvalues": fl(np.sort(quiet(lambda: qed.spectrum(H, sym=sym, device=DEVICE)).energies))
+                    },
+                )
+            )
+        cs.append(
+            GCase(
+                f"{m.name}/api/eigs/{label}/k=4",
+                "exact",
+                lambda sym=sym: {"energies": fl(quiet(lambda: qed.eigs(H, 4, sym=sym, device=DEVICE)).energies)},
+            )
+        )
     return cs
 
 
@@ -115,8 +128,11 @@ def eigs_detail_cases(m):
         if res > 1e-6:
             raise AssertionError(f"vector residual {res:.1e}")
         return {"rayleigh": fl(np.sort(ray)), "count": len(vs)}
-    return [GCase(f"{m.name}/api/eigs/auto/levels/k=6", "exact", lv),
-            GCase(f"{m.name}/api/eigs/auto/vectors/k=3", "exact", vec)]
+
+    return [
+        GCase(f"{m.name}/api/eigs/auto/levels/k=6", "exact", lv),
+        GCase(f"{m.name}/api/eigs/auto/vectors/k=3", "exact", vec),
+    ]
 
 
 def thermal_cases(m):
@@ -124,15 +140,28 @@ def thermal_cases(m):
     T = np.linspace(0.25, 3.0, 8)
     cs = []
     for label, sym in (("auto", Symmetry.auto()), ("none", Symmetry.none())):
-        cs.append(GCase(f"{m.name}/api/thermal/exact/{label}", "exact",
-                        lambda sym=sym: _thermo(quiet(lambda: qed.thermal(
-                            H, T, method="exact", sym=sym, device=DEVICE)))))
-        for method, kw in (("ftlm", dict(samples=8, krylov=40)), ("mtpq", dict(samples=4)),
-                           ("ftlm", dict(samples=8, krylov=40, exact_states=8))):
+        cs.append(
+            GCase(
+                f"{m.name}/api/thermal/exact/{label}",
+                "exact",
+                lambda sym=sym: _thermo(quiet(lambda: qed.thermal(H, T, method="exact", sym=sym, device=DEVICE))),
+            )
+        )
+        for method, kw in (
+            ("ftlm", dict(samples=8, krylov=40)),
+            ("mtpq", dict(samples=4)),
+            ("ftlm", dict(samples=8, krylov=40, exact_states=8)),
+        ):
             tag = "oftlm" if "exact_states" in kw else method
-            cs.append(GCase(f"{m.name}/api/thermal/{tag}/{label}", "stochastic",
-                            lambda sym=sym, method=method, kw=kw: _thermo(quiet(lambda: qed.thermal(
-                                H, T, method=method, sym=sym, seed=11, device=DEVICE, **kw)))))
+            cs.append(
+                GCase(
+                    f"{m.name}/api/thermal/{tag}/{label}",
+                    "stochastic",
+                    lambda sym=sym, method=method, kw=kw: _thermo(
+                        quiet(lambda: qed.thermal(H, T, method=method, sym=sym, seed=11, device=DEVICE, **kw))
+                    ),
+                )
+            )
     return cs
 
 
@@ -150,13 +179,30 @@ def dynamics_cases(m):
     O = probe_operator(N, [(("z",), (i,), cmath.exp(1j * math.pi * i) / math.sqrt(N)) for i in range(N)])
     cs = []
     for label, sym in (("auto", Symmetry.auto()), ("none", Symmetry.none())):
-        cs.append(GCase(f"{m.name}/api/dynamics/T=0/{label}/SzQ", "exact",
-                        lambda sym=sym: {"S": fl(quiet(lambda: qed.dynamics(
-                            H, O, omega, eta=0.15, sym=sym, krylov=80, device=DEVICE)).S[0])}))
-        cs.append(GCase(f"{m.name}/api/dynamics/T=1/{label}/SzQ", "stochastic",
-                        lambda sym=sym: {"S": fl(quiet(lambda: qed.dynamics(
-                            H, O, omega, eta=0.15, T=[1.0], sym=sym, krylov=40, samples=6, seed=11,
-                            device=DEVICE)).S[0])}))
+        cs.append(
+            GCase(
+                f"{m.name}/api/dynamics/T=0/{label}/SzQ",
+                "exact",
+                lambda sym=sym: {
+                    "S": fl(quiet(lambda: qed.dynamics(H, O, omega, eta=0.15, sym=sym, krylov=80, device=DEVICE)).S[0])
+                },
+            )
+        )
+        cs.append(
+            GCase(
+                f"{m.name}/api/dynamics/T=1/{label}/SzQ",
+                "stochastic",
+                lambda sym=sym: {
+                    "S": fl(
+                        quiet(
+                            lambda: qed.dynamics(
+                                H, O, omega, eta=0.15, T=[1.0], sym=sym, krylov=40, samples=6, seed=11, device=DEVICE
+                            )
+                        ).S[0]
+                    )
+                },
+            )
+        )
     return cs
 
 
@@ -166,8 +212,12 @@ def expect_cases(m):
 
     def run():
         r = quiet(lambda: qed.expect(H, [bond], 4, sym=Symmetry.auto(), device=DEVICE))
-        return {"energy": fl(r.energies), "multiplicity": [int(x) for x in r.multiplicities],
-                "bond": fl(np.real(r.values[:, 0]))}
+        return {
+            "energy": fl(r.energies),
+            "multiplicity": [int(x) for x in r.multiplicities],
+            "bond": fl(np.real(r.values[:, 0])),
+        }
+
     return [GCase(f"{m.name}/api/expect/auto/S0.S1/k=4", "exact", run)]
 
 

@@ -1,6 +1,7 @@
 """Grid adapter: one function per task over the verbs (qed._verbs). Each takes the model, the symmetry
 content, the device and the task knobs, and returns plain numpy data for the oracle.
 `Missing` means the API has no route for the cell."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -109,15 +110,15 @@ def _on_device(device, r):
 def eigs(m, H, content, device, k):
     """(sorted energies, the EigResult) -- its levels carry the multiplicities."""
     # GPU cells solve every block (prune=False), so the device path is what they measure.
-    r = _eigs(H, k, sym=_sym(m, content), device=device, prune=_prune(device),
-              dense_max_dim=_dense_max_dim(device))
+    r = _eigs(H, k, sym=_sym(m, content), device=device, prune=_prune(device), dense_max_dim=_dense_max_dim(device))
     _on_device(device, r)
     return np.sort(r.energies), r
 
 
 def vectors(m, H, content, device, k):
-    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=False,
-              dense_max_dim=_dense_max_dim(device))
+    r = _eigs(
+        H, k, sym=_sym(m, content), vectors=True, device=device, prune=False, dense_max_dim=_dense_max_dim(device)
+    )
     _on_device(device, r)
     return r.energies, r.vectors(basis="full")
 
@@ -125,8 +126,15 @@ def vectors(m, H, content, device, k):
 def labelled(m, H, content, device, k):
     """The EigResult with vectors: [(level, its multiplet in the full basis, seed first)], the
     result (for momentum(), irrep_characters() and the resolved groups)."""
-    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=_prune(device),
-              dense_max_dim=_dense_max_dim(device))
+    r = _eigs(
+        H,
+        k,
+        sym=_sym(m, content),
+        vectors=True,
+        device=device,
+        prune=_prune(device),
+        dense_max_dim=_dense_max_dim(device),
+    )
     _on_device(device, r)
     return [(L, r._raw.multiplet(r._spec, i, -1)) for i, L in enumerate(r.levels)], r
 
@@ -137,35 +145,61 @@ def spectrum(m, H, content, device):
     return r.energies
 
 
-def thermal(m, H, content, device, method, T, samples, krylov, seed, observables=None,
-            dense_max_dim=None):
-    r = _thermal(H, T, method=method.lower(), sym=_sym(m, content), samples=samples,
-                 krylov=None if method.lower() == "mtpq" else krylov, seed=seed, device=device,
-                 observables=observables, dense_max_dim=dense_max_dim)
+def thermal(m, H, content, device, method, T, samples, krylov, seed, observables=None, dense_max_dim=None):
+    r = _thermal(
+        H,
+        T,
+        method=method.lower(),
+        sym=_sym(m, content),
+        samples=samples,
+        krylov=None if method.lower() == "mtpq" else krylov,
+        seed=seed,
+        device=device,
+        observables=observables,
+        dense_max_dim=dense_max_dim,
+    )
     _on_device(device, r)
     return {"T": r.T, "E": r.E, "C": r.C, "O": r.O}
 
 
 def dynamics(m, H, content, device, obs, q, omega, eta, T, samples, krylov):
-    r = _dynamics(H, obs, omega, eta=eta, T=None if T is None else [T], sym=_sym(m, content),
-                  krylov=krylov, samples=samples, seed=7, device=device,
-                  dense_max_dim=None if device == "gpu" else CPU_DENSE_MAX_DIM)
+    r = _dynamics(
+        H,
+        obs,
+        omega,
+        eta=eta,
+        T=None if T is None else [T],
+        sym=_sym(m, content),
+        krylov=krylov,
+        samples=samples,
+        seed=7,
+        device=device,
+        dense_max_dim=None if device == "gpu" else CPU_DENSE_MAX_DIM,
+    )
     _on_device(device, r)
     return r.S[0]
 
 
 def expect(m, H, content, device, ops, k):
     """[(energy, multiplicity, values per op)] for the levels of the lowest-k window."""
-    r = _expect(H, ops, k, sym=_sym(m, content), device=device, prune=_prune(device),
-                dense_max_dim=_dense_max_dim(device))
+    r = _expect(
+        H, ops, k, sym=_sym(m, content), device=device, prune=_prune(device), dense_max_dim=_dense_max_dim(device)
+    )
     _on_device(device, r.eigs)
     return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
 
 
 def matrix_elements(m, H, content, device, O, k):
     """[(<v_i|O|v_j> from the API, v_i, v_j in the full basis)] over the first levels."""
-    r = _eigs(H, k, sym=_sym(m, content), vectors=True, device=device, prune=_prune(device),
-              dense_max_dim=_dense_max_dim(device))
+    r = _eigs(
+        H,
+        k,
+        sym=_sym(m, content),
+        vectors=True,
+        device=device,
+        prune=_prune(device),
+        dense_max_dim=_dense_max_dim(device),
+    )
     n = min(3, len(r.levels))
     full = [r._raw.multiplet(r._spec, i, -1)[0] for i in range(n)]
     return [(r.matrix_element(O, i, j), full[i], full[j]) for i in range(n) for j in range(n)]

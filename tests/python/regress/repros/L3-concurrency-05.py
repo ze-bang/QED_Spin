@@ -15,6 +15,7 @@ FTLM device='cpu', fixed seed, in three child processes with ED_SYM_REDUCED_CSR=
   C: ED_SYM_LG_GPU=1, 1 thread  (GPU gather, serial: isolates the race from GPU rounding)
 CONFIRMED if B deviates from A by > 1e-6 while C agrees with A.
 Restated with the strict device policy: device='cpu' never engages the gather, which is not reproducing."""
+
 import json
 import os
 import subprocess
@@ -31,13 +32,14 @@ print("RESULT " + json.dumps({"E": [float(x) for x in r.E], "C": [float(x) for x
                               "device_blocks": int(r.device_blocks)}))
 '''
 
+
 def run(lg_gpu, threads):
     env = dict(os.environ)
-    env.update({"ED_SYM_REDUCED_CSR": "0", "ED_SYM_LG_GPU": lg_gpu, "ED_SYM_PROFILE": "1",
-                "OMP_NUM_THREADS": str(threads)})
+    env.update(
+        {"ED_SYM_REDUCED_CSR": "0", "ED_SYM_LG_GPU": lg_gpu, "ED_SYM_PROFILE": "1", "OMP_NUM_THREADS": str(threads)}
+    )
     try:
-        p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True, text=True,
-                           timeout=85)
+        p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True, text=True, timeout=85)
     except subprocess.TimeoutExpired:
         return None, "timeout", 0
     line = [l for l in p.stdout.splitlines() if l.startswith("RESULT ")]
@@ -46,7 +48,9 @@ def run(lg_gpu, threads):
         return None, f"rc={p.returncode} err={p.stderr[-300:]!r}", engaged
     return json.loads(line[-1][7:]), "", engaged
 
+
 import qed
+
 if qed._core.cuda_device_count() == 0:
     print("REPRO: INCONCLUSIVE no CUDA device visible")
     raise SystemExit(0)
@@ -62,8 +66,9 @@ if A is None or B is None:
     raise SystemExit(0)
 dB = max(abs(x - y) for x, y in zip(A["E"], B["E"]))
 dC = max(abs(x - y) for x, y in zip(A["E"], C["E"])) if C else float("nan")
-msg = (f"max|E_B-E_A|={dB:.3e} max|E_C-E_A|={dC:.3e} gpu-gather engaged(B)={gb} "
-       f"device_blocks(B)={B['device_blocks']}")
+msg = (
+    f"max|E_B-E_A|={dB:.3e} max|E_C-E_A|={dC:.3e} gpu-gather engaged(B)={gb} " f"device_blocks(B)={B['device_blocks']}"
+)
 if gb == 0:
     # Since the strict device policy, device='cpu' never engages the GPU gather (it needs a block the
     # verb allowed onto the device), so the concurrent host loop has no device lane to race on.
@@ -73,5 +78,4 @@ elif dB > 1e-6 and (C is None or dC < 1e-6):
 elif dB > 1e-6:
     print("REPRO: INCONCLUSIVE B deviates but so does the serial run C; " + msg)
 else:
-    print(f"REPRO: NOT_REPRODUCED (race not observed; GPU still engaged under device='cpu': {gb} blocks); "
-          + msg)
+    print(f"REPRO: NOT_REPRODUCED (race not observed; GPU still engaged under device='cpu': {gb} blocks); " + msg)

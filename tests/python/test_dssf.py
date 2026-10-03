@@ -34,7 +34,7 @@ def _base_spec() -> dssf.OperatorSpec:
     s = dssf.OperatorSpec()
     s.operator_type = "sum"
     s.basis = "ladder"
-    s.components = [2]                          # Sz
+    s.components = [2]  # Sz
     s.momentum_points = [[0.0, 0.0, 0.0]]
     s.polarization = [1.0, 0.0, 0.0]
     s.unit_cell_size = 4
@@ -46,6 +46,7 @@ def _base_spec() -> dssf.OperatorSpec:
 # ---------------------------------------------------------------------------
 # compute_transverse_bases
 # ---------------------------------------------------------------------------
+
 
 def test_transverse_bases_orthogonal_Q_pol():
     e1, e2 = dssf.compute_transverse_bases(
@@ -72,10 +73,13 @@ def test_transverse_bases_parallel_Q_pol_falls_back():
     assert abs(dot) < 1e-12
 
 
-@pytest.mark.parametrize("Q,pol", [
-    ([1.0],            [1.0, 0.0, 0.0]),
-    ([1.0, 0.0, 0.0],  [1.0, 0.0]),
-])
+@pytest.mark.parametrize(
+    "Q,pol",
+    [
+        ([1.0], [1.0, 0.0, 0.0]),
+        ([1.0, 0.0, 0.0], [1.0, 0.0]),
+    ],
+)
 def test_transverse_bases_validates_input_shapes(Q, pol):
     with pytest.raises(ValueError):
         dssf.compute_transverse_bases(Q=Q, polarization=pol)
@@ -84,6 +88,7 @@ def test_transverse_bases_validates_input_shapes(Q, pol):
 # ---------------------------------------------------------------------------
 # build_observables -- shape + naming
 # ---------------------------------------------------------------------------
+
 
 def test_sum_one_per_component_per_Q():
     spec = _base_spec()
@@ -160,13 +165,17 @@ def test_experimental_one_per_Q_without_components():
 # build_observables -- input validation
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("mutate,desc", [
-    (lambda s: setattr(s, "components",      []), "empty components"),
-    (lambda s: setattr(s, "momentum_points", []), "empty momentum points"),
-    (lambda s: setattr(s, "polarization",    [1.0, 0.0]), "polarization not 3-vector"),
-    (lambda s: setattr(s, "num_sites",       0), "num_sites = 0"),
-    (lambda s: setattr(s, "operator_type", "totally_made_up"), "unknown operator_type"),
-])
+
+@pytest.mark.parametrize(
+    "mutate,desc",
+    [
+        (lambda s: setattr(s, "components", []), "empty components"),
+        (lambda s: setattr(s, "momentum_points", []), "empty momentum points"),
+        (lambda s: setattr(s, "polarization", [1.0, 0.0]), "polarization not 3-vector"),
+        (lambda s: setattr(s, "num_sites", 0), "num_sites = 0"),
+        (lambda s: setattr(s, "operator_type", "totally_made_up"), "unknown operator_type"),
+    ],
+)
 def test_rejects_malformed_input(mutate, desc):
     spec = _base_spec()
     mutate(spec)
@@ -177,6 +186,7 @@ def test_rejects_malformed_input(mutate, desc):
 # ---------------------------------------------------------------------------
 # Operator handles round-trip through Python apply()
 # ---------------------------------------------------------------------------
+
 
 def test_operators_are_apply_callable():
     """The Operator handles returned by build_observables must support the same
@@ -189,7 +199,7 @@ def test_operators_are_apply_callable():
     assert len(obs) == 1
 
     op = obs.operators[0]
-    dim = 1 << 4   # num_sites = 4 -> full 16-d Hilbert
+    dim = 1 << 4  # num_sites = 4 -> full 16-d Hilbert
     vec = np.zeros(dim, dtype=np.complex128)
     vec[0] = 1.0 + 0j
     out = op.apply(vec)
@@ -214,10 +224,12 @@ def test_inputs_are_validated(tmp_path):
             setattr(s, k, v)
         return s
 
-    for bad in (dict(momentum_points=[[0.5, 0.0]]),
-                dict(operator_type="sublattice", unit_cell_size=0),
-                dict(operator_type="sublattice", unit_cell_size=2, sublattice=2),
-                dict(components=[3])):
+    for bad in (
+        dict(momentum_points=[[0.5, 0.0]]),
+        dict(operator_type="sublattice", unit_cell_size=0),
+        dict(operator_type="sublattice", unit_cell_size=2, sublattice=2),
+        dict(components=[3]),
+    ):
         with pytest.raises(ValueError):
             qed.dssf.build_observables(spec(**bad))
     short = tmp_path / "short.dat"
@@ -227,7 +239,6 @@ def test_inputs_are_validated(tmp_path):
     for p in (short, two):
         with pytest.raises(ValueError):
             qed.dssf.build_observables(spec(positions_file=str(p)))
-    sub = qed.dssf.build_observables(spec(operator_type="sublattice", basis="xyz", components=[0],
-                                          unit_cell_size=1))
+    sub = qed.dssf.build_observables(spec(operator_type="sublattice", basis="xyz", components=[0], unit_cell_size=1))
     whole = qed.dssf.build_observables(spec(basis="xyz", components=[0]))
     assert sub.names[0].startswith("Sx") and sub.operators[0].equals(whole.operators[0])

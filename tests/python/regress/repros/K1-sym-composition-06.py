@@ -8,6 +8,7 @@ Test: 21-site triangular cluster with lattice vectors (4,1), (-1,5) (no mirror),
 + C6 rotations as an explicit generator set, Sz sector n_up=3. In qed.spectrum's levels look for two blocks
 of the same star whose co-group characters are complex conjugates, both reported (tr_folded False), with
 identical spectra."""
+
 import signal
 import types
 from collections import defaultdict
@@ -16,9 +17,13 @@ import numpy as np
 import qed
 
 signal.alarm(200)
-L1, L2 = (4, 1), (-1, 5)                       # det = 21; R60(L1) = L2
-def key(x, y):                                 # class of (x, y) modulo the lattice
+L1, L2 = (4, 1), (-1, 5)  # det = 21; R60(L1) = L2
+
+
+def key(x, y):  # class of (x, y) modulo the lattice
     return ((5 * x + y) % 21, (-x + 4 * y) % 21)
+
+
 sites, index = [], {}
 for x in range(21):
     for y in range(21):
@@ -30,7 +35,7 @@ N = len(sites)
 assert N == 21
 site = lambda x, y: index[key(x, y)]
 bonds = set()
-for (x, y) in sites:
+for x, y in sites:
     for dx, dy in ((1, 0), (0, 1), (-1, 1)):
         a, b = site(x, y), site(x + dx, y + dy)
         bonds.add((min(a, b), max(a, b)))
@@ -41,9 +46,13 @@ for i, j in sorted(bonds):
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
 T1 = [site(x + 1, y) for (x, y) in sites]
 T2 = [site(x, y + 1) for (x, y) in sites]
-R = [site(-y, x + y) for (x, y) in sites]      # 60-degree rotation: a1 -> a2, a2 -> a2 - a1
-def compose(p, q):                             # (p o q)[i] = p[q[i]]
+R = [site(-y, x + y) for (x, y) in sites]  # 60-degree rotation: a1 -> a2, a2 -> a2 - a1
+
+
+def compose(p, q):  # (p o q)[i] = p[q[i]]
     return [p[q[i]] for i in range(N)]
+
+
 rots, P = [], list(range(N))
 for _ in range(5):
     P = compose(R, P)
@@ -80,8 +89,10 @@ print("blocks:", len(blocks), "conjugate co-group pairs both solved:", pairs)
 iso = [p for p in pairs if p[3]]
 if iso:
     a, b, n, _, m = iso[0]
-    print(f"REPRO: CONFIRMED {len(iso)} complex-conjugate co-group block pair(s) solved separately with identical "
-          f"spectra (k0={a[0]}, irreps {a[1]}/{b[1]}, dim {n}, multiplicity {m} each, tr_folded False)")
+    print(
+        f"REPRO: CONFIRMED {len(iso)} complex-conjugate co-group block pair(s) solved separately with identical "
+        f"spectra (k0={a[0]}, irreps {a[1]}/{b[1]}, dim {n}, multiplicity {m} each, tr_folded False)"
+    )
 elif pairs:
     print(f"REPRO: NOT_REPRODUCED conjugate pairs exist but spectra differ: {pairs}")
 else:

@@ -75,7 +75,10 @@ public:
     void erase(std::uint64_t key) {
         std::lock_guard<std::mutex> lk(mu_);
         for (auto it = entries_.begin(); it != entries_.end(); ++it)
-            if ((*it)->content_hash == key) { entries_.erase(it); return; }
+            if ((*it)->content_hash == key) {
+                entries_.erase(it);
+                return;
+            }
     }
 
 private:
@@ -90,20 +93,14 @@ private:
 // membership (bit range, popcount / parity) and canonical-minimum under the
 // group action. A wrong-table hit fails with near-certainty; cost is
 // <= 64 x |G| LUT applies, negligible next to any solve.
-[[nodiscard]] inline bool
-orbit_table_consistent(const OrbitTable&    t,
-                       const CompiledGroup& cg,
-                       std::uint64_t        n_bits,
-                       int                  n_up,
-                       int                  parity) noexcept {
+[[nodiscard]] inline bool orbit_table_consistent(const OrbitTable& t, const CompiledGroup& cg, std::uint64_t n_bits,
+                                                 int n_up, int parity) noexcept {
     if (t.reps.empty()) return true;
-    const std::uint64_t mask =
-        (n_bits >= 64) ? ~0ULL : ((std::uint64_t{1} << n_bits) - 1ULL);
+    const std::uint64_t mask = (n_bits >= 64) ? ~0ULL : ((std::uint64_t{1} << n_bits) - 1ULL);
     const std::size_t n = t.reps.size();
     const std::size_t samples = std::min<std::size_t>(n, 64);
     for (std::size_t i = 0; i < samples; ++i) {
-        const std::size_t idx =
-            (samples == 1) ? 0 : i * (n - 1) / (samples - 1);
+        const std::size_t idx = (samples == 1) ? 0 : i * (n - 1) / (samples - 1);
         const std::uint64_t r = t.reps[idx];
         if (r & ~mask) return false;
         const int pc = __builtin_popcountll(r);
@@ -115,13 +112,12 @@ orbit_table_consistent(const OrbitTable&    t,
 }
 
 template <class BuildFn, class VerifyFn>
-[[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_impl(std::uint64_t key, BuildFn&& build, VerifyFn&& verify) {
+[[nodiscard]] inline std::shared_ptr<const OrbitTable> acquire_impl(std::uint64_t key, BuildFn&& build,
+                                                                    VerifyFn&& verify) {
     auto& reg = OrbitTableRegistry::instance();
     if (auto hit = reg.find(key)) {
         if (verify(*hit)) {
-            if (sym_profile_enabled())
-                ED_LOG(Info, "[sym-profile] orbit-table registry HIT (%zu reps)", hit->size());
+            if (sym_profile_enabled()) ED_LOG(Info, "[sym-profile] orbit-table registry HIT (%zu reps)", hit->size());
             return hit;
         }
         ED_LOG(Warn, "[symmetry-cache] orbit-table registry hit FAILED physical "
@@ -140,49 +136,32 @@ acquire_impl(std::uint64_t key, BuildFn&& build, VerifyFn&& verify) {
 /// registry is consulted first (flip elements change the group hash and
 /// therefore the key).
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_orbit_table_fixed_sz_compiled(std::uint64_t        n_bits,
-                                      int                  n_up,
-                                      const CompiledGroup& cg) {
-    const std::uint64_t key = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL)
-        ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
+acquire_orbit_table_fixed_sz_compiled(std::uint64_t n_bits, int n_up, const CompiledGroup& cg) {
+    const std::uint64_t key = cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+                              ^ (n_bits * 0x2545F4914F6CDD1DULL)
+                              ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
     return detail::acquire_impl(
-        key,
-        [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); },
-        [&](const OrbitTable& t) {
-            return detail::orbit_table_consistent(t, cg, n_bits, n_up, -1);
-        });
+        key, [&] { return build_orbit_table_fixed_sz_streaming(n_bits, n_up, cg); },
+        [&](const OrbitTable& t) { return detail::orbit_table_consistent(t, cg, n_bits, n_up, -1); });
 }
 
 [[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_orbit_table_parity_compiled(std::uint64_t        n_bits,
-                                    int                  parity,
-                                    const CompiledGroup& cg) {
-    const std::uint64_t key = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL)
-        ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
+acquire_orbit_table_parity_compiled(std::uint64_t n_bits, int parity, const CompiledGroup& cg) {
+    const std::uint64_t key = cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+                              ^ (n_bits * 0x2545F4914F6CDD1DULL)
+                              ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
     return detail::acquire_impl(
-        key,
-        [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); },
-        [&](const OrbitTable& t) {
-            return detail::orbit_table_consistent(t, cg, n_bits, -1, parity);
-        });
+        key, [&] { return build_orbit_table_parity_compiled(n_bits, parity, cg); },
+        [&](const OrbitTable& t) { return detail::orbit_table_consistent(t, cg, n_bits, -1, parity); });
 }
 
-[[nodiscard]] inline std::shared_ptr<const OrbitTable>
-acquire_orbit_table_full_compiled(std::uint64_t        n_bits,
-                                  const CompiledGroup& cg) {
-    const std::uint64_t key = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL);
+[[nodiscard]] inline std::shared_ptr<const OrbitTable> acquire_orbit_table_full_compiled(std::uint64_t n_bits,
+                                                                                         const CompiledGroup& cg) {
+    const std::uint64_t key =
+        cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL) ^ (n_bits * 0x2545F4914F6CDD1DULL);
     return detail::acquire_impl(
-        key,
-        [&] { return build_orbit_table_full_compiled(n_bits, cg); },
-        [&](const OrbitTable& t) {
-            return detail::orbit_table_consistent(t, cg, n_bits, -1, -1);
-        });
+        key, [&] { return build_orbit_table_full_compiled(n_bits, cg); },
+        [&](const OrbitTable& t) { return detail::orbit_table_consistent(t, cg, n_bits, -1, -1); });
 }
 
 }  // namespace ed::symmetry

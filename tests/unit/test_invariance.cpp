@@ -45,9 +45,7 @@ struct Model {
     std::shared_ptr<Operator> H;
 };
 
-std::vector<std::pair<std::size_t, std::size_t>> ring() {
-    return ed::input::lattice::chain(N, true).nn_pairs();
-}
+std::vector<std::pair<std::size_t, std::size_t>> ring() { return ed::input::lattice::chain(N, true).nn_pairs(); }
 
 std::shared_ptr<Operator> records() { return std::make_shared<Operator>(N, 0.5f); }
 
@@ -55,7 +53,7 @@ std::shared_ptr<Operator> records() { return std::make_shared<Operator>(N, 0.5f)
 // S-S- parts cancel), then Sz Sz.
 void cartesian_bond(Operator& H, std::uint64_t i, std::uint64_t j, double J) {
     const double q = J / 4.0;
-    const std::tuple<int, int, double> recs[] = {{0, 0, q}, {0, 1, q}, {1, 0, q}, {1, 1, q},     // Sx Sx
+    const std::tuple<int, int, double> recs[] = {{0, 0, q},  {0, 1, q}, {1, 0, q}, {1, 1, q},     // Sx Sx
                                                  {0, 0, -q}, {0, 1, q}, {1, 0, q}, {1, 1, -q}};  // Sy Sy
     for (const auto& [a, b, c] : recs)
         H.addTwoBodyTerm(static_cast<std::uint8_t>(a), i, static_cast<std::uint8_t>(b), j, Cx(c, 0.0));
@@ -74,18 +72,36 @@ std::vector<Model> zoo() {
     built("heisenberg", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); });
     built("xxz", [&](Operator& H) { R::xxz(H, bonds, 1.0, 0.5); });
     built("xyz", [&](Operator& H) { R::xyz(H, bonds, 1.0, 0.7, 0.4); });
-    built("heisenberg+zeeman_z", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.0, 0.0, 0.3); });
-    built("heisenberg+zeeman_x", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.3, 0.0, 0.0); });
-    built("heisenberg+zeeman_y", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::zeeman(H, 0.0, 0.3, 0.0); });
+    built("heisenberg+zeeman_z", [&](Operator& H) {
+        R::heisenberg(H, bonds, 1.0);
+        R::zeeman(H, 0.0, 0.0, 0.3);
+    });
+    built("heisenberg+zeeman_x", [&](Operator& H) {
+        R::heisenberg(H, bonds, 1.0);
+        R::zeeman(H, 0.3, 0.0, 0.0);
+    });
+    built("heisenberg+zeeman_y", [&](Operator& H) {
+        R::heisenberg(H, bonds, 1.0);
+        R::zeeman(H, 0.0, 0.3, 0.0);
+    });
     built("tfim", [&](Operator& H) { R::transverse_field_ising(H, bonds, 1.0, 0.7); });
-    built("heisenberg+dm_x", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::dm(H, bonds, 0.3, 0.0, 0.0); });
+    built("heisenberg+dm_x", [&](Operator& H) {
+        R::heisenberg(H, bonds, 1.0);
+        R::dm(H, bonds, 0.3, 0.0, 0.0);
+    });
     // D_z conserves S^z, but the builder writes it with S+S+ / S-S- records that cancel.
-    built("heisenberg+dm_z", [&](Operator& H) { R::heisenberg(H, bonds, 1.0); R::dm(H, bonds, 0.0, 0.0, 0.3); });
+    built("heisenberg+dm_z", [&](Operator& H) {
+        R::heisenberg(H, bonds, 1.0);
+        R::dm(H, bonds, 0.0, 0.0, 0.3);
+    });
     {
         const auto hc = ed::input::lattice::honeycomb(2, 2, true);
         std::vector<std::pair<std::size_t, std::size_t>> hb;
         std::vector<int> axis;
-        for (const auto& bd : hc.nn_bonds) { hb.emplace_back(bd.i, bd.j); axis.push_back(bd.bond_type % 3); }
+        for (const auto& bd : hc.nn_bonds) {
+            hb.emplace_back(bd.i, bd.j);
+            axis.push_back(bd.bond_type % 3);
+        }
         built("kitaev_honeycomb", [&](Operator& H) { R::kitaev(H, hb, axis, 1.0); });
     }
     {   // the Heisenberg ring in Cartesian form: U(1) and SU(2), which the records hide
@@ -112,8 +128,7 @@ std::vector<Model> zoo() {
             for (int p = 0; p < 6; ++p)
                 H->addThreeBodyTerm(static_cast<std::uint8_t>(pattern[p][0]), s[0],
                                     static_cast<std::uint8_t>(pattern[p][1]), s[1],
-                                    static_cast<std::uint8_t>(pattern[p][2]), s[2],
-                                    Cx(0.0, p < 3 ? 0.2 : -0.2));
+                                    static_cast<std::uint8_t>(pattern[p][2]), s[2], Cx(0.0, p < 3 ? 0.2 : -0.2));
         }
         z.push_back({"heisenberg+chirality", H});
     }
@@ -158,7 +173,11 @@ std::vector<Model> zoo() {
 
 std::vector<std::vector<int>> perms() {
     std::vector<std::vector<int>> p;
-    auto make = [&](auto f) { std::vector<int> v(N); for (int i = 0; i < N; ++i) v[static_cast<std::size_t>(i)] = f(i); p.push_back(v); };
+    auto make = [&](auto f) {
+        std::vector<int> v(N);
+        for (int i = 0; i < N; ++i) v[static_cast<std::size_t>(i)] = f(i);
+        p.push_back(v);
+    };
     make([](int i) { return i; });
     make([](int i) { return (i + 1) % N; });
     make([](int i) { return (i + 2) % N; });
@@ -188,7 +207,11 @@ double max_abs(const std::vector<Cx>& M) {
 
 bool up(std::uint64_t s, int i) { return (((s >> i) & 1ULL) != 0) != ed::ops::kSetBitIsDown; }
 
-struct Truth { bool flip, real, su2; int sz; std::vector<bool> perm; };
+struct Truth {
+    bool flip, real, su2;
+    int sz;
+    std::vector<bool> perm;
+};
 
 Truth truth(const std::vector<Cx>& M) {
     const double tol = 1e-9 * max_abs(M);
@@ -213,8 +236,14 @@ Truth truth(const std::vector<Cx>& M) {
                 const std::uint64_t b = 1ULL << i;
                 sz_t += up(t, i) ? 0.5 : -0.5;
                 sz_s += up(s, i) ? 0.5 : -0.5;
-                if (up(s, i)) cm += at(t, s ^ b); else cp += at(t, s ^ b);       // (M S)[t, s]
-                if (!up(t, i)) cm -= at(t ^ b, s); else cp -= at(t ^ b, s);      // (S M)[t, s]
+                if (up(s, i))
+                    cm += at(t, s ^ b);
+                else
+                    cp += at(t, s ^ b);       // (M S)[t, s]
+                if (!up(t, i))
+                    cm -= at(t ^ b, s);
+                else
+                    cp -= at(t ^ b, s);      // (S M)[t, s]
             }
             if (std::abs(cm) > tol || std::abs(cp) > tol || std::abs(m * (sz_s - sz_t)) > tol) r.su2 = false;
         }
@@ -224,7 +253,10 @@ Truth truth(const std::vector<Cx>& M) {
         for (std::uint64_t t = 0; t < kDim && ok; ++t)
             for (std::uint64_t s = 0; s < kDim; ++s) {
                 const auto pt = ed::ops::permute_mask(t, p.data(), N), ps = ed::ops::permute_mask(s, p.data(), N);
-                if (std::abs(at(pt, ps) - at(t, s)) > tol) { ok = false; break; }
+                if (std::abs(at(pt, ps) - at(t, s)) > tol) {
+                    ok = false;
+                    break;
+                }
             }
         r.perm.push_back(ok);
     }
@@ -233,11 +265,18 @@ Truth truth(const std::vector<Cx>& M) {
 
 // ---- the verdicts --------------------------------------------------------------------
 
-struct Verdicts { bool flip, real, su2; int sz; std::vector<bool> perm; };
+struct Verdicts {
+    bool flip, real, su2;
+    int sz;
+    std::vector<bool> perm;
+};
 
 Verdicts fresh(const MaskedOperator& H) {
-    Verdicts v{ed::ops::flip_invariant(H), ed::ops::conjugation_invariant(H), ed::ops::su2_invariant(H),
-               static_cast<int>(ed::ops::sz_content(H)), {}};
+    Verdicts v{ed::ops::flip_invariant(H),
+               ed::ops::conjugation_invariant(H),
+               ed::ops::su2_invariant(H),
+               static_cast<int>(ed::ops::sz_content(H)),
+               {}};
     for (const auto& p : perms()) v.perm.push_back(ed::ops::commutes_with_permutation(H, p));
     return v;
 }
@@ -456,7 +495,10 @@ TEST_CASE("group_average commutes with the group; keep_sz_changes keeps what it 
                 }
         const auto Ad = A.to_dense();
         double d = 0.0, m = 0.0;
-        for (std::size_t i = 0; i < Ad.size(); ++i) { d = std::max(d, std::abs(Ad[i] - ref[i])); m = std::max(m, std::abs(ref[i])); }
+        for (std::size_t i = 0; i < Ad.size(); ++i) {
+            d = std::max(d, std::abs(Ad[i] - ref[i]));
+            m = std::max(m, std::abs(ref[i]));
+        }
         CHECK(d <= 1e-12 * std::max(1.0, m));
         // the S^z filters
         using ed::ops::SzKeep;

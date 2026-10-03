@@ -4,6 +4,7 @@
 """Claim: EigResult.vectors() catches every ValueError as 'no component in this Sz sector', so real
 refusals become a silent empty list: at N >= 35 the default basis='full' hits expand()'s
 'N <= 34' refusal and returns [] (while basis='sz' works), and an impossible n_up returns []."""
+
 import qed
 
 
@@ -30,13 +31,17 @@ try:
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE setup raised {type(ex).__name__}: {ex}")
     raise SystemExit(0)
-print(f"N=36 E0={r36.energies[0]:.10f}; vectors() -> {None if full36 is None else len(full36)} (err {err36}); "
-      f"vectors(basis='sz', n_up=1) -> {len(sz36)}")
+print(
+    f"N=36 E0={r36.energies[0]:.10f}; vectors() -> {None if full36 is None else len(full36)} (err {err36}); "
+    f"vectors(basis='sz', n_up=1) -> {len(sz36)}"
+)
 print(f"N=12 vectors(basis='sz', n_up=99) -> {None if bogus is None else len(bogus)} (err {errb})")
 silent36 = full36 is not None and len(full36) == 0 and len(sz36) > 0
 silentb = bogus is not None and len(bogus) == 0
 if silent36 or silentb:
-    print(f"REPRO: CONFIRMED N=36 full-basis vectors() silently [] ({silent36}), sz basis gives {len(sz36)}; "
-          f"n_up=99 silently [] ({silentb})")
+    print(
+        f"REPRO: CONFIRMED N=36 full-basis vectors() silently [] ({silent36}), sz basis gives {len(sz36)}; "
+        f"n_up=99 silently [] ({silentb})"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED full36={err36 or len(full36)} bogus={errb or len(bogus)}")

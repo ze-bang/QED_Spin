@@ -22,7 +22,7 @@
 #include <string>
 
 #ifdef _OPENMP
-#  include <omp.h>
+#include <omp.h>
 #endif
 
 namespace {
@@ -41,19 +41,22 @@ struct EnvGuard {
         const char* cur = std::getenv("ED_SYM_SECTOR_CSR_BUDGET_GIB");
         had = cur != nullptr;
         if (had) saved = cur;
-        if (v) ::setenv("ED_SYM_SECTOR_CSR_BUDGET_GIB", v, 1);
-        else   ::unsetenv("ED_SYM_SECTOR_CSR_BUDGET_GIB");
+        if (v)
+            ::setenv("ED_SYM_SECTOR_CSR_BUDGET_GIB", v, 1);
+        else
+            ::unsetenv("ED_SYM_SECTOR_CSR_BUDGET_GIB");
     }
     ~EnvGuard() {
-        if (had) ::setenv("ED_SYM_SECTOR_CSR_BUDGET_GIB", saved.c_str(), 1);
-        else     ::unsetenv("ED_SYM_SECTOR_CSR_BUDGET_GIB");
+        if (had)
+            ::setenv("ED_SYM_SECTOR_CSR_BUDGET_GIB", saved.c_str(), 1);
+        else
+            ::unsetenv("ED_SYM_SECTOR_CSR_BUDGET_GIB");
     }
 };
 
 }  // namespace
 
-TEST_CASE("sector_csr_within_budget: serial lane admits up to the knob",
-          "[planner][csr_budget]") {
+TEST_CASE("sector_csr_within_budget: serial lane admits up to the knob", "[planner][csr_budget]") {
     EnvGuard g("4");
     constexpr std::uint64_t terms = 8;
 
@@ -63,8 +66,7 @@ TEST_CASE("sector_csr_within_budget: serial lane admits up to the knob",
     REQUIRE_FALSE(ed::planner::sector_csr_within_budget(dim_for_gib(9.0, terms), terms));
 }
 
-TEST_CASE("sector_csr_within_budget: the knob is an AGGREGATE across concurrent builders",
-          "[planner][csr_budget]") {
+TEST_CASE("sector_csr_within_budget: the knob is an AGGREGATE across concurrent builders", "[planner][csr_budget]") {
 #ifndef _OPENMP
     SUCCEED("OpenMP not enabled; the concurrent-builder split is a no-op.");
 #else
@@ -80,24 +82,20 @@ TEST_CASE("sector_csr_within_budget: the knob is an AGGREGATE across concurrent 
     // parallel lane: an outer team whose body asks the budget question.
     int admitted = 0;
     const int want = 8;
-#  pragma omp parallel num_threads(want) reduction(+ : admitted)
+#pragma omp parallel num_threads(want) reduction(+ : admitted)
     {
-        if (omp_get_team_size(1) == want
-            && ed::planner::sector_csr_within_budget(d1, terms))
-            admitted++;
+        if (omp_get_team_size(1) == want && ed::planner::sector_csr_within_budget(d1, terms)) admitted++;
     }
-    INFO("threads that would have materialized a 1 GiB CSR under a 4 GiB knob: "
-         << admitted);
+    INFO("threads that would have materialized a 1 GiB CSR under a 4 GiB knob: " << admitted);
     REQUIRE(admitted == 0);
 
     // Small enough that even 8-way concurrency stays under the knob (8 x 0.25
     // = 2 GiB < 4): still admitted. The split throttles, it does not veto.
     const std::uint64_t d_small = dim_for_gib(0.25, terms);
     int admitted_small = 0;
-#  pragma omp parallel num_threads(want) reduction(+ : admitted_small)
+#pragma omp parallel num_threads(want) reduction(+ : admitted_small)
     {
-        if (ed::planner::sector_csr_within_budget(d_small, terms))
-            admitted_small++;
+        if (ed::planner::sector_csr_within_budget(d_small, terms)) admitted_small++;
     }
     REQUIRE(admitted_small == want);
 #endif
@@ -124,8 +122,10 @@ TEST_CASE("block_csr_budget_bytes: unset, the budget follows the RAM the job may
     }
     ::setenv("ED_MEM_GUARD_OFF", "1", 1);
     REQUIRE(ed::planner::block_csr_budget_bytes(~std::uint64_t{0} / 2) == ~std::uint64_t{0});
-    if (off != nullptr) ::setenv("ED_MEM_GUARD_OFF", off, 1);
-    else ::unsetenv("ED_MEM_GUARD_OFF");
+    if (off != nullptr)
+        ::setenv("ED_MEM_GUARD_OFF", off, 1);
+    else
+        ::unsetenv("ED_MEM_GUARD_OFF");
 }
 
 TEST_CASE("CsrBudget: one block's operators share it", "[planner][csr_budget]") {

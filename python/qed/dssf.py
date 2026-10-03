@@ -52,8 +52,12 @@ __all__ = [
 
 _TYPES = ("sum", "transverse", "sublattice", "experimental", "transverse_experimental")
 _INV_SQRT3 = 0.5773502691896258
-_PYRO_AXES = ((-_INV_SQRT3, -_INV_SQRT3, -_INV_SQRT3), (-_INV_SQRT3, _INV_SQRT3, _INV_SQRT3),
-              (_INV_SQRT3, -_INV_SQRT3, _INV_SQRT3), (_INV_SQRT3, _INV_SQRT3, -_INV_SQRT3))
+_PYRO_AXES = (
+    (-_INV_SQRT3, -_INV_SQRT3, -_INV_SQRT3),
+    (-_INV_SQRT3, _INV_SQRT3, _INV_SQRT3),
+    (_INV_SQRT3, -_INV_SQRT3, _INV_SQRT3),
+    (_INV_SQRT3, _INV_SQRT3, -_INV_SQRT3),
+)
 _ZERO_TOL = 1e-10
 
 
@@ -80,8 +84,18 @@ class OperatorSpec:
     ``momentum_points`` (3-vectors, absolute units), ``polarization``, ``theta``,
     ``unit_cell_size``, ``num_sites``, ``positions_file`` and ``sublattice`` (None: all)."""
 
-    __slots__ = ("_operator_type", "_basis", "_components", "_momentum_points", "_polarization",
-                 "_theta", "_unit_cell_size", "_num_sites", "_positions_file", "_sublattice")
+    __slots__ = (
+        "_operator_type",
+        "_basis",
+        "_components",
+        "_momentum_points",
+        "_polarization",
+        "_theta",
+        "_unit_cell_size",
+        "_num_sites",
+        "_positions_file",
+        "_sublattice",
+    )
 
     def __init__(self):
         self._operator_type = "sum"
@@ -100,29 +114,39 @@ class OperatorSpec:
             raise TypeError(f"OperatorSpec.{what} must be a str, got {type(v).__name__}")
         return v
 
-    operator_type = property(lambda s: s._operator_type,
-                             lambda s, v: setattr(s, "_operator_type", s._str(v, "operator_type")))
+    operator_type = property(
+        lambda s: s._operator_type, lambda s, v: setattr(s, "_operator_type", s._str(v, "operator_type"))
+    )
     basis = property(lambda s: s._basis, lambda s, v: setattr(s, "_basis", s._str(v, "basis")))
-    positions_file = property(lambda s: s._positions_file,
-                              lambda s, v: setattr(s, "_positions_file", s._str(v, "positions_file")))
-    components = property(lambda s: list(s._components),
-                          lambda s, v: setattr(s, "_components", [_index(c, "components", -2 ** 63) for c in v]))
-    momentum_points = property(lambda s: [list(q) for q in s._momentum_points],
-                               lambda s, v: setattr(s, "_momentum_points",
-                                                    [_floats(q, "momentum_points") for q in v]))
-    polarization = property(lambda s: list(s._polarization),
-                            lambda s, v: setattr(s, "_polarization", _floats(v, "polarization")))
+    positions_file = property(
+        lambda s: s._positions_file, lambda s, v: setattr(s, "_positions_file", s._str(v, "positions_file"))
+    )
+    components = property(
+        lambda s: list(s._components),
+        lambda s, v: setattr(s, "_components", [_index(c, "components", -(2**63)) for c in v]),
+    )
+    momentum_points = property(
+        lambda s: [list(q) for q in s._momentum_points],
+        lambda s, v: setattr(s, "_momentum_points", [_floats(q, "momentum_points") for q in v]),
+    )
+    polarization = property(
+        lambda s: list(s._polarization), lambda s, v: setattr(s, "_polarization", _floats(v, "polarization"))
+    )
     theta = property(lambda s: s._theta, lambda s, v: setattr(s, "_theta", _floats([v], "theta")[0]))
-    unit_cell_size = property(lambda s: s._unit_cell_size,
-                              lambda s, v: setattr(s, "_unit_cell_size", _index(v, "unit_cell_size")))
+    unit_cell_size = property(
+        lambda s: s._unit_cell_size, lambda s, v: setattr(s, "_unit_cell_size", _index(v, "unit_cell_size"))
+    )
     num_sites = property(lambda s: s._num_sites, lambda s, v: setattr(s, "_num_sites", _index(v, "num_sites")))
-    sublattice = property(lambda s: s._sublattice,
-                          lambda s, v: setattr(s, "_sublattice", None if v is None else _index(v, "sublattice")))
+    sublattice = property(
+        lambda s: s._sublattice, lambda s, v: setattr(s, "_sublattice", None if v is None else _index(v, "sublattice"))
+    )
 
     def __repr__(self) -> str:
-        return (f"<qed.dssf.OperatorSpec operator_type='{self._operator_type}' basis='{self._basis}' "
-                f"num_sites={self._num_sites} momenta={len(self._momentum_points)} "
-                f"components={len(self._components)}>")
+        return (
+            f"<qed.dssf.OperatorSpec operator_type='{self._operator_type}' basis='{self._basis}' "
+            f"num_sites={self._num_sites} momenta={len(self._momentum_points)} "
+            f"components={len(self._components)}>"
+        )
 
 
 class Observables:
@@ -238,10 +262,10 @@ def _stem(prefix: str, Q) -> str:
 def _site_terms(op, c: int, site: int, phase: complex, xyz: bool) -> None:
     if not xyz:
         op.add_one_body(c, site, phase)
-    elif c == 0:     # Sx = (S+ + S-)/2
+    elif c == 0:  # Sx = (S+ + S-)/2
         op.add_one_body(0, site, complex(phase.real * 0.5, phase.imag * 0.5))
         op.add_one_body(1, site, complex(phase.real * 0.5, phase.imag * 0.5))
-    elif c == 1:     # Sy = -i (S+ - S-)/2
+    elif c == 1:  # Sy = -i (S+ - S-)/2
         op.add_one_body(0, site, phase * complex(0.0, -0.5))
         op.add_one_body(1, site, phase * complex(0.0, 0.5))
     else:
@@ -285,8 +309,9 @@ def build_observables(spec: OperatorSpec) -> Observables:
         if U == 0:
             raise ValueError("ed::dssf::build_observables: unit_cell_size must be >= 1")
         if spec._sublattice is not None and spec._sublattice >= U:
-            raise ValueError(f"ed::dssf::build_observables: sublattice {spec._sublattice} is not below "
-                             f"unit_cell_size {U}")
+            raise ValueError(
+                f"ed::dssf::build_observables: sublattice {spec._sublattice} is not below " f"unit_cell_size {U}"
+            )
     xyz = spec._basis == "xyz"
     positions = _read_positions(spec._positions_file, n)
     ops, names = [], []
@@ -334,7 +359,7 @@ def build_observables(spec: OperatorSpec) -> Observables:
                         _site_terms(op, c, i, ph[i], xyz)
                     ops.append(op)
                     names.append(stem + tag)
-            else:   # sublattice: the sum over sites s, s + U, ... (phases normalised over all N)
+            else:  # sublattice: the sum over sites s, s + U, ... (phases normalised over all N)
                 ph = _phases(Q, positions, 1.0 / math.sqrt(n))
                 subs = [spec._sublattice] if spec._sublattice is not None else range(U)
                 for s in subs:

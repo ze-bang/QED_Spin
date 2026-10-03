@@ -62,10 +62,10 @@ inline constexpr int kSublatticeMaxBlocks = 8;
 /// What the canonicalisers read, on the host or the device (the device mirror points it at device
 /// copies). A null `to_key` means no code: the plain scan over the group.
 struct SublatticeView {
-    const std::uint64_t* to_key   = nullptr;   // bpw x 256: a state's bits moved to their key positions
-    const std::uint16_t* lead     = nullptr;   // m x 2^L: the least leading block from block j's pattern
+    const std::uint64_t* to_key = nullptr;   // bpw x 256: a state's bits moved to their key positions
+    const std::uint16_t* lead = nullptr;   // m x 2^L: the least leading block from block j's pattern
     const std::uint32_t* cand_off = nullptr;   // m x 2^L + 1: offsets into cand
-    const std::uint16_t* cand     = nullptr;   // per (j, pattern): the elements reaching lead, ascending
+    const std::uint16_t* cand = nullptr;   // per (j, pattern): the elements reaching lead, ascending
     int n_sites = 0, bpw = 0, L = 0, m = 0;
 
     [[nodiscard]] ED_SLC_HD bool engaged() const noexcept { return to_key != nullptr; }
@@ -97,8 +97,7 @@ struct SublatticeView {
     /// fn(g), in ascending element order, for every element whose image of the state (key k) has
     /// the least leading block: every element that maps the state to its representative (the image
     /// least in the whole key) is among them.
-    template <class Fn>
-    ED_SLC_HD void for_each_candidate(std::uint64_t k, Fn&& fn) const {
+    template <class Fn> ED_SLC_HD void for_each_candidate(std::uint64_t k, Fn&& fn) const {
         std::uint32_t entry[kSublatticeMaxBlocks];
         std::uint32_t best = 0xFFFFFFFFu;
         for (int j = 0; j < m; ++j) {
@@ -121,7 +120,10 @@ struct SublatticeView {
             int pick = -1;
             std::uint32_t g = 0xFFFFFFFFu;
             for (int i = 0; i < n; ++i)
-                if (pos[i] < end[i] && cand[pos[i]] < g) { g = cand[pos[i]]; pick = i; }
+                if (pos[i] < end[i] && cand[pos[i]] < g) {
+                    g = cand[pos[i]];
+                    pick = i;
+                }
             if (pick < 0) return;
             ++pos[pick];
             fn(static_cast<int>(g));
@@ -159,26 +161,25 @@ public:
     /// bit perms[g * N + i]) with XOR masks `flips` (null: none), or null: switched off, or no block
     /// system of 2..8 blocks of at most 16 sites. Cached by the element list; never freed (a view
     /// into a code stays valid).
-    [[nodiscard]] static std::shared_ptr<const SublatticeCode>
-    of(const int* perms, const std::uint64_t* flips, int G, int N) {
+    [[nodiscard]] static std::shared_ptr<const SublatticeCode> of(const int* perms, const std::uint64_t* flips, int G,
+                                                                  int N) {
         return of(perms, flips, G, N, ed::env::tristate("ED_SYM_SUBLATTICE"));
     }
 
     /// The same with the mode given (nullopt: the size rule; true: whenever a block system exists;
     /// false: never) -- a saved sector rebuilds the code it was computed with whatever the
     /// environment says now.
-    [[nodiscard]] static std::shared_ptr<const SublatticeCode>
-    of(const int* perms, const std::uint64_t* flips, int G, int N, std::optional<bool> mode) {
+    [[nodiscard]] static std::shared_ptr<const SublatticeCode> of(const int* perms, const std::uint64_t* flips, int G,
+                                                                  int N, std::optional<bool> mode) {
         if (G <= 1 || N < 4 || N > 64 || G > 65535 || (mode && !*mode)) return nullptr;
         // the rule: forced (1), or unset with the least number of distinct permutations (-16, -64)
         const int rule = mode ? 1 : -(sublattice_relaxed_hint().load() ? 16 : 64);
-        Key key{N, rule,
-                std::vector<int>(perms, perms + static_cast<std::size_t>(G) * static_cast<std::size_t>(N)),
+        Key key{N, rule, std::vector<int>(perms, perms + static_cast<std::size_t>(G) * static_cast<std::size_t>(N)),
                 flips ? std::vector<std::uint64_t>(flips, flips + G)
                       : std::vector<std::uint64_t>(static_cast<std::size_t>(G), 0ULL)};
         static std::mutex mu;
-        static std::unordered_map<std::uint64_t,
-                                  std::vector<std::pair<Key, std::shared_ptr<const SublatticeCode>>>> cache;
+        static std::unordered_map<std::uint64_t, std::vector<std::pair<Key, std::shared_ptr<const SublatticeCode>>>>
+            cache;
         const std::uint64_t h = key.hash();
         std::lock_guard<std::mutex> lk(mu);
         auto& bucket = cache[h];
@@ -224,7 +225,10 @@ private:
         }
         [[nodiscard]] std::uint64_t hash() const {
             std::uint64_t h = 1469598103934665603ULL;
-            auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+            auto mix = [&h](std::uint64_t v) {
+                h ^= v;
+                h *= 1099511628211ULL;
+            };
             mix(static_cast<std::uint64_t>(N));
             mix(static_cast<std::uint64_t>(mode + 2));
             for (int p : perms) mix(static_cast<std::uint64_t>(p));
@@ -237,7 +241,7 @@ private:
     std::vector<std::uint16_t> lead_;
     std::vector<std::uint32_t> cand_off_;
     std::vector<std::uint16_t> cand_;
-    std::vector<int>           key_bit_;
+    std::vector<int> key_bit_;
     int n_ = 0, bpw_ = 0, L_ = 0, m_ = 0;
     std::uint64_t fingerprint_ = 0;
 
@@ -251,7 +255,8 @@ private:
         std::vector<int> parent(static_cast<std::size_t>(N));
         auto find = [&parent](int x) {
             while (parent[static_cast<std::size_t>(x)] != x) {
-                parent[static_cast<std::size_t>(x)] = parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+                parent[static_cast<std::size_t>(x)] =
+                    parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
                 x = parent[static_cast<std::size_t>(x)];
             }
             return x;
@@ -320,7 +325,10 @@ private:
                 c->key_bit_[static_cast<std::size_t>(sites[static_cast<std::size_t>(j)][static_cast<std::size_t>(t)])] =
                     N - (j + 1) * L + t;
         std::uint64_t h = 1469598103934665603ULL;
-        for (int kb : c->key_bit_) { h ^= static_cast<std::uint64_t>(kb + 1); h *= 1099511628211ULL; }
+        for (int kb : c->key_bit_) {
+            h ^= static_cast<std::uint64_t>(kb + 1);
+            h *= 1099511628211ULL;
+        }
         c->fingerprint_ = h;
         c->to_key_.assign(static_cast<std::size_t>(c->bpw_) * 256, 0ULL);
         for (int b = 0; b < c->bpw_; ++b)
@@ -343,7 +351,8 @@ private:
         std::vector<int> pos_in_block(static_cast<std::size_t>(N), -1);
         for (int j = 0; j < c->m_; ++j)
             for (int t = 0; t < L; ++t)
-                pos_in_block[static_cast<std::size_t>(sites[static_cast<std::size_t>(j)][static_cast<std::size_t>(t)])] = t;
+                pos_in_block[static_cast<std::size_t>(
+                    sites[static_cast<std::size_t>(j)][static_cast<std::size_t>(t)])] = t;
         for (int g = 0; g < G; ++g) {
             const int* p = k.perms.data() + static_cast<std::ptrdiff_t>(g) * N;
             src_block[static_cast<std::size_t>(g)] = block[static_cast<std::size_t>(p[sites[0][0]])];
@@ -361,7 +370,8 @@ private:
             const auto& eg = e[static_cast<std::size_t>(g)];
             img[0] = 0;
             for (std::size_t x = 1; x < P; ++x)
-                img[x] = img[x & (x - 1)] | eg[static_cast<std::size_t>(__builtin_ctzll(static_cast<unsigned long long>(x)))];
+                img[x] = img[x & (x - 1)]
+                         | eg[static_cast<std::size_t>(__builtin_ctzll(static_cast<unsigned long long>(x)))];
             for (std::size_t x = 0; x < P; ++x) img[x] = (img[x] ^ fl[static_cast<std::size_t>(g)]) & lmask;
         };
         for (int g = 0; g < G; ++g) {

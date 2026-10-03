@@ -13,6 +13,7 @@ n_up=9 sector (the field is a constant inside the sector). Symmetry: translation
 no flip / time reversal / point group, so k and -k are separate 4862-state blocks (above the
 1600 pruning floor). qed.eigs(H, 1, window=w) with prune=True vs prune=False: the latter returns
 both partners; the claim predicts prune=True returns one with complete=True."""
+
 import signal
 import numpy as np
 import qed
@@ -37,7 +38,7 @@ def build(s, h):
 sym = qed.Symmetry(spatial=[T], sz=NUP, spin_flip="off", time_reversal="off", point_group=False)
 e_a = qed.eigs(build(1.0, 0.0), 1, sym=sym, prune=False).energies[0]
 e_b = qed.eigs(build(1.0, 1.0), 1, sym=sym, prune=False).energies[0]
-msz = e_b - e_a                               # Sz of the sector (field coefficient 1)
+msz = e_b - e_a  # Sz of the sector (field coefficient 1)
 print(f"E0(s=1) = {e_a:.12f}, sector Sz = {msz:.6f}")
 if abs(abs(msz) - 0.5) > 1e-6:
     print("REPRO: INCONCLUSIVE unexpected sector Sz")
@@ -45,14 +46,16 @@ if abs(abs(msz) - 0.5) > 1e-6:
 
 verdict = None
 for s in (1e2, 1e3, 1e4):
-    h = -s * e_a / msz                        # shifts E0 to ~0 inside the sector
+    h = -s * e_a / msz  # shifts E0 to ~0 inside the sector
     H = build(s, h)
     w = 1e-8 * s * abs(e_a)
     full = qed.eigs(H, 1, sym=sym, prune=False, window=w)
     pr = qed.eigs(H, 1, sym=sym, prune=True, window=w)
     nf, npr = len(full.energies), len(pr.energies)
-    print(f"s={s:g}: E0={full.energies[0]:.3e}  prune=False -> {nf} levels {np.round(full.energies, 8).tolist()}; "
-          f"prune=True -> {npr} levels, complete={pr.complete}, pruned_blocks={pr.pruned_blocks}")
+    print(
+        f"s={s:g}: E0={full.energies[0]:.3e}  prune=False -> {nf} levels {np.round(full.energies, 8).tolist()}; "
+        f"prune=True -> {npr} levels, complete={pr.complete}, pruned_blocks={pr.pruned_blocks}"
+    )
     if nf < 2:
         continue
     if npr < nf and pr.complete:
@@ -61,7 +64,9 @@ for s in (1e2, 1e3, 1e4):
 
 if verdict:
     s, nf, npr, pb = verdict
-    print(f"REPRO: CONFIRMED s={s:g} E0~0: prune=True returned {npr} of {nf} degenerate partner levels "
-          f"with complete=True ({pb} blocks pruned)")
+    print(
+        f"REPRO: CONFIRMED s={s:g} E0~0: prune=True returned {npr} of {nf} degenerate partner levels "
+        f"with complete=True ({pb} blocks pruned)"
+    )
 else:
     print("REPRO: NOT_REPRODUCED pruning kept every degenerate partner for s in 1e2..1e4")

@@ -49,7 +49,8 @@ namespace {
             for (int d = N; d >= len; --d) poly[static_cast<std::size_t>(d)] += poly[static_cast<std::size_t>(d - len)];
         }
         double fixed = 0.0;
-        if (n_up >= 0) fixed = poly[static_cast<std::size_t>(n_up)];
+        if (n_up >= 0)
+            fixed = poly[static_cast<std::size_t>(n_up)];
         else
             for (int n = 0; n <= N; ++n)
                 if (sz_parity < 0 || n % 2 == sz_parity) fixed += poly[static_cast<std::size_t>(n)];
@@ -70,11 +71,9 @@ namespace {
 //   G_k0             { a . p_e }, D(a p_e) = chi_k0(a) D(e), the flip half +-D.
 // False only for a trivial little co-group (the caller's plain momentum block); the group sectors not tiling the
 // momentum sector (Burnside) and the other guards are bugs and throw.
-[[nodiscard]] bool
-build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
-               const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag, std::uint64_t dim_k,
-               StarBuild& sb)
-{
+[[nodiscard]] bool build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0, int m_star,
+                                      const LittleGroupOptions& opt, const LittleGroupBlockTag& base_tag, bool lg_diag,
+                                      std::uint64_t dim_k, StarBuild& sb) {
     auto broken = [&](const std::string& why) -> bool {
         throw std::logic_error("little group: star k0=" + std::to_string(k0) + ": " + why);
     };
@@ -87,18 +86,25 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
     {
         std::vector<int> id(static_cast<std::size_t>(N));
         std::iota(id.begin(), id.end(), 0);
-        P.push_back(id); Pinv.push_back(id); P_res.push_back(-1);
+        P.push_back(id);
+        Pinv.push_back(id);
+        P_res.push_back(-1);
     }
     for (std::size_t rp = 0; rp < cx.residues.size(); ++rp) {
         if (cx.irrep_map[rp][static_cast<std::size_t>(k0)] != k0) continue;
         const auto& p = cx.residues[rp];
         bool dup = false;
         for (const auto& qi : Pinv)
-            if (aidx.count(compose(p, qi))) { dup = true; break; }     // p = a . q: same coset
+            if (aidx.count(compose(p, qi))) {
+                dup = true;
+                break;
+            }     // p = a . q: same coset
         if (dup) continue;
         if (!ed::ops::commutes_with_permutation(*cx.terms, p))
             return broken("residue " + std::to_string(cx.residue_spec[rp]) + " fixes k0 but does not commute with H");
-        P.push_back(p); Pinv.push_back(inverse_perm(p)); P_res.push_back(cx.residue_spec[rp]);
+        P.push_back(p);
+        Pinv.push_back(inverse_perm(p));
+        P_res.push_back(cx.residue_spec[rp]);
     }
     const int nP = static_cast<int>(P.size());
     if (nP == 1) return false;                           // a trivial little co-group: the plain block
@@ -106,7 +112,8 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
     const auto& chiA = cx.giA.irreps[static_cast<std::size_t>(k0 % cx.n_irr_raw)].character;
     // The table p_e p_f = a_ef p_g and its factor system omega(e, f) = chi_k0(a_ef): the irreps of G_k0 that
     // restrict to chi_k0 on A are the omega-projective irreps of P_k0, D(a p_e) = chi_k0(a) D(e).
-    std::vector<std::vector<int>> mult(static_cast<std::size_t>(nP), std::vector<int>(static_cast<std::size_t>(nP), -1));
+    std::vector<std::vector<int>> mult(static_cast<std::size_t>(nP),
+                                       std::vector<int>(static_cast<std::size_t>(nP), -1));
     std::vector<std::vector<Complex>> omega(static_cast<std::size_t>(nP),
                                             std::vector<Complex>(static_cast<std::size_t>(nP), Complex(1, 0)));
     bool twisted = false;
@@ -132,9 +139,7 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
     try {
         giP = twisted ? ed::symmetry::decompose_projective_irreps(mult, omega)
                       : ed::symmetry::decompose_irreps_tables(mult);
-    } catch (const std::exception& ex) {
-        return broken(std::string("the irrep decomposition threw: ") + ex.what());
-    }
+    } catch (const std::exception& ex) { return broken(std::string("the irrep decomposition threw: ") + ex.what()); }
     const int nIr = static_cast<int>(giP.irreps.size());
     // The wanted irreps (opt.only_irrep, opt.only_irrep_chars).
     std::vector<int> want;
@@ -202,8 +207,11 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
     std::vector<int> pair_of(static_cast<std::size_t>(nIr), -1);
     if (tr_on && opt.only_irrep.empty()) {
         bool sector_real = true;
-        // scale-free: unit-modulus characters / phases (group data, not energies)
-        for (const Complex& c : chiA) if (std::abs(c.imag()) > 1e-12) { sector_real = false; break; }
+        for (const Complex& c : chiA)  // scale-free: unit-modulus characters / phases (group data, not energies)
+            if (std::abs(c.imag()) > 1e-12) {
+                sector_real = false;
+                break;
+            }
         for (int ii = 0; ii < nIr && sector_real; ++ii) {
             if (pair_of[static_cast<std::size_t>(ii)] >= 0 || !secs[static_cast<std::size_t>(ii)]) continue;
             const auto& ci = giP.irreps[static_cast<std::size_t>(ii)].character;
@@ -214,7 +222,9 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
                 // scale-free: unit-modulus characters / phases (group data, not energies)
                 for (std::size_t g = 0; m && g < ci.size(); ++g) m = std::abs(cj[g] - std::conj(ci[g])) < 1e-8;
                 if (m && secs[static_cast<std::size_t>(ii)]->states() == secs[static_cast<std::size_t>(jj)]->states()) {
-                    pair_of[static_cast<std::size_t>(ii)] = jj; pair_of[static_cast<std::size_t>(jj)] = ii; break;
+                    pair_of[static_cast<std::size_t>(ii)] = jj;
+                    pair_of[static_cast<std::size_t>(jj)] = ii;
+                    break;
                 }
             }
         }
@@ -229,55 +239,52 @@ build_group_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, in
         sp->build_buckets();
         const int d = giP.irreps[static_cast<std::size_t>(ii)].dim;   // each level d times: its partners
         auto impl = std::make_shared<BlockData>();
-        impl->tag              = base_tag;
-        impl->tag.irrep        = ii;
-        impl->tag.irrep_dim    = d;
-        impl->tag.tr_folded    = (jj > ii);
-        impl->tag.dim          = sp->states();
+        impl->tag = base_tag;
+        impl->tag.irrep = ii;
+        impl->tag.irrep_dim = d;
+        impl->tag.tr_folded = (jj > ii);
+        impl->tag.dim = sp->states();
         impl->tag.multiplicity = static_cast<std::uint64_t>(jj > ii ? 2 : 1) * static_cast<std::uint64_t>(m_star)
                                  * static_cast<std::uint64_t>(d);
-        impl->hk   = sb.hk;
+        impl->hk = sb.hk;
         impl->gsec = sp;
-        impl->gop  = std::make_shared<RepSectorMatVec>(op, std::shared_ptr<const ed::symmetry::RepSectorData>(sp));
+        impl->gop = std::make_shared<RepSectorMatVec>(op, std::shared_ptr<const ed::symmetry::RepSectorData>(sp));
         sb.blocks.push_back(std::move(impl));
     }
     info.little_order = nP;
     info.little_elems = P_res;
     info.little_characters.clear();
     info.little_irrep_dims.clear();
-    for (const auto& ir : giP.irreps) { info.little_characters.push_back(ir.character); info.little_irrep_dims.push_back(ir.dim); }
+    for (const auto& ir : giP.irreps) {
+        info.little_characters.push_back(ir.character);
+        info.little_irrep_dims.push_back(ir.dim);
+    }
     if (lg_diag)
-        ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu%s",
-               k0, Gx, sb.blocks.size(), dim_k, twisted ? "; projective factor system" : "");
+        ED_LOG(Info, "[little_group] star k0=%d: group-sector path, |G_k0|=%zu, %zu block(s), k-sector dim %zu%s", k0,
+               Gx, sb.blocks.size(), dim_k, twisted ? "; projective factor system" : "");
     return true;
 }
 
 }  // namespace
 
-[[nodiscard]] StarBuild
-build_star_blocks(const ::Operator&         op,
-                  const EngineContext&      cx,
-                  bool                      tr_on,
-                  int                       k0,
-                  const std::vector<int>&   members,
-                  const LittleGroupOptions& opt)
-{
+[[nodiscard]] StarBuild build_star_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0,
+                                          const std::vector<int>& members, const LittleGroupOptions& opt) {
     const int m_star = static_cast<int>(members.size());
 
     StarBuild sb;
     LittleGroupStarInfo& info = sb.info;
-    info.k0          = k0;
-    info.star_size   = m_star;
+    info.k0 = k0;
+    info.star_size = m_star;
     info.members.assign(members.begin(), members.end());
     info.flip_parity = cx.flip_half ? (k0 / cx.n_irr_raw) : -1;
 
     LittleGroupBlockTag base_tag;
-    base_tag.n_up        = opt.n_up;
-    base_tag.sz_parity   = opt.sz_parity;
-    base_tag.k0          = k0;
-    base_tag.k_raw       = k0 % cx.n_irr_raw;
+    base_tag.n_up = opt.n_up;
+    base_tag.sz_parity = opt.sz_parity;
+    base_tag.k0 = k0;
+    base_tag.k_raw = k0 % cx.n_irr_raw;
     base_tag.flip_parity = info.flip_parity;
-    base_tag.star_size   = m_star;
+    base_tag.star_size = m_star;
 
     // The group sectors need only the momentum sector's dimension (Burnside): the sector itself -- the largest
     // object of a star (3.8e8 representatives at N = 36, Gamma) -- is built only for a trivial little co-group,
@@ -285,14 +292,13 @@ build_star_blocks(const ::Operator&         op,
     const std::uint64_t dim_k = burnside_dim(cx, k0, opt.n_up, opt.sz_parity);
     if (dim_k == 0) return sb;
     const bool diag = ed::env::flag("ED_SYM_PROFILE", false) || ed::logging::enabled(ed::logging::Level::Debug);
-    if (build_group_blocks(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb))
-        return sb;
+    if (build_group_blocks(op, cx, tr_on, k0, m_star, opt, base_tag, diag, dim_k, sb)) return sb;
 
     // A trivial little co-group: one plain block holds the momentum sector, its irrep the trivial one.
     auto rd = build_k_sector(cx, k0, opt.n_up);
     if (rd.reps.size() != dim_k)       // the count the group path relies on
-        throw std::logic_error("little group: Burnside dimension " + std::to_string(dim_k)
-                               + " != momentum sector " + std::to_string(rd.reps.size()));
+        throw std::logic_error("little group: Burnside dimension " + std::to_string(dim_k) + " != momentum sector "
+                               + std::to_string(rd.reps.size()));
     if (rd.reps.empty()) return sb;
     sb.hk = std::make_shared<RepSectorMatVec>(op, std::move(rd));
     info.little_order = 1;
@@ -304,8 +310,8 @@ build_star_blocks(const ::Operator&         op,
         && !meets(opt.only_irrep_chars, [&](int i) { return co_group_char(trivial_elems(), trivial_chars(), i); }))
         return sb;
     auto impl = std::make_shared<BlockData>();
-    impl->tag              = base_tag;   // irrep = -1, irrep_dim = 1
-    impl->tag.dim          = sb.hk->dim();
+    impl->tag = base_tag;   // irrep = -1, irrep_dim = 1
+    impl->tag.dim = sb.hk->dim();
     impl->tag.multiplicity = static_cast<std::uint64_t>(m_star);
     impl->hk = sb.hk;
     sb.blocks.push_back(std::move(impl));

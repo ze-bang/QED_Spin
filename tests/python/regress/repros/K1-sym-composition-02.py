@@ -10,6 +10,7 @@ ED_SYM_PROFILE=1 the group path logs "group-sector path, |G_k0|". Expect 0 such 
 while projected levels (irrep >= 0) exist; control: XXZ ring at fixed n_up=6 logs the group path.
 Test (GPU, if a device exists): eigs(device='gpu', prune=False, dense_max_dim=0) on the XYZ parity run --
 device_blocks vs the number of blocks, and how many of them are projected (W) blocks."""
+
 import os
 import signal
 import subprocess
@@ -72,6 +73,7 @@ gpu_note = "gpu part skipped (no device)"
 try:
     import types
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as ex:
     ndev = 0
@@ -91,22 +93,26 @@ if ndev > 0:
     sym = qed.Symmetry(spatial=types.SimpleNamespace(abelian=[T], residues=[R]))
     try:
         rg = qed.eigs(H, 2, sym=sym, device="gpu", prune=False, dense_max_dim=0)
-    except qed.errors.DeviceUnsupported as ex:     # strict device='gpu' refuses the W blocks
+    except qed.errors.DeviceUnsupported as ex:  # strict device='gpu' refuses the W blocks
         rg, gpu_note, gpu_hit = None, f"gpu: refused ({str(ex)[:120]})", False
     if rg is not None:
         rc = qed.eigs(H, 2, sym=sym, device="cpu", prune=False, dense_max_dim=0)
         sp = qed.spectrum(H, sym=sym)
         blocks = {(L.sz_parity, L.k0, L.irrep, L.flip_parity) for L in sp.levels}
         nW = sum(1 for b in blocks if b[2] >= 0)
-        gpu_note = (f"gpu: device_blocks={rg.device_blocks} of >= {len(blocks)} solved blocks ({nW} projected W "
-                    f"blocks); E0 gpu {rg.energies[0]:.10f} cpu {rc.energies[0]:.10f}")
+        gpu_note = (
+            f"gpu: device_blocks={rg.device_blocks} of >= {len(blocks)} solved blocks ({nW} projected W "
+            f"blocks); E0 gpu {rg.energies[0]:.10f} cpu {rc.energies[0]:.10f}"
+        )
         gpu_hit = rg.device_blocks < len(blocks)
 else:
     gpu_hit = None
 print(gpu_note)
 if cpu_ok and gpu_hit is not False:
-    print(f"REPRO: CONFIRMED parity run: 0 group-path stars but {res_x[1]} projected blocks (W path); "
-          f"U(1) control: {gp_z} group-path stars; {gpu_note}")
+    print(
+        f"REPRO: CONFIRMED parity run: 0 group-path stars but {res_x[1]} projected blocks (W path); "
+        f"U(1) control: {gp_z} group-path stars; {gpu_note}"
+    )
 elif cpu_ok:
     print(f"REPRO: CONFIRMED cpu half only (GPU half NOT reproduced: every block ran on the device) {gpu_note}")
 else:

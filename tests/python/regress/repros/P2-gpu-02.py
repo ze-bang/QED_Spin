@@ -11,6 +11,7 @@ models), device='gpu', ED_LANCZOS_KERNEL_PROFILE=1.  Heisenberg (N SzSz terms + 
 which pass per row) versus XY (the same off-diagonal terms, no SzSz).  If diagonal terms were free the
 per-iteration times would match; the claim predicts Heisenberg/XY ~ (N + N/2)/(N/2) ~ 2.9 when lookups
 dominate.  CONFIRMED when the ratio is >= 1.8, NOT_REPRODUCED when it is < 1.3."""
+
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import sys
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -46,18 +48,19 @@ print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": 
       "device_blocks": int(r.device_blocks),
       "dims": sorted({int(L.block_dim) for L in r.levels})}), flush=True)
 '''
-PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply [\d.]+% \([\d.]+ us/it\) "
-                 r"recur [\d.]+% \([\d.]+ us/it\) reorth ([\d.]+)%")
+PAT = re.compile(
+    r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply [\d.]+% \([\d.]+ us/it\) "
+    r"recur [\d.]+% \([\d.]+ us/it\) reorth ([\d.]+)%"
+)
 
 
 def run(model):
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
-    p = subprocess.run([sys.executable, "-c", CHILD, model], capture_output=True, text=True,
-                       env=env, timeout=150)
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")  # the profile line is an Info record
+    p = subprocess.run([sys.executable, "-c", CHILD, model], capture_output=True, text=True, env=env, timeout=150)
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
+            res = json.loads(line[len("RESULT_JSON:") :])
     if res is None:
         raise RuntimeError(f"{model} rc={p.returncode}: {p.stderr[-300:]}")
     lines = [(int(m.group(1)), float(m.group(2)), float(m.group(3))) for m in PAT.finditer(p.stderr)]
@@ -76,14 +79,18 @@ except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:300]}")
     sys.exit(0)
 for m, r in out.items():
-    print(f"{m}: dims={r['dims']} iters={r['iters']} ms/iter={r['ms_per_iter']:.2f} "
-          f"device_blocks={r['device_blocks']} E={r['E']}")
+    print(
+        f"{m}: dims={r['dims']} iters={r['iters']} ms/iter={r['ms_per_iter']:.2f} "
+        f"device_blocks={r['device_blocks']} E={r['E']}"
+    )
 if any(r["device_blocks"] < 1 for r in out.values()):
     print("REPRO: INCONCLUSIVE a run did not use the device (device_blocks=0)")
     sys.exit(0)
 ratio = out["heis"]["ms_per_iter"] / out["xy"]["ms_per_iter"]
-msg = (f"Heisenberg/XY GPU per-iteration time = {ratio:.2f} (heis {out['heis']['ms_per_iter']:.2f} ms, "
-       f"xy {out['xy']['ms_per_iter']:.2f} ms, block dim {out['heis']['dims']})")
+msg = (
+    f"Heisenberg/XY GPU per-iteration time = {ratio:.2f} (heis {out['heis']['ms_per_iter']:.2f} ms, "
+    f"xy {out['xy']['ms_per_iter']:.2f} ms, block dim {out['heis']['dims']})"
+)
 if ratio >= 1.8:
     print("REPRO: CONFIRMED diagonal terms cost full lookups on the device: " + msg)
 elif ratio < 1.3:

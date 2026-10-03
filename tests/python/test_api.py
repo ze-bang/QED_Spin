@@ -1,5 +1,6 @@
 """Behaviour of the verbs that the coverage grid does not pin: sector selection, the
 degeneracy window, refusal of symmetries H does not have, and the argument checks."""
+
 from __future__ import annotations
 
 import logging
@@ -35,7 +36,7 @@ def test_selected_sectors_reassemble_the_spectrum():
 
 
 def test_window_returns_the_degenerate_partners():
-    H = _ring(8)                      # Heisenberg ring: the first excitation is a triplet
+    H = _ring(8)  # Heisenberg ring: the first excitation is a triplet
     sym = qed.Symmetry(spatial=_translations(8), point_group=False)
     E = qed.spectrum(H, sym=qed.Symmetry.none()).energies
     e1 = np.sort(E)[1]
@@ -46,7 +47,7 @@ def test_window_returns_the_degenerate_partners():
 
 def test_a_permutation_that_is_not_a_symmetry_is_refused():
     H = _ring(6)
-    swap = [1, 0, 2, 3, 4, 5]         # exchanges two neighbours only: not a ring symmetry
+    swap = [1, 0, 2, 3, 4, 5]  # exchanges two neighbours only: not a ring symmetry
     with pytest.raises(ValueError, match="commute"):
         qed.eigs(H, 1, sym=qed.Symmetry(spatial=[swap], point_group=False))
 
@@ -72,8 +73,11 @@ def test_total_spin_averages_an_operator_over_the_multiplet():
     H = _ring(n, 0.3)
     sym = qed.Symmetry(spatial=None, total_spin=1)
     zz = qed.Operator.product(n, "zz", [0, 2])
-    dot02 = (qed.Operator.product(n, "zz", [0, 2]) + qed.Operator.product(n, "+-", [0, 2], 0.5)
-             + qed.Operator.product(n, "-+", [0, 2], 0.5))
+    dot02 = (
+        qed.Operator.product(n, "zz", [0, 2])
+        + qed.Operator.product(n, "+-", [0, 2], 0.5)
+        + qed.Operator.product(n, "-+", [0, 2], 0.5)
+    )
     sz0 = qed.Operator.product(n, "z", [0])
     three = qed.Operator.product(n, "z+-", [0, 1, 2]) + qed.Operator.product(n, "z-+", [0, 1, 2])
     r = qed.expect(H, [zz, dot02, sz0, three], 4, sym=sym)
@@ -82,8 +86,12 @@ def test_total_spin_averages_an_operator_over_the_multiplet():
     # per energy, sum of multiplicity x <O> = Tr(P O), P onto the S = 1 states at that energy
     Hd, Od = _dense(H, n), _dense(three, n)
     E, V = np.linalg.eigh(Hd)
-    S2 = sum(_dense(qed.Operator.product(n, ab, [i, j], c), n)
-             for i in range(n) for j in range(n) for ab, c in (("zz", 1.0), ("+-", 0.5), ("-+", 0.5)))
+    S2 = sum(
+        _dense(qed.Operator.product(n, ab, [i, j], c), n)
+        for i in range(n)
+        for j in range(n)
+        for ab, c in (("zz", 1.0), ("+-", 0.5), ("-+", 0.5))
+    )
     clusters = {}
     for e, mult, val in zip(r.energies, r.multiplicities, r.values[:, 3]):
         c = clusters.setdefault(round(float(e), 7), [0, 0.0])
@@ -95,7 +103,7 @@ def test_total_spin_averages_an_operator_over_the_multiplet():
         s, U = np.linalg.eigh(W.conj().T @ S2 @ W)
         P = W @ U[:, np.abs(s - 2.0) < 1e-6]
         if P.shape[1] != dim:
-            continue                                       # a cluster cut by the k window
+            continue  # a cluster cut by the k window
         np.testing.assert_allclose(total, np.trace(P.conj().T @ Od @ P), atol=1e-9)
         checked += 1
     assert checked >= 1
@@ -144,7 +152,7 @@ def test_tower_sampling_pairs_blocks_by_their_labels():
     plain = qed.Symmetry(spatial=[T], point_group=False, total_spin=S).select(momentum=k_pi)
     ref = qed.thermal(H, hot, method="exact", sym=plain)
     np.testing.assert_allclose(sel.lnZ[0], ref.lnZ[0], rtol=1e-6)
-    np.testing.assert_allclose(sel.lnZ[0], math.log(9 * 5), rtol=1e-6)    # 5 multiplets at k = pi
+    np.testing.assert_allclose(sel.lnZ[0], math.log(9 * 5), rtol=1e-6)  # 5 multiplets at k = pi
 
 
 @pytest.mark.parametrize("spatial", [None, "ring"])
@@ -221,8 +229,11 @@ def test_total_spin_thermal_on_a_ferromagnet(spatial):
     E = [np.sum(levels * np.exp(-(levels - e0) / t)) / np.sum(np.exp(-(levels - e0) / t)) for t in T]
     # At T = 0.05 the tower's ground state dominates: a sampled lane that let the ferromagnetic
     # multiplet (far below) in would sit near its energy instead.
-    for method, kw in (("ftlm", dict(samples=8, krylov=60)), ("ftlm", dict(samples=4, krylov=60, exact_states=3)),
-                       ("mtpq", dict(samples=4))):
+    for method, kw in (
+        ("ftlm", dict(samples=8, krylov=60)),
+        ("ftlm", dict(samples=4, krylov=60, exact_states=3)),
+        ("mtpq", dict(samples=4)),
+    ):
         r = qed.thermal(H, T, method=method, sym=sym, seed=5, **kw)
         assert abs(r.E[0] - E[0]) < 1e-3 * abs(E[0]), (method, kw, r.E[0], E[0])
         np.testing.assert_allclose(r.lnZ[-1], lnZ[-1], rtol=0.05)
@@ -237,8 +248,9 @@ def test_total_spin_in_a_uniform_field():
         H.add_one_body(qed.OP_SZ, i, h)
     sym = qed.Symmetry(spatial=None, total_spin=S)
     free = qed.spectrum(H0, sym=sym).levels
-    want = np.sort([L.energy + h * m for L in free for _ in range(L.multiplicity // (2 * S + 1))
-                    for m in range(-S, S + 1)])
+    want = np.sort(
+        [L.energy + h * m for L in free for _ in range(L.multiplicity // (2 * S + 1)) for m in range(-S, S + 1)]
+    )
     sp = qed.spectrum(H, sym=sym)
     np.testing.assert_allclose(sp.energies, want, atol=1e-10)
     assert all(L.multiplicity == 1 for L in sp.levels)
@@ -247,14 +259,15 @@ def test_total_spin_in_a_uniform_field():
     np.testing.assert_allclose(top, np.sort([L.energy + h * S for L in free]), atol=1e-10)
     T = [0.5, 2.0]
     th = qed.thermal(H, T, method="exact", sym=sym)
-    np.testing.assert_allclose(th.lnZ, [np.log(np.sum(np.exp(-(want - want[0]) / t))) - want[0] / t for t in T],
-                               rtol=1e-10)
+    np.testing.assert_allclose(
+        th.lnZ, [np.log(np.sum(np.exp(-(want - want[0]) / t))) - want[0] / t for t in T], rtol=1e-10
+    )
     hot = qed.thermal(H, [1e8], method="ftlm", samples=3, seed=1, sym=sym)
     np.testing.assert_allclose(hot.lnZ[0], math.log(len(want)), rtol=1e-6)
     Sz = qed.Operator(n)
     for i in range(n):
         Sz.add_one_body(qed.OP_SZ, i, 1.0)
-    low = qed.expect(H, [Sz], 1, sym=sym)                    # the lowest member, m = -S
+    low = qed.expect(H, [Sz], 1, sym=sym)  # the lowest member, m = -S
     np.testing.assert_allclose(np.asarray(low.values).real.ravel()[0], -S, atol=1e-10)
     # T = 0 dynamics from that member, against its Sz sector without the restriction (the
     # lowest spin-1 member is that sector's ground state: E(S) rises with S on the ring)
@@ -286,7 +299,7 @@ def test_time_reversal_theta_folds_an_h_that_is_not_real(n):
     np.testing.assert_allclose(a.energies, b.energies, atol=1e-10)
     assert len(a.levels) < len(b.levels) and any(L.fold == "theta" for L in a.levels)
     if n % 2:
-        assert all(L.multiplicity % 2 == 0 for L in a.levels)       # Kramers pairs
+        assert all(L.multiplicity % 2 == 0 for L in a.levels)  # Kramers pairs
     qed.eigs(H, 1, sym=qed.Symmetry(spatial=[T], point_group=False, time_reversal="require"))
     # vectors: orthonormal eigenvectors, the Theta images in Sz sector N - n_up included
     M, k = _dense(H, n), 10
@@ -295,7 +308,7 @@ def test_time_reversal_theta_folds_an_h_that_is_not_real(n):
     np.testing.assert_allclose(V.conj().T @ V, np.eye(V.shape[1]), atol=1e-10)
     E = np.real(np.einsum("ij,ij->j", V.conj(), M @ V))
     np.testing.assert_allclose(M @ V, V * E, atol=1e-9)
-    np.testing.assert_allclose(np.sort(E), r.energies[:V.shape[1]], atol=1e-10)
+    np.testing.assert_allclose(np.sort(E), r.energies[: V.shape[1]], atol=1e-10)
     # averages: per energy, sum of multiplicity x <O> is Tr(P_E O), folded or not; O breaks Theta
     # (S^z_0), is not Hermitian (S^+_0 S^-_1) or keeps it (S_0.S_2)
     Os = [qed.Operator(n) for _ in range(3)]
@@ -312,6 +325,7 @@ def test_time_reversal_theta_folds_an_h_that_is_not_real(n):
             key = round(float(e), 7)
             out[key] = out.get(key, 0) + m * np.asarray(v)
         return out
+
     ta, tb = traces(on), traces(off)
     assert ta.keys() == tb.keys()
     for key in ta:
@@ -361,8 +375,7 @@ def test_a_walk_of_group_path_stars_builds_no_momentum_table():
 
 def test_sz_basis_vectors_are_eigenvectors_of_that_block():
     H = _ring(6)
-    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=_translations(6), point_group=False, sz=3),
-                 vectors=True)
+    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=_translations(6), point_group=False, sz=3), vectors=True)
     (v,) = r.vectors(basis="sz", n_up=3)
     assert len(v) == math.comb(6, 3)
     assert abs(np.linalg.norm(v) - 1.0) < 1e-12
@@ -373,6 +386,7 @@ def test_auto_symmetry_without_pynauty_warns_and_continues(monkeypatch):
 
     def no_pynauty(*a, **k):
         raise ImportError("pynauty is not installed")
+
     monkeypatch.setattr(disc, "find_symmetries", no_pynauty)
     H = _ring(6)
     with pytest.warns(RuntimeWarning, match="without spatial"):
@@ -457,7 +471,7 @@ def test_irrep_character_selects_the_little_group_irreps():
     n = 8
     H = _ring(n, 0.3)
     T = _translations(n)[0]
-    R = [(-i) % n for i in range(n)]                 # the reflection through site 0
+    R = [(-i) % n for i in range(n)]  # the reflection through site 0
     sym = qed.Symmetry(spatial=[T, R], sz=4, spin_flip="off", time_reversal="off")
     _, residues = sym.groups(H)
     assert residues
@@ -522,6 +536,7 @@ def test_group_sectors_are_built_without_the_momentum_sector(caplog, monkeypatch
 # Selections: every block answers for its irrep; a selection matching nothing raises
 # ---------------------------------------------------------------------------
 
+
 def _reflection(n):
     return [(-i) % n for i in range(n)]
 
@@ -532,10 +547,15 @@ def _square_j1j2(L=4, j2=0.3):
     xy = [(x, y) for y in range(L) for x in range(L)]
     b = qed.input.HamiltonianBuilder(L * L)
     b.heisenberg([(idx(x, y), idx(x + 1, y)) for x, y in xy] + [(idx(x, y), idx(x, y + 1)) for x, y in xy], J=1.0)
-    b.heisenberg([(idx(x, y), idx(x + 1, y + 1)) for x, y in xy]
-                 + [(idx(x, y), idx(x + 1, y - 1)) for x, y in xy], J=j2)
-    gens = ([idx(x + 1, y) for x, y in xy], [idx(x, y + 1) for x, y in xy],
-            [idx(-y, x) for x, y in xy], [idx(y, x) for x, y in xy])
+    b.heisenberg(
+        [(idx(x, y), idx(x + 1, y + 1)) for x, y in xy] + [(idx(x, y), idx(x + 1, y - 1)) for x, y in xy], J=j2
+    )
+    gens = (
+        [idx(x + 1, y) for x, y in xy],
+        [idx(x, y + 1) for x, y in xy],
+        [idx(-y, x) for x, y in xy],
+        [idx(y, x) for x, y in xy],
+    )
     return b.to_operator(), gens
 
 
@@ -556,8 +576,7 @@ def test_irrep_dimension_partition_reassembles_the_spectrum(case):
     # momenta, and every star when the point group is absorbed into the abelian part (audit F-A-1).
     if case == "ring":
         n, H = 8, _ring(8, 0.37)
-        sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=4, spin_flip="off",
-                           time_reversal="off")
+        sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=4, spin_flip="off", time_reversal="off")
     else:
         n = 7
         b = qed.input.HamiltonianBuilder(n)
@@ -596,8 +615,7 @@ def test_irrep_index_selection_never_returns_plain_blocks():
     # select(irrep=[i]) names projected blocks; stars with a trivial co-group have none
     # (audit C04-engine-core-03: their whole k-sectors came back).
     n = 12
-    sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=n // 2, spin_flip="off",
-                       time_reversal="off")
+    sym = qed.Symmetry(spatial=[_translations(n)[0], _reflection(n)], sz=n // 2, spin_flip="off", time_reversal="off")
     sel = qed.spectrum(_ring(n, 0.3), sym=sym.select(irrep=[1]))
     assert sel.levels and all(int(L.irrep) == 1 for L in sel.levels)
 
@@ -610,9 +628,11 @@ def test_a_selection_matching_nothing_raises(verb):
     sym = qed.Symmetry(spatial=[T, _reflection(n)], sz=n // 2, spin_flip="off", time_reversal="off")
     R = tuple(sym.groups(H)[1][0])
     ident = tuple(range(n))
-    for nothing in (sym.select(momentum={tuple(T): 0.3}),                              # no such momentum
-                    sym.select(momentum={tuple(T): 0.25}, irrep_character={R: 1.0}),   # R does not fix k
-                    sym.select(irrep_character={ident: 5.0})):                          # no 5-dim irrep
+    for nothing in (
+        sym.select(momentum={tuple(T): 0.3}),  # no such momentum
+        sym.select(momentum={tuple(T): 0.25}, irrep_character={R: 1.0}),  # R does not fix k
+        sym.select(irrep_character={ident: 5.0}),
+    ):  # no 5-dim irrep
         with pytest.raises(qed.errors.EmptySelection):
             if verb == "eigs":
                 qed.eigs(H, 1, sym=nothing)
@@ -629,8 +649,9 @@ def test_sz_parity_with_a_u1_hamiltonian(n):
     H = _ring(n, 0.3)
     for key, parity in (("even", 0), ("odd", 1)):
         got = np.sort(qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=key)).energies)
-        want = np.concatenate([qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=m)).energies
-                               for m in range(n + 1) if m % 2 == parity])
+        want = np.concatenate(
+            [qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=m)).energies for m in range(n + 1) if m % 2 == parity]
+        )
         np.testing.assert_allclose(got, np.sort(want), atol=1e-10)
 
 
@@ -651,8 +672,11 @@ def test_every_irrep_takes_the_group_sector_path():
     plain = qed.Symmetry(spatial=[Tx, Ty], point_group=False, sz=8, spin_flip="off", time_reversal="off")
     ref = np.sort(qed.spectrum(H, sym=plain.select(momentum={tuple(Tx): 0, tuple(Ty): 0})).energies)
     np.testing.assert_allclose(np.sort(qed.spectrum(H, sym=gamma).energies), ref, atol=1e-10)
-    a1_in_split = [split.levels[i].energy for i in range(len(split.levels))
-                   if all(abs(c - 1) < 1e-9 for c in split.irrep_characters(i).values())]
+    a1_in_split = [
+        split.levels[i].energy
+        for i in range(len(split.levels))
+        if all(abs(c - 1) < 1e-9 for c in split.irrep_characters(i).values())
+    ]
     assert abs(a1.energies[0] - min(a1_in_split)) < 1e-10
     # The vectors of the two-dimensional irrep: expectation values through its sector, both partners
     # of each level, every one an eigenvector in the full basis.
@@ -672,6 +696,7 @@ def test_every_irrep_takes_the_group_sector_path():
 # ---------------------------------------------------------------------------
 # Lowest-k completeness: degenerate blocks and blocks smaller than k
 # ---------------------------------------------------------------------------
+
 
 def _ising(n, periodic=True, scale=1.0):
     """H = scale sum Sz_i Sz_j over the chain's bonds, its diagonal (the exact spectrum) and the
@@ -710,6 +735,7 @@ def test_a_block_smaller_than_k_returns_its_whole_spectrum():
 # Thermodynamics: the canonical mTPQ estimator and cancellation-free moments
 # ---------------------------------------------------------------------------
 
+
 def _heisenberg_ring(n, J=1.0):
     b = qed.input.HamiltonianBuilder(n)
     b.heisenberg([(i, (i + 1) % n) for i in range(n)], J=J)
@@ -738,8 +764,9 @@ def test_mtpq_matches_exact_and_does_not_depend_on_the_energy_scale():
     r1 = qed.thermal(_heisenberg_ring(12), Ts, method="mtpq", samples=40, seed=3, sym=qed.Symmetry.none())
     np.testing.assert_allclose(r1.E, ref.E, rtol=0.03)
     np.testing.assert_allclose(r1.C, ref.C, rtol=0.15)
-    r2 = qed.thermal(_heisenberg_ring(12, J=0.04), 0.04 * Ts, method="mtpq", samples=40, seed=3,
-                     sym=qed.Symmetry.none())
+    r2 = qed.thermal(
+        _heisenberg_ring(12, J=0.04), 0.04 * Ts, method="mtpq", samples=40, seed=3, sym=qed.Symmetry.none()
+    )
     np.testing.assert_allclose(np.asarray(r2.E) / 0.04, r1.E, rtol=1e-9)
     np.testing.assert_allclose(r2.C, r1.C, rtol=1e-8)
     np.testing.assert_allclose(r2.entropy, r1.entropy, rtol=1e-9)
@@ -748,8 +775,7 @@ def test_mtpq_matches_exact_and_does_not_depend_on_the_energy_scale():
 def test_mtpq_refuses_a_temperature_its_trajectory_cannot_reach():
     # 20 steps cannot reach T = 0.02: refused, never clamped (audit C11-thermal-05: C grew as 1/T^2).
     with pytest.raises(qed.errors.ConvergenceError):
-        qed.thermal(_heisenberg_ring(12), [0.02], method="mtpq", steps=20, samples=2, seed=1,
-                    sym=qed.Symmetry.none())
+        qed.thermal(_heisenberg_ring(12), [0.02], method="mtpq", steps=20, samples=2, seed=1, sym=qed.Symmetry.none())
 
 
 def test_oftlm_exact_states_are_certified_eigenpairs():
@@ -762,7 +788,7 @@ def test_oftlm_exact_states_are_certified_eigenpairs():
     H = _heisenberg_ring(n)
     for i in range(n):
         for j in range(i + 1, n):
-            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 2.0 * lam)   # + lam (S^z_tot)^2: a wide spectrum
+            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 2.0 * lam)  # + lam (S^z_tot)^2: a wide spectrum
     T = [0.05]
     sym = qed.Symmetry.none()
     exact = qed.thermal(H, T, method="exact", sym=sym)
@@ -786,10 +812,10 @@ def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
         H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i + 1, 1.0)
     for i in range(n):
         if offset:
-            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i, 4.0 * offset / n)     # S^z S^z = 1/4 on spin 1/2
+            H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i, 4.0 * offset / n)  # S^z S^z = 1/4 on spin 1/2
     betas = np.array([10.0, 25.0, 40.0])
     x = 3.0 * np.exp(-betas)
-    exact = 6.0 * betas ** 2 * x / (1.0 + x) ** 2
+    exact = 6.0 * betas**2 * x / (1.0 + x) ** 2
     for sym in (qed.Symmetry.none(), qed.Symmetry(spatial=None)):
         C = np.asarray(qed.thermal(H, 1.0 / betas, method="exact", sym=sym).C)
         np.testing.assert_allclose(C, exact, rtol=1e-6)
@@ -798,6 +824,7 @@ def test_low_temperature_heat_capacity_keeps_its_relative_accuracy(offset):
 # ---------------------------------------------------------------------------
 # Dynamics and thermal labels (audit C12-dynamics-02/03/11, C11-thermal-03)
 # ---------------------------------------------------------------------------
+
 
 def _sz_q(n, q):
     O = qed.Operator(n)
@@ -817,7 +844,7 @@ def test_a_repeated_temperature_repeats_its_row():
     mixed = qed.dynamics(H, O, omega, T=[1.0, 0.5, 1.0], **kw)
     assert list(mixed.T) == [1.0, 0.5, 1.0]
     np.testing.assert_array_equal(mixed.S[2], mixed.S[0])
-    np.testing.assert_array_equal(mixed.S[0], one.S[0])            # the row of T = 1, not another
+    np.testing.assert_array_equal(mixed.S[0], one.S[0])  # the row of T = 1, not another
     for bad in ([0.0], [float("nan")], [float("inf")]):
         with pytest.raises(qed.errors.InvalidRequest):
             qed.dynamics(H, O, omega, T=bad, **kw)
@@ -836,8 +863,7 @@ def test_omega_is_measured_from_a_zero_ground_energy():
     for j in range(n):
         O.add_one_body(qed.OP_SMINUS, j, complex(np.exp(-1j * q * j)) / math.sqrt(n))
     omega = np.linspace(-1.5, 1.5, 601)
-    sym = qed.Symmetry(spatial=_translations(n), point_group=False, sz=n, spin_flip="off",
-                       time_reversal="off")
+    sym = qed.Symmetry(spatial=_translations(n), point_group=False, sz=n, spin_flip="off", time_reversal="off")
     r = qed.dynamics(H, O, omega, eta=0.02, sym=sym)
     assert r.e0 == 0.0
     assert abs(omega[np.argmax(r.S[0])] - math.cos(q)) < 0.006
@@ -860,8 +886,9 @@ def test_dynamics_selects_its_source_by_momentum():
     with pytest.raises(qed.errors.Unsupported):
         qed.dynamics(H, O, omega, sym=base.select(irrep=[0]))
     with pytest.raises(qed.errors.InvalidRequest, match="spin_flip"):
-        qed.dynamics(_ring_in_field(n), O, omega,
-                     sym=qed.Symmetry(spatial=[list(T)], point_group=False, spin_flip="require"))
+        qed.dynamics(
+            _ring_in_field(n), O, omega, sym=qed.Symmetry(spatial=[list(T)], point_group=False, spin_flip="require")
+        )
 
 
 def _s_plus_q(n, q):
@@ -884,8 +911,13 @@ def test_t0_ground_manifold_is_solved_on_the_folded_blocks(probe):
     omega = np.linspace(-0.5, 4.0, 91)
     kw = dict(eta=0.1, krylov=300)
     folded = qed.dynamics(H, O, omega, **kw)
-    plain = qed.dynamics(H, O, omega, sym=qed.Symmetry(spatial=_translations(n), point_group=False,
-                                                        spin_flip="off", time_reversal="off"), **kw)
+    plain = qed.dynamics(
+        H,
+        O,
+        omega,
+        sym=qed.Symmetry(spatial=_translations(n), point_group=False, spin_flip="off", time_reversal="off"),
+        **kw,
+    )
     assert folded.ground_manifold == plain.ground_manifold == 4
     scale = np.abs(plain.S).max()
     np.testing.assert_allclose(folded.S, plain.S, atol=1e-10 * scale)
@@ -918,12 +950,12 @@ def test_t0_continued_fractions_run_on_the_target_blocks():
 
 def _lehmann_finite_t(H, O, n, omega, eta, T):
     E, V = np.linalg.eigh(_dense(H, n))
-    M = V.conj().T @ _dense(O, n) @ V                     # <a|O|b>
+    M = V.conj().T @ _dense(O, n) @ V  # <a|O|b>
     w = np.exp(-(E - E[0]) / T)
-    poles = (E[:, None] - E[None, :]).ravel()             # E_a - E_b, the source b
+    poles = (E[:, None] - E[None, :]).ravel()  # E_a - E_b, the source b
     weights = (np.abs(M) ** 2 * w[None, :]).ravel() / w.sum()
     om = np.asarray(omega)[:, None]
-    return (weights[None, :] * eta / math.pi / ((om - poles[None, :]) ** 2 + eta ** 2)).sum(axis=1)
+    return (weights[None, :] * eta / math.pi / ((om - poles[None, :]) ** 2 + eta**2)).sum(axis=1)
 
 
 def test_finite_t_dynamics_folds_the_symmetric_sources():
@@ -953,8 +985,7 @@ def test_finite_t_dynamics_folds_the_symmetric_sources():
         for r in (plain, flip, point):
             assert np.abs(r.S[0] - ref).sum() <= 0.1 * np.abs(ref).sum()
     Op = _s_plus_q(n, math.pi)
-    assert run(Op, spatial=trans, point_group=False)[1] == run(Op, spatial=trans, point_group=False,
-                                                               spin_flip="off")[1]
+    assert run(Op, spatial=trans, point_group=False)[1] == run(Op, spatial=trans, point_group=False, spin_flip="off")[1]
 
 
 def _ring_in_field(n, h=0.1):
@@ -975,13 +1006,13 @@ def test_magnetisation_in_a_field_is_physical():
     # M(T) = Tr(S^z e^{-beta H}) / Z, against dense matrices of the library's own operators, so the
     # check holds whichever bit value means spin up (the Sz label meets physics here).
     n = 8
-    H, Sz = _ring_in_field(n, h=0.3), _sz_total(n)    # J S.S + 0.3 sum_i S^z_i
+    H, Sz = _ring_in_field(n, h=0.3), _sz_total(n)  # J S.S + 0.3 sum_i S^z_i
     E, V = np.linalg.eigh(_dense(H, n))
     mz = np.real(np.einsum("ji,jk,ki->i", V.conj(), _dense(Sz, n), V))
     T = np.array([0.3, 1.0, 3.0])
     w = np.exp(-(E - E[0])[None, :] / T[:, None])
     M_ref = (w * mz).sum(axis=1) / w.sum(axis=1)
-    assert M_ref[0] < -0.1                           # the field lowers Sz
+    assert M_ref[0] < -0.1  # the field lowers Sz
     for sym in (qed.Symmetry(spatial=None), qed.Symmetry()):
         r = qed.thermal(H, T, method="exact", sym=sym)
         np.testing.assert_allclose(r.M, M_ref, atol=1e-10)
@@ -1075,9 +1106,12 @@ def test_a_selection_without_a_state_of_the_spin_raises():
     base = qed.Symmetry(spatial=[list(T)], point_group=False, total_spin=1)
     empty, held = base.select(momentum={T: 0}), base.select(momentum={T: Fraction(1, 2)})
     O = _sz_q(n, math.pi)
-    for verb in (lambda s: qed.eigs(H, 1, sym=s), lambda s: qed.spectrum(H, sym=s),
-                 lambda s: qed.thermal(H, [1.0], method="exact", sym=s),
-                 lambda s: qed.dynamics(H, O, [0.0, 1.0], sym=s)):
+    for verb in (
+        lambda s: qed.eigs(H, 1, sym=s),
+        lambda s: qed.spectrum(H, sym=s),
+        lambda s: qed.thermal(H, [1.0], method="exact", sym=s),
+        lambda s: qed.dynamics(H, O, [0.0, 1.0], sym=s),
+    ):
         with pytest.raises(qed.errors.EmptySelection):
             verb(empty)
         verb(held)
@@ -1088,8 +1122,11 @@ def test_sz_parity_must_agree_with_the_total_spin():
     H = _ring(4)
     with pytest.raises(qed.errors.InvalidRequest, match="disjoint"):
         qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="even"))
-    np.testing.assert_allclose(qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="odd")).energies,
-                               qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1)).energies, atol=1e-12)
+    np.testing.assert_allclose(
+        qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1, sz="odd")).energies,
+        qed.spectrum(H, sym=qed.Symmetry(spatial=None, total_spin=1)).energies,
+        atol=1e-12,
+    )
 
 
 def test_dense_max_dim_is_the_eigs_crossover():
@@ -1131,7 +1168,7 @@ def test_dense_max_dim_is_the_thermal_crossover():
 def test_eigs_counts_blocks_of_two_states_as_dense():
     # Blocks of one or two states are solved densely whatever the crossover, and counted so.
     H = _ring(2)
-    sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")   # Sz blocks of 1, 2, 1 states
+    sym = qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off")  # Sz blocks of 1, 2, 1 states
     for vectors in (False, True):
         r = qed.eigs(H, 4, sym=sym, vectors=vectors, prune=False, dense_max_dim=0)
         assert r.placement["host_dense"] == 3 and r.placement["host_krylov"] == 0
@@ -1142,6 +1179,7 @@ def test_eigs_counts_blocks_of_two_states_as_dense():
 # The Krylov lanes at toy dimensions: dense_max_dim=0 sends every block above dimension 2
 # to the lanes the device runs (P2.4), so their answers must equal a dense numpy reference.
 # ---------------------------------------------------------------------------
+
 
 def _xxz_open(n, delta, hz):
     H = qed.Operator(n)
@@ -1193,16 +1231,20 @@ def _lane_symmetry(n, periodic, content):
     return qed.Symmetry(spatial=None, total_spin=0, **off)
 
 
-_LANE_CASES = [("ring10_j2", c) for c in ("none", "sz_one", "lg", "flip", "su2")] + \
-              [("ring8", c) for c in ("sz_one", "lg", "su2")] + \
-              [("xxz_field9", c) for c in ("none", "sz_one", "lg")]
+_LANE_CASES = (
+    [("ring10_j2", c) for c in ("none", "sz_one", "lg", "flip", "su2")]
+    + [("ring8", c) for c in ("sz_one", "lg", "su2")]
+    + [("xxz_field9", c) for c in ("none", "sz_one", "lg")]
+)
 
 
 @pytest.mark.parametrize("model,content", _LANE_CASES)
 def test_krylov_lanes_at_toy_dims(model, content):
-    H, n, periodic = {"ring10_j2": lambda: (_ring(10, 0.3), 10, True),
-                      "ring8": lambda: (_ring(8), 8, True),
-                      "xxz_field9": lambda: (_xxz_open(9, 0.6, 0.2), 9, False)}[model]()
+    H, n, periodic = {
+        "ring10_j2": lambda: (_ring(10, 0.3), 10, True),
+        "ring8": lambda: (_ring(8), 8, True),
+        "xxz_field9": lambda: (_xxz_open(9, 0.6, 0.2), 9, False),
+    }[model]()
     sym = _lane_symmetry(n, periodic, content)
     ref = _reference_levels(H, n, content)
     for k in (1, 3):
@@ -1222,6 +1264,7 @@ def test_krylov_lanes_at_toy_dims(model, content):
 # device floor, without a device, or on a CPU build, 'auto' and 'cpu' answer bit for bit.
 # ---------------------------------------------------------------------------
 
+
 def _same_result(a, b):
     assert np.array_equal(np.asarray(a.energies), np.asarray(b.energies))
     assert a.complete == b.complete and a.placement == b.placement
@@ -1230,8 +1273,11 @@ def _same_result(a, b):
 
 @pytest.mark.parametrize("model", ["ring10_j2", "xxz_field9", "ring12"])
 def test_auto_runs_the_cpu_lanes_below_the_floor(model):
-    H = {"ring10_j2": lambda: _ring(10, 0.3), "xxz_field9": lambda: _xxz_open(9, 0.6, 0.2),
-         "ring12": lambda: _ring(12)}[model]()
+    H = {
+        "ring10_j2": lambda: _ring(10, 0.3),
+        "xxz_field9": lambda: _xxz_open(9, 0.6, 0.2),
+        "ring12": lambda: _ring(12),
+    }[model]()
     n = int(H.num_sites)
     sym = qed.Symmetry(spatial=None, sz=n // 2, spin_flip="off", time_reversal="off")
     for k in (1, 3):
@@ -1277,6 +1323,7 @@ def test_auto_certifies_like_cpu(scale):
 # Symmetry verdicts on the canonical terms (audit C02-discovery-07 and its members, C07-su2-03)
 # ---------------------------------------------------------------------------
 
+
 def _ring_bonds(n):
     return [(i, (i + 1) % n) for i in range(n)]
 
@@ -1301,8 +1348,8 @@ def test_cartesian_heisenberg_is_su2():
     # J (Sx Sx + Sy Sy + Sz Sz) written as ladder records whose S+S+ / S-S- parts cancel.
     n = 8
     P, M = qed.OP_SPLUS, qed.OP_SMINUS
-    xx = {(P, P): 0.25, (P, M): 0.25, (M, P): 0.25, (M, M): 0.25}     # Sx Sx = (S+ + S-)(S+ + S-) / 4
-    yy = {(P, P): -0.25, (P, M): 0.25, (M, P): 0.25, (M, M): -0.25}   # Sy Sy = -(S+ - S-)(S+ - S-) / 4
+    xx = {(P, P): 0.25, (P, M): 0.25, (M, P): 0.25, (M, M): 0.25}  # Sx Sx = (S+ + S-)(S+ + S-) / 4
+    yy = {(P, P): -0.25, (P, M): 0.25, (M, P): 0.25, (M, M): -0.25}  # Sy Sy = -(S+ - S-)(S+ - S-) / 4
     H = qed.Operator(n)
     for i, j in _ring_bonds(n):
         for records in (xx, yy):
@@ -1337,6 +1384,7 @@ def test_s_squared_with_same_site_records_is_su2():
 # ---------------------------------------------------------------------------
 # Operator algebra (audit K3-model-scale-09)
 # ---------------------------------------------------------------------------
+
 
 def _hermitian_operator(n, rng, terms=5, max_factors=2):
     R = qed.Operator(n)
@@ -1374,10 +1422,16 @@ def test_operator_product_terms_and_equality():
     R.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5)
     assert R.equals(qed.Operator.product(n, "+-", [0, 1], 0.5))
     # S^x S^x + S^y S^y + S^z S^z in Cartesian form equals the ladder form
-    cart = (qed.Operator.product(n, "xx", [0, 1]) + qed.Operator.product(n, "yy", [0, 1])
-            + qed.Operator.product(n, "zz", [0, 1]))
-    ladder = (qed.Operator.product(n, "+-", [0, 1], 0.5) + qed.Operator.product(n, "-+", [0, 1], 0.5)
-              + qed.Operator.product(n, "zz", [0, 1]))
+    cart = (
+        qed.Operator.product(n, "xx", [0, 1])
+        + qed.Operator.product(n, "yy", [0, 1])
+        + qed.Operator.product(n, "zz", [0, 1])
+    )
+    ladder = (
+        qed.Operator.product(n, "+-", [0, 1], 0.5)
+        + qed.Operator.product(n, "-+", [0, 1], 0.5)
+        + qed.Operator.product(n, "zz", [0, 1])
+    )
     assert cart.equals(ladder) and not cart.equals(2 * ladder)
     # spin-1/2 identities on one site
     assert qed.Operator.product(n, "++", [2, 2]).equals(qed.Operator(n))
@@ -1399,8 +1453,7 @@ def test_operator_image_copy_and_limits():
         ring = ring + qed.Operator.product(n, "zz", [i, (i + 1) % n])
     assert ring.image(T).equals(ring)
     assert qed.Operator.product(n, "z", [1]).image(T).equals(qed.Operator.product(n, "z", [0]))
-    assert qed.Operator.product(n, "z", [0]).image(list(range(n)), flip=True).equals(
-        -qed.Operator.product(n, "z", [0]))
+    assert qed.Operator.product(n, "z", [0]).image(list(range(n)), flip=True).equals(-qed.Operator.product(n, "z", [0]))
     with pytest.raises(ValueError):
         ring.image([0, 0, 1, 2])
     B = ring.copy()
@@ -1425,8 +1478,11 @@ def _ring_exchange(n, J=1.0, K=0.3):
     I = qed.Operator.product(n, "I", [0])
 
     def dot(i, j, c=1.0):
-        return (qed.Operator.product(n, "zz", [i, j], c) + qed.Operator.product(n, "+-", [i, j], 0.5 * c)
-                + qed.Operator.product(n, "-+", [i, j], 0.5 * c))
+        return (
+            qed.Operator.product(n, "zz", [i, j], c)
+            + qed.Operator.product(n, "+-", [i, j], 0.5 * c)
+            + qed.Operator.product(n, "-+", [i, j], 0.5 * c)
+        )
 
     H = qed.Operator(n)
     for i in range(n):
@@ -1445,7 +1501,7 @@ def test_four_site_terms_in_the_hamiltonian():
     pop = np.array([bin(s).count("1") for s in range(1 << n)])
     sector = np.flatnonzero(pop == n // 2)
     ref = np.linalg.eigvalsh(M[np.ix_(sector, sector)])[:3]
-    r = qed.eigs(H, 3, sym=qed.Symmetry(sz=n // 2))   # translations, found on the canonical terms
+    r = qed.eigs(H, 3, sym=qed.Symmetry(sz=n // 2))  # translations, found on the canonical terms
     np.testing.assert_allclose(np.sort(np.asarray(r.energies))[:3], ref, atol=1e-10)
     # as its own observable: <psi|H|psi> = E on every level (four-site terms averaged in the algebra)
     rv = qed.eigs(H, 2, sym=qed.Symmetry(spatial=None, sz=n // 2), vectors=True)
@@ -1457,7 +1513,7 @@ def _lehmann_t0(H, O, n, omega, eta):
     g = np.flatnonzero(E - E[0] < 1e-8)
     W = (np.abs(V.conj().T @ _dense(O, n) @ V[:, g]) ** 2).sum(axis=1) / len(g)
     om = np.asarray(omega)[:, None]
-    return (W[None, :] * eta / math.pi / ((om - (E - E[0])[None, :]) ** 2 + eta ** 2)).sum(axis=1)
+    return (W[None, :] * eta / math.pi / ((om - (E - E[0])[None, :]) ** 2 + eta**2)).sum(axis=1)
 
 
 def _xyz_ring(n, jx=1.0, jy=0.7, jz=0.4):
@@ -1501,8 +1557,9 @@ def test_a_multiplet_at_the_kth_level_comes_back_whole():
     assert all(E[i] <= E[i + 1] + 1e-12 for i in range(len(E) - 1))
     assert len(r.energies) == 6
     ref = np.linalg.eigvalsh(_dense(H, n))[:7]
-    np.testing.assert_allclose(sorted(e for L in r.levels for e in [float(L.energy)] * int(L.multiplicity)), ref,
-                               atol=1e-10)
+    np.testing.assert_allclose(
+        sorted(e for L in r.levels for e in [float(L.energy)] * int(L.multiplicity)), ref, atol=1e-10
+    )
 
 
 def test_requests_that_cannot_be_answered_are_refused(tmp_path):
@@ -1510,7 +1567,7 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
     # ValueError), what it would otherwise answer wrongly or crash on.
     n = 6
     H = _ring(n)
-    bad = qed.Operator(n)                                  # a DM term with a sign error: not Hermitian
+    bad = qed.Operator(n)  # a DM term with a sign error: not Hermitian
     for i in range(n):
         bad.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.3j)
         bad.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.3j)
@@ -1518,15 +1575,25 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
     O = _sz_q(n, math.pi)
     omega = np.linspace(0.0, 3.0, 31)
     E = qed.errors.InvalidRequest
-    for call in (lambda: qed.eigs(Hbad, 1), lambda: qed.spectrum(Hbad),
-                 lambda: qed.thermal(Hbad, [1.0], method="exact"), lambda: qed.dynamics(Hbad, O, omega)):
+    for call in (
+        lambda: qed.eigs(Hbad, 1),
+        lambda: qed.spectrum(Hbad),
+        lambda: qed.thermal(Hbad, [1.0], method="exact"),
+        lambda: qed.dynamics(Hbad, O, omega),
+    ):
         with pytest.raises(E, match="not Hermitian"):
             call()
     for sz in (-1, True, 0.5, n + 1):
         with pytest.raises(E):
             qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, sz=sz))
-    for kw in (dict(eta=0.0), dict(eta=-0.1), dict(T=[1.0], krylov=0), dict(degeneracy_tol=-1.0),
-               dict(T=[]), dict(T=[float("nan")])):
+    for kw in (
+        dict(eta=0.0),
+        dict(eta=-0.1),
+        dict(T=[1.0], krylov=0),
+        dict(degeneracy_tol=-1.0),
+        dict(T=[]),
+        dict(T=[float("nan")]),
+    ):
         with pytest.raises(E):
             qed.dynamics(H, O, omega, **kw)
     with pytest.raises(E, match="observable 1 is None"):
@@ -1541,9 +1608,11 @@ def test_requests_that_cannot_be_answered_are_refused(tmp_path):
     with np.load(tmp_path / "good.npz") as f:
         base = {k: f[k] for k in f.files}
     perms = next(k for k in base if k.startswith("basis") and k.endswith("_perms"))
-    for key, value in (("level_vector", np.full_like(base["level_vector"], 1000)),
-                       ("vector_offset", base["vector_offset"][:-1]),
-                       (perms, np.full_like(base[perms], 100000))):
+    for key, value in (
+        ("level_vector", np.full_like(base["level_vector"], 1000)),
+        ("vector_offset", base["vector_offset"][:-1]),
+        (perms, np.full_like(base[perms], 100000)),
+    ):
         damaged = dict(base, **{key: value})
         np.savez(tmp_path / "bad.npz", **damaged)
         with pytest.raises(E):
@@ -1559,10 +1628,10 @@ def test_a_star_closed_by_time_reversal_is_folded():
     H = _ring(n)
     T = [(i + 1) % n for i in range(n)]
     sym = qed.Symmetry(spatial=[T], point_group=False, spin_flip="off")
-    current = qed.Operator(n)                                   # Hermitian, odd under time reversal
+    current = qed.Operator(n)  # Hermitian, odd under time reversal
     current.add_two_body(qed.OP_SPLUS, 0, qed.OP_SMINUS, 1, 0.5j)
     current.add_two_body(qed.OP_SMINUS, 0, qed.OP_SPLUS, 1, -0.5j)
-    k = 24                                                      # reaches levels at generic momenta
+    k = 24  # reaches levels at generic momenta
     r = qed.eigs(H, k, sym=sym, vectors=True)
     vs = np.array([np.asarray(v, complex) for v in r.vectors()])
     assert len(vs) == k
@@ -1608,15 +1677,17 @@ def test_every_refusal_is_a_qed_error():
         flux.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5j)
         flux.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, -0.5j)
         flux.add_one_body(qed.OP_SZ, i, 0.1)
-    for H_, sym in ((H + field_x, qed.Symmetry(spatial=None, sz=3)),            # no U(1)
-                    (H + field_x, qed.Symmetry(spatial=None, sz="even")),        # no Sz parity
-                    (H + field_x, qed.Symmetry(spatial=None, total_spin=0)),     # no SU(2)
-                    (H, qed.Symmetry(spatial=None, sz=2, total_spin=0)),         # disagree
-                    (H + flux, qed.Symmetry(spatial=None, time_reversal="require"))):
+    for H_, sym in (
+        (H + field_x, qed.Symmetry(spatial=None, sz=3)),  # no U(1)
+        (H + field_x, qed.Symmetry(spatial=None, sz="even")),  # no Sz parity
+        (H + field_x, qed.Symmetry(spatial=None, total_spin=0)),  # no SU(2)
+        (H, qed.Symmetry(spatial=None, sz=2, total_spin=0)),  # disagree
+        (H + flux, qed.Symmetry(spatial=None, time_reversal="require")),
+    ):
         with pytest.raises(E):
             qed.eigs(H_, 1, sym=sym)
     with pytest.raises(E):
-        qed.eigs(H, 1).vectors()                                                 # no vectors kept
+        qed.eigs(H, 1).vectors()  # no vectors kept
 
 
 def test_a_coefficient_that_is_not_finite_is_refused():
@@ -1627,8 +1698,7 @@ def test_a_coefficient_that_is_not_finite_is_refused():
         H = _ring(n)
         H.add_two_body(qed.OP_SZ, 0, qed.OP_SZ, 1, bad)
         assert not H.is_hermitian()
-        for call in (lambda: qed.eigs(H, 2), lambda: qed.spectrum(H),
-                     lambda: qed.thermal(H, [1.0], method="exact")):
+        for call in (lambda: qed.eigs(H, 2), lambda: qed.spectrum(H), lambda: qed.thermal(H, [1.0], method="exact")):
             with pytest.raises(qed.errors.InvalidRequest, match="not finite"):
                 call()
         O = qed.Operator(n)
@@ -1645,7 +1715,7 @@ def test_mtpq_on_a_block_of_zero_width():
     for i in range(n):
         xx.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, (i + 1) % n, 0.5)
         xx.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, (i + 1) % n, 0.5)
-    sym = qed.Symmetry(spatial=None, sz=0)                     # the all-down state alone, E = 0
+    sym = qed.Symmetry(spatial=None, sz=0)  # the all-down state alone, E = 0
     r = qed.thermal(xx, [1.0, 2.0], method="mtpq", samples=2, seed=3, sym=sym, dense_max_dim=0)
     np.testing.assert_allclose(r.E, [0.0, 0.0], atol=1e-12)
     np.testing.assert_allclose(r.lnZ, [0.0, 0.0], atol=1e-12)
@@ -1702,7 +1772,7 @@ def test_real_blocks_run_in_real_arithmetic(monkeypatch):
         np.testing.assert_allclose(r.energies, c.energies, atol=1e-11)
         lanes = {b["lane"] for b in r.block_stats}
         assert "csr-real" in lanes and "csr-real" not in {b["lane"] for b in c.block_stats}
-        if vectors:   # the real vectors are eigenvectors: <H> in each level is its energy
+        if vectors:  # the real vectors are eigenvectors: <H> in each level is its energy
             np.testing.assert_allclose(r.expect([H])[:, 0].real, [lv.energy for lv in r.levels], atol=1e-9)
 
 
@@ -1733,10 +1803,9 @@ def test_cross_correlations_follow_the_polarisation_identity(T):
         kw["T"] = T
     sab = qed.dynamics(H, A, omega, B, **kw).S
     assert np.iscomplexobj(sab)
-    pol = sum(1j ** (-k) * qed.dynamics(H, A + (1j ** k) * B, omega, A + (1j ** k) * B, **kw).S
-              for k in range(4)) / 4
+    pol = sum(1j ** (-k) * qed.dynamics(H, A + (1j**k) * B, omega, A + (1j**k) * B, **kw).S for k in range(4)) / 4
     np.testing.assert_allclose(sab, pol, atol=1e-9 * np.abs(pol).max())
-    if T is None:   # the ground state and both operators are real here: so is the cross spectrum
+    if T is None:  # the ground state and both operators are real here: so is the cross spectrum
         np.testing.assert_allclose(sab.imag, 0.0, atol=1e-12 * np.abs(sab).max())
 
 
@@ -1761,7 +1830,7 @@ def test_dynamics_probe_axes(T):
     assert full.shape == (2, 2) + one[0].shape
     for i in range(2):
         np.testing.assert_allclose(full[i, i].real, one[i], rtol=1e-10, atol=1e-12)
-    if T is None:   # at T > 0 the sampled trace is Hermitian only on average
+    if T is None:  # at T > 0 the sampled trace is Hermitian only on average
         np.testing.assert_allclose(full[1, 0], np.conj(full[0, 1]), atol=1e-10 * np.abs(full).max())
     pairs = qed.dynamics(H, [A, B], omega, [B, A], **kw).S
     np.testing.assert_allclose(pairs[0], full[0, 1], atol=1e-12)
@@ -1774,6 +1843,7 @@ def test_version_is_pyprojects():
     """qed.__version__ is pyproject.toml's version (compiled into _core through CMake)."""
     import pathlib
     import re
+
     text = (pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
     assert qed.__version__ == re.search(r'^version = "([0-9.]+)"$', text, re.M).group(1)
     assert qed._core.__version__ == qed.__version__

@@ -52,8 +52,7 @@ namespace ed::core {
 #if defined(_SC_AVPHYS_PAGES) && defined(_SC_PAGESIZE)
     const long pages = sysconf(_SC_AVPHYS_PAGES);
     const long psize = sysconf(_SC_PAGESIZE);
-    if (pages > 0 && psize > 0)
-        return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(psize);
+    if (pages > 0 && psize > 0) return static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(psize);
 #endif
     return 0;
 }
@@ -71,13 +70,18 @@ namespace ed::core {
     std::ifstream cg("/proc/self/cgroup");
     std::string line, path;
     while (cg && std::getline(cg, line))
-        if (line.rfind("0::", 0) == 0) { path = line.substr(3); break; }
+        if (line.rfind("0::", 0) == 0) {
+            path = line.substr(3);
+            break;
+        }
     if (path.empty()) return 0;
     auto read_u64 = [](const std::string& file, std::uint64_t& out) -> bool {
         std::ifstream f(file);
         std::string s;
         if (!(f >> s) || s == "max") return false;
-        try { out = std::stoull(s); } catch (...) { return false; }
+        try {
+            out = std::stoull(s);
+        } catch (...) { return false; }
         return true;
     };
     // One "key value" line of a memory.stat file (0 when absent).
@@ -91,7 +95,7 @@ namespace ed::core {
     };
     std::uint64_t best = 0;
     bool found = false;
-    for (std::string p = path;; ) {
+    for (std::string p = path;;) {
         const std::string dir = "/sys/fs/cgroup" + (p == "/" ? std::string() : p);
         std::uint64_t lim = 0, cur = 0;
         if (read_u64(dir + "/memory.max", lim) && read_u64(dir + "/memory.current", cur)) {
@@ -112,7 +116,7 @@ namespace ed::core {
 /// smaller of the node's MemAvailable and the headroom under our cgroup limit.
 [[nodiscard]] inline std::uint64_t available_ram_bytes() noexcept {
     const std::uint64_t node = node_available_ram_bytes();
-    const std::uint64_t job  = cgroup_available_ram_bytes();
+    const std::uint64_t job = cgroup_available_ram_bytes();
     if (job == 0) return node;
     if (node == 0) return job;
     return node < job ? node : job;
@@ -141,14 +145,14 @@ namespace ed::core {
         cudaMemPool_t pool = nullptr;
         std::uint64_t reserved = 0, used = 0;
         if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess
-                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) == cudaSuccess
-                && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess) {
+            && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) == cudaSuccess
+            && cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess) {
             if (reserved > used) free_bytes += static_cast<std::size_t>(reserved - used);
         } else {
             cudaGetLastError();
         }
         cached_free = free_bytes;
-        cached_at   = now;
+        cached_at = now;
     }
     return cached_free;
 #else
@@ -171,11 +175,11 @@ inline void guard_working_set(std::uint64_t est_bytes, const char* what) {
         const auto GiB = [](double b) {
             return std::to_string(static_cast<std::uint64_t>(b / (1024.0 * 1024.0 * 1024.0)));
         };
-        throw ed::ResourceLimit(
-            std::string(what) + ": estimated working set ~" + GiB(est_bytes) +
-            " GiB exceeds ~" + GiB(budget) + " GiB available RAM. Reduce the "
-            "problem (sz / symmetry / fewer samples / smaller Krylov dim), give "
-            "it more memory, or set ED_MEM_GUARD_OFF=1 to override.");
+        throw ed::ResourceLimit(std::string(what) + ": estimated working set ~" + GiB(est_bytes) + " GiB exceeds ~"
+                                + GiB(budget)
+                                + " GiB available RAM. Reduce the "
+                                  "problem (sz / symmetry / fewer samples / smaller Krylov dim), give "
+                                  "it more memory, or set ED_MEM_GUARD_OFF=1 to override.");
     }
 }
 

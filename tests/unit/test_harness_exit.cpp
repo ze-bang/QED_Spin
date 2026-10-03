@@ -11,6 +11,4 @@ TEST_CASE("four failed assertions", "[harness_four]") {
     for (int i = 0; i < 4; ++i) CHECK(i < 0);
 }
 
-TEST_CASE("a skip alone", "[harness_skip]") {
-    SKIP("skipped on purpose");
-}
+TEST_CASE("a skip alone", "[harness_skip]") { SKIP("skipped on purpose"); }

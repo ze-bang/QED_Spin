@@ -6,6 +6,7 @@ only_momentum, only_irrep_chars) and the spin_flip='require' check (it zeroes sp
 eigs honours both. Test: 8-site Heisenberg ring; dynamics with select(momentum={T: 1/2}) equals the
 unselected result although eigs with the same selection returns only k=pi levels; with a field,
 spin_flip='require' raises in eigs but not in dynamics."""
+
 import cmath
 from fractions import Fraction
 import numpy as np

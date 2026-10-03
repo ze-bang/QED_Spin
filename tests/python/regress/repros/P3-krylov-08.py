@@ -12,6 +12,7 @@ time (the reorthogonalisation term).
 
 RESTATED 2026-10-02 (P6.2 step 5): the applies are the block's from result.block_stats (the lane is its
 own recurrence now and emits no [lanczos_kernel] profile line, which made the old count INCONCLUSIVE)."""
+
 import json
 import subprocess
 import sys
@@ -40,11 +41,10 @@ print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": 
 
 
 def run(vec):
-    p = subprocess.run([sys.executable, "-c", CHILD, "1" if vec else "0"], capture_output=True, text=True,
-                       timeout=280)
+    p = subprocess.run([sys.executable, "-c", CHILD, "1" if vec else "0"], capture_output=True, text=True, timeout=280)
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+            return json.loads(line[len("RESULT_JSON:") :])
     raise RuntimeError(f"child rc={p.returncode}: {p.stderr[-400:]}")
 
 
@@ -57,8 +57,10 @@ except Exception as e:
 print("values lane :", rv)
 print("vectors lane:", rw)
 dE = abs(rv["E"][0] - rw["E"][0]) if rv["E"] and rw["E"] else float("nan")
-msg = (f"vectors lane {rw['applies']} applies in {rw['wall']:.1f}s, values lane {rv['applies']} applies in "
-       f"{rv['wall']:.1f}s; |dE0|={dE:.1e}")
+msg = (
+    f"vectors lane {rw['applies']} applies in {rw['wall']:.1f}s, values lane {rv['applies']} applies in "
+    f"{rv['wall']:.1f}s; |dE0|={dE:.1e}"
+)
 if (rw["applies"] >= 200 and rv["applies"] <= 150) or rw["wall"] > 2.0 * rv["wall"]:
     print("REPRO: CONFIRMED " + msg)
 else:

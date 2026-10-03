@@ -41,14 +41,14 @@ int ud(int bit) { return ed::ops::kSetBitIsDown ? bit : 1 - bit; }
 M2 single(char op) {
     const Cx i(0.0, 1.0);
     switch (op) {
-        case '+': return {0, 1, 0, 0};                       // <up|S+|dn> = 1
-        case '-': return {0, 0, 1, 0};                       // <dn|S-|up> = 1
-        case 'z': return {0.5, 0, 0, -0.5};
-        case 'x': return {0, 0.5, 0.5, 0};
-        case 'y': return {0, -0.5 * i, 0.5 * i, 0};          // (S+ - S-) / 2i
-        case 'u': return {1, 0, 0, 0};
-        case 'd': return {0, 0, 0, 1};
-        default:  return {1, 0, 0, 1};
+    case '+': return {0, 1, 0, 0};                       // <up|S+|dn> = 1
+    case '-': return {0, 0, 1, 0};                       // <dn|S-|up> = 1
+    case 'z': return {0.5, 0, 0, -0.5};
+    case 'x': return {0, 0.5, 0.5, 0};
+    case 'y': return {0, -0.5 * i, 0.5 * i, 0};          // (S+ - S-) / 2i
+    case 'u': return {1, 0, 0, 0};
+    case 'd': return {0, 0, 0, 1};
+    default: return {1, 0, 0, 1};
     }
 }
 
@@ -87,8 +87,7 @@ std::vector<Cx> dense_product(int n, const std::string& ops, const std::vector<i
     const std::uint64_t dim = 1ULL << n;
     std::vector<Cx> R(dim * dim, 0.0);
     for (std::uint64_t s = 0; s < dim; ++s) R[s * dim + s] = c;
-    for (std::size_t k = 0; k < ops.size(); ++k)
-        R = matmul(R, embed(n, sites[k], single(ops[k])), dim);
+    for (std::size_t k = 0; k < ops.size(); ++k) R = matmul(R, embed(n, sites[k], single(ops[k])), dim);
     return R;
 }
 
@@ -138,8 +137,7 @@ TEST_CASE("random products, adjoints, images, hermiticity", "[masked]") {
         std::shuffle(perm.begin(), perm.end(), rng);
         const std::uint64_t m = (trial % 2) ? (dim - 1) : static_cast<std::uint64_t>(trial % static_cast<int>(dim));
         std::vector<std::uint64_t> U(dim);
-        for (std::uint64_t s = 0; s < dim; ++s)
-            U[s] = ed::ops::permute_mask(s, perm.data(), n) ^ m;
+        for (std::uint64_t s = 0; s < dim; ++s) U[s] = ed::ops::permute_mask(s, perm.data(), n) ^ m;
         std::vector<Cx> UDU(dim * dim, 0.0);
         for (std::uint64_t t = 0; t < dim; ++t)
             for (std::uint64_t s = 0; s < dim; ++s) UDU[U[t] * dim + U[s]] = D[t * dim + s];
@@ -159,9 +157,11 @@ TEST_CASE("random products, adjoints, images, hermiticity", "[masked]") {
     // spin-1/2 identities: S+ S+ = 0, S+ S- = |up><up|, (2 S^z)^2 = 1
     CHECK(MaskedOperator::product(n, "++", {1, 1}, 1.0).terms(1e-15).empty());
     CHECK(maxdiff(MaskedOperator::product(n, "+-", {1, 1}, 1.0).to_dense(),
-                  MaskedOperator::product(n, "u", {1}, 1.0).to_dense()) < 1e-14);
+                  MaskedOperator::product(n, "u", {1}, 1.0).to_dense())
+          < 1e-14);
     CHECK(maxdiff(MaskedOperator::product(n, "zz", {4, 4}, 4.0).to_dense(),
-                  MaskedOperator::product(n, "I", {0}, 1.0).to_dense()) < 1e-14);
+                  MaskedOperator::product(n, "I", {0}, 1.0).to_dense())
+          < 1e-14);
 }
 
 TEST_CASE("commutators, equality and the global maps K, F, Dz, Theta", "[masked]") {
@@ -179,7 +179,8 @@ TEST_CASE("commutators, equality and the global maps K, F, Dz, Theta", "[masked]
     const auto UT = global({0, 1, -1, 0});       // i sigma^y: <up|.|dn> = 1, <dn|.|up> = -1
     const std::vector<Cx> UI = global({1, 0, 0, 1});
     auto conjugate = [&](const std::vector<Cx>& U, std::vector<Cx> D, bool antiunitary) {
-        if (antiunitary) for (auto& x : D) x = std::conj(x);   // (U K) O (U K)^-1 = U O* U^dagger
+        if (antiunitary)
+            for (auto& x : D) x = std::conj(x);   // (U K) O (U K)^-1 = U O* U^dagger
         std::vector<Cx> Ud(dim * dim);
         for (std::uint64_t i = 0; i < dim; ++i)
             for (std::uint64_t j = 0; j < dim; ++j) Ud[j * dim + i] = std::conj(U[i * dim + j]);
@@ -218,8 +219,8 @@ TEST_CASE("commutators, equality and the global maps K, F, Dz, Theta", "[masked]
         const auto DA = A.to_dense(), DB = B.to_dense();
         REQUIRE(maxdiff((A - B).to_dense(), lin(DA, 1.0, DB, -1.0)) < 1e-12);
         REQUIRE(maxdiff((-A).to_dense(), lin(DA, -1.0, DA, 0.0)) < 1e-12);
-        REQUIRE(maxdiff(ed::ops::commutator(A, B).to_dense(),
-                        lin(matmul(DA, DB, dim), 1.0, matmul(DB, DA, dim), -1.0)) < 1e-12);
+        REQUIRE(maxdiff(ed::ops::commutator(A, B).to_dense(), lin(matmul(DA, DB, dim), 1.0, matmul(DB, DA, dim), -1.0))
+                < 1e-12);
 
         REQUIRE(maxdiff(A.image(Map::K).to_dense(), conjugate(UI, DA, true)) < 1e-12);
         REQUIRE(maxdiff(A.image(Map::F).to_dense(), conjugate(UF, DA, false)) < 1e-12);

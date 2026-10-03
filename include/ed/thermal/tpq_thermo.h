@@ -68,8 +68,8 @@ inline double log_sum_exp(const std::vector<double>& x, std::size_t n) {
  * @param dim               dimension D of the space the start vectors fill
  */
 inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& sample_energies,
-                                        const std::vector<std::vector<double>>& sample_log_norms,
-                                        double L, const std::vector<double>& betas, double dim) {
+                                        const std::vector<std::vector<double>>& sample_log_norms, double L,
+                                        const std::vector<double>& betas, double dim) {
     MtpqThermo out;
     Curves& c = out.curves;
     const std::size_t nT = betas.size(), R = sample_energies.size();
@@ -130,8 +130,8 @@ inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& 
         const double a = std::exp(lnS[1] - lnS[0]);          // L - E
         const double var = std::max(std::exp(lnS[2] - lnS[0]) - a * a, 0.0);
         c.lnZ[t] = lnD - beta * L + lnS[0];
-        c.E[t]   = L - a;
-        c.V[t]   = var;
+        c.E[t] = L - a;
+        c.V[t] = var;
     }
     return out;
 }

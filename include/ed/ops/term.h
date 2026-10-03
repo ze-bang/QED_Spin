@@ -36,7 +36,7 @@ namespace ed::ops {
 inline constexpr bool kSetBitIsDown = false;
 
 /// The value bit pattern `b` takes on its sites when they are all up / all down.
-ED_OPS_HD std::uint64_t up_bits(std::uint64_t b)   { return kSetBitIsDown ? 0 : b; }
+ED_OPS_HD std::uint64_t up_bits(std::uint64_t b) { return kSetBitIsDown ? 0 : b; }
 ED_OPS_HD std::uint64_t down_bits(std::uint64_t b) { return kSetBitIsDown ? b : 0; }
 
 struct MaskedTerm {
@@ -57,8 +57,7 @@ ED_OPS_HD int masked_popcount(std::uint64_t x) {
 
 /// Gate of one term on state s: false if the term annihilates s; otherwise the
 /// target state and the real sign (+1 / -1) that multiplies coeff.
-ED_OPS_HD bool masked_apply(const MaskedTerm& t, std::uint64_t s,
-                               std::uint64_t& target, double& sign) {
+ED_OPS_HD bool masked_apply(const MaskedTerm& t, std::uint64_t s, std::uint64_t& target, double& sign) {
     if ((s & t.cond_mask) != t.cond_val) return false;
     target = s ^ t.flip_mask;
     sign = (masked_popcount(s & t.sign_mask) & 1) ? -1.0 : 1.0;
@@ -68,7 +67,7 @@ ED_OPS_HD bool masked_apply(const MaskedTerm& t, std::uint64_t s,
 /// Change of the number of set bits (up spins) the term produces, when it acts: a flipped
 /// bit that was set removes one, a flipped bit that was clear adds one.
 ED_OPS_HD int masked_delta_set_bits(const MaskedTerm& t) {
-    const std::uint64_t flipped_set   = t.flip_mask & t.cond_val;             // S+ sites
+    const std::uint64_t flipped_set = t.flip_mask & t.cond_val;             // S+ sites
     const std::uint64_t flipped_clear = t.flip_mask & ~t.cond_val & t.cond_mask;  // S- sites
     return masked_popcount(flipped_clear) - masked_popcount(flipped_set);
 }

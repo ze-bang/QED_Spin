@@ -6,6 +6,7 @@ solve then runs on the device -- a block without a device kernel raises
 :class:`qed.errors.DeviceUnsupported`; small blocks may still be solved densely on the host
 (reported in the result's ``placement``). ``"auto"`` chooses per block.
 """
+
 from __future__ import annotations
 
 from .. import _core
@@ -22,6 +23,7 @@ def resolve(device: str):
         if not _core.has_cuda_build():
             raise DeviceUnavailable("device='gpu' needs a build with CUDA")
         if _core.cuda_device_count() == 0:
-            raise DeviceUnavailable("device='gpu', but no CUDA device is visible "
-                                    "(CUDA_VISIBLE_DEVICES, or a node without a GPU)")
+            raise DeviceUnavailable(
+                "device='gpu', but no CUDA device is visible " "(CUDA_VISIBLE_DEVICES, or a node without a GPU)"
+            )
     return getattr(_core.sectors.Device, _NAMES[key])

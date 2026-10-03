@@ -38,19 +38,23 @@ sym = qed.Symmetry.auto()
 
 def run(method, dev):
     t0 = time.perf_counter()
-    r = qed.thermal(H, T, method=method, sym=sym, samples=8, krylov=(60 if method == "ftlm" else None),
-                    seed=5, device=dev)
+    r = qed.thermal(
+        H, T, method=method, sym=sym, samples=8, krylov=(60 if method == "ftlm" else None), seed=5, device=dev
+    )
     return time.perf_counter() - t0, r
 
 
-run("ftlm", "cpu"); run("ftlm", "auto")           # warm-up: symmetry discovery, CUDA context
+run("ftlm", "cpu")
+run("ftlm", "auto")  # warm-up: symmetry discovery, CUDA context
 out = {}
 for m in ("ftlm", "mtpq"):
     (tc, rc) = min((run(m, "cpu") for _ in range(3)), key=lambda x: x[0])
     (ta, ra) = min((run(m, "auto") for _ in range(3)), key=lambda x: x[0])
     out[m] = (tc, ta, ra.device_blocks, rc.blocks, float(np.max(np.abs(rc.E - ra.E))))
-    print(f"{m}: cpu {tc:.2f} s, auto {ta:.2f} s ({ta / max(tc, 1e-9):.1f}x), device_blocks {ra.device_blocks}/"
-          f"{rc.blocks}, max|E_auto - E_cpu| {out[m][4]:.1e}")
+    print(
+        f"{m}: cpu {tc:.2f} s, auto {ta:.2f} s ({ta / max(tc, 1e-9):.1f}x), device_blocks {ra.device_blocks}/"
+        f"{rc.blocks}, max|E_auto - E_cpu| {out[m][4]:.1e}"
+    )
 worst = max(v[1] / max(v[0], 1e-9) for v in out.values())
 if worst > 2.0:
     s = "; ".join(f"{m} auto {v[1]:.2f}s vs cpu {v[0]:.2f}s" for m, v in out.items())

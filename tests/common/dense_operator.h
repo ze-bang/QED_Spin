@@ -44,8 +44,7 @@ public:
         struct State {
             ed::matvec::CudaBackend be;
             ed::matvec::Backend::UniqueVec A;
-            explicit State(const Eigen::MatrixXcd& M)
-                : A(be.make_zero_vector(static_cast<std::size_t>(M.size()))) {
+            explicit State(const Eigen::MatrixXcd& M) : A(be.make_zero_vector(static_cast<std::size_t>(M.size()))) {
                 be.copy_from_host(M.data(), A.get(), static_cast<std::size_t>(M.size()));   // column-major
             }
         };
@@ -82,8 +81,7 @@ public:
 
 private:
     void tick() const {
-        if (++applies_ >= throw_at_)
-            throw ed::ResourceLimit("ThrowingOperator: apply " + std::to_string(applies_));
+        if (++applies_ >= throw_at_) throw ed::ResourceLimit("ThrowingOperator: apply " + std::to_string(applies_));
     }
     std::shared_ptr<const ed::LinearOperator> inner_;
     std::uint64_t throw_at_;

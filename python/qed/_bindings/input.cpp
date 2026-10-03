@@ -51,15 +51,14 @@ using ed::input::Plaquette;
 }  // namespace
 
 void bind_input(py::module_& parent) {
-    py::module_ m = parent.def_submodule(
-        "input",
-        "Lattices and the Hamiltonian builder (the ed::input library).");
+    py::module_ m = parent.def_submodule("input", "Lattices and the Hamiltonian builder (the ed::input library).");
 
     // ---------------------------------------------------------------------
     // Op enum
     // ---------------------------------------------------------------------
-    py::enum_<Op>(m, "Op", "Spin operator code matching TransformData::op_type "
-                            "(Sp=0, Sm=1, Sz=2).")
+    py::enum_<Op>(m, "Op",
+                  "Spin operator code matching TransformData::op_type "
+                  "(Sp=0, Sm=1, Sz=2).")
         .value("Sp", Op::Sp)
         .value("Sm", Op::Sm)
         .value("Sz", Op::Sz)
@@ -68,17 +67,16 @@ void bind_input(py::module_& parent) {
     // ---------------------------------------------------------------------
     // Bond / Plaquette PODs
     // ---------------------------------------------------------------------
-    py::class_<Bond>(m, "Bond", "A bond from site i to site j (kept in that orientation), with an "
-                                "optional bond_type tag, e.g. a Kitaev colour.")
-        .def(py::init<std::size_t, std::size_t, int>(),
-             py::arg("i"), py::arg("j"), py::arg("bond_type") = 0)
+    py::class_<Bond>(m, "Bond",
+                     "A bond from site i to site j (kept in that orientation), with an "
+                     "optional bond_type tag, e.g. a Kitaev colour.")
+        .def(py::init<std::size_t, std::size_t, int>(), py::arg("i"), py::arg("j"), py::arg("bond_type") = 0)
         .def_readwrite("i", &Bond::i)
         .def_readwrite("j", &Bond::j)
         .def_readwrite("bond_type", &Bond::bond_type)
         .def("__repr__", [](const Bond& b) {
-            return "Bond(i=" + std::to_string(b.i) +
-                   ", j=" + std::to_string(b.j) +
-                   ", bond_type=" + std::to_string(b.bond_type) + ")";
+            return "Bond(i=" + std::to_string(b.i) + ", j=" + std::to_string(b.j)
+                   + ", bond_type=" + std::to_string(b.bond_type) + ")";
         });
 
     py::class_<Plaquette>(m, "Plaquette")
@@ -126,36 +124,25 @@ void bind_input(py::module_& parent) {
         .def("nnnn_pairs", &Lattice::nnnn_pairs)
         .def("all_sites", &Lattice::all_sites)
         .def("__repr__", [](const Lattice& L) {
-            return "<qed.input.Lattice " + L.label +
-                   " num_sites=" + std::to_string(L.num_sites) +
-                   " nn_bonds=" + std::to_string(L.nn_bonds.size()) + ">";
+            return "<qed.input.Lattice " + L.label + " num_sites=" + std::to_string(L.num_sites)
+                   + " nn_bonds=" + std::to_string(L.nn_bonds.size()) + ">";
         });
 
     // ---------------------------------------------------------------------
     // Lattice factory functions: mirror the C++ namespace ed::input::lattice
     // under qed.input.lattice.
     // ---------------------------------------------------------------------
-    py::module_ ml = m.def_submodule(
-        "lattice",
-        "Lattice generators (chain, square, triangular, honeycomb, kagome, "
-        "pyrochlore, custom-from-edges, cluster.txt).");
+    py::module_ ml = m.def_submodule("lattice", "Lattice generators (chain, square, triangular, honeycomb, kagome, "
+                                                "pyrochlore, custom-from-edges, cluster.txt).");
 
-    ml.def("chain", &ed::input::lattice::chain,
-           py::arg("length"), py::arg("pbc") = false);
-    ml.def("square", &ed::input::lattice::square,
-           py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
-    ml.def("triangular", &ed::input::lattice::triangular,
-           py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
-    ml.def("honeycomb", &ed::input::lattice::honeycomb,
-           py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
-    ml.def("kagome", &ed::input::lattice::kagome,
-           py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
-    ml.def("pyrochlore", &ed::input::lattice::pyrochlore,
-           py::arg("Lx"), py::arg("Ly"), py::arg("Lz"), py::arg("pbc") = false);
-    ml.def("from_neighbor_lists",
-           &ed::input::lattice::from_neighbor_lists,
-           py::arg("positions"), py::arg("nn_pairs"),
+    ml.def("chain", &ed::input::lattice::chain, py::arg("length"), py::arg("pbc") = false);
+    ml.def("square", &ed::input::lattice::square, py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
+    ml.def("triangular", &ed::input::lattice::triangular, py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
+    ml.def("honeycomb", &ed::input::lattice::honeycomb, py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
+    ml.def("kagome", &ed::input::lattice::kagome, py::arg("Lx"), py::arg("Ly"), py::arg("pbc") = false);
+    ml.def("pyrochlore", &ed::input::lattice::pyrochlore, py::arg("Lx"), py::arg("Ly"), py::arg("Lz"),
+           py::arg("pbc") = false);
+    ml.def("from_neighbor_lists", &ed::input::lattice::from_neighbor_lists, py::arg("positions"), py::arg("nn_pairs"),
            py::arg("sublattice") = std::vector<int>{});
-    ml.def("from_cluster_file", &ed::input::lattice::from_cluster_file,
-           py::arg("path"));
+    ml.def("from_cluster_file", &ed::input::lattice::from_cluster_file, py::arg("path"));
 }

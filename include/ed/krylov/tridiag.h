@@ -49,12 +49,12 @@ struct TridiagEig {
     for (std::size_t i = 0; i + 1 < m; ++i) off[i] = beta[i + 1];
     for (std::size_t i = 0; i < m; ++i)
         if (!std::isfinite(t.values[i]) || (i + 1 < m && !std::isfinite(off[i])))
-            throw ed::ConvergenceError("tridiagonal eigensolve: non-finite entry at step "
-                                       + std::to_string(i) + " of " + std::to_string(m));
+            throw ed::ConvergenceError("tridiagonal eigensolve: non-finite entry at step " + std::to_string(i) + " of "
+                                       + std::to_string(m));
     if (vectors) t.vectors.assign(m * m, 0.0);
     const lapack_int n = static_cast<lapack_int>(m);
-    const lapack_int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, vectors ? 'V' : 'N', n, t.values.data(),
-                                           off.data(), vectors ? t.vectors.data() : nullptr, vectors ? n : 1);
+    const lapack_int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, vectors ? 'V' : 'N', n, t.values.data(), off.data(),
+                                           vectors ? t.vectors.data() : nullptr, vectors ? n : 1);
     if (info != 0)
         throw ed::ConvergenceError("tridiagonal eigensolve failed (dstevd info " + std::to_string(info)
                                    + ", m = " + std::to_string(m) + ")");
@@ -65,10 +65,10 @@ struct TridiagEig {
 /// eigenvalue: what the convergence gates read (the Paige bound of Ritz value j is
 /// |beta_m z_{m-1}(j)|).
 struct TridiagEnds {
-    std::size_t         m = 0;
+    std::size_t m = 0;
     std::vector<double> values;    ///< the `count` lowest, ascending
     std::vector<double> vectors;   ///< column-major m x count: column j is the eigenvector of values[j]
-    double              top = 0.0; ///< the largest eigenvalue
+    double top = 0.0; ///< the largest eigenvalue
 
     /// Component `row` of the eigenvector of values[col].
     [[nodiscard]] double z(std::size_t row, std::size_t col) const { return vectors[col * m + row]; }
@@ -94,16 +94,16 @@ struct TridiagEnds {
     auto [d, e] = entries();
     for (std::size_t i = 0; i < m; ++i)
         if (!std::isfinite(d[i]) || (i + 1 < m && !std::isfinite(e[i])))
-            throw ed::ConvergenceError("tridiagonal eigensolve: non-finite entry at step "
-                                       + std::to_string(i) + " of " + std::to_string(m));
+            throw ed::ConvergenceError("tridiagonal eigensolve: non-finite entry at step " + std::to_string(i) + " of "
+                                       + std::to_string(m));
     const lapack_int n = static_cast<lapack_int>(m), want = static_cast<lapack_int>(count);
     const double abstol = 2.0 * std::numeric_limits<double>::min();   // bisection to full accuracy (dlamch(S))
     std::vector<double> w(m);
     std::vector<lapack_int> ifail(m);
     lapack_int found = 0;
     t.vectors.assign(m * count, 0.0);
-    lapack_int info = LAPACKE_dstevx(LAPACK_COL_MAJOR, 'V', 'I', n, d.data(), e.data(), 0.0, 0.0, 1, want,
-                                     abstol, &found, w.data(), t.vectors.data(), n, ifail.data());
+    lapack_int info = LAPACKE_dstevx(LAPACK_COL_MAJOR, 'V', 'I', n, d.data(), e.data(), 0.0, 0.0, 1, want, abstol,
+                                     &found, w.data(), t.vectors.data(), n, ifail.data());
     if (info != 0 || found != want)
         throw ed::ConvergenceError("tridiagonal eigensolve failed (dstevx info " + std::to_string(info)
                                    + ", m = " + std::to_string(m) + ")");
@@ -113,8 +113,8 @@ struct TridiagEnds {
         return t;
     }
     auto [d2, e2] = entries();   // dstevx may rescale its inputs
-    info = LAPACKE_dstevx(LAPACK_COL_MAJOR, 'N', 'I', n, d2.data(), e2.data(), 0.0, 0.0, n, n, abstol, &found,
-                          w.data(), nullptr, 1, ifail.data());
+    info = LAPACKE_dstevx(LAPACK_COL_MAJOR, 'N', 'I', n, d2.data(), e2.data(), 0.0, 0.0, n, n, abstol, &found, w.data(),
+                          nullptr, 1, ifail.data());
     if (info != 0 || found != 1)
         throw ed::ConvergenceError("tridiagonal eigensolve failed (dstevx info " + std::to_string(info)
                                    + ", m = " + std::to_string(m) + ")");

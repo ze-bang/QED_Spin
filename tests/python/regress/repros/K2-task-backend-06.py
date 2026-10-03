@@ -9,6 +9,7 @@ slower and its levels to be a subset of the Sz=0 spectrum.
 
 RESTATED 2026-10-02: single calls read ratios 2.3-3.3 around the 3x threshold on one build (srun on gate2
 ae29ebbc and gate3); each side is now the fastest of three calls."""
+
 import signal
 import time
 import numpy as np
@@ -19,11 +20,16 @@ signal.alarm(290)
 H = chain(18).operator()
 try:
     t_sz = t_s0 = float("inf")
-    for _ in range(3):   # the fastest of three calls each (RESTATED below)
-        t0 = time.perf_counter(); r_sz = qed.spectrum(H, sym=qed.Symmetry(sz=9)); t_sz = min(t_sz, time.perf_counter() - t0)
-        t0 = time.perf_counter(); r_s0 = qed.spectrum(H, sym=qed.Symmetry(total_spin=0)); t_s0 = min(t_s0, time.perf_counter() - t0)
+    for _ in range(3):  # the fastest of three calls each (RESTATED below)
+        t0 = time.perf_counter()
+        r_sz = qed.spectrum(H, sym=qed.Symmetry(sz=9))
+        t_sz = min(t_sz, time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        r_s0 = qed.spectrum(H, sym=qed.Symmetry(total_spin=0))
+        t_s0 = min(t_s0, time.perf_counter() - t0)
 except Exception as e:
-    print(f"REPRO: INCONCLUSIVE raised {type(e).__name__}: {str(e)[:200]}"); raise SystemExit(0)
+    print(f"REPRO: INCONCLUSIVE raised {type(e).__name__}: {str(e)[:200]}")
+    raise SystemExit(0)
 ez = np.sort(np.asarray(r_sz.energies, float))
 es = np.sort(np.asarray(r_s0.energies, float))
 sub = bool(np.all(np.min(np.abs(es[:, None] - ez[None, :]), axis=1) < 1e-7)) if es.size else False

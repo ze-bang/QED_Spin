@@ -51,7 +51,8 @@ Spec unfolded(const Spec& s) {
 // Whether a momentum sector passes the spec's momentum selection.
 bool selected(const Spec& u, const ed::symmetry::RepSectorData& rd) {
     return meets(u.only_momentum, [&](int i) -> std::optional<Complex> {
-        if (i >= 0 && static_cast<std::size_t>(i) < rd.characters.size()) return rd.characters[static_cast<std::size_t>(i)];
+        if (i >= 0 && static_cast<std::size_t>(i) < rd.characters.size())
+            return rd.characters[static_cast<std::size_t>(i)];
         return std::nullopt;
     });
 }
@@ -98,9 +99,9 @@ ed::ops::MaskedOperator connecting_part(const ed::ops::MaskedOperator& O, const 
 
 // O from sector `src` to sector `tgt` as rows of the target (CrossSectorMatVec's program), or
 // null when the projected program is empty: no term of O connects the two (exact reachability).
-std::shared_ptr<const ed::ops::MaskedProgram>
-cross_program(const ed::ops::MaskedOperator& O, const ed::symmetry::RepSectorData& src,
-              const ed::symmetry::RepSectorData& tgt) {
+std::shared_ptr<const ed::ops::MaskedProgram> cross_program(const ed::ops::MaskedOperator& O,
+                                                            const ed::symmetry::RepSectorData& src,
+                                                            const ed::symmetry::RepSectorData& tgt) {
     auto P = std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({O.dagger()}, tgt, src));
     return P->n_terms() == 0 ? nullptr : P;
 }
@@ -126,20 +127,20 @@ std::vector<Subspace> targets_of(const Subspace& src, const std::set<int>& shift
 // Every non-empty momentum sector of one subspace, with its H matvec.
 struct Target {
     std::shared_ptr<const ed::symmetry::RepSectorData> rd;
-    std::shared_ptr<RepSectorMatVec>                   H;
+    std::shared_ptr<RepSectorMatVec> H;
 };
 
 std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std::vector<Perm>& A,
                                      const Subspace& sub) {
     std::vector<Target> out;
-    ed::solvers::little_group_k_sectors_stream(
-        H, A, n_sites, sub.n_up, sub.sz_parity, [&](ed::symmetry::RepSectorData& rd) {
-            if (rd.reps.empty()) return;
-            Target t;
-            t.rd = ed::solvers::share_rep_sector(std::move(rd));
-            t.H  = std::make_shared<RepSectorMatVec>(H, t.rd);
-            out.push_back(std::move(t));
-        });
+    ed::solvers::little_group_k_sectors_stream(H, A, n_sites, sub.n_up, sub.sz_parity,
+                                               [&](ed::symmetry::RepSectorData& rd) {
+                                                   if (rd.reps.empty()) return;
+                                                   Target t;
+                                                   t.rd = ed::solvers::share_rep_sector(std::move(rd));
+                                                   t.H = std::make_shared<RepSectorMatVec>(H, t.rd);
+                                                   out.push_back(std::move(t));
+                                               });
     return out;
 }
 
@@ -148,11 +149,15 @@ std::vector<Target> momentum_sectors(const ::Operator& H, int n_sites, const std
 // k = 1 solve with a `tol` window finds the blocks at E0 (a block whose Lanczos estimate is
 // far above E0 is never solved); only those are then solved with vectors, deeper until a
 // level above the window shows up, which catches degeneracies inside a block.
-std::vector<std::pair<Level, BlockVector>>
-ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Device device,
-                int dense_max_dim, bool prune, double& e0, Placement& placement) {
+std::vector<std::pair<Level, BlockVector>> ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol,
+                                                           Device device, int dense_max_dim, bool prune, double& e0,
+                                                           Placement& placement) {
     EigsOptions eo;
-    eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim; eo.prune = prune;
+    eo.k = 1;
+    eo.window = tol;
+    eo.device = device;
+    eo.dense_max_dim = dense_max_dim;
+    eo.prune = prune;
     const EigsResult first = eigs(H, u, eo);
     placement += first.placement;
     eo.vectors = true;
@@ -172,8 +177,8 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
         for (int pb = 2;; pb *= 2) {
             EigsOptions deep = eo;
             deep.per_block = pb;
-            deep.cut       = false;
-            deep.window    = 0.0;
+            deep.cut = false;
+            deep.window = 0.0;
             const EigsResult r = eigs(H, one, deep);
             placement += r.placement;
             const bool exhausted = static_cast<int>(r.levels.size()) < pb;
@@ -193,11 +198,15 @@ ground_manifold(const ::Operator& H, int n_sites, const Spec& u, double tol, Dev
 // solve finds the blocks at E0 and each is then solved alone, deeper until a level above the window
 // shows up. A block selection drops a Theta fold, so a level's fold, mirror and multiplicity come
 // from the first solve.
-std::vector<detail::Member>
-folded_ground_manifold(const ::Operator& H, int n_sites, const Spec& s, const std::vector<Perm>& A, double tol,
-                       Device device, int dense_max_dim, bool prune, double& e0, Placement& placement) {
+std::vector<detail::Member> folded_ground_manifold(const ::Operator& H, int n_sites, const Spec& s,
+                                                   const std::vector<Perm>& A, double tol, Device device,
+                                                   int dense_max_dim, bool prune, double& e0, Placement& placement) {
     EigsOptions eo;
-    eo.k = 1; eo.window = tol; eo.device = device; eo.dense_max_dim = dense_max_dim; eo.prune = prune;
+    eo.k = 1;
+    eo.window = tol;
+    eo.device = device;
+    eo.dense_max_dim = dense_max_dim;
+    eo.prune = prune;
     const EigsResult first = eigs(H, s, eo);
     placement += first.placement;
     eo.vectors = true;
@@ -220,8 +229,8 @@ folded_ground_manifold(const ::Operator& H, int n_sites, const Spec& s, const st
         for (int pb = 2;; pb *= 2) {
             EigsOptions deep = eo;
             deep.per_block = pb;
-            deep.cut       = false;
-            deep.window    = 0.0;
+            deep.cut = false;
+            deep.window = 0.0;
             const EigsResult r = eigs(H, one, deep);
             placement += r.placement;
             const bool exhausted = static_cast<int>(r.levels.size()) < pb;
@@ -243,7 +252,7 @@ folded_ground_manifold(const ::Operator& H, int n_sites, const Spec& s, const st
 ed::BlockRequest dynamics_request(ed::Task task, std::uint64_t dim) {
     ed::BlockRequest r;
     r.task = task;
-    r.dim  = dim;
+    r.dim = dim;
     r.device_kernel = true;
     r.verb = "dynamics";
     return r;
@@ -273,7 +282,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     detail::validate_spec(s, n_sites, "dynamics");
     // the sublattice rule for the tables this call builds (sublattice_code.h): relaxed on the device,
     // strict on the host (continued fractions and samples: many host applies)
-    const ed::symmetry::SublatticeRuleScope slc_rule(d.device == Device::Gpu || (d.device == Device::Auto && ed::have_cuda()));
+    const ed::symmetry::SublatticeRuleScope slc_rule(d.device == Device::Gpu
+                                                     || (d.device == Device::Auto && ed::have_cuda()));
     if (probes.empty()) throw ed::InvalidRequest("dynamics: no probe");
     for (std::size_t p = 0; p < probes.size(); ++p) {
         detail::validate_observable(probes[p].A, n_sites, "dynamics", p);
@@ -282,8 +292,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     detail::validate_dynamics_spec(d);
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
-    if (distinct.size() != d.temperatures.size())
-        throw ed::InvalidRequest("dynamics: a temperature is listed twice");
+    if (distinct.size() != d.temperatures.size()) throw ed::InvalidRequest("dynamics: a temperature is listed twice");
     detail::require_device(d.device, "dynamics");
     ed::parallel::pin_omp_threads_once();
     // 'require' asserts a symmetry of H. Dynamics folds by neither, but still checks it.
@@ -357,14 +366,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     };
     // One sector at a time, for the paths that need no cache: the momentum sectors of `sub` are
     // built one by one and handed to `visit`, which keeps what it wants.
-    auto stream_sectors = [&](const Subspace& sub,
-                              const std::function<void(const std::shared_ptr<const ed::symmetry::RepSectorData>&)>& visit) {
-        ed::solvers::little_group_k_sectors_stream(
-            H, A, n_sites, sub.n_up, sub.sz_parity, [&](ed::symmetry::RepSectorData& rd) {
-                if (rd.reps.empty()) return;
-                visit(ed::solvers::share_rep_sector(std::move(rd)));
-            });
-    };
+    auto stream_sectors =
+        [&](const Subspace& sub,
+            const std::function<void(const std::shared_ptr<const ed::symmetry::RepSectorData>&)>& visit) {
+            ed::solvers::little_group_k_sectors_stream(H, A, n_sites, sub.n_up, sub.sz_parity,
+                                                       [&](ed::symmetry::RepSectorData& rd) {
+                                                           if (rd.reps.empty()) return;
+                                                           visit(ed::solvers::share_rep_sector(std::move(rd)));
+                                                       });
+        };
 
     if (d.temperatures.empty()) {
         // ---- T = 0: the ground manifold, then one continued fraction per target -------
@@ -376,12 +386,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         // a momentum sector always has one.
         std::vector<std::pair<BlockVector, int>> ground;   // (vector, Sz parity of its subspace)
         if (s.only_momentum.empty() && d.device != Device::Gpu) {
-            for (auto& m : folded_ground_manifold(H, n_sites, s, A, window, d.device, d.dense_max_dim, d.prune,
-                                                  out.e0, out.placement))
+            for (auto& m : folded_ground_manifold(H, n_sites, s, A, window, d.device, d.dense_max_dim, d.prune, out.e0,
+                                                  out.placement))
                 ground.push_back({std::move(m.v), m.sub.sz_parity});
         } else {
-            for (auto& [L, v] : ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0,
-                                                out.placement))
+            for (auto& [L, v] :
+                 ground_manifold(H, n_sites, u, window, d.device, d.dense_max_dim, d.prune, out.e0, out.placement))
                 ground.push_back({std::move(v), L.tag.sz_parity});
         }
         // With whole multiplets the solve returns the Sz = S member of each; the other members
@@ -393,14 +403,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             for (int m = 0; whole && m < s.two_S; ++m) {
                 const BlockVector& x = states.back().first;
                 std::shared_ptr<const ed::symmetry::RepSectorData> below;
-                stream_sectors({x.basis->n_up - 1, -1, 1}, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
-                    if (!below && same_momentum(*x.basis, *rd)) below = rd;
-                });
-                if (!below)
-                    throw std::runtime_error("dynamics: no momentum sector one Sz lower holds the multiplet");
+                stream_sectors({x.basis->n_up - 1, -1, 1},
+                               [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
+                                   if (!below && same_momentum(*x.basis, *rd)) below = rd;
+                               });
+                if (!below) throw std::runtime_error("dynamics: no momentum sector one Sz lower holds the multiplet");
                 BlockVector y{below, std::vector<Complex>(below->reps.size(), Complex(0, 0))};
                 if (const auto P = cross_program(s_minus, *x.basis, *below))
-                    CrossSectorMatVec(P, x.basis, below).apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
+                    CrossSectorMatVec(P, x.basis, below)
+                        .apply(x.amplitudes.data(), y.amplitudes.data(), y.amplitudes.size());
                 double n2 = 0.0;
                 for (const auto& c : y.amplitudes) n2 += std::norm(c);
                 if (n2 < 1e-20) throw std::runtime_error("dynamics: S- annihilated a tower state above Sz = -S");
@@ -416,7 +427,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         ed::observables::CfSpectralOptions cf;
         cf.krylov_dim = std::max<std::size_t>(d.krylov, 2);
         cf.broadening = d.eta;
-        cf.tolerance  = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
+        cf.tolerance = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         cf.energy_shift = out.e0;
         // The target subspaces, each with the (state, probe) pairs it receives. A target subspace
         // is streamed one momentum sector at a time: a sector is built once, used by every pair
@@ -430,7 +441,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     reaching[{tsub.n_up, tsub.sz_parity}].push_back({si, p});
         }
         std::size_t reached = 0;
-        for (const auto& entry : reaching) {   // named references: OpenMP regions below cannot capture structured bindings
+        for (const auto& entry :
+             reaching) {   // named references: OpenMP regions below cannot capture structured bindings
             const auto& key = entry.first;
             const auto& who = entry.second;
             const Subspace tsub{key.first, key.second, 1};
@@ -447,7 +459,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             LittleGroupOptions topt;
             topt.n_up = tsub.n_up;
             topt.sz_parity = tsub.n_up >= 0 ? -1 : tsub.sz_parity;
-            topt.spin_flip = s.spin_flip == 0 ? 0 : -1;   // where it applies: 'require' was checked for the call
+            topt.spin_flip = s.spin_flip == 0 ? 0 : -1; // where it applies: 'require' was checked for the call
             topt.time_reversal = 0;
             EngineContext tcx;
             if (!s.residues.empty() || s.spin_flip != 0) {
@@ -455,13 +467,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                 make_engine_context(H, A, s.residues, n_sites, topt, tcx, tr_on);
             }
             stream_sectors(tsub, [&](const std::shared_ptr<const ed::symmetry::RepSectorData>& rd) {
-                std::shared_ptr<RepSectorMatVec> Ht;       // H of this sector, once a probe reaches it
+                std::shared_ptr<RepSectorMatVec> Ht; // H of this sector, once a probe reaches it
                 bool counted = false;
                 // The blocks of this momentum (built at the first pair that reaches it); `rest`: an irrep of
                 // dimension > 1, or no fold at all, leaves part of the sector to Ht.
                 struct TBlock {
                     std::shared_ptr<const ed::symmetry::RepSectorData> sec;
-                    std::shared_ptr<RepSectorMatVec>                   H;
+                    std::shared_ptr<RepSectorMatVec> H;
                 };
                 std::vector<TBlock> blocks;
                 std::vector<std::shared_ptr<StarBuild>> stars;
@@ -482,15 +494,17 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     bool fixed = tcx.flip_half;
                     for (std::size_t r = 0; r < tcx.residues.size() && !fixed; ++r)
                         fixed = tcx.irrep_map[r][static_cast<std::size_t>(k)] == k;
-                    if (!fixed) return;                  // a trivial little co-group: the sector is its one block
+                    if (!fixed) return; // a trivial little co-group: the sector is its one block
                     rest = false;
                     for (int par = 0; par < (tcx.flip_half ? 2 : 1); ++par) {
                         const int kext = k + par * tcx.n_irr_raw;
                         auto sb = std::make_shared<StarBuild>(build_star_blocks(H, tcx, false, kext, {kext}, topt));
                         for (const auto& bi : sb->blocks) {
                             auto sec = bi->gsec ? bi->gsec : sb->hk->rep_data_ptr();
-                            if (sec->irrep_dim == 1) blocks.push_back({std::move(sec), bi->gop ? bi->gop : sb->hk});
-                            else rest = true;
+                            if (sec->irrep_dim == 1)
+                                blocks.push_back({std::move(sec), bi->gop ? bi->gop : sb->hk});
+                            else
+                                rest = true;
                         }
                         stars.push_back(std::move(sb));
                     }
@@ -506,7 +520,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                             const auto r = ed::observables::cf_spectral_from_vector(bk, apply, nb, yb, d.omega, cf);
                             for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r.spectral_function[i];
                         } else {
-                            const auto r = ed::observables::cross_spectral_from_vectors(bk, apply, nb, yb, ya, d.omega, cf);
+                            const auto r =
+                                ed::observables::cross_spectral_from_vectors(bk, apply, nb, yb, ya, d.omega, cf);
                             for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r[i];
                         }
                     };
@@ -544,7 +559,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     std::vector<Complex> phi_b, phi_a;
                     if (!carry(Bt[w], phi_b)) continue;
                     if (pr[p].cross && !carry(At[w], phi_a)) continue;
-                    if (!counted) { counted = true; ++reached; }
+                    if (!counted) {
+                        counted = true;
+                        ++reached;
+                    }
                     if (!built) build_blocks();
                     const Complex* pa = pr[p].cross ? phi_a.data() : nullptr;
                     double n2b = 0.0;
@@ -557,9 +575,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                         phase["project on blocks"] += clock_since(t_pj);
                         double nb2 = 0.0, na2 = 1.0;
                         for (const auto& c : yb) nb2 += std::norm(c);
-                        if (pa) { na2 = 0.0; for (const auto& c : ya) na2 += std::norm(c); }
+                        if (pa) {
+                            na2 = 0.0;
+                            for (const auto& c : ya) na2 += std::norm(c);
+                        }
                         kept += nb2;
-                        if (rest) {                      // the part outside the one-dimensional blocks
+                        if (rest) { // the part outside the one-dimensional blocks
                             const auto lb = lift_group_vector(*b.sec, *rd, yb.data());
                             for (std::size_t i = 0; i < n; ++i) phi_b[i] -= lb[i];
                             if (pa) {
@@ -586,7 +607,6 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     continued_fraction(*Ht, n, phi_b.data(), pa, p);
                 }
             });
-
         }
         for (std::size_t p = 0; p < P; ++p) {
             for (auto& x : S[p]) x /= static_cast<double>(states.size());
@@ -606,7 +626,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     // What a source sector counts for in one probe's sums: the weight of its Z and of its S (zero:
     // the probe does not use it -- its symmetries count the source through another one).
     struct Use {
-        double  z = 0.0;
+        double z = 0.0;
         Complex s = Complex(0, 0);
     };
     // One source sector's sums: S per probe and temperature, Z per temperature.
@@ -614,7 +634,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         std::vector<std::map<double, std::vector<Complex>>> S;
         std::map<double, double> Z;
         double emin = 0.0;
-        std::vector<Use> use;    // per probe
+        std::vector<Use> use; // per probe
     };
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
@@ -623,9 +643,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     // multiplet at every such Sz, so its tower dimension is its dimension at Sz = S less that of
     // the same momentum at Sz = S + 1 (one more up spin).
     struct Job {
-        std::uint64_t key = 0;                  // the source's identity (Sz, parity, momentum): seeds its samples
-        const Target* src = nullptr; Subspace sub;
-        std::vector<Use> use;                   // per probe
+        std::uint64_t key = 0; // the source's identity (Sz, parity, momentum): seeds its samples
+        const Target* src = nullptr;
+        Subspace sub;
+        std::vector<Use> use; // per probe
         // Each target sector a probe reaches: A and B as rows of it (the same program for an
         // autocorrelation).
         struct Reach {
@@ -698,9 +719,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     // orbit under the residues it follows with factor 1, counted once per member. A momentum
     // selection need not be a union of orbits: it folds none.
     const bool pg_ok = s.two_S < 0 && !s.residues.empty() && u.only_momentum.empty();
-    std::vector<std::optional<Complex>> mirror(P);           // per probe: the flip mirror's factor
-    std::vector<std::vector<int>> korbit(P);                  // per probe: the orbit root of each momentum
-    std::vector<std::vector<std::uint64_t>> ksize(P);         // per probe: the size of each root's orbit
+    std::vector<std::optional<Complex>> mirror(P); // per probe: the flip mirror's factor
+    std::vector<std::vector<int>> korbit(P); // per probe: the orbit root of each momentum
+    std::vector<std::vector<std::uint64_t>> ksize(P); // per probe: the size of each root's orbit
     for (std::size_t p = 0; p < P; ++p) {
         if (flip_ok) mirror[p] = factor(p, [](const MaskedOperator& X) { return X.image(MaskedOperator::Map::F); });
         if (!pg_ok) continue;
@@ -722,7 +743,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             }
         }
         ksize[p].assign(static_cast<std::size_t>(pcx.n_irr_raw), 0);
-        for (int k = 0; k < pcx.n_irr_raw; ++k) ++ksize[p][static_cast<std::size_t>(ko[static_cast<std::size_t>(k)] = root(k))];
+        for (int k = 0; k < pcx.n_irr_raw; ++k)
+            ++ksize[p][static_cast<std::size_t>(ko[static_cast<std::size_t>(k)] = root(k))];
     }
     // What source (sub, momentum k) counts for in each probe's sums.
     auto uses = [&](const Subspace& sub, int k) {
@@ -730,12 +752,14 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         for (std::size_t p = 0; p < P; ++p) {
             double w = 1.0;
             if (!korbit[p].empty()) {
-                if (korbit[p][static_cast<std::size_t>(k)] != k) continue;   // another momentum of its orbit
+                if (korbit[p][static_cast<std::size_t>(k)] != k) continue; // another momentum of its orbit
                 w = static_cast<double>(ksize[p][static_cast<std::size_t>(k)]);
             }
-            if (mirror[p] && 2 * sub.n_up > n_sites) continue;               // its flip mirror stands for it
-            if (mirror[p] && 2 * sub.n_up < n_sites) out[p] = {2.0 * w, (Complex(1, 0) + *mirror[p]) * w};
-            else                                     out[p] = {w, Complex(w, 0)};
+            if (mirror[p] && 2 * sub.n_up > n_sites) continue; // its flip mirror stands for it
+            if (mirror[p] && 2 * sub.n_up < n_sites)
+                out[p] = {2.0 * w, (Complex(1, 0) + *mirror[p]) * w};
+            else
+                out[p] = {w, Complex(w, 0)};
         }
         return out;
     };
@@ -766,24 +790,24 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     // still weighs in the partition function: `kernel(nullptr)` runs it against a zero operator.
     auto options = [&](const Job& j) {
         ed::observables::FtlmCrossIrrepOptions fo;
-        fo.krylov_dim  = d.krylov;
+        fo.krylov_dim = d.krylov;
         fo.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         fo.num_samples = d.samples;
-        fo.broadening  = d.eta;
+        fo.broadening = d.eta;
         fo.random_seed = ed::thermal::block_seed(seed0, j.key);
         if (const auto p = j.tower) {
             fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };
-            fo.trace_dim      = j.tower_dim;
-            fo.min_weight     = ed::numerics::kRoundoffWeight;
+            fo.trace_dim = j.tower_dim;
+            fo.min_weight = ed::numerics::kRoundoffWeight;
         }
         return fo;
     };
     // The working set of one sample from a job's source to its largest target (core/footprint.h).
     auto job_shape = [&](const Job& j) {
         ed::core::Shape sh;
-        sh.dim    = j.src->rd->reps.size();
+        sh.dim = j.src->rd->reps.size();
         sh.krylov = d.krylov;
-        sh.dim_target = sh.dim;                 // the zero-O run when nothing is reached
+        sh.dim_target = sh.dim; // the zero-O run when nothing is reached
         for (const auto& x : j.reaches) sh.dim_target = std::max<std::uint64_t>(sh.dim_target, x.t->rd->reps.size());
         return sh;
     };
@@ -838,7 +862,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         j.src->H->enable_device(true);
         const auto H_src = j.src->H->bind_cuda();
         std::vector<ed::observables::FtlmDynamicsTarget> tg;
-        std::size_t dim_dst = dim_src;                 // the zero-target run when nothing is reached
+        std::size_t dim_dst = dim_src; // the zero-target run when nothing is reached
         for (const auto& x : j.reaches) {
             x.t->H->enable_device(true);
             ed::observables::FtlmDynamicsTarget t;
@@ -859,15 +883,19 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             const auto free = ed::core::available_device_bytes(/*fresh=*/true);
             if (!free) width = 1;
             ed::core::Shape sh;
-            sh.dim = dim_src; sh.dim_target = dim_dst; sh.krylov = d.krylov; sh.device = true;
+            sh.dim = dim_src;
+            sh.dim_target = dim_dst;
+            sh.krylov = d.krylov;
+            sh.device = true;
             for (; free && width > 1; --width) {
                 sh.width = width;
                 if (static_cast<double>(ed::core::footprint(ed::core::Path::DynamicsFtlm, sh).device)
-                    <= 0.9 * static_cast<double>(*free)) break;
+                    <= 0.9 * static_cast<double>(*free))
+                    break;
             }
         }
         if (width >= 2) {
-            fo.batch_src   = std::move(ms);
+            fo.batch_src = std::move(ms);
             fo.batch_width = width;
         } else {
             for (auto& t : tg) t.batch = nullptr;
@@ -879,7 +907,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     };
 
     std::vector<Source> sources;
-    std::set<std::pair<Key, std::size_t>> reached;   // (target subspace, sector index)
+    std::set<std::pair<Key, std::size_t>> reached; // (target subspace, sector index)
     std::uint64_t multiplets = 0;
     std::size_t n_jobs = 0;
     for (std::size_t si = 0; si < source_subs.size(); ++si) {
@@ -894,17 +922,21 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             j.src = &src;
             j.sub = sub;
             j.key = (static_cast<std::uint64_t>(sub.n_up + 1) * 3 + static_cast<std::uint64_t>(sub.sz_parity + 1))
-                        * static_cast<std::uint64_t>(pcx.n_irr_raw) + static_cast<std::uint64_t>(k);
+                        * static_cast<std::uint64_t>(pcx.n_irr_raw)
+                    + static_cast<std::uint64_t>(k);
             if (s.two_S >= 0) {
                 j.tower_dim = tower_dim_of(src);
                 if (j.tower_dim == 0) continue;
-                if (si == 0) multiplets += j.tower_dim;   // one member of each multiplet per Sz sector
+                if (si == 0) multiplets += j.tower_dim; // one member of each multiplet per Sz sector
                 // S^2 as S- S+ + Sz(Sz + 1) through the sector one up spin higher, or the S^2 carrier on a
                 // sector with the spin flip.
                 std::shared_ptr<const ed::LinearOperator> s2;
-                if (!src.rd->has_flips())                 s2 = std::make_shared<LadderS2>(src.rd);
-                else if (FlipLadderS2::fits(*src.rd))     s2 = std::make_shared<FlipLadderS2>(src.rd);
-                else                                      s2 = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
+                if (!src.rd->has_flips())
+                    s2 = std::make_shared<LadderS2>(src.rd);
+                else if (FlipLadderS2::fits(*src.rd))
+                    s2 = std::make_shared<FlipLadderS2>(src.rd);
+                else
+                    s2 = std::make_shared<RepSectorMatVec>(*s2c, src.rd);
                 j.tower = std::make_shared<ed::symmetry::LowdinS2Projector>(
                     s2, s.two_S, ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up));
             }
@@ -930,7 +962,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         }
 
         if (si == 0 && s.two_S >= 0 && u.only_momentum.empty()
-            && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S))   // all in the first sector: known now
+            && multiplets != ed::symmetry::multiplet_count(n_sites, s.two_S)) // all in the first sector: known now
             throw std::runtime_error("dynamics: the momentum sectors hold " + std::to_string(multiplets) + " spin-"
                                      + std::to_string(s.two_S) + "/2 multiplets, expected "
                                      + std::to_string(ed::symmetry::multiplet_count(n_sites, s.two_S)));
@@ -946,7 +978,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         }
         std::vector<Source> local(jobs.size());
         auto t_k = std::chrono::steady_clock::now();
-        for (std::size_t i : device_jobs) { local[i] = run_device(jobs[i]); ++out.device_blocks; }
+        for (std::size_t i : device_jobs) {
+            local[i] = run_device(jobs[i]);
+            ++out.device_blocks;
+        }
         phase["ftlm kernel (device)"] += clock_since(t_k);
 
         // On the host, small sectors run concurrently, one thread each: at a few thousand states
@@ -958,13 +993,13 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             (jobs[i].src->rd->reps.size() < ed::kHostPoolMaxDim ? small : large).push_back(i);
         std::uint64_t per_small = 1;
         for (std::size_t i : small)
-            per_small = std::max<std::uint64_t>(per_small,
-                ed::core::footprint(ed::core::Path::DynamicsFtlm, job_shape(jobs[i])).host);
+            per_small = std::max<std::uint64_t>(
+                per_small, ed::core::footprint(ed::core::Path::DynamicsFtlm, job_shape(jobs[i])).host);
         t_k = std::chrono::steady_clock::now();
-        for (std::size_t i : small) {        // warm the lazily built operators before going parallel
+        for (std::size_t i : small) { // warm the lazily built operators before going parallel
             std::vector<Complex> x(jobs[i].src->rd->reps.size(), Complex(0, 0)), y(x.size());
             jobs[i].src->H->apply(x.data(), y.data(), x.size());
-            if (jobs[i].tower) {             // S^2 on the source (its CSRs)
+            if (jobs[i].tower) { // S^2 on the source (its CSRs)
                 std::vector<Complex> z(x.size(), Complex(1, 0));
                 jobs[i].tower->project(z.data(), z.size());
             }
@@ -982,10 +1017,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             const std::uint64_t avail = ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
             if (avail > 0)
                 // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores): read by the num_threads clause below
-                team = static_cast<int>(std::max<std::uint64_t>(1, std::min<std::uint64_t>(
-                    static_cast<std::uint64_t>(team), static_cast<std::uint64_t>(0.9 * static_cast<double>(avail)) / per_small)));
-            // Full team for the loop over sectors; BLAS single-threaded inside it (the kernel's
-            // own OpenMP loops run serially there, nested parallelism being inactive).
+                team = static_cast<int>(std::max<std::uint64_t>(
+                    1,
+                    std::min<std::uint64_t>(static_cast<std::uint64_t>(team),
+                                            static_cast<std::uint64_t>(0.9 * static_cast<double>(avail)) / per_small)));
+                // Full team for the loop over sectors; BLAS single-threaded inside it (the kernel's
+                // own OpenMP loops run serially there, nested parallelism being inactive).
 #ifdef _OPENMP
             ed::parallel::ThreadBudgetScope blas_serial(omp_get_max_threads(), 1);
 #endif
@@ -1009,10 +1046,12 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         phase["ftlm kernel"] += clock_since(t_k);
         for (auto& x : local) sources.push_back(std::move(x));
         jobs.clear();
-        for (auto it = cache.begin(); it != cache.end();) {   // sectors no later source needs
+        for (auto it = cache.begin(); it != cache.end();) { // sectors no later source needs
             const auto lu = last_use.find(it->first);
-            if (lu == last_use.end() || lu->second <= si) it = cache.erase(it);
-            else ++it;
+            if (lu == last_use.end() || lu->second <= si)
+                it = cache.erase(it);
+            else
+                ++it;
         }
     }
     if (!u.only_momentum.empty() && n_jobs == 0)
@@ -1025,7 +1064,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         const double T = d.temperatures[it], beta = 1.0 / T;
         double ref = std::numeric_limits<double>::infinity();
         for (const auto& s2 : sources) ref = std::min(ref, s2.emin);
-        std::vector<double> Z(P, 0.0);   // per probe: over the sources it uses
+        std::vector<double> Z(P, 0.0); // per probe: over the sources it uses
         for (const auto& s2 : sources) {
             const double w = std::exp(-beta * (s2.emin - ref));
             for (std::size_t p = 0; p < P; ++p) {
@@ -1040,4 +1079,4 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     return out;
 }
 
-}  // namespace ed::sectors
+} // namespace ed::sectors

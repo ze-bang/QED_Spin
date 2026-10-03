@@ -36,8 +36,7 @@ struct Matching {
 
     [[nodiscard]] std::uint64_t swapped(std::uint64_t s) const noexcept {
         std::uint64_t r = 0;
-        for (int b = 0; b < bytes; ++b)
-            r |= swap_lut[static_cast<std::size_t>(b) * 256 + ((s >> (8 * b)) & 0xFFu)];
+        for (int b = 0; b < bytes; ++b) r |= swap_lut[static_cast<std::size_t>(b) * 256 + ((s >> (8 * b)) & 0xFFu)];
         return r;
     }
     [[nodiscard]] double amplitude(std::uint64_t s) const noexcept {
@@ -65,7 +64,8 @@ Matching random_matching(int N, int two_S, std::mt19937_64& gen) {
         for (int v = 0; v < 256; ++v) {
             std::uint64_t r = 0;
             for (int i = 0; i < 8 && 8 * b + i < N; ++i)
-                if ((v >> i) & 1) r |= std::uint64_t{1} << partner[8 * static_cast<std::size_t>(b) + static_cast<std::size_t>(i)];
+                if ((v >> i) & 1)
+                    r |= std::uint64_t{1} << partner[8 * static_cast<std::size_t>(b) + static_cast<std::size_t>(i)];
             m.swap_lut[static_cast<std::size_t>(b) * 256 + static_cast<std::size_t>(v)] = r;
         }
     std::normal_distribution<double> nd(0.0, 1.0);
@@ -216,7 +216,7 @@ std::vector<Complex> valence_bond_start(const ed::symmetry::RepSectorData& rd, i
     std::vector<Complex> u(rd.states());
     double raw = 0.0;   // the weight before the projection: what a vanishing projection is measured against
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(dynamic, 256) reduction(+ : raw)
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : raw)
 #endif
     for (long long ii = 0; ii < static_cast<long long>(n_reps); ++ii) {
         const std::size_t i = static_cast<std::size_t>(ii);
@@ -226,7 +226,8 @@ std::vector<Complex> valence_bond_start(const ed::symmetry::RepSectorData& rd, i
             const double a = phi(pol.apply_perm(rd.reps[i], g));
             if (a == 0.0) continue;
             raw += a * a;
-            if (d == 1) z[0] += rd.characters[static_cast<std::size_t>(g)] * a;
+            if (d == 1)
+                z[0] += rd.characters[static_cast<std::size_t>(g)] * a;
             else
                 for (int j = 0; j < d; ++j)
                     z[j] += rd.irrep_D[static_cast<std::size_t>(g) * dd + static_cast<std::size_t>(j)] * a;
@@ -316,7 +317,10 @@ TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std:
         for (Eigen::Index e = static_cast<Eigen::Index>(c) - 1; e >= 0; --e) {
             const double g = es.eigenvalues()(e);
             // scale-free: eigenvalues of a projector's Gram matrix in unit vectors (0 or 1 when exact)
-            if (g < 0.1) { ++out.off; continue; }
+            if (g < 0.1) {
+                ++out.off;
+                continue;
+            }
             if (g < 0.9) out.ambiguous = true;   // mixed at O(1): neither certifiably in nor out
             std::vector<Complex> v(n, Complex(0, 0));
             for (std::size_t i = 0; i < c; ++i) {
@@ -397,8 +401,7 @@ public:
             explicit Scratch(std::size_t n) : a(be.make_zero_vector(n)), b(be.make_zero_vector(n)) {}
         };
         auto st = std::make_shared<Scratch>(dim());
-        return [this, st, hd = h_->bind_cuda(), sd = s2_->bind_cuda()](const Complex* in, Complex* out,
-                                                                       std::size_t n) {
+        return [this, st, hd = h_->bind_cuda(), sd = s2_->bind_cuda()](const Complex* in, Complex* out, std::size_t n) {
             hd(in, out, n);
             sd(in, st->a.get(), n);
             st->be.axpy(Complex(-lam_), in, st->a.get(), n);
@@ -434,8 +437,10 @@ Eigen::MatrixXcd tower_basis(const Tower& t) {
     const double lam = t.lambda();
     DenseEigenpairs d = dense_eigenpairs_in_range(S2, lam - 0.5 * gap, lam + 0.5 * gap);
     if (t.dim >= 0 && d.vectors.cols() != static_cast<Eigen::Index>(t.dim))
-        throw std::runtime_error("tower_basis: S^2 has " + std::to_string(d.vectors.cols()) + " states at S(S+1), the "
-                                 "block's dimensions say " + std::to_string(t.dim));
+        throw std::runtime_error("tower_basis: S^2 has " + std::to_string(d.vectors.cols())
+                                 + " states at S(S+1), the "
+                                   "block's dimensions say "
+                                 + std::to_string(t.dim));
     return std::move(d.vectors);
 }
 
@@ -470,12 +475,13 @@ FlipLadderS2::FlipLadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> se
     for (int g = 0; g < sec_->group_size; ++g) {
         if (sec_->flip_masks[static_cast<std::size_t>(g)] != 0) continue;
         perms.emplace_back(sec_->perms_flat.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(g) * Nz),
-                           sec_->perms_flat.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(g) + 1) * Nz));
+                           sec_->perms_flat.begin()
+                               + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(g) + 1) * Nz));
         chi.push_back(sec_->characters[static_cast<std::size_t>(g)]);
     }
     const auto tab = group_orbit_table(perms, N, sec_->n_up, -1, false);
-    auto plain = std::make_shared<ed::symmetry::RepSectorData>(
-        group_sector_from_table(*tab, perms, N, sec_->n_up, false, chi));
+    auto plain =
+        std::make_shared<ed::symmetry::RepSectorData>(group_sector_from_table(*tab, perms, N, sec_->n_up, false, chi));
     plain->build_perm_lut();
     plain->build_buckets();
     plain_ = plain;
@@ -488,7 +494,7 @@ FlipLadderS2::FlipLadderS2(std::shared_ptr<const ed::symmetry::RepSectorData> se
     from_.assign(m, -1);
     coef_.assign(m, Complex(0, 0));
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
     for (long long jj = 0; jj < static_cast<long long>(m); ++jj) {
         const auto j = static_cast<std::size_t>(jj);
@@ -515,7 +521,7 @@ void FlipLadderS2::apply(const Complex* in, Complex* out, std::size_t n) const {
     const std::size_t m = plain_->reps.size();
     ed::core::NumaVector<Complex> x(m), y(m);   // written whole below and by the ladder: no zero fill
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
     for (long long jj = 0; jj < static_cast<long long>(m); ++jj) {
         const auto j = static_cast<std::size_t>(jj);
@@ -523,7 +529,7 @@ void FlipLadderS2::apply(const Complex* in, Complex* out, std::size_t n) const {
     }
     ladder_->apply(x.data(), y.data(), m);
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
     for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
         const auto i = static_cast<std::size_t>(ii);

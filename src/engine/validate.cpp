@@ -39,8 +39,7 @@ void validate_hamiltonian(const ::Operator& H, const char* verb) {
     validate_environment(verb);
     const auto n = H.getNumBits();
     if (n < 1 || n > 63) refuse(verb, "H acts on " + std::to_string(n) + " sites; 1..63 are supported");
-    if (!std::isfinite(H.canonical().l1_norm()))
-        refuse(verb, "H has a coefficient that is not finite (NaN or inf)");
+    if (!std::isfinite(H.canonical().l1_norm())) refuse(verb, "H has a coefficient that is not finite (NaN or inf)");
     if (!ed::ops::hermitian(H.canonical()))
         refuse(verb, "H is not Hermitian (H - H^dagger exceeds 1e-10 of its largest coefficient); its "
                      "eigenvalues need not be real");
@@ -49,7 +48,7 @@ void validate_hamiltonian(const ::Operator& H, const char* verb) {
 void validate_spec(const Spec& s, int n_sites, const char* verb) {
     if (s.n_up < -1 || s.n_up > n_sites)
         refuse(verb, "the Sz sector n_up = " + std::to_string(s.n_up) + " is outside 0.." + std::to_string(n_sites)
-                     + " (the number of up spins)");
+                         + " (the number of up spins)");
     if (s.sz_parity < -1 || s.sz_parity > 1)
         refuse(verb, "sz_parity = " + std::to_string(s.sz_parity) + " is not 0 (even), 1 (odd) or -1 (both)");
     if (s.spin_flip < -1 || s.spin_flip > 1)
@@ -59,15 +58,15 @@ void validate_spec(const Spec& s, int n_sites, const char* verb) {
     if (s.two_S < -1 || s.two_S > n_sites)
         refuse(verb, "total spin 2S = " + std::to_string(s.two_S) + " is outside 0.." + std::to_string(n_sites));
     if (s.two_S >= 0 && (n_sites - s.two_S) % 2 != 0)
-        refuse(verb, "total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "
-                     + std::to_string(n_sites));
+        refuse(verb,
+               "total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = " + std::to_string(n_sites));
 }
 
 void validate_observable(const ::Operator* O, int n_sites, const char* verb, std::size_t index) {
     if (!O) refuse(verb, "observable " + std::to_string(index) + " is None");
     if (static_cast<int>(O->getNumBits()) != n_sites)
         refuse(verb, "observable " + std::to_string(index) + " acts on " + std::to_string(O->getNumBits())
-                     + " sites, H on " + std::to_string(n_sites));
+                         + " sites, H on " + std::to_string(n_sites));
     if (!std::isfinite(O->canonical().l1_norm()))
         refuse(verb, "observable " + std::to_string(index) + " has a coefficient that is not finite (NaN or inf)");
 }
@@ -90,8 +89,7 @@ void validate_thermal_spec(const ThermalSpec& t, int n_sites) {
         if (t.samples < 1) refuse("thermal", "samples must be >= 1");
         if (t.method == ThermalSpec::Method::FTLM && t.krylov < 1) refuse("thermal", "krylov must be >= 1");
     }
-    for (std::size_t i = 0; i < t.observables.size(); ++i)
-        validate_observable(t.observables[i], n_sites, "thermal", i);
+    for (std::size_t i = 0; i < t.observables.size(); ++i) validate_observable(t.observables[i], n_sites, "thermal", i);
 }
 
 void validate_dynamics_spec(const DynamicsSpec& d) {

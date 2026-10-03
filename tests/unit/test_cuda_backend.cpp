@@ -58,8 +58,8 @@ bool gpu_available() {
 // Device-pointer matvec for the Lanczos-kernel tests: stage each vector
 // through the host Operator (the kernel under test is the CUDA Backend, not
 // a device SpMV).
-std::function<void(const Complex*, Complex*, std::size_t)>
-staged_device_matvec(ed::matvec::CudaBackend& be, const Operator& H) {
+std::function<void(const Complex*, Complex*, std::size_t)> staged_device_matvec(ed::matvec::CudaBackend& be,
+                                                                                const Operator& H) {
     return [&be, &H](const Complex* in, Complex* out, std::size_t n) {
         std::vector<Complex> hin(n), hout(n);
         be.copy_to_host(in, hin.data(), n);
@@ -70,9 +70,11 @@ staged_device_matvec(ed::matvec::CudaBackend& be, const Operator& H) {
 
 }  // namespace
 
-TEST_CASE("matvec::CudaBackend round-trips its BLAS-1 primitives",
-          "[cuda-backend][matvec-unification][phase2]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+TEST_CASE("matvec::CudaBackend round-trips its BLAS-1 primitives", "[cuda-backend][matvec-unification][phase2]") {
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     constexpr std::size_t n = 1024;
 
@@ -94,7 +96,7 @@ TEST_CASE("matvec::CudaBackend round-trips its BLAS-1 primitives",
     cuda.copy_from_host(h_y.data(), d_y.get(), n);
 
     // ---- nrm2 ----
-    const double nrm_dev  = cuda.nrm2(d_x.get(), n);
+    const double nrm_dev = cuda.nrm2(d_x.get(), n);
     double nrm_ref_sq = 0.0;
     for (auto z : h_x) nrm_ref_sq += std::norm(z);
     REQUIRE(std::abs(nrm_dev - std::sqrt(nrm_ref_sq)) < 1e-10 * (1.0 + std::abs(nrm_dev)));
@@ -119,16 +121,17 @@ TEST_CASE("matvec::CudaBackend round-trips its BLAS-1 primitives",
     cuda.scale(Complex(0.5, 0.0), d_x.get(), n);
     std::vector<Complex> h_x_after(n);
     cuda.copy_to_host(d_x.get(), h_x_after.data(), n);
-    for (std::size_t i = 0; i < n; ++i) {
-        REQUIRE(std::abs(h_x_after[i] - 0.5 * h_x[i]) < 1e-12);
-    }
+    for (std::size_t i = 0; i < n; ++i) { REQUIRE(std::abs(h_x_after[i] - 0.5 * h_x[i]) < 1e-12); }
 }
 
 TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
           "[cuda-backend][lanczos-kernel][phase2]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
-    constexpr int    N   = 6;
+    constexpr int N = 6;
     constexpr std::size_t dim = std::size_t{1} << N;
 
     // ---- CPU reference ----
@@ -139,15 +142,11 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
 
     ed::krylov::LanczosKernelOptions opts;
     opts.max_iter = 24;
-    opts.reorth   = ed::krylov::ReorthPolicy::FullCGS2;
+    opts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
     opts.keep_basis = true;
 
     auto cpu_res = ed::krylov::lanczos_kernel(
-        cpu,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            cpu_H->apply(in, out, n);
-        },
-        dim, v0.data(), opts);
+        cpu, [&](const Complex* in, Complex* out, std::size_t n) { cpu_H->apply(in, out, n); }, dim, v0.data(), opts);
     REQUIRE(cpu_res.alpha.size() > 0);
 
     // ---- CUDA lane: same kernel, CUDA backend ----
@@ -158,13 +157,9 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
     cuda.copy_from_host(v0.data(), d_v0.get(), dim);
 
     auto cuda_res = ed::krylov::lanczos_kernel(
-        cuda,
-        [&](const Complex* in, Complex* out, std::size_t n) {
-            gpu_H(in, out, n);
-        },
-        dim, d_v0.get(), opts);
+        cuda, [&](const Complex* in, Complex* out, std::size_t n) { gpu_H(in, out, n); }, dim, d_v0.get(), opts);
     REQUIRE(cuda_res.alpha.size() == cpu_res.alpha.size());
-    REQUIRE(cuda_res.beta.size()  == cpu_res.beta.size());
+    REQUIRE(cuda_res.beta.size() == cpu_res.beta.size());
 
     // Pin equality of every Ritz-tridiagonal coefficient. Both backends
     // ran the same algorithmic body; differences here can only come from
@@ -182,7 +177,10 @@ TEST_CASE("krylov::lanczos_kernel matches CPU vs CUDA backend on 6-site chain",
 
 TEST_CASE("matvec::CudaBackend batched dot_many matches the sequential reference",
           "[cuda-backend][batched-primitives][phase1]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // `dot_many` is overridden via one
     // `cublasZgemv` over a staged contiguous (n x M) basis buffer. Pin
@@ -223,23 +221,21 @@ TEST_CASE("matvec::CudaBackend batched dot_many matches the sequential reference
 
         // Sequential reference: M single-vector `dot` calls.
         std::vector<Complex> coeffs_seq(M);
-        for (std::size_t k = 0; k < M; ++k) {
-            coeffs_seq[k] = cuda.dot(basis_ptrs[k], d_v.get(), n);
-        }
+        for (std::size_t k = 0; k < M; ++k) { coeffs_seq[k] = cuda.dot(basis_ptrs[k], d_v.get(), n); }
 
         for (std::size_t k = 0; k < M; ++k) {
-            INFO("M=" << M << " k=" << k
-                 << " batched=" << coeffs_batched[k]
-                 << " sequential=" << coeffs_seq[k]);
-            REQUIRE(std::abs(coeffs_batched[k] - coeffs_seq[k])
-                    < 1e-12 * (1.0 + std::abs(coeffs_seq[k])));
+            INFO("M=" << M << " k=" << k << " batched=" << coeffs_batched[k] << " sequential=" << coeffs_seq[k]);
+            REQUIRE(std::abs(coeffs_batched[k] - coeffs_seq[k]) < 1e-12 * (1.0 + std::abs(coeffs_seq[k])));
         }
     }
 }
 
 TEST_CASE("matvec::CudaBackend batched primitives over contiguous runs and separate vectors",
           "[cuda-backend][batched-primitives]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // dot_many / axpy_many issue one gemv per run of columns that sit back to back (P7.3): a basis
     // of 6 columns of one block, then 3 separate vectors, then 2 more columns of the block that do
@@ -296,7 +292,10 @@ TEST_CASE("matvec::CudaBackend batched primitives over contiguous runs and separ
 
 TEST_CASE("matvec::CudaBackend reads a vector the pool reissued at an address it read before",
           "[cuda-backend][batched-primitives]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // A one-vector basis is read by dot_many and freed, and a new vector of the same size is
     // allocated: the pool usually returns the same address. dot_many must read the NEW vector
@@ -328,7 +327,10 @@ TEST_CASE("matvec::CudaBackend reads a vector the pool reissued at an address it
 
 TEST_CASE("matvec::CudaBackend batched axpy_many matches the sequential reference",
           "[cuda-backend][batched-primitives][phase1]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // `axpy_many` is overridden via one
     // `cublasZgemv(OP_N)` over the same staged basis buffer. Pin that
@@ -347,9 +349,9 @@ TEST_CASE("matvec::CudaBackend batched axpy_many matches the sequential referenc
         // Two parallel device copies of y0: one for the batched lane,
         // one for the sequential reference. Both start identical.
         auto d_y_batched = cuda.make_zero_vector(n);
-        auto d_y_seq     = cuda.make_zero_vector(n);
+        auto d_y_seq = cuda.make_zero_vector(n);
         cuda.copy_from_host(h_y0.data(), d_y_batched.get(), n);
-        cuda.copy_from_host(h_y0.data(), d_y_seq.get(),     n);
+        cuda.copy_from_host(h_y0.data(), d_y_seq.get(), n);
 
         std::vector<std::vector<Complex>> h_basis(M, std::vector<Complex>(n));
         std::vector<ed::matvec::Backend::UniqueVec> d_basis;
@@ -367,28 +369,27 @@ TEST_CASE("matvec::CudaBackend batched axpy_many matches the sequential referenc
         for (auto& a : alphas) a = Complex(uni(rng), uni(rng));
 
         // Batched override.
-        cuda.axpy_many(alphas.data(), basis_ptrs.data(), M,
-                       d_y_batched.get(), n);
+        cuda.axpy_many(alphas.data(), basis_ptrs.data(), M, d_y_batched.get(), n);
 
         // Sequential reference.
-        for (std::size_t k = 0; k < M; ++k) {
-            cuda.axpy(alphas[k], basis_ptrs[k], d_y_seq.get(), n);
-        }
+        for (std::size_t k = 0; k < M; ++k) { cuda.axpy(alphas[k], basis_ptrs[k], d_y_seq.get(), n); }
 
         // Compare element-by-element on the host.
         std::vector<Complex> h_y_batched(n), h_y_seq(n);
         cuda.copy_to_host(d_y_batched.get(), h_y_batched.data(), n);
-        cuda.copy_to_host(d_y_seq.get(),     h_y_seq.data(),     n);
+        cuda.copy_to_host(d_y_seq.get(), h_y_seq.data(), n);
         for (std::size_t i = 0; i < n; ++i) {
-            REQUIRE(std::abs(h_y_batched[i] - h_y_seq[i])
-                    < 1e-12 * (1.0 + std::abs(h_y_seq[i])));
+            REQUIRE(std::abs(h_y_batched[i] - h_y_seq[i]) < 1e-12 * (1.0 + std::abs(h_y_seq[i])));
         }
     }
 }
 
 TEST_CASE("matvec::CudaBackend fused axpby (cublasZgeam) matches scale+axpy",
           "[cuda-backend][batched-primitives][phase1]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // axpby is a single cublasZgeam. Pin element-wise agreement against
     // the two-launch (scale + axpy) decomposition, which is exactly the
@@ -404,13 +405,13 @@ TEST_CASE("matvec::CudaBackend fused axpby (cublasZgeam) matches scale+axpy",
 
     auto d_x = cuda.make_zero_vector(n);
     auto d_y_fused = cuda.make_zero_vector(n);
-    auto d_y_ref   = cuda.make_zero_vector(n);
+    auto d_y_ref = cuda.make_zero_vector(n);
     cuda.copy_from_host(h_x.data(), d_x.get(), n);
     cuda.copy_from_host(h_y.data(), d_y_fused.get(), n);
-    cuda.copy_from_host(h_y.data(), d_y_ref.get(),   n);
+    cuda.copy_from_host(h_y.data(), d_y_ref.get(), n);
 
     const Complex alpha(0.7, -0.3);
-    const Complex beta (1.4,  0.2);
+    const Complex beta(1.4, 0.2);
 
     cuda.axpby(alpha, d_x.get(), beta, d_y_fused.get(), n);
 
@@ -420,16 +421,17 @@ TEST_CASE("matvec::CudaBackend fused axpby (cublasZgeam) matches scale+axpy",
 
     std::vector<Complex> h_y_fused(n), h_y_ref(n);
     cuda.copy_to_host(d_y_fused.get(), h_y_fused.data(), n);
-    cuda.copy_to_host(d_y_ref.get(),   h_y_ref.data(),   n);
+    cuda.copy_to_host(d_y_ref.get(), h_y_ref.data(), n);
     for (std::size_t i = 0; i < n; ++i) {
-        REQUIRE(std::abs(h_y_fused[i] - h_y_ref[i])
-                < 1e-12 * (1.0 + std::abs(h_y_ref[i])));
+        REQUIRE(std::abs(h_y_fused[i] - h_y_ref[i]) < 1e-12 * (1.0 + std::abs(h_y_ref[i])));
     }
 }
 
-TEST_CASE("matvec::CudaBackend pool-backed allocator survives a churn loop",
-          "[cuda-backend][allocator][phase1]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+TEST_CASE("matvec::CudaBackend pool-backed allocator survives a churn loop", "[cuda-backend][allocator][phase1]") {
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
     // The allocator is backed by
     // `cudaMallocAsync` / `cudaFreeAsync` on the default device pool.
@@ -463,8 +465,7 @@ TEST_CASE("matvec::CudaBackend pool-backed allocator survives a churn loop",
         const double nrm = cuda.nrm2(d_x.get(), this_n);
         double ref_sq = 0.0;
         for (const auto& z : h_x) ref_sq += std::norm(z);
-        REQUIRE(std::abs(nrm - std::sqrt(ref_sq))
-                < 1e-10 * (1.0 + nrm));
+        REQUIRE(std::abs(nrm - std::sqrt(ref_sq)) < 1e-10 * (1.0 + nrm));
         // d_x goes out of scope; UniqueVec frees via cudaFreeAsync,
         // returning the allocation to the pool for the next iter.
     }
@@ -473,14 +474,17 @@ TEST_CASE("matvec::CudaBackend pool-backed allocator survives a churn loop",
 TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
           "ground state through cuBLAS",
           "[cuda-backend][lanczos-kernel][aux_ortho]") {
-    if (!gpu_available()) { SUCCEED("no CUDA device available, skipping"); return; }
+    if (!gpu_available()) {
+        SUCCEED("no CUDA device available, skipping");
+        return;
+    }
 
-    constexpr int    N   = 6;
+    constexpr int N = 6;
     constexpr std::size_t dim = std::size_t{1} << N;
 
     // ---- Reference: dense E_0 / E_1 from CPU host-space solve --------------
     auto cpu_op = ed_tests::build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
-    auto ref    = ed_tests::reference_from_operator(*cpu_op, dim);
+    auto ref = ed_tests::reference_from_operator(*cpu_op, dim);
     REQUIRE(ref.eigs.size() >= 2);
 
     // ---- Pass 1: build the Krylov basis with CudaBackend, reconstruct y_0 --
@@ -493,16 +497,14 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     // iteration. A random vector spans every Sz sector and gives the
     // kernel a full Krylov subspace to grow.
     auto v0_a_host = ed_tests::random_unit_vector(dim, /*seed=*/0xA110CAU);
-    auto d_v0_a    = cuda.make_zero_vector(dim);
+    auto d_v0_a = cuda.make_zero_vector(dim);
     cuda.copy_from_host(v0_a_host.data(), d_v0_a.get(), dim);
 
-    auto gpu_matvec = [&](const Complex* in, Complex* out, std::size_t n) {
-        gpu_op(in, out, n);
-    };
+    auto gpu_matvec = [&](const Complex* in, Complex* out, std::size_t n) { gpu_op(in, out, n); };
 
     ed::krylov::LanczosKernelOptions opts_a;
-    opts_a.max_iter   = 30;
-    opts_a.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+    opts_a.max_iter = 30;
+    opts_a.reorth = ed::krylov::ReorthPolicy::FullCGS2;
     opts_a.keep_basis = true;
     auto R_a = ed::krylov::lanczos_kernel(cuda, gpu_matvec, dim, d_v0_a.get(), opts_a);
     const std::size_t M_a = R_a.alpha.size();
@@ -521,8 +523,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_a(T_a);
     REQUIRE(es_a.info() == Eigen::Success);
-    INFO("CUDA pass-1: E_0_lanczos=" << es_a.eigenvalues()(0)
-         << "  E_0_dense=" << ref.eigs[0]);
+    INFO("CUDA pass-1: E_0_lanczos=" << es_a.eigenvalues()(0) << "  E_0_dense=" << ref.eigs[0]);
     REQUIRE(std::abs(es_a.eigenvalues()(0) - ref.eigs[0]) < 1e-8);
 
     // Reconstruct y_0 on device via cuBLAS axpy_many:
@@ -530,15 +531,13 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     // Use the backend's batched primitive — exactly what the kernel
     // uses for its CGS2 axpy_many, just driven from outside.
     auto d_y0 = cuda.make_zero_vector(dim);
-    std::vector<Complex>        coeffs(M_a);
+    std::vector<Complex> coeffs(M_a);
     std::vector<const Complex*> basis_ptrs(M_a);
     for (std::size_t j = 0; j < M_a; ++j) {
-        coeffs[j]     = Complex(es_a.eigenvectors()(static_cast<int>(j), 0), 0.0);
+        coeffs[j] = Complex(es_a.eigenvectors()(static_cast<int>(j), 0), 0.0);
         basis_ptrs[j] = R_a.basis[j];
     }
-    cuda.axpy_many(coeffs.data(),
-                   basis_ptrs.data(), M_a,
-                   d_y0.get(), dim);
+    cuda.axpy_many(coeffs.data(), basis_ptrs.data(), M_a, d_y0.get(), dim);
 
     // Sanity: ||y_0|| ~ 1 on device.
     REQUIRE(std::abs(cuda.nrm2(d_y0.get(), dim) - 1.0) < 1e-8);
@@ -548,7 +547,7 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     // mirror the kernel's documented contract: the CALLER pre-projects
     // v0 against the aux set before handing it to the kernel.
     auto v0_b_host = ed_tests::random_unit_vector(dim, /*seed=*/0xB055AU);
-    auto d_v0_b    = cuda.make_zero_vector(dim);
+    auto d_v0_b = cuda.make_zero_vector(dim);
     cuda.copy_from_host(v0_b_host.data(), d_v0_b.get(), dim);
 
     // Caller-side CGS2 pre-projection of v0_b against y_0 (device-side).
@@ -561,13 +560,12 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     cuda.scale(Complex(1.0 / v0b_norm, 0.0), d_v0_b.get(), dim);
 
     ed::krylov::LanczosKernelOptions opts_b;
-    opts_b.max_iter        = 30;
-    opts_b.reorth          = ed::krylov::ReorthPolicy::FullCGS2;
-    opts_b.keep_basis      = true;
-    opts_b.aux_ortho_ptrs  = { d_y0.get() };
+    opts_b.max_iter = 30;
+    opts_b.reorth = ed::krylov::ReorthPolicy::FullCGS2;
+    opts_b.keep_basis = true;
+    opts_b.aux_ortho_ptrs = {d_y0.get()};
 
-    auto R_b = ed::krylov::lanczos_kernel(cuda, gpu_matvec, dim,
-                                          d_v0_b.get(), opts_b);
+    auto R_b = ed::krylov::lanczos_kernel(cuda, gpu_matvec, dim, d_v0_b.get(), opts_b);
     const std::size_t M_b = R_b.alpha.size();
     REQUIRE(M_b >= 5);
 
@@ -593,19 +591,16 @@ TEST_CASE("lanczos_kernel<CudaBackend> `aux_ortho_ptrs` projects out the "
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_b(T_b);
     REQUIRE(es_b.info() == Eigen::Success);
-    INFO("CUDA deflated: E_0=" << es_b.eigenvalues()(0)
-         << "  E_1 (dense)=" << ref.eigs[1]
-         << "  E_0 (dense)=" << ref.eigs[0]);
+    INFO("CUDA deflated: E_0=" << es_b.eigenvalues()(0) << "  E_1 (dense)=" << ref.eigs[1]
+                               << "  E_0 (dense)=" << ref.eigs[0]);
     REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[1]) < 1e-7);
     // The smallest Ritz value MUST NOT be the ground state.
-    REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[0]) >
-            std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
+    REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[0]) > std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
 }
 
 #else   // !WITH_CUDA
 
-TEST_CASE("matvec::CudaBackend test placeholder (CUDA disabled)",
-          "[cuda-backend][phase2]") {
+TEST_CASE("matvec::CudaBackend test placeholder (CUDA disabled)", "[cuda-backend][phase2]") {
     SUCCEED("CUDA support not compiled");
 }
 

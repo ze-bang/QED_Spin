@@ -7,6 +7,7 @@ adds 8 dot products plus a serial memcpy per step -- 20-40% on top of the matvec
 XXZ chain (nn+nnn, open), N=24, Sz=0 sector (dim 2,704,156), qed.eigs(k=1, prune=False) with
 ED_LANCZOS_KERNEL_PROFILE=1; compare (reorth + ring) time per step with the matvec time per step.
 CONFIRMED when the ring overhead is >= 20% of the matvec."""
+
 import json
 import os
 import re
@@ -33,11 +34,13 @@ r = qed.eigs(H, 1, sym=sym, prune=False, allow_partial=True)
 print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": time.time() - t0}), flush=True)
 ''' % (N, NUP, repr(bonds))
 
-PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply ([\d.]+)% \(([\d.]+) us/it\) "
-                 r"recur ([\d.]+)% \(([\d.]+) us/it\) reorth ([\d.]+)% \(([\d.]+) us/it\) "
-                 r"norm ([\d.]+)% \(([\d.]+) us/it\) ring ([\d.]+)% \(([\d.]+) us/it\)")
+PAT = re.compile(
+    r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply ([\d.]+)% \(([\d.]+) us/it\) "
+    r"recur ([\d.]+)% \(([\d.]+) us/it\) reorth ([\d.]+)% \(([\d.]+) us/it\) "
+    r"norm ([\d.]+)% \(([\d.]+) us/it\) ring ([\d.]+)% \(([\d.]+) us/it\)"
+)
 try:
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")  # the profile line is an Info record
     p = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, env=env, timeout=280)
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:200]}")
@@ -45,7 +48,7 @@ except Exception as e:
 res = None
 for line in p.stdout.splitlines():
     if line.startswith("RESULT_JSON:"):
-        res = json.loads(line[len("RESULT_JSON:"):])
+        res = json.loads(line[len("RESULT_JSON:") :])
 calls = [m for m in PAT.finditer(p.stderr)]
 if res is None or not calls:
     print(f"REPRO: INCONCLUSIVE child rc={p.returncode}, profile lines={len(calls)}: {p.stderr[-300:]}")
@@ -55,9 +58,11 @@ iters = int(m.group(1))
 apply_us, recur_us, reorth_us, norm_us, ring_us = (float(m.group(g)) for g in (4, 6, 8, 10, 12))
 # the ring bucket also holds the (necessary) w /= beta scale pass; discount it by one norm-pass time
 over = (reorth_us + max(0.0, ring_us - norm_us)) / max(apply_us, 1e-9)
-msg = (f"dim 2704156, {iters} steps, per step: apply {apply_us/1e3:.1f} ms, reorth(8 dots) {reorth_us/1e3:.1f} ms, "
-       f"ring copy {ring_us/1e3:.1f} ms, recur {recur_us/1e3:.1f} ms, norm {norm_us/1e3:.1f} ms -> ring overhead "
-       f"{100*over:.0f}% of the matvec; E0={res['E'][0] if res['E'] else None}")
+msg = (
+    f"dim 2704156, {iters} steps, per step: apply {apply_us/1e3:.1f} ms, reorth(8 dots) {reorth_us/1e3:.1f} ms, "
+    f"ring copy {ring_us/1e3:.1f} ms, recur {recur_us/1e3:.1f} ms, norm {norm_us/1e3:.1f} ms -> ring overhead "
+    f"{100*over:.0f}% of the matvec; E0={res['E'][0] if res['E'] else None}"
+)
 if over >= 0.20:
     print("REPRO: CONFIRMED " + msg)
 elif over < 0.08:

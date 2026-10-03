@@ -11,6 +11,7 @@ for eigs and for a short FTLM.
 RESTATED 2026-10-02 (P6 groundwork): the >= 5x thresholds sat above the audit's own 4.9x (eigs), so the
 script read NOT_REPRODUCED while the cost stood. Plan target (P6.5): eigs and FTLM with total_spin within
 1.2x of the plain sector. CONFIRMED when either slowdown exceeds 1.2x."""
+
 import time
 import qed
 
@@ -23,8 +24,11 @@ su2 = qed.Symmetry(spatial=None, total_spin=0)
 out = {}
 try:
     for name, sym in (("plain", plain), ("su2", su2)):
-        t0 = time.perf_counter(); r = qed.eigs(H, 1, sym=sym); t1 = time.perf_counter()
-        th = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=40, seed=3); t2 = time.perf_counter()
+        t0 = time.perf_counter()
+        r = qed.eigs(H, 1, sym=sym)
+        t1 = time.perf_counter()
+        th = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=40, seed=3)
+        t2 = time.perf_counter()
         out[name] = (float(r.energies[0]), t1 - t0, t2 - t1, int(th.blocks))
         print(f"{name}: E0 {out[name][0]:.10f}  eigs {t1-t0:.2f} s  ftlm {t2-t1:.2f} s  ftlm blocks {th.blocks}")
 except Exception as ex:

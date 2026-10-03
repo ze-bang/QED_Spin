@@ -11,6 +11,7 @@ Test: N=12 Heisenberg ring scaled by s, Symmetry with spatial=None (Sz sectors u
 above dense_max_dim=64 so they run on the device kernel). GPU eigs(s1*H) then GPU eigs(s2*H) in
 one process; the second must equal s2*E0 (independent dense numpy reference). Pairs:
 (2e10, 4e10) [llround overflow] and (1e-10, 3e-10) [rounds to 0]. Control: (1.0, 1.5)."""
+
 import signal
 import numpy as np
 import qed
@@ -23,6 +24,7 @@ signal.alarm(280)
 N = 12
 bonds = [(i, (i + 1) % N) for i in range(N)]
 
+
 def op(s):
     H = qed.Operator(N)
     for i, j in bonds:
@@ -31,14 +33,21 @@ def op(s):
         H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * s)
     return H
 
+
 # independent dense reference for s = 1
-sz = np.diag([0.5, -0.5]); sp = np.array([[0., 1.], [0., 0.]]); sm = sp.T
+sz = np.diag([0.5, -0.5])
+sp = np.array([[0.0, 1.0], [0.0, 0.0]])
+sm = sp.T
+
+
 def site(o, k):
     m = np.array([[1.0]])
     for q in range(N):
         m = np.kron(m, o if q == k else np.eye(2))
     return m
-Hd = np.zeros((2 ** N, 2 ** N))
+
+
+Hd = np.zeros((2**N, 2**N))
 for i, j in bonds:
     Hd += site(sz, i) @ site(sz, j) + 0.5 * (site(sp, i) @ site(sm, j) + site(sm, i) @ site(sp, j))
 E0ref = float(np.linalg.eigvalsh(Hd)[0])
@@ -54,8 +63,10 @@ for s1, s2 in ((1.0, 1.5), (2e10, 4e10), (1e-10, 3e-10)):
         e1, e2, ec = float(r1.energies[0]), float(r2.energies[0]), float(rc.energies[0])
         rel2 = abs(e2 / s2 - E0ref) / abs(E0ref)
         relc = abs(ec / s2 - E0ref) / abs(E0ref)
-        tag = (f"(s1={s1:g},s2={s2:g}) gpu E0(s2)/s2={e2/s2:.10f} gpu E0(s1)/s1={e1/s1:.10f} "
-               f"cpu E0(s2)/s2={ec/s2:.10f} dev_blocks={r2.device_blocks}")
+        tag = (
+            f"(s1={s1:g},s2={s2:g}) gpu E0(s2)/s2={e2/s2:.10f} gpu E0(s1)/s1={e1/s1:.10f} "
+            f"cpu E0(s2)/s2={ec/s2:.10f} dev_blocks={r2.device_blocks}"
+        )
         print(tag)
         if r2.device_blocks == 0:
             notes.append("no device blocks " + tag)

@@ -19,6 +19,7 @@ difference); ``--got FILE`` compares a recorded file instead of running the case
 
 Run on a compute node (sbatch scripts/golden/*.sbatch); never on a login node.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(1, os.path.dirname(HERE))          # tests/python: support.models, support.oracle
+sys.path.insert(1, os.path.dirname(HERE))  # tests/python: support.models, support.oracle
 
 TOL = {"exact": 1e-10, "transport": 1e-7, "stochastic": 1e-10}
 
@@ -48,8 +49,9 @@ def git_sha():
 
 def env_snapshot():
     snap = {k: v for k, v in sorted(os.environ.items()) if k.startswith(("ED_", "QED_", "OMP_NUM"))}
-    try:                                   # the registry, when this build has one
+    try:  # the registry, when this build has one
         import qed
+
         snap["_registered"] = dict(qed._core.env_snapshot())
         snap["_unknown"] = list(qed._core.env_unknown())
     except Exception:  # noqa: BLE001
@@ -105,8 +107,11 @@ def diff_values(a, b, tol, path=""):
             return [f"{path}: length {len(a)} -> {len(b)}"]
         if a and all(isinstance(x, (int, float)) for x in a + b):
             differs, n, d_abs, d_rel = _numeric_diff(np.asarray(a, float), np.asarray(b, float), tol)
-            return [f"{path}: max rel diff {d_rel:.2e} > {tol:.0e} (abs {d_abs:.2e}; {n} of {len(a)} values)"] \
-                if differs else []
+            return (
+                [f"{path}: max rel diff {d_rel:.2e} > {tol:.0e} (abs {d_abs:.2e}; {n} of {len(a)} values)"]
+                if differs
+                else []
+            )
         for i, (x, y) in enumerate(zip(a, b)):
             out += diff_values(x, y, tol, f"{path}[{i}]")
         return out
@@ -140,6 +145,7 @@ def dense_inconsistencies(records, tol=1e-8):
     dense_reference records and skipped every record without a matching "count" field -- all
     of them.)"""
     from cases import dense_spectra
+
     dense = dense_spectra()
     out = []
     for name, rec in records.items():
@@ -162,6 +168,7 @@ def select(cases, only):
 
 def cmd_record(args):
     from cases import build_cases
+
     cases = select(build_cases(args.device), args.only)
     records, quarantine = {}, {}
     for c in cases:
@@ -184,15 +191,25 @@ def cmd_record(args):
             print(f"  DENSE MISMATCH: {name}: full spectrum {d:.2e} from its dense reference")
         print("refusing to record a reference that disagrees with exact diagonalization")
         return 1
-    doc = {"meta": {"sha": git_sha(), "device": args.device, "env": env_snapshot(),
-                    "recorded": time.strftime("%Y-%m-%d %H:%M:%S"), "qed_file": _qed_file()},
-           "records": records, "quarantine": quarantine}
+    doc = {
+        "meta": {
+            "sha": git_sha(),
+            "device": args.device,
+            "env": env_snapshot(),
+            "recorded": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "qed_file": _qed_file(),
+        },
+        "records": records,
+        "quarantine": quarantine,
+    }
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with gzip.open(args.out, "wt") as f:
         json.dump(doc, f)
     n_raise = sum("raised" in r for r in records.values())
-    print(f"\nrecorded {len(records)} cases ({n_raise} raise, {len(quarantine)} quarantined) "
-          f"at {doc['meta']['sha'][:10]} -> {args.out}")
+    print(
+        f"\nrecorded {len(records)} cases ({n_raise} raise, {len(quarantine)} quarantined) "
+        f"at {doc['meta']['sha'][:10]} -> {args.out}"
+    )
     return 0
 
 
@@ -201,12 +218,13 @@ def cmd_bless(args):
     by a second run) and keep every other record; the file's meta keeps a log of what
     was re-blessed, at which commit and why."""
     from cases import build_cases
+
     if not args.only and not args.new:
         print("bless needs --only (exact case names) or --new: re-blessing everything is `record`")
         return 2
     with gzip.open(args.ref, "rt") as f:
         doc = json.load(f)
-    if args.new:                                  # every case the reference does not know yet
+    if args.new:  # every case the reference does not know yet
         chosen = [c for c in build_cases(args.device) if c.name not in doc["records"]]
         if not chosen:
             print("no new cases")
@@ -228,8 +246,13 @@ def cmd_bless(args):
             print(f"  {c.name}{line}")
         doc["records"][c.name] = r1
     doc["meta"].setdefault("blessed", []).append(
-        {"sha": git_sha(), "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-         "cases": [c.name for c in chosen], "reason": args.reason})
+        {
+            "sha": git_sha(),
+            "date": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "cases": [c.name for c in chosen],
+            "reason": args.reason,
+        }
+    )
     with gzip.open(args.ref, "wt") as f:
         json.dump(doc, f)
     print(f"\nblessed {len(chosen)} case(s) into {args.ref}")
@@ -242,6 +265,7 @@ def cmd_retire(args):
     live case would hide a regression). The dropped records move into meta["retired"]
     with the commit, date and reason, so every deletion stays auditable."""
     from cases import build_cases
+
     if not args.only:
         print("retire needs --only with exact case names")
         return 2
@@ -259,8 +283,8 @@ def cmd_retire(args):
     for name in args.only:
         doc.get("quarantine", {}).pop(name, None)
     doc["meta"].setdefault("retired", []).append(
-        {"sha": git_sha(), "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-         "reason": args.reason, "records": dropped})
+        {"sha": git_sha(), "date": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": args.reason, "records": dropped}
+    )
     with gzip.open(args.ref, "wt") as f:
         json.dump(doc, f)
     for name in args.only:
@@ -278,13 +302,16 @@ def _results(args):
     """(name, record) pairs: the cases run now, or the records of a --got file."""
     if args.got:
         doc = _load(args.got)
-        print(f"this run {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}) "
-              f"from {args.got}")
+        print(
+            f"this run {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}) "
+            f"from {args.got}"
+        )
         for name, rec in doc["records"].items():
             if not args.only or any(o in name for o in args.only):
                 yield name, (lambda r=rec: r)
         return
     from cases import build_cases
+
     print(f"this run {git_sha()[:10]} ({args.device}); qed from {_qed_file()}")
     for c in select(build_cases(args.device), args.only):
         yield c.name, (lambda c=c: run_case(c))
@@ -293,8 +320,10 @@ def _results(args):
 def cmd_compare(args):
     doc = _load(args.ref)
     ref, quarantine = doc["records"], doc.get("quarantine", {})
-    print(f"reference {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}); "
-          + ("tier tolerances" if args.tol is None else f"every tolerance {args.tol:.0e}"))
+    print(
+        f"reference {doc['meta']['sha'][:10]} ({doc['meta']['device']}, {doc['meta']['recorded']}); "
+        + ("tier tolerances" if args.tol is None else f"every tolerance {args.tol:.0e}")
+    )
     bad, new, qdiff = [], [], []
     current = {}
     for name, result in _results(args):
@@ -312,11 +341,13 @@ def cmd_compare(args):
         if d and gated:
             bad.append((name, d))
     missing = [] if args.only else sorted(set(ref) - set(current) - set(new))
-    print(f"\n{len(current) - len(bad) - len(qdiff)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
-          f"{len(missing)} missing from this run, {len(qdiff)} of {len(quarantine)} quarantined cases differ (not gating)")
-    for name, d in bad:                    # with --tol every differing path, else the first six
+    print(
+        f"\n{len(current) - len(bad) - len(qdiff)} ok, {len(bad)} MISMATCH, {len(new)} new (not in reference), "
+        f"{len(missing)} missing from this run, {len(qdiff)} of {len(quarantine)} quarantined cases differ (not gating)"
+    )
+    for name, d in bad:  # with --tol every differing path, else the first six
         print(f"\n  {name}")
-        for line in (d if args.tol is not None else d[:6]):
+        for line in d if args.tol is not None else d[:6]:
             print(f"      {line}")
     for name in missing:
         print(f"  MISSING: {name}")
@@ -328,6 +359,7 @@ def cmd_compare(args):
 
 def cmd_list(args):
     from cases import build_cases
+
     for c in select(build_cases(args.device), args.only):
         print(f"{c.tier:10s} {c.name}")
     return 0
@@ -336,6 +368,7 @@ def cmd_list(args):
 def _qed_file():
     try:
         import qed
+
         return f"{os.path.dirname(qed.__file__)} [core: {qed._core.__file__}]"
     except Exception:  # noqa: BLE001
         return "unimportable"
@@ -344,8 +377,13 @@ def _qed_file():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("record", cmd_record), ("compare", cmd_compare), ("bless", cmd_bless),
-                     ("retire", cmd_retire), ("list", cmd_list)):
+    for name, fn in (
+        ("record", cmd_record),
+        ("compare", cmd_compare),
+        ("bless", cmd_bless),
+        ("retire", cmd_retire),
+        ("list", cmd_list),
+    ):
         p = sub.add_parser(name)
         p.add_argument("--device", default="cpu", choices=("cpu", "gpu"))
         p.add_argument("--only", nargs="*", default=[], help="substring filter on case names")
@@ -357,14 +395,24 @@ def main():
             p.add_argument("--reason", required=True, help="why the reference moves (kept in meta)")
         if name == "bless":
             p.add_argument("--new", action="store_true", help="bless every case not yet in the reference")
-            p.add_argument("--allow-raise", action="store_true",
-                           help="also bless cases whose outcome is a deliberate refusal (an exception)")
+            p.add_argument(
+                "--allow-raise",
+                action="store_true",
+                help="also bless cases whose outcome is a deliberate refusal (an exception)",
+            )
         if name == "compare":
             p.add_argument("--ref", required=True)
-            p.add_argument("--tol", type=float, default=None,
-                           help="one tolerance for every tier; 0 lists every value path that differs at all")
-            p.add_argument("--got", default=None,
-                           help="compare the records of this file (a `record --out`) instead of running the cases")
+            p.add_argument(
+                "--tol",
+                type=float,
+                default=None,
+                help="one tolerance for every tier; 0 lists every value path that differs at all",
+            )
+            p.add_argument(
+                "--got",
+                default=None,
+                help="compare the records of this file (a `record --out`) instead of running the cases",
+            )
         p.set_defaults(fn=fn)
     args = ap.parse_args()
     sys.exit(args.fn(args))

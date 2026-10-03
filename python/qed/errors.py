@@ -5,10 +5,20 @@ caught before it existed, so ``except ValueError`` keeps working next to
 ``except qed.errors.InvalidRequest``. The C++ engine throws the classes of the same
 name in ``include/ed/core/errors.h``; the bindings translate them into these.
 """
+
 from __future__ import annotations
 
-__all__ = ["QEDError", "InvalidRequest", "EmptySelection", "Unsupported", "DeviceUnavailable",
-           "DeviceUnsupported", "ResourceLimit", "ConvergenceError", "QEDWarning"]
+__all__ = [
+    "QEDError",
+    "InvalidRequest",
+    "EmptySelection",
+    "Unsupported",
+    "DeviceUnavailable",
+    "DeviceUnsupported",
+    "ResourceLimit",
+    "ConvergenceError",
+    "QEDWarning",
+]
 
 
 class QEDWarning(RuntimeWarning):

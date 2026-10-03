@@ -40,8 +40,7 @@ constexpr int kThreads = 256;
 
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess)
-        throw std::runtime_error(std::string("rep_matrix_elements_gpu: ") + what + ": "
-                                 + cudaGetErrorString(e));
+        throw std::runtime_error(std::string("rep_matrix_elements_gpu: ") + what + ": " + cudaGetErrorString(e));
 }
 
 struct DevSector {
@@ -96,9 +95,14 @@ struct DevSector {
             slc_lead = code->lead();
             slc_cand_off = code->cand_off();
             slc_cand = code->cand();
-            pol.slc = {thrust::raw_pointer_cast(slc_to_key.data()), thrust::raw_pointer_cast(slc_lead.data()),
-                       thrust::raw_pointer_cast(slc_cand_off.data()), thrust::raw_pointer_cast(slc_cand.data()),
-                       rd.n_sites, (rd.n_sites + 7) / 8, code->block_size(), code->blocks()};
+            pol.slc = {thrust::raw_pointer_cast(slc_to_key.data()),
+                       thrust::raw_pointer_cast(slc_lead.data()),
+                       thrust::raw_pointer_cast(slc_cand_off.data()),
+                       thrust::raw_pointer_cast(slc_cand.data()),
+                       rd.n_sites,
+                       (rd.n_sites + 7) / 8,
+                       code->block_size(),
+                       code->blocks()};
         }
         // rep_index_of_rank / shared_rank_of stay null: binary search over reps
     }
@@ -168,9 +172,8 @@ struct PairPtrs {
 __device__ inline cuDoubleComplex cmul(cuDoubleComplex a, cuDoubleComplex b) { return cuCmul(a, b); }
 
 // shared layout: acc[(p * n_loc + (o - obs_lo)) * 2 + {0: re, 1: im}]
-__global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgView prog,
-                          PairPtrs pp, Balanced bal, int n_pairs, int obs_lo, int obs_hi,
-                          double* __restrict__ block_out) {
+__global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgView prog, PairPtrs pp, Balanced bal,
+                          int n_pairs, int obs_lo, int obs_hi, double* __restrict__ block_out) {
     extern __shared__ double acc[];
     const int n_loc = obs_hi - obs_lo;
     const int n_acc = 2 * n_pairs * n_loc;
@@ -197,7 +200,10 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
             std::uint32_t lo = prog.group_vbegin[gi], hi = prog.group_vbegin[gi + 1];
             while (lo < hi) {
                 const std::uint32_t mid = lo + ((hi - lo) >> 1);
-                if (prog.vsub_val[mid] < v) lo = mid + 1; else hi = mid;
+                if (prog.vsub_val[mid] < v)
+                    lo = mid + 1;
+                else
+                    hi = mid;
             }
             if (lo == prog.group_vbegin[gi + 1] || prog.vsub_val[lo] != v) continue;
             const std::uint32_t vi = lo;
@@ -214,13 +220,15 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
             }
             const cuDoubleComplex base = make_cuDoubleComplex(proj.x * w, proj.y * w);
             cuDoubleComplex y[kMaxPairs];
-            for (int p = 0; p < n_pairs; ++p)
-                y[p] = cmul(cmul(base, bk[p]), cuConj(pp.bra[p][j]));
+            for (int p = 0; p < n_pairs; ++p) y[p] = cmul(cmul(base, bk[p]), cuConj(pp.bra[p][j]));
             for (std::uint32_t k = prog.vsub_tbegin[vi]; k < prog.vsub_tbegin[vi + 1]; ++k) {
                 const int o = static_cast<int>(prog.term_obs[k]);
                 if (o < obs_lo || o >= obs_hi) continue;
                 cuDoubleComplex c = prog.term_coeff[k];
-                if (__popcll(s & prog.term_sign[k]) & 1) { c.x = -c.x; c.y = -c.y; }
+                if (__popcll(s & prog.term_sign[k]) & 1) {
+                    c.x = -c.x;
+                    c.y = -c.y;
+                }
                 for (int p = 0; p < n_pairs; ++p) {
                     const cuDoubleComplex t = cmul(c, y[p]);
                     const int a = 2 * (p * n_loc + (o - obs_lo));
@@ -237,14 +245,11 @@ __global__ void me_kernel(DevPolicy src, DevPolicy tgt, bool same_sector, ProgVi
 
 }  // namespace
 
-std::vector<Complex>
-rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
-                        const ed::symmetry::RepSectorData& tgt,
-                        const MaskedProgram& prog,
-                        const std::vector<RepVectorView>& kets,
-                        const std::vector<RepVectorView>& bras,
-                        const std::vector<std::pair<int, int>>& pairs,
-                        const RepMEOptions& opt) {
+std::vector<Complex> rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
+                                             const ed::symmetry::RepSectorData& tgt, const MaskedProgram& prog,
+                                             const std::vector<RepVectorView>& kets,
+                                             const std::vector<RepVectorView>& bras,
+                                             const std::vector<std::pair<int, int>>& pairs, const RepMEOptions& opt) {
     const std::size_t n_obs = static_cast<std::size_t>(prog.n_obs);
     std::vector<Complex> out(pairs.size() * n_obs, Complex(0.0, 0.0));
 
@@ -268,8 +273,7 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
        "shared-memory attribute");
     const std::uint64_t dim = src.dim();
     const int n_blocks = static_cast<int>(std::max<std::uint64_t>(
-        1, std::min<std::uint64_t>((dim + kThreads - 1) / kThreads,
-                                   static_cast<std::uint64_t>(n_sm) * 8)));
+        1, std::min<std::uint64_t>((dim + kThreads - 1) / kThreads, static_cast<std::uint64_t>(n_sm) * 8)));
 
     // Pair batches: at most kMaxPairs pairs, and distinct vectors that fit in free memory.
     std::size_t free_b = 0, total_b = 0;
@@ -277,8 +281,7 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
     const std::size_t vec_bytes = std::max(src.dim(), tgt.dim()) * sizeof(cuDoubleComplex);
     const std::size_t budget = static_cast<std::size_t>(0.85 * static_cast<double>(free_b));
     const std::size_t max_vecs = vec_bytes ? budget / vec_bytes : 2 * kMaxPairs;
-    if (max_vecs < 2)
-        throw std::runtime_error("rep_matrix_elements_gpu: one ket + one bra do not fit on the device");
+    if (max_vecs < 2) throw std::runtime_error("rep_matrix_elements_gpu: one ket + one bra do not fit on the device");
 
     std::size_t p0 = 0;
     while (p0 < pairs.size()) {
@@ -290,8 +293,8 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
         while (p1 < pairs.size() && p1 - p0 < static_cast<std::size_t>(kMaxPairs)) {
             const auto& bv = bras[static_cast<std::size_t>(pairs[p1].first)];
             const auto& kv = kets[static_cast<std::size_t>(pairs[p1].second)];
-            const std::size_t extra = (slot.count(bv.data) ? 0 : 1)
-                                    + ((slot.count(kv.data) || kv.data == bv.data) ? 0 : 1);
+            const std::size_t extra =
+                (slot.count(bv.data) ? 0 : 1) + ((slot.count(kv.data) || kv.data == bv.data) ? 0 : 1);
             if (host_vecs.size() + extra > max_vecs) break;
             for (const RepVectorView* v : {&bv, &kv})
                 if (!slot.count(v->data)) {
@@ -304,8 +307,8 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
         std::vector<thrust::device_vector<cuDoubleComplex>> dvec(host_vecs.size());
         for (std::size_t i = 0; i < host_vecs.size(); ++i) {
             dvec[i].resize(host_len[i]);
-            ck(cudaMemcpy(thrust::raw_pointer_cast(dvec[i].data()), host_vecs[i],
-                          host_len[i] * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice),
+            ck(cudaMemcpy(thrust::raw_pointer_cast(dvec[i].data()), host_vecs[i], host_len[i] * sizeof(cuDoubleComplex),
+                          cudaMemcpyHostToDevice),
                "upload vector");
         }
         PairPtrs pp{};
@@ -331,15 +334,16 @@ rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
             ck(cudaGetLastError(), "kernel launch");
             ck(cudaDeviceSynchronize(), "kernel");
             std::vector<double> h(block_out.size());
-            ck(cudaMemcpy(h.data(), thrust::raw_pointer_cast(block_out.data()),
-                          h.size() * sizeof(double), cudaMemcpyDeviceToHost), "download partials");
+            ck(cudaMemcpy(h.data(), thrust::raw_pointer_cast(block_out.data()), h.size() * sizeof(double),
+                          cudaMemcpyDeviceToHost),
+               "download partials");
             for (int b = 0; b < n_blocks; ++b)
                 for (int p = 0; p < n_pairs; ++p)
                     for (int o = o0; o < o1; ++o) {
                         const std::size_t a = static_cast<std::size_t>(b) * n_acc
-                                            + 2 * static_cast<std::size_t>(p * (o1 - o0) + (o - o0));
-                        out[(p0 + static_cast<std::size_t>(p)) * n_obs + static_cast<std::size_t>(o)]
-                            += Complex(h[a], h[a + 1]);
+                                              + 2 * static_cast<std::size_t>(p * (o1 - o0) + (o - o0));
+                        out[(p0 + static_cast<std::size_t>(p)) * n_obs + static_cast<std::size_t>(o)] +=
+                            Complex(h[a], h[a + 1]);
                     }
         }
         p0 = p1;

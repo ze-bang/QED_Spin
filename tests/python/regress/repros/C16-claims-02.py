@@ -11,6 +11,7 @@ remain, wait out the 1 s free-memory cache, and run eigs and FTLM with device='g
 chain in the Sz=0 sector without spatial symmetry (dim C(22,11) = 705,432, needing 90 MB by the
 fit test, below the 2^20-rep threshold of the host-staged GPU gather). The risky part runs in a
 child process."""
+
 import subprocess
 import sys
 
@@ -84,7 +85,9 @@ elif not res.startswith("warm=") or res.startswith("warm=0"):
 elif "free_mb=" in res and float(res.split("free_mb=")[1].split("|")[0]) > 85:
     print(f"REPRO: INCONCLUSIVE could not occupy device memory: {res}")
 elif "ok:device_blocks=0" in res and "warnings=0" in res:
-    print(f"REPRO: CONFIRMED device='gpu' with a GPU present but too little free memory ran on the "
-          f"host silently: {res}")
+    print(
+        f"REPRO: CONFIRMED device='gpu' with a GPU present but too little free memory ran on the "
+        f"host silently: {res}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED {res}")

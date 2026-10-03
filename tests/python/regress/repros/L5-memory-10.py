@@ -11,6 +11,7 @@ spin_flip='off', time_reversal='off'): one 31824-state block. qed.eigs(H, 200, v
 it under the floor (160*200 = 32000), so it is materialised as a 31824^2 complex matrix (16.2 GB)
 inside this 16 GB job, while Krylov-Schur would hold ~460 x 31824 x 16 B = 0.23 GB. The call runs
 in a subprocess so an OOM kill can be reported."""
+
 import subprocess
 import sys
 
@@ -33,12 +34,16 @@ try:
     print(f"child return code {p.returncode}; output tail: {tail}")
     low = tail.lower()
     if p.returncode in (-9, 137) or "bad_alloc" in low or "memoryerror" in low or "alloc" in low:
-        print(f"REPRO: CONFIRMED eigs(k=200, vectors=True) on a 31824-state block went dense with no "
-              f"memory guard (rc={p.returncode}); Krylov-Schur would need ~0.23 GB")
+        print(
+            f"REPRO: CONFIRMED eigs(k=200, vectors=True) on a 31824-state block went dense with no "
+            f"memory guard (rc={p.returncode}); Krylov-Schur would need ~0.23 GB"
+        )
     elif "CHILD_DONE" in p.stdout:
         print("REPRO: NOT_REPRODUCED eigs(k=200, vectors=True) completed inside 16 GB")
     else:
         print(f"REPRO: INCONCLUSIVE child failed otherwise (rc={p.returncode})")
 except subprocess.TimeoutExpired:
-    print("REPRO: INCONCLUSIVE eigs(k=200, vectors=True) still running after 220 s "
-          "(no OOM within the timeout; path not identified)")
+    print(
+        "REPRO: INCONCLUSIVE eigs(k=200, vectors=True) still running after 220 s "
+        "(no OOM within the timeout; path not identified)"
+    )

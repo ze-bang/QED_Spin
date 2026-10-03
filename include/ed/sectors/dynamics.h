@@ -33,16 +33,16 @@ namespace ed::sectors {
 
 struct DynamicsSpec {
     std::vector<double> omega;
-    double              eta            = 0.05;
+    double eta = 0.05;
     std::vector<double> temperatures;          ///< empty = T = 0
-    std::size_t         krylov         = 200;
-    std::size_t         samples        = 40;   ///< T > 0: random vectors per source sector
-    std::uint64_t       seed           = 0;    ///< 0 = draw one
+    std::size_t krylov = 200;
+    std::size_t samples = 40;   ///< T > 0: random vectors per source sector
+    std::uint64_t seed = 0;    ///< 0 = draw one
     // scale-free: relative to s_H (numerics.h)
-    double              degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window, relative to s_H (numerics.h)
-    int                 dense_max_dim  = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
-    bool                prune          = true; ///< T = 0: the ground-manifold eigensolve prunes blocks (EigsOptions)
-    Device              device         = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
+    double degeneracy_tol = 1e-8; ///< T = 0: ground-manifold window, relative to s_H (numerics.h)
+    int dense_max_dim = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
+    bool prune = true; ///< T = 0: the ground-manifold eigensolve prunes blocks (EigsOptions)
+    Device device = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
 };
 
 /// One correlation: S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>; B null: A's
@@ -53,21 +53,21 @@ struct Probe {
 };
 
 struct DynamicsCurves {
-    std::vector<double>              omega;
-    std::vector<double>              T;        ///< empty for T = 0
+    std::vector<double> omega;
+    std::vector<double> T;        ///< empty for T = 0
     /// [probe][row][omega]: one row per temperature (one row at T = 0). An autocorrelation's
     /// imaginary part is zero up to roundoff.
     std::vector<std::vector<std::vector<Complex>>> S;
-    double                           e0 = 0.0;
-    int                              ground_manifold = 0;   ///< T = 0: levels averaged over
-    std::size_t                      target_sectors = 0;    ///< sectors the probes reached
-    std::size_t                      device_blocks  = 0;    ///< continued fractions / FTLM sources run on a GPU
-    Placement                        placement;
-    Diagnostics                      diagnostics;
+    double e0 = 0.0;
+    int ground_manifold = 0;   ///< T = 0: levels averaged over
+    std::size_t target_sectors = 0;    ///< sectors the probes reached
+    std::size_t device_blocks = 0;    ///< continued fractions / FTLM sources run on a GPU
+    Placement placement;
+    Diagnostics diagnostics;
 };
 
-[[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, const Spec& s,
-                                      const std::vector<Probe>& probes, const DynamicsSpec& d);
+[[nodiscard]] DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Probe>& probes,
+                                      const DynamicsSpec& d);
 
 /// O's autocorrelation alone.
 [[nodiscard]] inline DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const ::Operator& O,

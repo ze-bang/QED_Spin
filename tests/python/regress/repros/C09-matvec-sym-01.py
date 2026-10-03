@@ -8,6 +8,7 @@ becomes the zero operator on the CPU symmetry lane and in Operator.apply's CSR l
 Test: an 8-site Heisenberg ring with J = 1e-16. Spectra must scale exactly with J:
 qed.eigs(H_small) / 1e-16 should equal the dense numpy spectrum of the J = 1 ring.
 Operator.apply(H_small) v should equal 1e-16 * Operator.apply(H_one) v."""
+
 import signal
 import sys
 
@@ -42,7 +43,7 @@ def site(op, i):
     return out
 
 
-Hd = np.zeros((2 ** N, 2 ** N), complex)
+Hd = np.zeros((2**N, 2**N), complex)
 for i in range(N):
     j = (i + 1) % N
     for o in (sx, sy, sz):
@@ -70,18 +71,22 @@ print(f"eigs J=1e-16:  {e_small}  -> /J = {e_small / J}  (max rel err {small_err
 
 # Full-basis Operator.apply (dim 256 <= 2^20: CSR lane).
 rng = np.random.default_rng(1)
-v = (rng.standard_normal(2 ** N) + 1j * rng.standard_normal(2 ** N))
+v = rng.standard_normal(2**N) + 1j * rng.standard_normal(2**N)
 a_one = np.asarray(ring(1.0).apply(v))
 a_small = np.asarray(ring(J).apply(v))
 apply_rel = float(np.linalg.norm(a_small / J - a_one) / np.linalg.norm(a_one))
-print(f"Operator.apply: |H_small v|/J = {np.linalg.norm(a_small) / J:.4e}, |H_one v| = "
-      f"{np.linalg.norm(a_one):.4e}, rel err {apply_rel:.2e}")
+print(
+    f"Operator.apply: |H_small v|/J = {np.linalg.norm(a_small) / J:.4e}, |H_one v| = "
+    f"{np.linalg.norm(a_one):.4e}, rel err {apply_rel:.2e}"
+)
 
 if ctrl_err > 1e-8:
     print(f"REPRO: INCONCLUSIVE control J=1 disagrees with dense reference ({ctrl_err:.2e})")
 elif small_err > 1e-6 or apply_rel > 1e-6:
-    print(f"REPRO: CONFIRMED J=1e-16 eigs/J={list(np.round(e_small / J, 6))} vs ref "
-          f"{list(np.round(ref_sz, 6))}; apply rel err {apply_rel:.2e}")
+    print(
+        f"REPRO: CONFIRMED J=1e-16 eigs/J={list(np.round(e_small / J, 6))} vs ref "
+        f"{list(np.round(ref_sz, 6))}; apply rel err {apply_rel:.2e}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED eigs rel err {small_err:.2e}, apply rel err {apply_rel:.2e}")
 sys.exit(0)

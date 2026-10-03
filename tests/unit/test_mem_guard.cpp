@@ -19,14 +19,14 @@ TEST_CASE("mem_guard: available RAM is the tighter of node and cgroup", "[mem_gu
     // allocate and free (ctest runs in parallel), so bracket the combined probe with
     // samples on both sides and allow a slack. The slack is far below the gap the
     // test exists to catch: a job-limited cgroup against a node's free memory.
-    const std::uint64_t node0  = ed::core::node_available_ram_bytes();
+    const std::uint64_t node0 = ed::core::node_available_ram_bytes();
     const std::uint64_t group0 = ed::core::cgroup_available_ram_bytes();
-    const std::uint64_t avail  = ed::core::available_ram_bytes();
-    const std::uint64_t node1  = ed::core::node_available_ram_bytes();
+    const std::uint64_t avail = ed::core::available_ram_bytes();
+    const std::uint64_t node1 = ed::core::node_available_ram_bytes();
     const std::uint64_t group1 = ed::core::cgroup_available_ram_bytes();
-    const std::uint64_t slack  = std::uint64_t{512} << 20;
-    INFO("node " << (node0 >> 20) << "/" << (node1 >> 20) << " MiB, cgroup "
-         << (group0 >> 20) << "/" << (group1 >> 20) << " MiB, available " << (avail >> 20) << " MiB");
+    const std::uint64_t slack = std::uint64_t{512} << 20;
+    INFO("node " << (node0 >> 20) << "/" << (node1 >> 20) << " MiB, cgroup " << (group0 >> 20) << "/" << (group1 >> 20)
+                 << " MiB, available " << (avail >> 20) << " MiB");
     REQUIRE(node0 > 0);                      // every Linux host reports MemAvailable
     REQUIRE(avail > 0);
     REQUIRE(avail <= std::max(node0, node1) + slack);
@@ -45,7 +45,10 @@ TEST_CASE("mem_guard: ED_MEM_GUARD_OFF stands every guard down", "[mem_guard]") 
     setenv("ED_MEM_GUARD_OFF", "1", 1);
     REQUIRE(ed::core::mem_guard_off());
     REQUIRE_NOTHROW(ed::core::guard_working_set(ed::core::available_ram_bytes() * 2, "test"));
-    if (old) setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1); else unsetenv("ED_MEM_GUARD_OFF");
+    if (old)
+        setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1);
+    else
+        unsetenv("ED_MEM_GUARD_OFF");
 }
 
 TEST_CASE("footprint: the paths count the vectors the kernels hold", "[mem_guard][footprint]") {

@@ -108,8 +108,7 @@ inline constexpr std::size_t kLgTwoPassMinDim = std::size_t{1} << 22;   // 4.2M
 // gate, so the honest contiguous gate returns NOTHING (correct refusal).
 // ``dflt`` = 0 selects the eigenvalue-scan default max(40k, 400); the
 // vector lane passes its own tighter default (stored-basis memory).
-[[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k,
-                                                      std::uint64_t dflt = 0) {
+[[nodiscard]] inline std::uint64_t lg_lowest_max_iter(std::size_t k, std::uint64_t dflt = 0) {
     if (dflt > 0) return dflt;
     return std::max<std::uint64_t>(40u * static_cast<std::uint64_t>(k), 400u);
 }
@@ -129,18 +128,15 @@ inline constexpr int kLgGsRestarts = 4;
 
 // U-composition convention (matches irreps.cpp): U(g)U(h) = U(g·h) with
 // (g·h)[i] = h[g[i]].
-[[nodiscard]] inline std::vector<int>
-compose(const std::vector<int>& g, const std::vector<int>& h) {
+[[nodiscard]] inline std::vector<int> compose(const std::vector<int>& g, const std::vector<int>& h) {
     std::vector<int> c(g.size());
-    for (std::size_t i = 0; i < g.size(); ++i)
-        c[i] = h[static_cast<std::size_t>(g[i])];
+    for (std::size_t i = 0; i < g.size(); ++i) c[i] = h[static_cast<std::size_t>(g[i])];
     return c;
 }
 
 [[nodiscard]] inline std::vector<int> inverse_perm(const std::vector<int>& p) {
     std::vector<int> inv(p.size());
-    for (std::size_t i = 0; i < p.size(); ++i)
-        inv[static_cast<std::size_t>(p[i])] = static_cast<int>(i);
+    for (std::size_t i = 0; i < p.size(); ++i) inv[static_cast<std::size_t>(p[i])] = static_cast<int>(i);
     return inv;
 }
 
@@ -148,8 +144,8 @@ compose(const std::vector<int>& g, const std::vector<int>& h) {
 // one or the operator dies: pruning's estimate and the solve of one block bind twice and build
 // once. Never destroyed (a static's destructor could run after the CUDA runtime unloads).
 struct IdleDeviceCsr {
-    std::mutex                                     m;
-    const void*                                    owner = nullptr;
+    std::mutex m;
+    const void* owner = nullptr;
     std::shared_ptr<const ed::symmetry::DeviceCsr> csr;
     static IdleDeviceCsr& get() {
         static IdleDeviceCsr* slot = new IdleDeviceCsr;
@@ -166,9 +162,7 @@ struct IdleDeviceCsr {
 // -----------------------------------------------------------------------------
 class RepSectorMatVec final : public ed::LinearOperator {
 public:
-
-    RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd,
-                    bool force_gpu = false)
+    RepSectorMatVec(const ::Operator& op, ed::symmetry::RepSectorData rd, bool force_gpu = false)
         : RepSectorMatVec(op, own_with_lut(std::move(rd)), force_gpu) {}
 
     /// Share an existing sector basis: H and any other G-invariant operator on the
@@ -176,24 +170,18 @@ public:
     /// which is 1-2 GB at N = 36. The data must already carry its permutation LUT
     /// (every RepSectorMatVec builds it on construction, so rep_data_ptr() of an
     /// existing operator qualifies).
-    RepSectorMatVec(const ::Operator& op,
-                    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
-                    bool force_gpu = false)
+    RepSectorMatVec(const ::Operator& op, std::shared_ptr<const ed::symmetry::RepSectorData> rd, bool force_gpu = false)
         : RepSectorMatVec(op.row_program(), std::move(rd), force_gpu) {}
 
     /// An operator given by its row program (Operator::row_program, or compile_operator of an
     /// adjoint) on a sector basis that already carries its permutation LUT.
     RepSectorMatVec(std::shared_ptr<const ed::ops::MaskedProgram> rows,
-                    std::shared_ptr<const ed::symmetry::RepSectorData> rd,
-                    bool force_gpu = false)
-        : rd_(std::move(rd)),
-          rows_(std::move(rows)),
-          pol_(rd_->make_policy()),
-          force_gpu_(force_gpu)
-    {
+                    std::shared_ptr<const ed::symmetry::RepSectorData> rd, bool force_gpu = false)
+        : rd_(std::move(rd)), rows_(std::move(rows)), pol_(rd_->make_policy()), force_gpu_(force_gpu) {
         for (std::size_t g = 0; g < rows_->n_groups(); ++g)
             if (rows_->group_flip[g] != 0)
-                offdiag_terms_ += rows_->vsub_tbegin[rows_->group_vbegin[g + 1]] - rows_->vsub_tbegin[rows_->group_vbegin[g]];
+                offdiag_terms_ +=
+                    rows_->vsub_tbegin[rows_->group_vbegin[g + 1]] - rows_->vsub_tbegin[rows_->group_vbegin[g]];
         for (const auto& c : rows_->term_coeff) norm_bound_ += std::abs(c);
     }
 
@@ -217,16 +205,14 @@ public:
             csr_->spmv(in, out);
         else
             ed::matvec::sector_gather(rows_->view(), pol_, rd_->states(), in, out);
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - t0).count();
+        const auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         applies_.fetch_add(1, std::memory_order_relaxed);
         apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
     }
     [[nodiscard]] std::size_t dim() const override { return rd_->states(); }
     [[nodiscard]] bool is_hermitian() const override { return true; }
-    [[nodiscard]] std::string description() const override {
-        return "LittleGroupRepSector(H_k)";
-    }
+    [[nodiscard]] std::string description() const override { return "LittleGroupRepSector(H_k)"; }
     /// s_H of the operator (sum of |c| over its terms): a block's norm cannot exceed it.
     [[nodiscard]] double norm_bound() const override { return norm_bound_; }
 
@@ -281,9 +267,7 @@ public:
     [[nodiscard]] bool is_real() const override {
         ensure_lane_();
         if (!csr_ || (gpu_fn_ && force_gpu_)) return false;
-        std::call_once(real_once_, [this] {
-            real_ = ed::matvec::RealCsrView::of(*csr_, ed::numerics::kRealBlockRel);
-        });
+        std::call_once(real_once_, [this] { real_ = ed::matvec::RealCsrView::of(*csr_, ed::numerics::kRealBlockRel); });
         return real_.has_value();
     }
     [[nodiscard]] RealMatvecFn bind_cpu_real() const override {
@@ -291,19 +275,15 @@ public:
         return [this](const double* in, double* out, std::size_t) {
             const auto t0 = std::chrono::steady_clock::now();
             real_->spmv(in, out);
-            const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - t0).count();
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
             applies_.fetch_add(1, std::memory_order_relaxed);
             real_applies_.fetch_add(1, std::memory_order_relaxed);
             apply_ns_.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
         };
     }
-    [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const {
-        return rd_;
-    }
-    [[nodiscard]] const ed::symmetry::RepSectorData& rep_data() const {
-        return *rd_;
-    }
+    [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> rep_data_ptr() const { return rd_; }
+    [[nodiscard]] const ed::symmetry::RepSectorData& rep_data() const { return *rd_; }
 
     // The sector matrix assembled DIRECTLY from the row walk -- PARALLEL over rows --
     // instead of dim column matvecs: the same entries the walk lane applies; densifying /
@@ -350,8 +330,7 @@ private:
     // per row). col_idx is uint32, so > 2^32-row sectors always
     // stay on the gather walk.
     void maybe_build_csr_() const {
-        if (ed::planner::resolved_sym_matvec_repr()
-                != static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr))
+        if (ed::planner::resolved_sym_matvec_repr() != static_cast<int>(ed::planner::SymMatvecRepr::RepReducedCsr))
             return;
         const std::uint64_t dim = rd_->states();
         if (dim == 0 || dim >= (std::uint64_t{1} << 32)) return;
@@ -380,15 +359,16 @@ private:
         }
         csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(std::move(built));
         if (budget_) {   // the estimate is an upper bound for a dictionary; a full-value CSR may exceed it
-            if (csr_bytes() <= est) budget_->give(est - csr_bytes());
-            else (void)budget_->take(csr_bytes() - est);
+            if (csr_bytes() <= est)
+                budget_->give(est - csr_bytes());
+            else
+                (void)budget_->take(csr_bytes() - est);
         }
         if (ed::env::flag("ED_SYM_PROFILE", false)) {
             ED_LOG(Info,
-                         "[sym_profile] little-group block dim=%llu: "
-                         "reduced CSR engaged (nnz=%llu)",
-                         static_cast<unsigned long long>(dim),
-                         static_cast<unsigned long long>(csr_->nnz()));
+                   "[sym_profile] little-group block dim=%llu: "
+                   "reduced CSR engaged (nnz=%llu)",
+                   static_cast<unsigned long long>(dim), static_cast<unsigned long long>(csr_->nnz()));
         }
     }
 
@@ -398,10 +378,10 @@ private:
     // walk serves. A bound apply holds it, and so does the idle slot (IdleDeviceCsr) until another
     // operator builds one. Declined once, it is not tried again.
     std::string upload_refusal_() const {
-        return "a sector of an irrep of dimension " + std::to_string(rd_->irrep_dim) + " (" + std::to_string(rd_->states())
-               + " states) runs on the device through its reduced CSR (" + std::to_string(csr_bytes() >> 20)
-               + " MiB), which could not be uploaded (device CSR budget " + std::to_string(device_csr_room_() >> 20)
-               + " MiB)";
+        return "a sector of an irrep of dimension " + std::to_string(rd_->irrep_dim) + " ("
+               + std::to_string(rd_->states()) + " states) runs on the device through its reduced CSR ("
+               + std::to_string(csr_bytes() >> 20) + " MiB), which could not be uploaded (device CSR budget "
+               + std::to_string(device_csr_room_() >> 20) + " MiB)";
     }
 
     // The device CSR's budget: ED_GPU_CSR_BUDGET_GIB, unset half the free device memory.
@@ -441,13 +421,13 @@ private:
         }
         const ed::symmetry::DeviceCsrInfo info = ed::symmetry::device_csr_info(*c);
         dcsr_build_s_ += info.build_s;
-        dcsr_nnz_   = info.nnz;
+        dcsr_nnz_ = info.nnz;
         dcsr_bytes_ = info.bytes;
         dcsr_built_ = true;
         dcsr_ = c;
         std::lock_guard<std::mutex> g(idle.m);
         idle.owner = this;
-        idle.csr   = c;
+        idle.csr = c;
         return c;
     }
 
@@ -471,13 +451,15 @@ private:
             gpu_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (ed::env::flag("ED_SYM_PROFILE", false)) {
                 ED_LOG(Info,
-                             "[sym_profile] little-group block dim=%zu: "
-                             "GPU rep gather engaged", rd_->reps.size());
+                       "[sym_profile] little-group block dim=%zu: "
+                       "GPU rep gather engaged",
+                       rd_->reps.size());
             }
         } catch (const std::exception& e) {
             ED_LOG(Warn,
-                         "[little_group] GPU rep gather declined (%s); "
-                         "using the CPU walk", e.what());
+                   "[little_group] GPU rep gather declined (%s); "
+                   "using the CPU walk",
+                   e.what());
             gpu_fn_ = nullptr;
         }
     }
@@ -486,39 +468,39 @@ private:
     // for the backend, which holds a non-owning view.
     std::shared_ptr<const ed::symmetry::RepSectorData> rd_;
 
-    static std::shared_ptr<const ed::symmetry::RepSectorData>
-    own_with_lut(ed::symmetry::RepSectorData rd) {
+    static std::shared_ptr<const ed::symmetry::RepSectorData> own_with_lut(ed::symmetry::RepSectorData rd) {
         auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
         p->build_perm_lut();
         p->build_buckets();
         return p;
     }
-    std::shared_ptr<const ed::ops::MaskedProgram>  rows_;    // the operator's row program
-    ed::matvec::basis::RepSymmetryBasisPolicy      pol_;     // views into *rd_
-    std::uint64_t                                  offdiag_terms_ = 0;
-    double                                         norm_bound_ = 0.0;   // sum of |c| over the program
-    mutable std::once_flag                         csr_once_;
+    std::shared_ptr<const ed::ops::MaskedProgram> rows_;    // the operator's row program
+    ed::matvec::basis::RepSymmetryBasisPolicy pol_;     // views into *rd_
+    std::uint64_t offdiag_terms_ = 0;
+    double norm_bound_ = 0.0;   // sum of |c| over the program
+    mutable std::once_flag csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
-    mutable std::once_flag                         real_once_;
+    mutable std::once_flag real_once_;
     mutable std::optional<ed::matvec::RealCsrView> real_;     // csr_'s real part, when the block is real
-    mutable std::once_flag                         gpu_once_;
-    mutable ed::LinearOperator::MatvecFn           gpu_fn_;
-    mutable std::mutex                             dcsr_mtx_;
+    mutable std::once_flag gpu_once_;
+    mutable ed::LinearOperator::MatvecFn gpu_fn_;
+    mutable std::mutex dcsr_mtx_;
     mutable std::weak_ptr<const ed::symmetry::DeviceCsr> dcsr_;   // the device CSR while anything holds it
-    mutable bool                                   dcsr_declined_ = false;
-    mutable bool                                   dcsr_built_ = false;
-    mutable double                                 dcsr_build_s_ = 0.0;
-    mutable std::uint64_t                          dcsr_nnz_ = 0, dcsr_bytes_ = 0;
-    bool                                           force_gpu_ = false;
-    bool                                           device_ok_ = false;
-    std::shared_ptr<ed::planner::CsrBudget>        budget_;      // the block's, or null: the default rule
-    std::uint64_t                                  defer_csr_ = 0;   // applies walked before the CSR
+    mutable bool dcsr_declined_ = false;
+    mutable bool dcsr_built_ = false;
+    mutable double dcsr_build_s_ = 0.0;
+    mutable std::uint64_t dcsr_nnz_ = 0, dcsr_bytes_ = 0;
+    bool force_gpu_ = false;
+    bool device_ok_ = false;
+    std::shared_ptr<ed::planner::CsrBudget> budget_;      // the block's, or null: the default rule
+    std::uint64_t defer_csr_ = 0;   // applies walked before the CSR
     // Per-operator counters (relaxed: applies may run concurrently).
-    mutable std::atomic<std::uint64_t>             applies_{0};
-    mutable std::atomic<std::uint64_t>             apply_ns_{0};
-    mutable std::atomic<std::uint64_t>             real_applies_{0};   // of them on real vectors
-    mutable double                                 csr_build_s_ = 0.0;
-    mutable double                                 gpu_build_s_ = 0.0;
+    mutable std::atomic<std::uint64_t> applies_{0};
+    mutable std::atomic<std::uint64_t> apply_ns_{0};
+    mutable std::atomic<std::uint64_t> real_applies_{0};   // of them on real vectors
+    mutable double csr_build_s_ = 0.0;
+    mutable double gpu_build_s_ = 0.0;
+
 public:
     /// Host-side applies so far, and their total seconds (representation builds excluded).
     [[nodiscard]] std::uint64_t applies() const noexcept { return applies_.load(std::memory_order_relaxed); }
@@ -554,6 +536,7 @@ public:
     /// meaningful only after the first apply(). false + !gpu_engaged()
     /// after applies ran means the CSR-free gather walk served them.
     [[nodiscard]] bool csr_engaged() const noexcept { return csr_ != nullptr; }
+
 private:
 };
 
@@ -569,8 +552,8 @@ public:
     CrossSectorMatVec(std::shared_ptr<const ed::ops::MaskedProgram> rows,
                       std::shared_ptr<const ed::symmetry::RepSectorData> src,
                       std::shared_ptr<const ed::symmetry::RepSectorData> tgt)
-        : rows_(std::move(rows)), src_(std::move(src)), tgt_(std::move(tgt)),
-          src_pol_(src_->make_policy()), tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {
+        : rows_(std::move(rows)), src_(std::move(src)), tgt_(std::move(tgt)), src_pol_(src_->make_policy()),
+          tgt_pol_(tgt_->make_policy()), same_(src_.get() == tgt_.get()) {
         // Between sectors of an irrep of dimension d > 1 the rows are blocks (sector_rows.h), written for
         // two sectors of the SAME irrep (an invariant operator: total S+-, S^2); any other pair refuses.
         if ((src_->irrep_dim > 1 || tgt_->irrep_dim > 1)
@@ -614,12 +597,12 @@ private:
         if (built.built()) csr_ = std::make_unique<ed::matvec::ReducedSymmetryCsr<Complex>>(std::move(built));
     }
 
-    std::shared_ptr<const ed::ops::MaskedProgram>      rows_;
+    std::shared_ptr<const ed::ops::MaskedProgram> rows_;
     std::shared_ptr<const ed::symmetry::RepSectorData> src_, tgt_;
-    ed::matvec::basis::RepSymmetryBasisPolicy          src_pol_, tgt_pol_;
-    bool                                               same_;
-    mutable std::atomic<std::uint64_t>                 applies_{0};
-    mutable std::once_flag                             csr_once_;
+    ed::matvec::basis::RepSymmetryBasisPolicy src_pol_, tgt_pol_;
+    bool same_;
+    mutable std::atomic<std::uint64_t> applies_{0};
+    mutable std::once_flag csr_once_;
     mutable std::unique_ptr<ed::matvec::ReducedSymmetryCsr<Complex>> csr_;
 };
 
@@ -641,28 +624,31 @@ private:
 [[nodiscard]] inline bool csr_is_real(const ed::matvec::ReducedSymmetryCsr<Complex>& c) {
     double big = 0.0, imag = 0.0;
     const auto scan = [&](const Complex& v) {
-        big  = std::max(big, std::abs(v));
+        big = std::max(big, std::abs(v));
         imag = std::max(imag, std::abs(v.imag()));
     };
-    if (c.dictionary()) for (const auto& v : c.dict) scan(v);
-    else                for (const auto& v : c.val) scan(v);
+    if (c.dictionary())
+        for (const auto& v : c.dict) scan(v);
+    else
+        for (const auto& v : c.val) scan(v);
     return imag <= ed::numerics::kRealBlockRel * big;
 }
 
 /// The matrix of `c` written whole into `out` (dim x dim, column-major): doubles (its real part,
 /// for a block csr_is_real accepts) or complex values; zeros and entries in parallel.
-template <class T>
-inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr<Complex>& c, T* out) {
+template <class T> inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr<Complex>& c, T* out) {
     const std::uint64_t n = c.dim;
-    #pragma omp parallel for schedule(static) if(n > 256)
+#pragma omp parallel for schedule(static) if (n > 256)
     for (long long j = 0; j < static_cast<long long>(n); ++j)
         std::fill(out + static_cast<std::uint64_t>(j) * n, out + (static_cast<std::uint64_t>(j) + 1) * n, T(0));
-    #pragma omp parallel for schedule(static) if(n > 256)
+#pragma omp parallel for schedule(static) if (n > 256)
     for (long long ir = 0; ir < static_cast<long long>(n); ++ir) {
         const auto r = static_cast<std::uint64_t>(ir);
         for (std::uint64_t e = c.row_ptr[r]; e < c.row_ptr[r + 1]; ++e) {
-            if constexpr (std::is_same_v<T, double>) out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e).real();
-            else                                     out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e);
+            if constexpr (std::is_same_v<T, double>)
+                out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e).real();
+            else
+                out[std::uint64_t{c.col_idx[e]} * n + r] = c.value(e);
         }
     }
 }
@@ -670,16 +656,14 @@ inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr<Complex>& c, T* ou
 // Dense materialization: a sector operator takes the CSR path above; anything else (S^2 through
 // its ladder, a penalty) the column-by-column matvec build.
 [[nodiscard]] inline Eigen::MatrixXcd materialize(const ed::LinearOperator& mv) {
-    if (const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv))
-        return dense_block(*hk);
+    if (const auto* hk = dynamic_cast<const RepSectorMatVec*>(&mv)) return dense_block(*hk);
     const std::size_t n = mv.dim();
     Eigen::MatrixXcd H(n, n);
     std::vector<Complex> e(n, Complex(0, 0)), col(n);
     for (std::size_t j = 0; j < n; ++j) {
         e[j] = Complex(1, 0);
         mv.apply(e.data(), col.data(), n);
-        for (std::size_t i = 0; i < n; ++i) H(static_cast<Eigen::Index>(i),
-                                              static_cast<Eigen::Index>(j)) = col[i];
+        for (std::size_t i = 0; i < n; ++i) H(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = col[i];
         e[j] = Complex(0, 0);
     }
     return H;
@@ -688,47 +672,43 @@ inline void csr_to_dense(const ed::matvec::ReducedSymmetryCsr<Complex>& c, T* ou
 
 // The per-call engine state shared by the star walk and every consumer.
 struct EngineContext {
-    std::vector<std::vector<int>>        A;             // RAW abelian perms
-    ed::symmetry::GroupIrreps            giA;           // irreps of RAW A
-    std::vector<std::vector<int>>        residues;      // usable, deduped, no identity
-    std::vector<int>                     residue_spec;  // per residue: its index in the caller's list
-    std::vector<std::vector<int>>        irrep_map;     // per residue: k -> k'
+    std::vector<std::vector<int>> A;             // RAW abelian perms
+    ed::symmetry::GroupIrreps giA;           // irreps of RAW A
+    std::vector<std::vector<int>> residues;      // usable, deduped, no identity
+    std::vector<int> residue_spec;  // per residue: its index in the caller's list
+    std::vector<std::vector<int>> irrep_map;     // per residue: k -> k'
                                                         // (EXTENDED indices when flip)
     /// The subspace's orbit table under A (A') and, at fixed Sz, its rank lookup: acquired by the
     /// first star that needs its momentum sector (k_sector_table), so a walk whose stars all take
     /// the group-sector path never builds them.
     struct KTable {
         std::once_flag once;
-        std::shared_ptr<const ed::symmetry::OrbitTable>       otab;
+        std::shared_ptr<const ed::symmetry::OrbitTable> otab;
         std::shared_ptr<const ed::symmetry::SharedRankLookup> srl;   // fixed Sz: shared rank table, or null
         std::atomic<double> seconds{0.0};                              // to acquire both (0: not yet)
     };
-    std::shared_ptr<KTable>              k_table = std::make_shared<KTable>();
-    int                                  n_up = -1, sz_parity = -1;   // the subspace
-    ed::symmetry::CompiledGroup          cg;            // A (or A'), byte-LUT
-    int                                  n_sites = 0;
+    std::shared_ptr<KTable> k_table = std::make_shared<KTable>();
+    int n_up = -1, sz_parity = -1;   // the subspace
+    ed::symmetry::CompiledGroup cg;            // A (or A'), byte-LUT
+    int n_sites = 0;
     // A' = A x Z2 (global spin flip as an XOR element). Element
     // index convention: a in [0,|A|) pure, a+|A| = flip*a. Irrep index
     // convention: k + s*n_irr_raw, s in {0,1} the flip parity.
-    bool                                 flip_half = false;
-    std::uint64_t                        flip_mask = 0;
-    int                                  n_irr_raw = 0;
-    const ed::ops::MaskedOperator*       terms = nullptr;       // H's canonical terms (the verdicts)
-    Antiunitary                          tr = Antiunitary::None;   // the map of the stars' time-reversal fold
+    bool flip_half = false;
+    std::uint64_t flip_mask = 0;
+    int n_irr_raw = 0;
+    const ed::ops::MaskedOperator* terms = nullptr;       // H's canonical terms (the verdicts)
+    Antiunitary tr = Antiunitary::None;   // the map of the stars' time-reversal fold
 
-    [[nodiscard]] std::size_t nA_ext() const noexcept {
-        return A.size() * (flip_half ? 2u : 1u);
-    }
-    [[nodiscard]] int n_irr_ext() const noexcept {
-        return n_irr_raw * (flip_half ? 2 : 1);
-    }
+    [[nodiscard]] std::size_t nA_ext() const noexcept { return A.size() * (flip_half ? 2u : 1u); }
+    [[nodiscard]] int n_irr_ext() const noexcept { return n_irr_raw * (flip_half ? 2 : 1); }
 };
 
 // Outcome of resolve_flip_engagement (context.cpp).
 struct FlipEngagement {
-    bool          symmetric = false;
-    bool          engaged   = false;
-    std::uint64_t mask      = 0;
+    bool symmetric = false;
+    bool engaged = false;
+    std::uint64_t mask = 0;
 };
 
 // -----------------------------------------------------------------------------
@@ -741,8 +721,8 @@ struct FlipEngagement {
 // -----------------------------------------------------------------------------
 struct StarBuild {
     std::vector<std::shared_ptr<BlockData>> blocks;
-    LittleGroupStarInfo               info;
-    std::shared_ptr<RepSectorMatVec>  hk;   // null <=> empty sector
+    LittleGroupStarInfo info;
+    std::shared_ptr<RepSectorMatVec> hk;   // null <=> empty sector
     double t_orbit = 0.0;   // seconds in the star's own orbit table (group-sector path)
     double t_build = 0.0;   // seconds in build_star_blocks (set by the star walk)
 };
@@ -750,8 +730,8 @@ struct StarBuild {
 // ---- naming irreps by character ---------------------------------------------
 /// chi_sigma(residue i) in a co-group table: elems[e] is the residue of element e (-1 the
 /// identity) and chars[e] its character; nullopt when residue i is not in the group.
-[[nodiscard]] inline std::optional<Complex>
-co_group_char(const std::vector<int>& elems, const std::vector<Complex>& chars, int i) {
+[[nodiscard]] inline std::optional<Complex> co_group_char(const std::vector<int>& elems,
+                                                          const std::vector<Complex>& chars, int i) {
     for (std::size_t e = 0; e < elems.size(); ++e)
         if (elems[e] == i) return chars[e];
     return std::nullopt;
@@ -759,15 +739,17 @@ co_group_char(const std::vector<int>& elems, const std::vector<Complex>& chars, 
 
 /// Whether a block meets any one of `any_of` (empty: always); chi(i) is its character on
 /// residue i, or nullopt when i is not in its group.
-template <class Chi>
-[[nodiscard]] bool meets(const std::vector<CharConstraint>& any_of, Chi&& chi) {
+template <class Chi> [[nodiscard]] bool meets(const std::vector<CharConstraint>& any_of, Chi&& chi) {
     if (any_of.empty()) return true;
     for (const auto& c : any_of) {
         bool ok = true;
         for (const auto& [i, x] : c) {
             const std::optional<Complex> v = chi(i);
             // scale-free: unit-modulus characters / phases (group data, not energies)
-            if (!v || std::abs(*v - x) > 1e-8) { ok = false; break; }
+            if (!v || std::abs(*v - x) > 1e-8) {
+                ok = false;
+                break;
+            }
         }
         if (ok) return true;
     }
@@ -777,8 +759,7 @@ template <class Chi>
 /// Whether irrep `ii` of a co-group table passes opt.only_irrep and opt.only_irrep_chars.
 [[nodiscard]] inline bool wanted_irrep(const LittleGroupOptions& opt, int ii, const std::vector<int>& elems,
                                        const std::vector<Complex>& chars) {
-    if (!opt.only_irrep.empty()
-        && std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) == opt.only_irrep.end())
+    if (!opt.only_irrep.empty() && std::find(opt.only_irrep.begin(), opt.only_irrep.end(), ii) == opt.only_irrep.end())
         return false;
     return meets(opt.only_irrep_chars, [&](int i) { return co_group_char(elems, chars, i); });
 }
@@ -795,21 +776,14 @@ template <class Chi>
 
 // ---- helpers defined in the engine translation units ----------------------
 // context.cpp
-[[nodiscard]] FlipEngagement
-resolve_flip_engagement(const ed::ops::MaskedOperator& h,
-                        const LittleGroupOptions& opt, int n_sites);
+[[nodiscard]] FlipEngagement resolve_flip_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions& opt,
+                                                     int n_sites);
 [[nodiscard]] std::vector<int> conjugate_irrep_map(const EngineContext& cx);
-[[nodiscard]] ed::symmetry::RepSectorData
-build_k_sector(const EngineContext& cx, int k, int n_up);
-void make_engine_context(const ::Operator&                    op,
-                         const std::vector<std::vector<int>>& abelian_group,
-                         const std::vector<std::vector<int>>& residue_perms,
-                         int                                  n_sites,
-                         const LittleGroupOptions&            opt,
-                         EngineContext&                       cx,
-                         bool&                                tr_on);
-[[nodiscard]] std::map<int, std::vector<int>>
-star_partition(const EngineContext& cx, bool tr_on);
+[[nodiscard]] ed::symmetry::RepSectorData build_k_sector(const EngineContext& cx, int k, int n_up);
+void make_engine_context(const ::Operator& op, const std::vector<std::vector<int>>& abelian_group,
+                         const std::vector<std::vector<int>>& residue_perms, int n_sites, const LittleGroupOptions& opt,
+                         EngineContext& cx, bool& tr_on);
+[[nodiscard]] std::map<int, std::vector<int>> star_partition(const EngineContext& cx, bool tr_on);
 
 // block_solve.cpp: the per-block eigensolve driver. The dense choice is the verb's
 // (lowest_dense_floor, through place()); the Krylov lanes are templated on the Backend and
@@ -823,7 +797,7 @@ star_partition(const EngineContext& cx, bool tr_on);
 /// The lowest eigenpairs of a dense block, ascending; column j of `vectors` belongs to values[j].
 struct DenseEigenpairs {
     std::vector<double> values;
-    Eigen::MatrixXcd    vectors;
+    Eigen::MatrixXcd vectors;
 };
 /// The `want` lowest eigenpairs of a materialised block (consumed): the one dense eigensolve with
 /// vectors (LAPACK MRRR, the real path for a real block).
@@ -844,9 +818,7 @@ template <class B> struct LanePolicy;
 template <class Scalar> struct LanePolicy<ed::matvec::BasicCpuBackend<Scalar>> {
     /// Bytes the Krylov-Schur basis may use (0: no cap): the RAM this job may still allocate
     /// (no cap under ED_MEM_GUARD_OFF).
-    static std::uint64_t ks_budget_bytes() {
-        return ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes();
-    }
+    static std::uint64_t ks_budget_bytes() { return ed::core::mem_guard_off() ? 0 : ed::core::available_ram_bytes(); }
     /// The GS vector may keep its Krylov basis (as far as it fits) up to this dimension; above it,
     /// it replays the recurrence.
     static constexpr std::size_t gs_kept_basis_max_dim = kLgTwoPassMinDim;
@@ -870,11 +842,11 @@ template <class Scalar> struct LanePolicy<ed::matvec::BasicCudaBackend<Scalar>> 
 /// false: the block could not certify the requested window (the certified prefix is kept).
 /// `whole`: the values are every level the block holds (fewer than requested when it holds fewer).
 struct BlockSolution {
-    std::vector<double>               values;
+    std::vector<double> values;
     std::vector<std::vector<Complex>> vectors;
-    bool                              converged = true;
-    bool                              whole     = false;
-    std::uint64_t                     applies   = 0;   ///< H applies of this solve
+    bool converged = true;
+    bool whole = false;
+    std::uint64_t applies = 0;   ///< H applies of this solve
 };
 
 /// The spin-S tower of one fixed-Sz block (P6.5): its states of total spin S, which the eigs lanes
@@ -887,10 +859,10 @@ struct BlockSolution {
 /// the band (tower_penalty). No projection runs per apply.
 struct Tower {
     std::shared_ptr<const ed::symmetry::RepSectorData> sector;   ///< the block's basis
-    std::shared_ptr<const ed::LinearOperator>          s2;       ///< S^2 on it (LadderS2, or the S^2 carrier)
-    int              two_S = -1;
+    std::shared_ptr<const ed::LinearOperator> s2;       ///< S^2 on it (LadderS2, or the S^2 carrier)
+    int two_S = -1;
     std::vector<int> towers;      ///< the 2S' the block holds (allowed_two_S_in_block)
-    std::int64_t     dim   = -1;  ///< its spin-S states when known (states less those at n_up + 1), else -1
+    std::int64_t dim = -1;  ///< its spin-S states when known (states less those at n_up + 1), else -1
 
     [[nodiscard]] double lambda() const { return 0.25 * two_S * (two_S + 2); }
     /// min |S'(S'+1) - S(S+1)| over the block's other towers; 0 when it holds no other.
@@ -902,7 +874,12 @@ struct Tower {
     [[nodiscard]] std::vector<Complex> seed(std::uint64_t s) const;
 
     /// The last start computed (a lane asks for the one its caller checked).
-    struct SeedMemo { std::mutex m; bool have = false; std::uint64_t s = 0; std::vector<Complex> v; };
+    struct SeedMemo {
+        std::mutex m;
+        bool have = false;
+        std::uint64_t s = 0;
+        std::vector<Complex> v;
+    };
     std::shared_ptr<SeedMemo> memo = std::make_shared<SeedMemo>();
 };
 
@@ -919,10 +896,10 @@ struct Tower {
 /// H's Rayleigh quotient), its off-tower ones those at 0. `off` counts the off-tower directions
 /// dropped; `ambiguous`, one neither near 0 nor near 1 (mixed at O(1)): nothing certified there.
 struct TowerLevels {
-    std::vector<double>               values;
+    std::vector<double> values;
     std::vector<std::vector<Complex>> vectors;
-    std::size_t                       off       = 0;
-    bool                              ambiguous = false;
+    std::size_t off = 0;
+    bool ambiguous = false;
 };
 [[nodiscard]] TowerLevels tower_filter(const Tower& t, const ed::LinearOperator& H, const std::vector<double>& values,
                                        std::vector<std::vector<Complex>> vectors, double cluster_tol);
@@ -943,18 +920,18 @@ struct TowerLevels {
 /// The certified lowest eigenpair of one block: `certified` when ||H u - E u|| <= gs_resid_tol(H)
 /// (a miss or an internal numerical failure leaves it false).
 struct GsVector {
-    double               energy   = 0.0;
+    double energy = 0.0;
     std::vector<Complex> vector;
-    double               residual = std::numeric_limits<double>::infinity();
-    bool                 certified = false;
-    std::uint64_t        applies   = 0;
+    double residual = std::numeric_limits<double>::infinity();
+    bool certified = false;
+    std::uint64_t applies = 0;
 };
 
 /// An upper bound on a block's lowest level (40 Lanczos steps); -inf when it failed.
 struct BlockEstimate {
-    double        theta    = -std::numeric_limits<double>::infinity();   ///< lowest Ritz value
-    double        residual = std::numeric_limits<double>::infinity();    ///< its bound |beta_m z_m|
-    std::uint64_t applies  = 0;
+    double theta = -std::numeric_limits<double>::infinity();   ///< lowest Ritz value
+    double residual = std::numeric_limits<double>::infinity();    ///< its bound |beta_m z_m|
+    std::uint64_t applies = 0;
 };
 
 /// The `want` lowest levels by a dense solve on the host: LAPACK values, or Eigen with vectors.
@@ -1000,13 +977,8 @@ template <class B>
 [[nodiscard]] BlockEstimate estimate_lowest(B& be, const ed::LinearOperator& H, const Tower* tower = nullptr);
 
 // stars.cpp
-[[nodiscard]] StarBuild
-build_star_blocks(const ::Operator&         op,
-                  const EngineContext&      cx,
-                  bool                      tr_on,
-                  int                       k0,
-                  const std::vector<int>&   members,
-                  const LittleGroupOptions& opt);
+[[nodiscard]] StarBuild build_star_blocks(const ::Operator& op, const EngineContext& cx, bool tr_on, int k0,
+                                          const std::vector<int>& members, const LittleGroupOptions& opt);
 
 }  // namespace lg_detail
 
@@ -1015,13 +987,13 @@ build_star_blocks(const ::Operator&         op,
 // sector of a trivial co-group, whose operator IS the star's H_k0.
 // =============================================================================
 struct BlockData {
-    LittleGroupBlockTag                   tag;
-    std::shared_ptr<lg_detail::RepSectorMatVec>      hk;    // shared across the star's blocks
+    LittleGroupBlockTag tag;
+    std::shared_ptr<lg_detail::RepSectorMatVec> hk;    // shared across the star's blocks
     // Group-sector block (group_sector.cpp): an irrep solved in the rep basis of the FULL little group
     // G_k = A x P_k0 (x flip) -- C(N, n_up)/|G_k| states instead of the whole k-sector. `gop` acts on
     // `gsec`. Null on a plain block.
     std::shared_ptr<const ed::symmetry::RepSectorData> gsec;
-    std::shared_ptr<lg_detail::RepSectorMatVec>        gop;
+    std::shared_ptr<lg_detail::RepSectorMatVec> gop;
 };
 
 namespace lg_detail {
@@ -1044,16 +1016,18 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
 // group_sector.cpp: the group sectors of build_star_blocks (build_group_blocks, stars.cpp).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::OrbitTable>
 group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, int sz_parity, bool flip);
-[[nodiscard]] ed::symmetry::RepSectorData
-group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
-                        int n_sites, int n_up, bool flip, const std::vector<Complex>& characters);
+[[nodiscard]] ed::symmetry::RepSectorData group_sector_from_table(const ed::symmetry::OrbitTable& tab,
+                                                                  const std::vector<std::vector<int>>& perms,
+                                                                  int n_sites, int n_up, bool flip,
+                                                                  const std::vector<Complex>& characters);
 /// The sector of an irrep of dimension d (P6.3): D holds D(g) for every element (|G| d x d
 /// row-major, 2|G| with flip, in the table's element order); per stabiliser class its rank and C
 /// (rep_sector.h), and the representatives of nonzero rank with their state offsets. d = 1 is
 /// group_sector_from_table on the traces.
-[[nodiscard]] ed::symmetry::RepSectorData
-group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
-                              int n_sites, int n_up, bool flip, int d, const std::vector<Complex>& D);
+[[nodiscard]] ed::symmetry::RepSectorData group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab,
+                                                                        const std::vector<std::vector<int>>& perms,
+                                                                        int n_sites, int n_up, bool flip, int d,
+                                                                        const std::vector<Complex>& D);
 /// The sector one up spin higher (n_up + 1) of `src`'s group and irrep, where total S+ maps `src`
 /// (a fixed-Sz sector below n_up = N without the flip half, which does not map n_up + 1 to itself).
 [[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> raised_sector(const ed::symmetry::RepSectorData& src);
@@ -1079,17 +1053,17 @@ public:
         }
         ed::ops::CompileOptions copt;
         copt.project = false;                         // total S+- commute with the group
-        plus_ = std::make_unique<CrossSectorMatVec>(
-            std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({plus.dagger()}, *up_, *sec_, copt)),
-            sec_, up_);
-        minus_ = std::make_unique<CrossSectorMatVec>(
-            std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_program({minus.dagger()}, *sec_, *up_, copt)),
-            up_, sec_);
+        plus_ = std::make_unique<CrossSectorMatVec>(std::make_shared<const ed::ops::MaskedProgram>(
+                                                        ed::ops::compile_program({plus.dagger()}, *up_, *sec_, copt)),
+                                                    sec_, up_);
+        minus_ = std::make_unique<CrossSectorMatVec>(std::make_shared<const ed::ops::MaskedProgram>(
+                                                         ed::ops::compile_program({minus.dagger()}, *sec_, *up_, copt)),
+                                                     up_, sec_);
     }
 
     void apply(const Complex* in, Complex* out, std::size_t n) const override {
         if (!plus_) {
-            #pragma omp parallel for schedule(static) if(n > 8192)
+#pragma omp parallel for schedule(static) if (n > 8192)
             for (long long i = 0; i < static_cast<long long>(n); ++i) out[i] = shift_ * in[i];
             return;
         }
@@ -1097,7 +1071,7 @@ public:
         ed::core::NumaVector<Complex> mid(up_->states()), back(n);
         plus_->apply(in, mid.data(), mid.size());
         minus_->apply(mid.data(), back.data(), n);
-        #pragma omp parallel for schedule(static) if(n > 8192)
+#pragma omp parallel for schedule(static) if (n > 8192)
         for (long long i = 0; i < static_cast<long long>(n); ++i) out[i] = shift_ * in[i] + back[i];
     }
     [[nodiscard]] std::size_t dim() const override { return sec_->states(); }
@@ -1134,17 +1108,17 @@ private:
     std::shared_ptr<const ed::symmetry::RepSectorData> sec_, plain_;
     std::unique_ptr<LadderS2> ladder_;
     std::vector<std::int64_t> from_;    // per state of the plain sector: its flip-sector state (-1: none)
-    std::vector<Complex>      coef_;    // and E's entry there
+    std::vector<Complex> coef_;    // and E's entry there
     std::vector<std::uint64_t> to_ptr_; // per flip-sector state: its plain states (CSR of E^T)
     std::vector<std::uint64_t> to_;
 };
 /// Re-express v (sector g, group G) in sector k of a subgroup (conj convention, norm kept); both sectors must
 /// carry their permutation LUT (every RepSectorMatVec builds it). No copies.
-[[nodiscard]] std::vector<Complex>
-lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
+[[nodiscard]] std::vector<Complex> lift_group_vector(const ed::symmetry::RepSectorData& g,
+                                                     const ed::symmetry::RepSectorData& k, const Complex* v);
 /// Its adjoint: the coordinates in sector g (an irrep of dimension 1) of the projection of v (sector k of a
 /// subgroup) onto g's span. The lift is an isometry, so lift(restrict(v)) is that projection.
-[[nodiscard]] std::vector<Complex>
-restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v);
+[[nodiscard]] std::vector<Complex> restrict_group_vector(const ed::symmetry::RepSectorData& g,
+                                                         const ed::symmetry::RepSectorData& k, const Complex* v);
 }  // namespace lg_detail
 }  // namespace ed::solvers

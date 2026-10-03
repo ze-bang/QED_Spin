@@ -8,6 +8,7 @@ sector with 2 down spins (sz=N-2 up spins, k=0 ground state, 9 reps ordered by s
 picks r = p*9/8 skip d=9), O = sum_i S+_i S+_{i+9} -> all-up state. Reference: dense diagonalisation
 inside the 153-state sector (independent of the library; N=18 is too large for a full Kronecker
 reference). Control: O = sum_i S+_i S+_{i+1} (d=1, sampled)."""
+
 import itertools
 import numpy as np
 import qed
@@ -49,9 +50,12 @@ for d in (9, 1):
     r = qed.dynamics(Hq, O, omega, eta=eta, sym=sym)
     lib_w = float(np.asarray(r.S[0])[0] * np.pi * eta)
     res[d] = (lib_w, ref_w)
-    print(f"d={d}: lib e0={r.e0:.10f} dense E0={E0:.10f}; weight lib={lib_w:.6e} dense={ref_w:.6e}; "
-          f"target_sectors exposed? {hasattr(r, 'target_sectors')}")
-lib9, ref9 = res[9]; lib1, ref1 = res[1]
+    print(
+        f"d={d}: lib e0={r.e0:.10f} dense E0={E0:.10f}; weight lib={lib_w:.6e} dense={ref_w:.6e}; "
+        f"target_sectors exposed? {hasattr(r, 'target_sectors')}"
+    )
+lib9, ref9 = res[9]
+lib1, ref1 = res[1]
 ctrl_ok = abs(lib1 - ref1) < 1e-6 * max(ref1, 1e-12)
 if ref9 > 1e-6 and lib9 < 1e-12 and ctrl_ok:
     print(f"REPRO: CONFIRMED d=9 weight dropped (lib {lib9:.1e}, dense {ref9:.4e}); d=1 control matches ({lib1:.4e})")

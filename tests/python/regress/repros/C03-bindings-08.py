@@ -4,6 +4,7 @@
 """Claim: a running solve cannot be interrupted: the bindings release the GIL for the whole call and
 nothing polls for signals, so SIGINT (Ctrl-C) during qed.thermal only raises KeyboardInterrupt
 after the C++ call returns."""
+
 import subprocess
 import sys
 import time
@@ -27,8 +28,9 @@ except KeyboardInterrupt:
 
 
 def run(samples, sigint_after=None):
-    p = subprocess.Popen([sys.executable, "-c", CHILD, str(samples)], stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, text=True)
+    p = subprocess.Popen(
+        [sys.executable, "-c", CHILD, str(samples)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     line = p.stdout.readline()
     if not line.startswith("START"):
         p.kill()
@@ -65,11 +67,15 @@ if full < 4.0:
 delay = 0.2 * full
 out, lag, err = run(samples, sigint_after=delay)
 remaining = full - delay
-print(f"interrupted run: SIGINT at {delay:.1f} s, child output '{out}', exit {lag:.1f} s after SIGINT "
-      f"(uninterrupted remainder ~{remaining:.1f} s)")
+print(
+    f"interrupted run: SIGINT at {delay:.1f} s, child output '{out}', exit {lag:.1f} s after SIGINT "
+    f"(uninterrupted remainder ~{remaining:.1f} s)"
+)
 if out and out.startswith("KBI") and lag > 0.5 * remaining and lag > 2.0:
-    print(f"REPRO: CONFIRMED KeyboardInterrupt arrived {lag:.1f} s after SIGINT (solve {full:.1f} s, "
-          f"remainder {remaining:.1f} s)")
+    print(
+        f"REPRO: CONFIRMED KeyboardInterrupt arrived {lag:.1f} s after SIGINT (solve {full:.1f} s, "
+        f"remainder {remaining:.1f} s)"
+    )
 elif lag is not None and lag < 1.5:
     print(f"REPRO: NOT_REPRODUCED exited {lag:.1f} s after SIGINT")
 else:

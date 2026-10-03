@@ -7,6 +7,7 @@ golden models (make_audit_models, nlce_clusters, tri_chiral_3x3, tri_j1j2, squar
 flags that pick their symmetry options. Couplings of golden models are dyadic rationals wherever
 a case is compared at 1e-10.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -22,15 +23,15 @@ class Model:
     name: str
     N: int
     terms: list
-    translations: list = field(default_factory=list)   # generator permutations, perm[i] = image of i
-    shape: tuple = ()                                   # translation orders, one per generator
-    coords: list = field(default_factory=list)          # integer coordinates per site, one per generator
+    translations: list = field(default_factory=list)  # generator permutations, perm[i] = image of i
+    shape: tuple = ()  # translation orders, one per generator
+    coords: list = field(default_factory=list)  # integer coordinates per site, one per generator
     u1: bool = True
     su2: bool = True
     real: bool = True
-    flip: bool = True                                   # [H, prod sigma^x] = 0
-    parity: bool = True                                 # (-1)^{n_up} conserved (true when u1 is)
-    lattice: tuple = None                               # (Lx, Ly) of a 2D golden model
+    flip: bool = True  # [H, prod sigma^x] = 0
+    parity: bool = True  # (-1)^{n_up} conserved (true when u1 is)
+    lattice: tuple = None  # (Lx, Ly) of a 2D golden model
     notes: str = ""
     extra: dict = field(default_factory=dict)
     # Point-group generators: with the translations they generate the model's whole spatial group
@@ -43,6 +44,7 @@ class Model:
     def operator(self):
         """Terms on up to three sites as records, longer ones (and projectors) through the algebra."""
         import qed
+
         H = qed.Operator(self.N)
         code = {"+": qed.OP_SPLUS, "-": qed.OP_SMINUS, "z": qed.OP_SZ}
         long = []
@@ -66,6 +68,7 @@ class Model:
     def generator_set(self):
         """The translations as an explicit split (abelian part only)."""
         import qed
+
         return qed.Symmetries(abelian=[list(t) for t in self.translations])
 
     def space_group(self):
@@ -85,6 +88,7 @@ class Model:
 # The grid's models
 # ---------------------------------------------------------------------------
 
+
 def chain(N=12, J2=0.35):
     terms = []
     for i in range(N):
@@ -93,8 +97,16 @@ def chain(N=12, J2=0.35):
     T = [(i + 1) % N for i in range(N)]
     R = [(-i) % N for i in range(N)]
     odd = "; odd N: S = 1/2 ground level, spin flip pairs n_up with N - n_up" if N % 2 else ""
-    return Model(f"chain{N}", N, terms, [T], (N,), [(i,) for i in range(N)], point_group=[R],
-                 notes="J1-J2 ring: U(1), SU(2), flip, D_N, real" + odd)
+    return Model(
+        f"chain{N}",
+        N,
+        terms,
+        [T],
+        (N,),
+        [(i,) for i in range(N)],
+        point_group=[R],
+        notes="J1-J2 ring: U(1), SU(2), flip, D_N, real" + odd,
+    )
 
 
 def _tri_sites(Lx, Ly):
@@ -117,11 +129,24 @@ def triangular(L=3, chi=0.0, Ly=None, h=0.0):
     T1 = [idx(x + 1, y) for x, y in xy]
     T2 = [idx(x, y + 1) for x, y in xy]
     name = f"tri{Lx * Ly}" + ("chi" if chi else "") + ("h" if h else "")
-    return Model(name, Lx * Ly, terms, [T1, T2], (Lx, Ly), xy, real=not chi, su2=not h,
-                 notes="triangular torus; odd N gives a degenerate ground state"
-                       + ("; scalar chirality: complex, TR-odd, three-body" if chi else "")
-                       + ("; uniform field h S^z: no spin flip, so a sector label off N/2 (N odd) checks "
-                          "which bit value is spin up" if h else ""))
+    return Model(
+        name,
+        Lx * Ly,
+        terms,
+        [T1, T2],
+        (Lx, Ly),
+        xy,
+        real=not chi,
+        su2=not h,
+        notes="triangular torus; odd N gives a degenerate ground state"
+        + ("; scalar chirality: complex, TR-odd, three-body" if chi else "")
+        + (
+            "; uniform field h S^z: no spin flip, so a sector label off N/2 (N odd) checks "
+            "which bit value is spin up"
+            if h
+            else ""
+        ),
+    )
 
 
 def xyz_chain(N=12, jx=1.0, jy=0.6, jz=0.8):
@@ -132,8 +157,17 @@ def xyz_chain(N=12, jx=1.0, jy=0.6, jz=0.8):
         terms += _expand(jy, (("y", i), ("y", j)))
         terms += [(jz, (("z", i), ("z", j)))]
     T = [(i + 1) % N for i in range(N)]
-    return Model(f"xyz{N}", N, terms, [T], (N,), [(i,) for i in range(N)],
-                 u1=False, su2=False, notes="XYZ ring: Sz parity only, flip, translations")
+    return Model(
+        f"xyz{N}",
+        N,
+        terms,
+        [T],
+        (N,),
+        [(i,) for i in range(N)],
+        u1=False,
+        su2=False,
+        notes="XYZ ring: Sz parity only, flip, translations",
+    )
 
 
 def square_ring(Lx=4, Ly=3, K=0.3):
@@ -146,8 +180,15 @@ def square_ring(Lx=4, Ly=3, K=0.3):
         terms += ring(idx(x, y), idx(x + 1, y), idx(x + 1, y + 1), idx(x, y + 1), K)
     T1 = [idx(x + 1, y) for x, y in xy]
     T2 = [idx(x, y + 1) for x, y in xy]
-    return Model(f"sq{Lx * Ly}ring", Lx * Ly, terms, [T1, T2], (Lx, Ly), xy,
-                 notes="square torus + four-site ring exchange: U(1), SU(2), flip, real")
+    return Model(
+        f"sq{Lx * Ly}ring",
+        Lx * Ly,
+        terms,
+        [T1, T2],
+        (Lx, Ly),
+        xy,
+        notes="square torus + four-site ring exchange: U(1), SU(2), flip, real",
+    )
 
 
 def kagome_bq(L=2, K=0.2):
@@ -173,8 +214,15 @@ def kagome_bq(L=2, K=0.2):
     T1 = [idx(x + 1, y, s) for x, y in cells for s in range(3)]
     T2 = [idx(x, y + 1, s) for x, y in cells for s in range(3)]
     coords = [(x, y) for x, y in cells for _ in range(3)]
-    return Model(f"kagome{3 * L * L}bq", 3 * L * L, terms, [T1, T2], (L, L), coords,
-                 notes="kagome torus + four-site bowtie biquadratic: U(1), SU(2), flip, real")
+    return Model(
+        f"kagome{3 * L * L}bq",
+        3 * L * L,
+        terms,
+        [T1, T2],
+        (L, L),
+        coords,
+        notes="kagome torus + four-site bowtie biquadratic: U(1), SU(2), flip, real",
+    )
 
 
 def open_chain(N=10, seed=10):
@@ -189,9 +237,16 @@ def open_chain(N=10, seed=10):
     for i in range(N - 2):
         terms += dot(i, i + 2, J=float(J2[i]))
     R = [N - 1 - i for i in range(N)]
-    return Model(f"obc{N}", N, terms, point_group=[R], abelian=[R], abelian_shape=(2,),
-                 notes="open J1-J2 chain, reversal-symmetric random bonds: U(1), SU(2), flip, real; "
-                       "reversal only, no translations (the reversal is the whole abelian part)")
+    return Model(
+        f"obc{N}",
+        N,
+        terms,
+        point_group=[R],
+        abelian=[R],
+        abelian_shape=(2,),
+        notes="open J1-J2 chain, reversal-symmetric random bonds: U(1), SU(2), flip, real; "
+        "reversal only, no translations (the reversal is the whole abelian part)",
+    )
 
 
 def tri_patch(L=4):
@@ -206,10 +261,16 @@ def tri_patch(L=4):
                 terms += dot(idx[(x, y)], idx[(x + dx, y + dy)])
     C3 = [idx[(L - 1 - x - y, x)] for x, y in sites]
     M = [idx[(y, x)] for x, y in sites]
-    return Model(f"tri_patch{len(sites)}", len(sites), terms, point_group=[C3, M], abelian=[C3],
-                 abelian_shape=(3,),
-                 notes="open triangular patch, NN Heisenberg: U(1), SU(2), flip, real; C3v, no "
-                       "translations (C3 is the abelian part, the mirror the residue)")
+    return Model(
+        f"tri_patch{len(sites)}",
+        len(sites),
+        terms,
+        point_group=[C3, M],
+        abelian=[C3],
+        abelian_shape=(3,),
+        notes="open triangular patch, NN Heisenberg: U(1), SU(2), flip, real; C3v, no "
+        "translations (C3 is the abelian part, the mirror the residue)",
+    )
 
 
 def tri_torus12():
@@ -226,10 +287,17 @@ def tri_torus12():
         for b in range(2):
             coords[tt.site(a + b, b)] = (a, b)
     assert None not in coords
-    return Model("tri12", tt.N, terms, [T1, T2], (6, 2), coords,
-                 point_group=[p for _, p in tt.point_group()],
-                 notes="triangular torus ((2,2),(-2,4)), NN Heisenberg: U(1), SU(2), flip, real; "
-                       "space group p6m (12 translations x C6v)")
+    return Model(
+        "tri12",
+        tt.N,
+        terms,
+        [T1, T2],
+        (6, 2),
+        coords,
+        point_group=[p for _, p in tt.point_group()],
+        notes="triangular torus ((2,2),(-2,4)), NN Heisenberg: U(1), SU(2), flip, real; "
+        "space group p6m (12 translations x C6v)",
+    )
 
 
 def kagome(L=2):
@@ -259,6 +327,7 @@ def kagome(L=2):
             out.append(hit[0])
         assert {frozenset(out[i] for i in b) for b in bonds} == bonds
         return out
+
     c = np.array([1.5, np.sqrt(3.0) / 2])
     rot = np.array([[0.5, -np.sqrt(3.0) / 2], [np.sqrt(3.0) / 2, 0.5]])
     C6 = perm(lambda p: c + rot @ (p - c))
@@ -266,9 +335,17 @@ def kagome(L=2):
     T1 = [idx(x + 1, y, s) for x, y in cells for s in range(3)]
     T2 = [idx(x, y + 1, s) for x, y in cells for s in range(3)]
     coords = [(x, y) for x, y in cells for _ in range(3)]
-    return Model(f"kagome{3 * L * L}", 3 * L * L, terms, [T1, T2], (L, L), coords, point_group=[C6, Mx],
-                 notes="kagome torus, NN Heisenberg: U(1), SU(2), flip, real; p6m (translations x "
-                       "C6v about a hexagon centre)")
+    return Model(
+        f"kagome{3 * L * L}",
+        3 * L * L,
+        terms,
+        [T1, T2],
+        (L, L),
+        coords,
+        point_group=[C6, Mx],
+        notes="kagome torus, NN Heisenberg: U(1), SU(2), flip, real; p6m (translations x "
+        "C6v about a hexagon centre)",
+    )
 
 
 def dm_ring(N=12, J2=0.25, D=0.375):
@@ -279,11 +356,20 @@ def dm_ring(N=12, J2=0.25, D=0.375):
         terms += dot(i, j) + dot(i, (i + 2) % N, J=J2)
         terms += [(0.5j * D, (("+", i), ("-", j))), (-0.5j * D, (("-", i), ("+", j)))]
     T = [(i + 1) % N for i in range(N)]
-    return Model(f"dm_ring{N}", N, terms, [T], (N,), [(i,) for i in range(N)], su2=False, real=False,
-                 flip=False,
-                 notes="J1-J2 ring + uniform DM along z: complex (no complex-conjugation symmetry), U(1); "
-                       "translations only (the DM term is odd under reflection and under spin flip); "
-                       "even under the spin time reversal Theta = prod i sigma^y K; no SU(2)")
+    return Model(
+        f"dm_ring{N}",
+        N,
+        terms,
+        [T],
+        (N,),
+        [(i,) for i in range(N)],
+        su2=False,
+        real=False,
+        flip=False,
+        notes="J1-J2 ring + uniform DM along z: complex (no complex-conjugation symmetry), U(1); "
+        "translations only (the DM term is odd under reflection and under spin flip); "
+        "even under the spin time reversal Theta = prod i sigma^y K; no SU(2)",
+    )
 
 
 def xxz_field(N=12, delta=0.6, hz=0.15):
@@ -294,27 +380,56 @@ def xxz_field(N=12, delta=0.6, hz=0.15):
         terms.append((hz, (("z", i),)))
     T = [(i + 1) % N for i in range(N)]
     R = [(-i) % N for i in range(N)]
-    return Model(f"xxz_hz{N}", N, terms, [T], (N,), [(i,) for i in range(N)], point_group=[R],
-                 su2=False, flip=False,
-                 notes="XXZ ring Delta=0.6 in a field hz=0.15: U(1), real (time reversal = complex "
-                       "conjugation), D_N; no spin flip, no SU(2)")
+    return Model(
+        f"xxz_hz{N}",
+        N,
+        terms,
+        [T],
+        (N,),
+        [(i,) for i in range(N)],
+        point_group=[R],
+        su2=False,
+        flip=False,
+        notes="XXZ ring Delta=0.6 in a field hz=0.15: U(1), real (time reversal = complex "
+        "conjugation), D_N; no spin flip, no SU(2)",
+    )
 
 
-MODELS = {m.name: m for m in (chain(), triangular(3), triangular(3, chi=0.25), triangular(3, h=0.3),
-                              xyz_chain(), square_ring(), kagome_bq(),
-                              chain(11), open_chain(), tri_patch(), tri_torus12(), kagome(), dm_ring(),
-                              xxz_field())}
-
+MODELS = {
+    m.name: m
+    for m in (
+        chain(),
+        triangular(3),
+        triangular(3, chi=0.25),
+        triangular(3, h=0.3),
+        xyz_chain(),
+        square_ring(),
+        kagome_bq(),
+        chain(11),
+        open_chain(),
+        tri_patch(),
+        tri_torus12(),
+        kagome(),
+        dm_ring(),
+        xxz_field(),
+    )
+}
 
 
 # ---------------------------------------------------------------------------
 # The golden harness's models
 # ---------------------------------------------------------------------------
 
+
 def heisenberg_terms(bonds, J=1.0, Jz=None):
     Jz = J if Jz is None else Jz
-    return records([t for (i, j) in bonds
-                    for t in ((("+", "-"), (i, j), 0.5 * J), (("-", "+"), (i, j), 0.5 * J), (("z", "z"), (i, j), Jz))])
+    return records(
+        [
+            t
+            for (i, j) in bonds
+            for t in ((("+", "-"), (i, j), 0.5 * J), (("-", "+"), (i, j), 0.5 * J), (("z", "z"), (i, j), Jz))
+        ]
+    )
 
 
 def chain_bonds(N):
@@ -324,25 +439,28 @@ def chain_bonds(N):
 def triangular_torus(Lx, Ly):
     """Sites (x,y) -> x + Lx*y; a1=(1,0), a2=(1/2, sqrt3/2). Returns nn bonds, nnn bonds,
     and ccw triangles (up and down) as index triples."""
+
     def idx(x, y):
         return (x % Lx) + Lx * (y % Ly)
+
     nn, nnn, tri = [], [], []
     for y in range(Ly):
         for x in range(Lx):
             i = idx(x, y)
             nn += [(i, idx(x + 1, y)), (i, idx(x, y + 1)), (i, idx(x - 1, y + 1))]
             nnn += [(i, idx(x + 1, y + 1)), (i, idx(x - 2, y + 1)), (i, idx(x + 1, y - 2))]
-            tri.append((i, idx(x + 1, y), idx(x, y + 1)))            # up triangle, ccw
+            tri.append((i, idx(x + 1, y), idx(x, y + 1)))  # up triangle, ccw
             tri.append((idx(x + 1, y), idx(x + 1, y + 1), idx(x, y + 1)))  # down triangle, ccw
 
     def dedup(bs):
         seen, out = set(), []
-        for (i, j) in bs:
+        for i, j in bs:
             key = (min(i, j), max(i, j))
             if key not in seen and i != j:
                 seen.add(key)
                 out.append((i, j))
         return out
+
     return dedup(nn), dedup(nnn), tri
 
 
@@ -350,8 +468,8 @@ def chiral_terms(triangles, Jchi):
     """Jchi * S_i . (S_j x S_k) for each ccw triangle, expanded in S+/S-/Sz products:
     S_i.(S_j x S_k) = (i/2) sum_cyclic [ Sz_a (S+_b S-_c - S-_b S+_c) ]."""
     t = []
-    for (i, j, k) in triangles:
-        for (a, b, c) in ((i, j, k), (j, k, i), (k, i, j)):
+    for i, j, k in triangles:
+        for a, b, c in ((i, j, k), (j, k, i), (k, i, j)):
             t.append((("z", "+", "-"), (a, b, c), 0.5j * Jchi))
             t.append((("z", "-", "+"), (a, b, c), -0.5j * Jchi))
     return records(t)
@@ -364,7 +482,8 @@ def rng_terms_real(N, seed, density=1.0):
         for j in range(i + 1, N):
             if r.random() > density:
                 continue
-            J = float(r.normal()); Jz = float(r.normal())
+            J = float(r.normal())
+            Jz = float(r.normal())
             t += [(("+", "-"), (i, j), 0.5 * J), (("-", "+"), (i, j), 0.5 * J), (("z", "z"), (i, j), Jz)]
     return records(t)
 
@@ -386,34 +505,91 @@ def lattice_pairs(L):
 def make_audit_models():
     """The small models every verb is checked on."""
     import qed
+
     ms = []
     ms.append(Model("dimer", 2, heisenberg_terms([(0, 1)]), u1=True, real=True, su2=True))
     ms.append(Model("triangle3", 3, heisenberg_terms([(0, 1), (1, 2), (2, 0)]), u1=True, real=True, su2=True))
     ms.append(Model("chain4", 4, heisenberg_terms(chain_bonds(4)), u1=True, real=True, su2=True))
     ms.append(Model("chain5_odd", 5, heisenberg_terms(chain_bonds(5)), u1=True, real=True, su2=True))
-    ms.append(Model("open_chain10", 10, heisenberg_terms([(i, i + 1) for i in range(9)]), u1=True, real=True, su2=True,
-                    notes="open boundaries: reflection only"))
-    ms.append(Model("j1j2_chain12", 12, heisenberg_terms(chain_bonds(12)) + heisenberg_terms([(i, (i + 2) % 12) for i in range(12)], 0.5),
-                    u1=True, real=True, su2=True, notes="frustrated, degeneracies"))
+    ms.append(
+        Model(
+            "open_chain10",
+            10,
+            heisenberg_terms([(i, i + 1) for i in range(9)]),
+            u1=True,
+            real=True,
+            su2=True,
+            notes="open boundaries: reflection only",
+        )
+    )
+    ms.append(
+        Model(
+            "j1j2_chain12",
+            12,
+            heisenberg_terms(chain_bonds(12)) + heisenberg_terms([(i, (i + 2) % 12) for i in range(12)], 0.5),
+            u1=True,
+            real=True,
+            su2=True,
+            notes="frustrated, degeneracies",
+        )
+    )
     ms.append(Model("xy_chain10", 10, heisenberg_terms(chain_bonds(10), J=1.0, Jz=0.0), u1=True, real=True, su2=False))
     stag = heisenberg_terms(chain_bonds(10)) + records([(("z",), (i,), 0.3 * (-1) ** i) for i in range(10)])
-    ms.append(Model("staggered_field10", 10, stag, u1=True, real=True, su2=False, flip=False,
-                    notes="period-2 translation"))
+    ms.append(
+        Model("staggered_field10", 10, stag, u1=True, real=True, su2=False, flip=False, notes="period-2 translation")
+    )
     tfim = [(("z", "z"), (i, (i + 1) % 10), -1.0) for i in range(10)]
     tfim += [t for i in range(10) for t in ((("+",), (i,), -0.35), (("-",), (i,), -0.35))]  # -h Sx, h = 0.7
-    ms.append(Model("tfim10", 10, records(tfim), u1=False, real=True, su2=False, parity=False,
-                    notes="no U(1), no Sz parity; flip-symmetric Z2"))
-    ms.append(Model("random_real8", 8, rng_terms_real(8, 1), u1=True, real=True, su2=False,
-                    notes="all-to-all, no spatial symmetry"))
-    ms.append(Model("random_complex8", 8, rng_terms_complex(8, 2), u1=True, real=False, su2=False,
-                    notes="complex hopping + DM, no TR"))
+    ms.append(
+        Model(
+            "tfim10",
+            10,
+            records(tfim),
+            u1=False,
+            real=True,
+            su2=False,
+            parity=False,
+            notes="no U(1), no Sz parity; flip-symmetric Z2",
+        )
+    )
+    ms.append(
+        Model(
+            "random_real8",
+            8,
+            rng_terms_real(8, 1),
+            u1=True,
+            real=True,
+            su2=False,
+            notes="all-to-all, no spatial symmetry",
+        )
+    )
+    ms.append(
+        Model(
+            "random_complex8",
+            8,
+            rng_terms_complex(8, 2),
+            u1=True,
+            real=False,
+            su2=False,
+            notes="complex hopping + DM, no TR",
+        )
+    )
     sq = qed.input.lattice.square(4, 3, True)
     ms.append(Model("square4x3", 12, heisenberg_terms(lattice_pairs(sq)), u1=True, real=True, su2=True, lattice=(4, 3)))
     kg = qed.input.lattice.kagome(2, 2, True)
     ms.append(Model("kagome2x2", 12, heisenberg_terms(lattice_pairs(kg)), u1=True, real=True, su2=True))
     nn, nnn, tri = triangular_torus(4, 3)
-    ms.append(Model("tri_chiral4x3", 12, heisenberg_terms(nn) + heisenberg_terms(nnn, 0.2) + chiral_terms(tri, 0.5),
-                    u1=True, real=False, su2=True, lattice=(4, 3)))
+    ms.append(
+        Model(
+            "tri_chiral4x3",
+            12,
+            heisenberg_terms(nn) + heisenberg_terms(nnn, 0.2) + chiral_terms(tri, 0.5),
+            u1=True,
+            real=False,
+            su2=True,
+            lattice=(4, 3),
+        )
+    )
     return ms
 
 
@@ -428,6 +604,7 @@ def tri_j1j2(T1, T2, J2, name):
 def square_j1j2(L, J2, name):
     def idx(x, y):
         return (x % L) + L * (y % L)
+
     nn, nnn = set(), set()
     for y in range(L):
         for x in range(L):

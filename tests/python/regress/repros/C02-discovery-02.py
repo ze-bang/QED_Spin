@@ -7,6 +7,7 @@ term check only when three-body terms exist (discovery.py:90). A Heisenberg ring
 staggered h_x and a uniform h_z (zeeman_per_site emits Sz last) is therefore reported with
 the full dihedral group; translation by one site does not commute with H, and the default
 qed.eigs(H, 1) raises 'H does not commute with a supplied site permutation'."""
+
 import signal
 import qed
 
@@ -38,8 +39,10 @@ except Exception as e:  # expected
     err = f"{type(e).__name__}: {str(e)[:120]}"
 e_none = float(qed.eigs(H, 1, sym=qed.Symmetry(spatial=None)).energies[0])
 
-info = (f"T1_commutes={c1} T2_commutes={c2} group_size={gsize} "
-        f"non_commuting_discovered={bad}/{len(perms)} default_eigs_error={err!r} E0(spatial=None)={e_none:.10f}")
+info = (
+    f"T1_commutes={c1} T2_commutes={c2} group_size={gsize} "
+    f"non_commuting_discovered={bad}/{len(perms)} default_eigs_error={err!r} E0(spatial=None)={e_none:.10f}"
+)
 if (not c1) and bad > 0 and err is not None:
     print("REPRO: CONFIRMED " + info)
 elif err is None and bad == 0:

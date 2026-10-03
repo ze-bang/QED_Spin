@@ -26,8 +26,7 @@ namespace {
 py::array_t<std::complex<double>> to_array(std::vector<std::complex<double>> v) {
     auto* heap = new std::vector<std::complex<double>>(std::move(v));
     py::capsule owner(heap, [](void* p) { delete static_cast<std::vector<std::complex<double>>*>(p); });
-    return py::array_t<std::complex<double>>({heap->size()}, {sizeof(std::complex<double>)},
-                                             heap->data(), owner);
+    return py::array_t<std::complex<double>>({heap->size()}, {sizeof(std::complex<double>)}, heap->data(), owner);
 }
 
 py::array_t<double> to_real_array(std::vector<double> v) {
@@ -41,13 +40,11 @@ py::array_t<double> to_real_array(std::vector<double> v) {
 // in the sector basis they were solved in, each basis once (representatives, norms, characters,
 // group action), and the Spec. Derived tables (the permutation lookup) are rebuilt on load.
 
-template <class T>
-py::array_t<T> arr(const std::vector<T>& v) {
+template <class T> py::array_t<T> arr(const std::vector<T>& v) {
     return py::array_t<T>(static_cast<py::ssize_t>(v.size()), v.data());
 }
 
-template <class T>
-std::vector<T> vec(const py::dict& d, const char* key) {
+template <class T> std::vector<T> vec(const py::dict& d, const char* key) {
     auto a = py::array_t<T, py::array::c_style | py::array::forcecast>::ensure(d[key]);
     if (!a) throw std::invalid_argument(std::string("load_eigs: bad array ") + key);
     return std::vector<T>(a.data(), a.data() + a.size());
@@ -67,27 +64,47 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
     for (std::size_t i = 0; i < nl; ++i) {
         const auto& L = r.levels[i];
         const auto& t = L.tag;
-        energy[i] = L.energy; mirror[i] = L.mirror; fold[i] = static_cast<std::int64_t>(L.fold);
-        mult[i] = static_cast<std::int64_t>(L.multiplicity); vector[i] = L.vector;
-        const std::int64_t row[11] = {t.n_up, t.sz_parity, t.k0, t.k_raw, t.flip_parity, t.irrep,
-                                      t.irrep_dim, t.star_size, t.tr_folded ? 1 : 0,
+        energy[i] = L.energy;
+        mirror[i] = L.mirror;
+        fold[i] = static_cast<std::int64_t>(L.fold);
+        mult[i] = static_cast<std::int64_t>(L.multiplicity);
+        vector[i] = L.vector;
+        const std::int64_t row[11] = {t.n_up,
+                                      t.sz_parity,
+                                      t.k0,
+                                      t.k_raw,
+                                      t.flip_parity,
+                                      t.irrep,
+                                      t.irrep_dim,
+                                      t.star_size,
+                                      t.tr_folded ? 1 : 0,
                                       static_cast<std::int64_t>(t.dim),
                                       static_cast<std::int64_t>(t.multiplicity)};
         std::copy(row, row + 11, tag.begin() + static_cast<std::ptrdiff_t>(11 * i));
     }
-    d["level_energy"] = arr(energy); d["level_mirror"] = arr(mirror); d["level_fold"] = arr(fold);
-    d["level_multiplicity"] = arr(mult); d["level_vector"] = arr(vector); d["level_tag"] = arr(tag);
+    d["level_energy"] = arr(energy);
+    d["level_mirror"] = arr(mirror);
+    d["level_fold"] = arr(fold);
+    d["level_multiplicity"] = arr(mult);
+    d["level_vector"] = arr(vector);
+    d["level_tag"] = arr(tag);
     // Physical labels, ragged per level: momentum characters, co-group (residue, character).
     std::vector<std::int64_t> moff{0}, ioff{0}, ielem;
     std::vector<std::complex<double>> mchi, ichi;
     for (const auto& L : r.levels) {
         mchi.insert(mchi.end(), L.momentum.begin(), L.momentum.end());
         moff.push_back(static_cast<std::int64_t>(mchi.size()));
-        for (const auto& [e, c] : L.irrep_characters) { ielem.push_back(e); ichi.push_back(c); }
+        for (const auto& [e, c] : L.irrep_characters) {
+            ielem.push_back(e);
+            ichi.push_back(c);
+        }
         ioff.push_back(static_cast<std::int64_t>(ielem.size()));
     }
-    d["level_momentum"] = arr(mchi); d["level_momentum_offset"] = arr(moff);
-    d["level_irrep_elems"] = arr(ielem); d["level_irrep_chars"] = arr(ichi); d["level_irrep_offset"] = arr(ioff);
+    d["level_momentum"] = arr(mchi);
+    d["level_momentum_offset"] = arr(moff);
+    d["level_irrep_elems"] = arr(ielem);
+    d["level_irrep_chars"] = arr(ichi);
+    d["level_irrep_offset"] = arr(ioff);
 
     // Vectors, with each distinct basis stored once.
     std::map<const void*, std::int64_t> basis_id;
@@ -106,7 +123,7 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
             d[py::str(p + "shape")] = arr(std::vector<std::int64_t>{b.group_size, b.n_sites, b.n_up, b.irrep_dim});
             // which members represent the orbits: the sublattice key order's fingerprint, 0 the plain order
             d[py::str(p + "sublattice")] = arr(std::vector<std::uint64_t>{b.slc ? b.slc->fingerprint() : 0});
-            if (b.irrep_dim > 1) {   // a sector of a d > 1 irrep (rep_sector.h)
+            if (b.irrep_dim > 1) { // a sector of a d > 1 irrep (rep_sector.h)
                 d[py::str(p + "irrep_D")] = arr(b.irrep_D);
                 d[py::str(p + "class_rank")] = arr(std::vector<std::int64_t>(b.class_rank.begin(), b.class_rank.end()));
                 d[py::str(p + "class_C")] = arr(b.class_C);
@@ -119,22 +136,25 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
         voffset.push_back(static_cast<std::int64_t>(amps.size()));
     }
     d["n_bases"] = arr(std::vector<std::int64_t>{static_cast<std::int64_t>(basis_id.size())});
-    d["vector_basis"] = arr(vbasis); d["vector_offset"] = arr(voffset); d["vector_amplitudes"] = arr(amps);
+    d["vector_basis"] = arr(vbasis);
+    d["vector_offset"] = arr(voffset);
+    d["vector_amplitudes"] = arr(amps);
 
     auto perms = [](const std::vector<sec::Perm>& ps) {
         std::vector<std::int64_t> flat;
         for (const auto& p : ps) flat.insert(flat.end(), p.begin(), p.end());
         return flat;
     };
-    d["spec_abelian"] = arr(perms(s.abelian)); d["spec_residues"] = arr(perms(s.residues));
+    d["spec_abelian"] = arr(perms(s.abelian));
+    d["spec_residues"] = arr(perms(s.residues));
     d["spec_only_k0"] = arr(std::vector<std::int64_t>(s.only_k0.begin(), s.only_k0.end()));
     d["spec_only_irrep"] = arr(std::vector<std::int64_t>(s.only_irrep.begin(), s.only_irrep.end()));
     d["spec_scalars"] = arr(std::vector<std::int64_t>{s.n_up, s.sz_parity, s.use_sz ? 1 : 0, s.spin_flip,
                                                       s.time_reversal, s.two_S, r.n_sites});
     d["result_scalars"] = arr(std::vector<std::int64_t>{
-        static_cast<std::int64_t>(r.total_dim), static_cast<std::int64_t>(r.partial_blocks),
-        r.complete ? 1 : 0, r.flip_engaged ? 1 : 0, static_cast<std::int64_t>(r.time_reversal),
-        static_cast<std::int64_t>(r.device_blocks), static_cast<std::int64_t>(r.pruned_blocks)});
+        static_cast<std::int64_t>(r.total_dim), static_cast<std::int64_t>(r.partial_blocks), r.complete ? 1 : 0,
+        r.flip_engaged ? 1 : 0, static_cast<std::int64_t>(r.time_reversal), static_cast<std::int64_t>(r.device_blocks),
+        static_cast<std::int64_t>(r.pruned_blocks)});
     return d;
 }
 
@@ -155,7 +175,8 @@ py::tuple eigs_from_arrays(const py::dict& d) {
             std::vector<char> seen(static_cast<std::size_t>(n), 0);
             for (int i = 0; i < n; ++i) {
                 const auto x = flat[p * static_cast<std::size_t>(n) + static_cast<std::size_t>(i)];
-                if (x < 0 || x >= n || seen[static_cast<std::size_t>(x)]) fail(name + " holds an entry that is not a permutation of the sites");
+                if (x < 0 || x >= n || seen[static_cast<std::size_t>(x)])
+                    fail(name + " holds an entry that is not a permutation of the sites");
                 seen[static_cast<std::size_t>(x)] = 1;
             }
         }
@@ -172,15 +193,22 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     for (std::size_t i = 0; i < energy.size(); ++i) {
         sec::Level L;
         const std::int64_t* t = tag.data() + 11 * i;
-        L.energy = energy[i]; L.mirror = static_cast<int>(mirror[i]);
-        L.multiplicity = static_cast<std::uint64_t>(mult[i]); L.vector = static_cast<int>(vector[i]);
-        L.tag.n_up = static_cast<int>(t[0]); L.tag.sz_parity = static_cast<int>(t[1]);
-        L.tag.k0 = static_cast<int>(t[2]); L.tag.k_raw = static_cast<int>(t[3]);
-        L.tag.flip_parity = static_cast<int>(t[4]); L.tag.irrep = static_cast<int>(t[5]);
-        L.tag.irrep_dim = static_cast<int>(t[6]); L.tag.star_size = static_cast<int>(t[7]);
-        L.tag.tr_folded = t[8] != 0; L.tag.dim = static_cast<std::uint64_t>(t[9]);
+        L.energy = energy[i];
+        L.mirror = static_cast<int>(mirror[i]);
+        L.multiplicity = static_cast<std::uint64_t>(mult[i]);
+        L.vector = static_cast<int>(vector[i]);
+        L.tag.n_up = static_cast<int>(t[0]);
+        L.tag.sz_parity = static_cast<int>(t[1]);
+        L.tag.k0 = static_cast<int>(t[2]);
+        L.tag.k_raw = static_cast<int>(t[3]);
+        L.tag.flip_parity = static_cast<int>(t[4]);
+        L.tag.irrep = static_cast<int>(t[5]);
+        L.tag.irrep_dim = static_cast<int>(t[6]);
+        L.tag.star_size = static_cast<int>(t[7]);
+        L.tag.tr_folded = t[8] != 0;
+        L.tag.dim = static_cast<std::uint64_t>(t[9]);
         L.tag.multiplicity = static_cast<std::uint64_t>(t[10]);
-        L.fold = L.tag.tr_folded ? sec::Antiunitary::K : sec::Antiunitary::None;   // files without level_fold
+        L.fold = L.tag.tr_folded ? sec::Antiunitary::K : sec::Antiunitary::None; // files without level_fold
         r.levels.push_back(L);
     }
     // 0 none, 1 K, 2 Theta: the antiunitary pairing of each level.
@@ -227,8 +255,9 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         rd->group_size = static_cast<int>(shape.at(0));
         rd->n_sites = static_cast<int>(shape.at(1));
         rd->n_up = static_cast<int>(shape.at(2));
-        rd->irrep_dim = shape.size() > 3 ? static_cast<int>(shape[3]) : 1;   // files before P6.3: 1
-        if (rd->irrep_dim < 1 || rd->irrep_dim > 8) fail("basis " + std::to_string(b) + " has an impossible irrep dimension");
+        rd->irrep_dim = shape.size() > 3 ? static_cast<int>(shape[3]) : 1; // files before P6.3: 1
+        if (rd->irrep_dim < 1 || rd->irrep_dim > 8)
+            fail("basis " + std::to_string(b) + " has an impossible irrep dimension");
         check_perms(rd->perms_flat, static_cast<std::size_t>(rd->group_size), rd->n_sites, p + "perms");
         if (rd->irrep_dim > 1) {
             const std::size_t dd = static_cast<std::size_t>(rd->irrep_dim * rd->irrep_dim);
@@ -244,12 +273,13 @@ py::tuple eigs_from_arrays(const py::dict& d) {
                     fail("basis " + std::to_string(b) + " names a stabiliser class that is not in the file");
                 rd->rep_class.push_back(static_cast<std::uint16_t>(x));
             }
-            bool offsets = rd->state_offset.size() == rd->reps.size() + 1 && !rd->state_offset.empty()
-                           && rd->state_offset[0] == 0;
+            bool offsets =
+                rd->state_offset.size() == rd->reps.size() + 1 && !rd->state_offset.empty() && rd->state_offset[0] == 0;
             for (std::size_t r = 0; offsets && r < rd->reps.size(); ++r)
                 offsets = rd->state_offset[r + 1] == rd->state_offset[r] + rd->class_rank[rd->rep_class[r]];
             if (rd->irrep_D.size() != static_cast<std::size_t>(rd->group_size) * dd
-                || rd->class_C.size() != rd->class_rank.size() * dd || rd->rep_class.size() != rd->reps.size() || !offsets)
+                || rd->class_C.size() != rd->class_rank.size() * dd || rd->rep_class.size() != rd->reps.size()
+                || !offsets)
                 fail("basis " + std::to_string(b) + " has irrep arrays of the wrong length");
         }
         if (rd->characters.size() != static_cast<std::size_t>(rd->group_size)
@@ -268,10 +298,11 @@ py::tuple eigs_from_arrays(const py::dict& d) {
                                                        rd->flip_masks.empty() ? nullptr : rd->flip_masks.data(),
                                                        rd->group_size, rd->n_sites, true);
             if (!rd->slc || rd->slc->fingerprint() != fp)
-                fail("basis " + std::to_string(b) + " was computed with a sublattice key order this build does "
-                     "not reproduce");
+                fail("basis " + std::to_string(b)
+                     + " was computed with a sublattice key order this build does "
+                       "not reproduce");
         }
-        {   // the stored representatives are the ones that rule finds (a sample)
+        { // the stored representatives are the ones that rule finds (a sample)
             const auto pol = rd->make_policy();
             const std::size_t n = rd->reps.size(), samples = std::min<std::size_t>(n, 64);
             for (std::size_t i = 0; i < samples; ++i) {
@@ -299,10 +330,13 @@ py::tuple eigs_from_arrays(const py::dict& d) {
         if (L.vector < -1 || L.vector >= static_cast<int>(r.vectors.size()))
             fail("level_vector names a vector that is not in the file");
     const auto sc = vec<std::int64_t>(d, "result_scalars");
-    r.total_dim = static_cast<std::uint64_t>(sc.at(0)); r.partial_blocks = static_cast<std::size_t>(sc.at(1));
-    r.complete = sc.at(2) != 0; r.flip_engaged = sc.at(3) != 0;
+    r.total_dim = static_cast<std::uint64_t>(sc.at(0));
+    r.partial_blocks = static_cast<std::size_t>(sc.at(1));
+    r.complete = sc.at(2) != 0;
+    r.flip_engaged = sc.at(3) != 0;
     r.time_reversal = antiunitary(sc.at(4), "result_scalars");
-    r.device_blocks = static_cast<std::size_t>(sc.at(5)); r.pruned_blocks = static_cast<std::size_t>(sc.at(6));
+    r.device_blocks = static_cast<std::size_t>(sc.at(5));
+    r.pruned_blocks = static_cast<std::size_t>(sc.at(6));
 
     sec::Spec s;
     const auto ss = vec<std::int64_t>(d, "spec_scalars");
@@ -314,16 +348,21 @@ py::tuple eigs_from_arrays(const py::dict& d) {
     }
     auto perms = [n](const std::vector<std::int64_t>& flat) {
         std::vector<sec::Perm> out;
-        for (std::size_t i = 0; n > 0 && i + static_cast<std::size_t>(n) <= flat.size(); i += static_cast<std::size_t>(n))
-            out.emplace_back(flat.begin() + static_cast<std::ptrdiff_t>(i), flat.begin() + static_cast<std::ptrdiff_t>(i) + n);
+        for (std::size_t i = 0; n > 0 && i + static_cast<std::size_t>(n) <= flat.size();
+             i += static_cast<std::size_t>(n))
+            out.emplace_back(flat.begin() + static_cast<std::ptrdiff_t>(i),
+                             flat.begin() + static_cast<std::ptrdiff_t>(i) + n);
         return out;
     };
     s.abelian = perms(vec<std::int64_t>(d, "spec_abelian"));
     s.residues = perms(vec<std::int64_t>(d, "spec_residues"));
     for (auto k : vec<std::int64_t>(d, "spec_only_k0")) s.only_k0.push_back(static_cast<int>(k));
     for (auto k : vec<std::int64_t>(d, "spec_only_irrep")) s.only_irrep.push_back(static_cast<int>(k));
-    s.n_up = static_cast<int>(ss.at(0)); s.sz_parity = static_cast<int>(ss.at(1)); s.use_sz = ss.at(2) != 0;
-    s.spin_flip = static_cast<int>(ss.at(3)); s.time_reversal = static_cast<int>(ss.at(4));
+    s.n_up = static_cast<int>(ss.at(0));
+    s.sz_parity = static_cast<int>(ss.at(1));
+    s.use_sz = ss.at(2) != 0;
+    s.spin_flip = static_cast<int>(ss.at(3));
+    s.time_reversal = static_cast<int>(ss.at(4));
     s.two_S = static_cast<int>(ss.at(5));
     if (s.n_up < -1 || s.n_up > n || s.sz_parity < -1 || s.sz_parity > 1 || s.two_S < -1 || s.two_S > n)
         fail("the saved symmetry labels are out of range");
@@ -334,8 +373,10 @@ py::tuple eigs_from_arrays(const py::dict& d) {
 // Where a verb's solves ran (sec::Placement), as a dict.
 py::dict placement_to_py(const sec::Placement& p) {
     py::dict d;
-    d["device_krylov"] = p.device_krylov; d["device_dense"] = p.device_dense;
-    d["host_krylov"] = p.host_krylov; d["host_dense"] = p.host_dense;
+    d["device_krylov"] = p.device_krylov;
+    d["device_dense"] = p.device_dense;
+    d["host_krylov"] = p.host_krylov;
+    d["host_dense"] = p.host_dense;
     return d;
 }
 
@@ -344,17 +385,28 @@ py::list block_stats_to_py(const std::vector<sec::BlockStats>& v) {
     py::list out;
     for (const auto& b : v) {
         py::dict d;
-        d["k0"] = b.k0; d["irrep"] = b.irrep; d["flip_parity"] = b.flip_parity; d["n_up"] = b.n_up;
-        d["dim"] = b.dim; d["kind"] = b.kind; d["lane"] = b.lane;
-        d["context_orbit_s"] = b.context_orbit_s; d["star_orbit_s"] = b.star_orbit_s;
-        d["star_build_s"] = b.star_build_s; d["build_s"] = b.build_s;
-        d["nnz"] = b.nnz; d["csr_bytes"] = b.csr_bytes;
-        d["applies"] = b.applies; d["apply_s"] = b.apply_s; d["other_s"] = b.other_s; d["solve_s"] = b.solve_s;
+        d["k0"] = b.k0;
+        d["irrep"] = b.irrep;
+        d["flip_parity"] = b.flip_parity;
+        d["n_up"] = b.n_up;
+        d["dim"] = b.dim;
+        d["kind"] = b.kind;
+        d["lane"] = b.lane;
+        d["context_orbit_s"] = b.context_orbit_s;
+        d["star_orbit_s"] = b.star_orbit_s;
+        d["star_build_s"] = b.star_build_s;
+        d["build_s"] = b.build_s;
+        d["nnz"] = b.nnz;
+        d["csr_bytes"] = b.csr_bytes;
+        d["applies"] = b.applies;
+        d["apply_s"] = b.apply_s;
+        d["other_s"] = b.other_s;
+        d["solve_s"] = b.solve_s;
         out.append(std::move(d));
     }
     return out;
 }
-}  // namespace
+} // namespace
 
 void bind_sectors(py::module_& m) {
     auto s = m.def_submodule("sectors", "Symmetry sectors and the lowest-level eigensolve over them.");
@@ -401,10 +453,11 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("irrep_dim", [](const sec::Level& l) { return l.tag.irrep_dim; })
         .def_property_readonly("star_size", [](const sec::Level& l) { return l.tag.star_size; })
         .def_property_readonly("tr_folded", [](const sec::Level& l) { return l.tag.tr_folded; })
-        .def_property_readonly("fold", [](const sec::Level& l) { return antiunitary_name(l.fold); },
-                               "The antiunitary map pairing the level with states its block does not hold: "
-                               "'K' (complex conjugation), 'theta' (time reversal; also the map of a mirror "
-                               "in Sz sector N - n_up), or None.")
+        .def_property_readonly(
+            "fold", [](const sec::Level& l) { return antiunitary_name(l.fold); },
+            "The antiunitary map pairing the level with states its block does not hold: "
+            "'K' (complex conjugation), 'theta' (time reversal; also the map of a mirror "
+            "in Sz sector N - n_up), or None.")
         .def_property_readonly("block_dim", [](const sec::Level& l) { return l.tag.dim; })
         .def("__repr__", [](const sec::Level& l) {
             return "Level(E=" + std::to_string(l.energy) + ", mult=" + std::to_string(l.multiplicity)
@@ -416,59 +469,67 @@ void bind_sectors(py::module_& m) {
         .def_readonly("levels", &sec::EigsResult::levels)
         .def_readonly("n_sites", &sec::EigsResult::n_sites)
         .def_readonly("complete", &sec::EigsResult::complete)
-        .def_property_readonly("time_reversal", [](const sec::EigsResult& r) { return antiunitary_name(r.time_reversal); },
-                               "The antiunitary map that folded any level: 'K', 'theta' or None.")
+        .def_property_readonly(
+            "time_reversal", [](const sec::EigsResult& r) { return antiunitary_name(r.time_reversal); },
+            "The antiunitary map that folded any level: 'K', 'theta' or None.")
         .def_readonly("device_blocks", &sec::EigsResult::device_blocks)
         .def_property_readonly("placement", [](const sec::EigsResult& r) { return placement_to_py(r.placement); })
         .def_readonly("pruned_blocks", &sec::EigsResult::pruned_blocks)
         .def_readonly("diagnostics", &sec::EigsResult::diagnostics)
-        .def_property_readonly("block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
-                               "Per solved block: dim, lane, phase seconds, nnz, applies (one dict each).")
+        .def_property_readonly(
+            "block_stats", [](const sec::EigsResult& r) { return block_stats_to_py(r.block_stats); },
+            "Per solved block: dim, lane, phase seconds, nnz, applies (one dict each).")
         .def("energies", &sec::EigsResult::energies, py::arg("k"))
-        .def("multiplet", [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up,
-                             std::size_t max_vectors) {
-                 const auto& L = r.levels.at(static_cast<std::size_t>(level));
-                 if (L.vector < 0) throw std::invalid_argument("multiplet: the level carries no vector");
-                 std::vector<std::vector<std::complex<double>>> vs;
-                 {
-                     py::gil_scoped_release nogil;
-                     vs = sec::multiplet(spec, r.n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up,
-                                         max_vectors);
-                 }
-                 py::list out;
-                 for (auto& v : vs) out.append(to_array(std::move(v)));
-                 return out;
-             }, py::arg("spec"), py::arg("level"), py::arg("n_up") = -1, py::arg("max_vectors") = 0,
-             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space); "
-             "at most max_vectors of its vectors when that is > 0.")
-        .def("expect", [](const sec::EigsResult& r, const sec::Spec& spec,
-                          const std::vector<const ::Operator*>& ops) {
-                 py::gil_scoped_release nogil;
-                 return sec::expect(r, spec, ops);
-             }, py::arg("spec"), py::arg("ops"),
-             "<O> per level averaged over its symmetry multiplet: [level][op].")
-        .def("matrix_element", [](const sec::EigsResult& r, const ::Operator& O,
-                                  std::size_t i, std::size_t j) {
-                 py::gil_scoped_release nogil;
-                 return sec::matrix_element(r, O, i, j);
-             }, py::arg("O"), py::arg("i"), py::arg("j"),
-             "<v_i|O|v_j> between the vectors of levels i and j.");
+        .def(
+            "multiplet",
+            [](const sec::EigsResult& r, const sec::Spec& spec, int level, int n_up, std::size_t max_vectors) {
+                const auto& L = r.levels.at(static_cast<std::size_t>(level));
+                if (L.vector < 0) throw std::invalid_argument("multiplet: the level carries no vector");
+                std::vector<std::vector<std::complex<double>>> vs;
+                {
+                    py::gil_scoped_release nogil;
+                    vs = sec::multiplet(spec, r.n_sites, L, r.vectors[static_cast<std::size_t>(L.vector)], n_up,
+                                        max_vectors);
+                }
+                py::list out;
+                for (auto& v : vs) out.append(to_array(std::move(v)));
+                return out;
+            },
+            py::arg("spec"), py::arg("level"), py::arg("n_up") = -1, py::arg("max_vectors") = 0,
+            "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space); "
+            "at most max_vectors of its vectors when that is > 0.")
+        .def(
+            "expect",
+            [](const sec::EigsResult& r, const sec::Spec& spec, const std::vector<const ::Operator*>& ops) {
+                py::gil_scoped_release nogil;
+                return sec::expect(r, spec, ops);
+            },
+            py::arg("spec"), py::arg("ops"), "<O> per level averaged over its symmetry multiplet: [level][op].")
+        .def(
+            "matrix_element",
+            [](const sec::EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
+                py::gil_scoped_release nogil;
+                return sec::matrix_element(r, O, i, j);
+            },
+            py::arg("O"), py::arg("i"), py::arg("j"), "<v_i|O|v_j> between the vectors of levels i and j.");
 
     py::class_<sec::SpectrumResult>(s, "SpectrumResult")
         .def_readonly("levels", &sec::SpectrumResult::levels)
         .def_readonly("device_blocks", &sec::SpectrumResult::device_blocks)
-        .def_property_readonly("time_reversal", [](const sec::SpectrumResult& r) { return antiunitary_name(r.time_reversal); })
+        .def_property_readonly("time_reversal",
+                               [](const sec::SpectrumResult& r) { return antiunitary_name(r.time_reversal); })
         .def_property_readonly("placement", [](const sec::SpectrumResult& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::SpectrumResult::diagnostics)
         .def("expanded", [](const sec::SpectrumResult& r) { return to_real_array(r.expanded()); });
 
-    s.def("spectrum",
-          [](const ::Operator& H, const sec::Spec& spec, sec::Device device) {
-              py::gil_scoped_release nogil;
-              return sec::spectrum(H, spec, device);
-          },
-          py::arg("H"), py::arg("spec"), py::arg("device") = sec::Device::Cpu,
-          "The complete spectrum of H, every symmetry block diagonalised densely.");
+    s.def(
+        "spectrum",
+        [](const ::Operator& H, const sec::Spec& spec, sec::Device device) {
+            py::gil_scoped_release nogil;
+            return sec::spectrum(H, spec, device);
+        },
+        py::arg("H"), py::arg("spec"), py::arg("device") = sec::Device::Cpu,
+        "The complete spectrum of H, every symmetry block diagonalised densely.");
 
     py::enum_<sec::ThermalSpec::Method>(s, "ThermalMethod")
         .value("Exact", sec::ThermalSpec::Method::Exact)
@@ -504,13 +565,14 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("placement", [](const sec::ThermalCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::ThermalCurves::diagnostics);
 
-    s.def("thermal",
-          [](const ::Operator& H, const sec::Spec& spec, const sec::ThermalSpec& t) {
-              py::gil_scoped_release nogil;
-              return sec::thermal(H, spec, t);
-          },
-          py::arg("H"), py::arg("spec"), py::arg("thermal"),
-          "Thermodynamics of H over every symmetry block, combined in log space.");
+    s.def(
+        "thermal",
+        [](const ::Operator& H, const sec::Spec& spec, const sec::ThermalSpec& t) {
+            py::gil_scoped_release nogil;
+            return sec::thermal(H, spec, t);
+        },
+        py::arg("H"), py::arg("spec"), py::arg("thermal"),
+        "Thermodynamics of H over every symmetry block, combined in log space.");
 
     py::class_<sec::DynamicsSpec>(s, "DynamicsSpec")
         .def(py::init<>())
@@ -534,39 +596,42 @@ void bind_sectors(py::module_& m) {
         .def_property_readonly("placement", [](const sec::DynamicsCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);
 
-    s.def("dynamics",
-          [](const ::Operator& H, const sec::Spec& spec,
-             const std::vector<std::pair<const ::Operator*, const ::Operator*>>& probes, const sec::DynamicsSpec& d) {
-              std::vector<sec::Probe> ps;
-              for (const auto& [a, b] : probes) {
-                  if (!a) throw ed::InvalidRequest("dynamics: a probe without its operator A");
-                  ps.push_back({a, b});
-              }
-              py::gil_scoped_release nogil;
-              return sec::dynamics(H, spec, ps, d);
-          },
-          py::arg("H"), py::arg("spec"), py::arg("probes"), py::arg("dynamics"),
-          "S_AB(omega) = <A^dag delta(omega - H + E) B> over the momentum sectors of H, per (A, B) probe "
-          "(B None: A's autocorrelation); S is [probe][row][omega], complex.");
+    s.def(
+        "dynamics",
+        [](const ::Operator& H, const sec::Spec& spec,
+           const std::vector<std::pair<const ::Operator*, const ::Operator*>>& probes, const sec::DynamicsSpec& d) {
+            std::vector<sec::Probe> ps;
+            for (const auto& [a, b] : probes) {
+                if (!a) throw ed::InvalidRequest("dynamics: a probe without its operator A");
+                ps.push_back({a, b});
+            }
+            py::gil_scoped_release nogil;
+            return sec::dynamics(H, spec, ps, d);
+        },
+        py::arg("H"), py::arg("spec"), py::arg("probes"), py::arg("dynamics"),
+        "S_AB(omega) = <A^dag delta(omega - H + E) B> over the momentum sectors of H, per (A, B) probe "
+        "(B None: A's autocorrelation); S is [probe][row][omega], complex.");
 
     s.def("eigs_to_arrays", &eigs_to_arrays, py::arg("result"), py::arg("spec"),
           "A result as named arrays (EigResult.save).");
     s.def("eigs_from_arrays", &eigs_from_arrays, py::arg("arrays"),
           "(result, spec) from eigs_to_arrays output (qed.load_eigs); result.n_sites is restored.");
-    s.def("eigs",
-          [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors,
-             int dense_max_dim, bool allow_partial, sec::Device device,
-             bool prune, double window) {
-              sec::EigsOptions o;
-              o.k = k; o.vectors = vectors; o.dense_max_dim = dense_max_dim;
-              o.allow_partial = allow_partial; o.device = device;
-              o.prune = prune; o.window = window;
-              py::gil_scoped_release nogil;
-              return sec::eigs(H, spec, o);
-          },
-          py::arg("H"), py::arg("spec"), py::arg("k") = 1,
-          py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
-          py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu,
-          py::arg("prune") = true, py::arg("window") = 0.0,
-          "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
+    s.def(
+        "eigs",
+        [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors, int dense_max_dim, bool allow_partial,
+           sec::Device device, bool prune, double window) {
+            sec::EigsOptions o;
+            o.k = k;
+            o.vectors = vectors;
+            o.dense_max_dim = dense_max_dim;
+            o.allow_partial = allow_partial;
+            o.device = device;
+            o.prune = prune;
+            o.window = window;
+            py::gil_scoped_release nogil;
+            return sec::eigs(H, spec, o);
+        },
+        py::arg("H"), py::arg("spec"), py::arg("k") = 1, py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
+        py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu, py::arg("prune") = true,
+        py::arg("window") = 0.0, "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
 }

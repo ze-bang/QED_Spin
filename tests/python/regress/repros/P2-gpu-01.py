@@ -14,6 +14,7 @@ threads; ED_SYM_PROFILE confirms the host reduced CSR engaged), with ED_LANCZOS_
 the per-iteration Lanczos time.  CONFIRMED when the GPU lane is >= 2x slower per iteration than the
 4-thread host CSR on both configs (a CSR SpMV on the same device slice, with several times the
 bandwidth of 4 host cores, would therefore be far faster than the current device lane)."""
+
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import sys
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -49,18 +51,19 @@ print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": 
       "device_blocks": int(r.device_blocks),
       "dims": sorted({int(L.block_dim) for L in r.levels})}), flush=True)
 '''
-PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply [\d.]+% \([\d.]+ us/it\) "
-                 r"recur [\d.]+% \([\d.]+ us/it\) reorth ([\d.]+)%")
+PAT = re.compile(
+    r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = apply [\d.]+% \([\d.]+ us/it\) "
+    r"recur [\d.]+% \([\d.]+ us/it\) reorth ([\d.]+)%"
+)
 
 
 def run(cfg, dev):
     env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", ED_SYM_PROFILE="1")
-    p = subprocess.run([sys.executable, "-c", CHILD, cfg, dev], capture_output=True, text=True,
-                       env=env, timeout=200)
+    p = subprocess.run([sys.executable, "-c", CHILD, cfg, dev], capture_output=True, text=True, env=env, timeout=200)
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
+            res = json.loads(line[len("RESULT_JSON:") :])
     if res is None:
         raise RuntimeError(f"{cfg}/{dev} rc={p.returncode}: {p.stderr[-300:]}")
     lines = [(int(m.group(1)), float(m.group(2)), float(m.group(3))) for m in PAT.finditer(p.stderr)]
@@ -83,8 +86,10 @@ except Exception as e:
     sys.exit(0)
 
 for (c, d), r in out.items():
-    print(f"config {c} {d}: dims={r['dims']} iters={r['iters']} ms/iter={r['ms_per_iter']:.2f} "
-          f"device_blocks={r['device_blocks']} csr={r['csr']} E={r['E']}")
+    print(
+        f"config {c} {d}: dims={r['dims']} iters={r['iters']} ms/iter={r['ms_per_iter']:.2f} "
+        f"device_blocks={r['device_blocks']} csr={r['csr']} E={r['E']}"
+    )
 if any(out[(c, "gpu")]["device_blocks"] < 1 for c in ("A", "B")):
     print("REPRO: INCONCLUSIVE a GPU run did not use the device (device_blocks=0)")
     sys.exit(0)
@@ -94,9 +99,11 @@ if not all(out[(c, "cpu")]["csr"] for c in ("A", "B")):
 ratios = {c: out[(c, "gpu")]["ms_per_iter"] / out[(c, "cpu")]["ms_per_iter"] for c in ("A", "B")}
 gAB = out[("B", "gpu")]["ms_per_iter"] / out[("A", "gpu")]["ms_per_iter"]
 cAB = out[("B", "cpu")]["ms_per_iter"] / out[("A", "cpu")]["ms_per_iter"]
-msg = (f"gpu/cpu-CSR per-iter A={ratios['A']:.2f}x B={ratios['B']:.2f}x; "
-       f"B/A per-iter gpu={gAB:.2f} cpu={cAB:.2f} (block dims A={out[('A','gpu')]['dims']} "
-       f"B={out[('B','gpu')]['dims']})")
+msg = (
+    f"gpu/cpu-CSR per-iter A={ratios['A']:.2f}x B={ratios['B']:.2f}x; "
+    f"B/A per-iter gpu={gAB:.2f} cpu={cAB:.2f} (block dims A={out[('A','gpu')]['dims']} "
+    f"B={out[('B','gpu')]['dims']})"
+)
 if min(ratios.values()) >= 2.0:
     print("REPRO: CONFIRMED device on-the-fly lane slower than 4-thread host CSR: " + msg)
 elif max(ratios.values()) < 0.5:

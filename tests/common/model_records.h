@@ -110,11 +110,15 @@ inline void kitaev(Operator& H, const Bonds& bonds, const std::vector<int>& axis
         if (i == j) continue;
         const Cx q(K / 4.0, 0.0), mq(-K / 4.0, 0.0);
         if (axis[b] == 0) {
-            H.addTwoBodyTerm(Sp, i, Sp, j, q); H.addTwoBodyTerm(Sp, i, Sm, j, q);
-            H.addTwoBodyTerm(Sm, i, Sp, j, q); H.addTwoBodyTerm(Sm, i, Sm, j, q);
+            H.addTwoBodyTerm(Sp, i, Sp, j, q);
+            H.addTwoBodyTerm(Sp, i, Sm, j, q);
+            H.addTwoBodyTerm(Sm, i, Sp, j, q);
+            H.addTwoBodyTerm(Sm, i, Sm, j, q);
         } else if (axis[b] == 1) {
-            H.addTwoBodyTerm(Sp, i, Sp, j, mq); H.addTwoBodyTerm(Sp, i, Sm, j, q);
-            H.addTwoBodyTerm(Sm, i, Sp, j, q); H.addTwoBodyTerm(Sm, i, Sm, j, mq);
+            H.addTwoBodyTerm(Sp, i, Sp, j, mq);
+            H.addTwoBodyTerm(Sp, i, Sm, j, q);
+            H.addTwoBodyTerm(Sm, i, Sp, j, q);
+            H.addTwoBodyTerm(Sm, i, Sm, j, mq);
         } else {
             H.addTwoBodyTerm(Sz, i, Sz, j, Cx(K, 0.0));
         }

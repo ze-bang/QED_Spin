@@ -34,18 +34,14 @@ enum class MemorySpace : std::uint8_t {
 
 constexpr std::string_view to_string(MemorySpace s) noexcept {
     switch (s) {
-        case MemorySpace::Host:       return "Host";
-        case MemorySpace::CudaDevice: return "CudaDevice";
+    case MemorySpace::Host: return "Host";
+    case MemorySpace::CudaDevice: return "CudaDevice";
     }
     return "Unknown";
 }
 
-constexpr bool is_device(MemorySpace s) noexcept {
-    return s == MemorySpace::CudaDevice;
-}
+constexpr bool is_device(MemorySpace s) noexcept { return s == MemorySpace::CudaDevice; }
 
-constexpr bool is_host(MemorySpace s) noexcept {
-    return s == MemorySpace::Host;
-}
+constexpr bool is_host(MemorySpace s) noexcept { return s == MemorySpace::Host; }
 
 } // namespace ed::matvec

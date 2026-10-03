@@ -32,7 +32,7 @@ bool numa_pin_threads_enabled();
 /// The number of times the per-process pinning has been *applied* (zero: not
 /// pinned yet, the knob is off, OMP_PROC_BIND binds the threads, or pinning
 /// failed). Test-friendly accessor.
-int  pin_omp_threads_application_count();
+int pin_omp_threads_application_count();
 
 /// Apply OpenMP thread-to-CPU pinning once per process (see the knob above).
 /// Repeat calls are no-ops; on non-Linux platforms, without OpenMP or with the

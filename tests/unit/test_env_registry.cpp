@@ -61,9 +61,18 @@ TEST_CASE("env registry: a number falls back to the default when unset, empty or
     const char* r = "ED_SYM_SECTOR_CSR_BUDGET_GIB";
     ::unsetenv(r);
     REQUIRE(ed::env::real(r, 1e-8) == 1e-8);
-    { ScopedEnv e(r, "1e-6"); REQUIRE(ed::env::real(r, 1e-8) == 1e-6); }
-    { ScopedEnv e(r, "");     REQUIRE(ed::env::real(r, 1e-8) == 1e-8); }
-    { ScopedEnv e(r, "x");    REQUIRE(ed::env::real(r, 1e-8) == 1e-8); }
+    {
+        ScopedEnv e(r, "1e-6");
+        REQUIRE(ed::env::real(r, 1e-8) == 1e-6);
+    }
+    {
+        ScopedEnv e(r, "");
+        REQUIRE(ed::env::real(r, 1e-8) == 1e-8);
+    }
+    {
+        ScopedEnv e(r, "x");
+        REQUIRE(ed::env::real(r, 1e-8) == 1e-8);
+    }
 }
 
 TEST_CASE("env registry: snapshot lists what is set; unknown() catches a misspelt name", "[env]") {

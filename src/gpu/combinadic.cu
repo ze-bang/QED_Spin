@@ -33,7 +33,7 @@ void upload_pascal_shared() {
         for (int n = 0; n <= 64; ++n) {
             h_pascal[n][0] = 1ULL;
             for (int k = 1; k <= n; ++k) {
-                unsigned long long left  = h_pascal[n - 1][k - 1];
+                unsigned long long left = h_pascal[n - 1][k - 1];
                 unsigned long long right = (k < n) ? h_pascal[n - 1][k] : 0ULL;
                 h_pascal[n][k] = left + right;
             }

@@ -12,6 +12,7 @@ cases (and their --param overrides), takes the median over repeats, and exits 1 
 case is >10% slower or uses >15% more memory than the baseline, 2 when the files share no
 case. QED_COMMIT overrides the commit label.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,8 +31,12 @@ WALL_TOL, RSS_TOL = 1.10, 1.15
 
 
 def commit():
-    return os.environ.get("QED_COMMIT") or subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=HERE).stdout.strip()
+    return (
+        os.environ.get("QED_COMMIT")
+        or subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, cwd=HERE
+        ).stdout.strip()
+    )
 
 
 def parse_param(s):
@@ -46,20 +51,32 @@ def parse_param(s):
 
 def run_case(a):
     from cases import CASES
+
     fn, _ = CASES[a.case]
     params = dict(parse_param(p) for p in a.param)
     if a.log:
         import qed
+
         qed.set_log_level(a.log, sys.stderr)
     t0 = time.perf_counter()
     out = fn(**params)
     wall = time.perf_counter() - t0
-    rss = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-              resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 2**20  # GiB
-    row = dict(case=a.case, commit=commit(), params=params, repeat=a.repeat, wall_s=round(wall, 2),
-               peak_rss_gib=round(rss, 3), threads=int(os.environ.get("OMP_NUM_THREADS", "0")),
-               omp_bind=os.environ.get("OMP_PROC_BIND", ""), host=os.uname().nodename,
-               job=os.environ.get("SLURM_JOB_ID", ""))
+    rss = (
+        max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+        / 2**20
+    )  # GiB
+    row = dict(
+        case=a.case,
+        commit=commit(),
+        params=params,
+        repeat=a.repeat,
+        wall_s=round(wall, 2),
+        peak_rss_gib=round(rss, 3),
+        threads=int(os.environ.get("OMP_NUM_THREADS", "0")),
+        omp_bind=os.environ.get("OMP_PROC_BIND", ""),
+        host=os.uname().nodename,
+        job=os.environ.get("SLURM_JOB_ID", ""),
+    )
     row.update({k: out.pop(k) for k in METRICS if k in out})
     if a.xdiag:
         with open(a.xdiag) as f:
@@ -96,7 +113,9 @@ def compare(base_path, cur_path):
         return 2
     med = lambda rows, f: statistics.median(r[f] for r in rows)  # noqa: E731
     bad = []
-    print(f"{'case':40s} {'wall base':>10s} {'wall now':>10s} {'ratio':>6s} {'RSS base':>9s} {'RSS now':>9s} {'ratio':>6s}")
+    print(
+        f"{'case':40s} {'wall base':>10s} {'wall now':>10s} {'ratio':>6s} {'RSS base':>9s} {'RSS now':>9s} {'ratio':>6s}"
+    )
     for k in common:
         wb, wc = med(base[k], "wall_s"), med(cur[k], "wall_s")
         rb, rc = med(base[k], "peak_rss_gib"), med(cur[k], "peak_rss_gib")

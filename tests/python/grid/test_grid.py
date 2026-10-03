@@ -15,6 +15,7 @@ rule and, at T > 0, detailed balance where it is measurable. Selection contents 
 checked against H on the subspace their momentum / character projectors define
 (resolve_selection, Oracle.subspace).
 """
+
 from __future__ import annotations
 
 import functools
@@ -33,8 +34,18 @@ pytest.importorskip("pynauty")
 
 
 from . import adapter as api  # noqa: E402
-from .models import (MODELS, Model, adjoint, apply_perm, compose, dot, fourier, oracle,  # noqa: E402
-                     scale, sparse)
+from .models import (
+    MODELS,
+    Model,
+    adjoint,
+    apply_perm,
+    compose,
+    dot,
+    fourier,
+    oracle,  # noqa: E402
+    scale,
+    sparse,
+)
 
 pytestmark = pytest.mark.grid
 
@@ -44,24 +55,23 @@ HERE = Path(__file__).resolve().parent
 # model carries are in its notes (support/models.py).
 _NEW = ["chain11", "obc10", "tri_patch10", "tri12", "kagome12", "dm_ring12", "xxz_hz12"]
 CONTENT_MODELS = {
-    "none":    ["chain12", "tri9chi", "dm_ring12"],
-    "sz_all":  ["chain12", "tri9", "tri9chi", "tri9h", "dm_ring12", "xxz_hz12", "obc10"],
-    "sz_one":  ["chain12", "tri9", "tri9h", "sq12ring", "chain11", "dm_ring12", "xxz_hz12", "tri_patch10"],
-    "parity":  ["xyz12"],
-    "flip":    ["chain12", "chain11", "obc10"],
+    "none": ["chain12", "tri9chi", "dm_ring12"],
+    "sz_all": ["chain12", "tri9", "tri9chi", "tri9h", "dm_ring12", "xxz_hz12", "obc10"],
+    "sz_one": ["chain12", "tri9", "tri9h", "sq12ring", "chain11", "dm_ring12", "xxz_hz12", "tri_patch10"],
+    "parity": ["xyz12"],
+    "flip": ["chain12", "chain11", "obc10"],
     "abelian": ["chain12", "tri9", "tri9chi", "xyz12", "chain11", "tri12", "kagome12", "dm_ring12", "xxz_hz12"],
-    "lg":      ["chain12", "tri9", "tri9chi", "tri9h", "xyz12", "sq12ring", "kagome12bq"] + _NEW,
-    "tr":      ["chain12", "tri12", "xxz_hz12", "dm_ring12"],
-    "su2":     ["chain12", "tri9", "sq12ring", "kagome12bq", "chain11", "obc10", "tri12"],
+    "lg": ["chain12", "tri9", "tri9chi", "tri9h", "xyz12", "sq12ring", "kagome12bq"] + _NEW,
+    "tr": ["chain12", "tri12", "xxz_hz12", "dm_ring12"],
+    "su2": ["chain12", "tri9", "sq12ring", "kagome12bq", "chain11", "obc10", "tri12"],
     # spatial="auto" combined with each spin option
-    "su2_lg":  ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12"],
-    "tr_lg":   ["chain12", "obc10", "tri_patch10", "tri12", "kagome12", "xxz_hz12", "dm_ring12"],
+    "su2_lg": ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12"],
+    "tr_lg": ["chain12", "obc10", "tri_patch10", "tri12", "kagome12", "xxz_hz12", "dm_ring12"],
     "flip_lg": ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12", "xyz12"],
     "parity_lg": ["xyz12"],
     # the model's whole space group as an explicit permutation list, split by the library
-    "raw_spacegroup": ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12", "dm_ring12",
-                       "xxz_hz12"],
-    "all":     ["chain12", "tri9chi", "xyz12"] + _NEW,
+    "raw_spacegroup": ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12", "dm_ring12", "xxz_hz12"],
+    "all": ["chain12", "tri9chi", "xyz12"] + _NEW,
     # Symmetry.select over the explicit space group (resolve_selection)
     "sel_mom": ["chain12", "chain11", "obc10", "tri_patch10", "tri12", "kagome12", "dm_ring12", "xxz_hz12"],
     "sel_char": ["chain12", "tri_patch10", "tri12", "kagome12"],
@@ -69,19 +79,57 @@ CONTENT_MODELS = {
     "sel_union": ["chain12", "tri12", "dm_ring12"],
 }
 SELECTIONS = ("sel_mom", "sel_char", "sel_char_id", "sel_union")
-TASKS = ["eigs", "vectors", "labels", "scale", "expect", "spectrum", "th_exact", "th_ftlm", "th_mtpq",
-         "th_Oexact", "th_Oftlm", "dyn0_zz", "dyn0_pm", "dyn0_3b", "dynT_zz", "dynT_pm", "dynT_3b"]
+TASKS = [
+    "eigs",
+    "vectors",
+    "labels",
+    "scale",
+    "expect",
+    "spectrum",
+    "th_exact",
+    "th_ftlm",
+    "th_mtpq",
+    "th_Oexact",
+    "th_Oftlm",
+    "dyn0_zz",
+    "dyn0_pm",
+    "dyn0_3b",
+    "dynT_zz",
+    "dynT_pm",
+    "dynT_3b",
+]
 BACKENDS = ["cpu", "gpu"]
 
 # Dynamics probes need U(1) for S+ (it changes Sz); skip them where Sz is broken. The _3b probe
 # is three-body (three_body_probe). Models without translations probe the site-staggered sum.
-Q = {"chain12": (3,), "tri9": (1, 1), "tri9chi": (1, 1), "tri9h": (1, 1), "xyz12": (3,), "sq12ring": (1, 1),
-     "kagome12bq": (1, 0), "chain11": (3,), "tri12": (2, 1), "kagome12": (1, 0), "dm_ring12": (3,),
-     "xxz_hz12": (3,), "obc10": None, "tri_patch10": None}
+Q = {
+    "chain12": (3,),
+    "tri9": (1, 1),
+    "tri9chi": (1, 1),
+    "tri9h": (1, 1),
+    "xyz12": (3,),
+    "sq12ring": (1, 1),
+    "kagome12bq": (1, 0),
+    "chain11": (3,),
+    "tri12": (2, 1),
+    "kagome12": (1, 0),
+    "dm_ring12": (3,),
+    "xxz_hz12": (3,),
+    "obc10": None,
+    "tri_patch10": None,
+}
 # Momentum selections, in units of the momentum generators' orders (Model.momentum_generators);
 # sel_union keeps two momenta in different stars.
-SEL_MOM = {"chain12": [(1,)], "chain11": [(2,)], "obc10": [(1,)], "tri_patch10": [(1,)], "tri12": [(1, 0)],
-           "kagome12": [(1, 0)], "dm_ring12": [(1,)], "xxz_hz12": [(2,)]}
+SEL_MOM = {
+    "chain12": [(1,)],
+    "chain11": [(2,)],
+    "obc10": [(1,)],
+    "tri_patch10": [(1,)],
+    "tri12": [(1, 0)],
+    "kagome12": [(1, 0)],
+    "dm_ring12": [(1,)],
+    "xxz_hz12": [(2,)],
+}
 SEL_UNION = {"chain12": [(0,), (3,)], "tri12": [(0, 0), (3, 1)], "dm_ring12": [(2,), (9,)]}
 OMEGA = np.linspace(-1.0, 7.0, 161)
 ETA = 0.1
@@ -108,8 +156,7 @@ def _cells():
                 # qed.dynamics documents k0 / irrep / irrep_character selections as Unsupported
                 if task.startswith("dyn") and content in ("sel_char", "sel_char_id"):
                     continue
-                yield pytest.param(task, content, mname, backend,
-                                   id=f"{task}-{content}-{mname}-{backend}")
+                yield pytest.param(task, content, mname, backend, id=f"{task}-{content}-{mname}-{backend}")
 
 
 @functools.lru_cache(maxsize=None)
@@ -133,8 +180,10 @@ def resolve_selection(mname, content):
     mine = {e for e, _ in orc.abelian_elements(gens, orders, (0,) * len(orders))}
     centre = [z for z in G if all(compose(z, g) == compose(g, z) for g in G)]
     if not mine <= {tuple(a) for a in A} <= {compose(t, z) for t in mine for z in centre}:
-        raise Mismatch(f"{mname}: the library's abelian part ({len(A)} elements) is not the "
-                       f"{len(mine)} momentum generators' group times central elements")
+        raise Mismatch(
+            f"{mname}: the library's abelian part ({len(A)} elements) is not the "
+            f"{len(mine)} momentum generators' group times central elements"
+        )
     if content in ("sel_mom", "sel_union"):
         qs = SEL_MOM[mname] if content == "sel_mom" else SEL_UNION[mname]
         reqs = [{g: Fraction(qa, L) for g, qa, L in zip(gens, q, orders)} for q in qs]
@@ -148,8 +197,7 @@ def resolve_selection(mname, content):
         pick = None
         for R in map(tuple, residues):
             fixed = [q for q, B in spaces.items() if orc._image_momentum(B, R, gens, orders) == q]
-            if fixed and all(len({orc._image_momentum(spaces[q], g, gens, orders) for g in G}) == 1
-                             for q in fixed):
+            if fixed and all(len({orc._image_momentum(spaces[q], g, gens, orders) for g in G}) == 1 for q in fixed):
                 pick = R
                 break
         if pick is None:
@@ -157,8 +205,10 @@ def resolve_selection(mname, content):
         seen = set()
         for q in fixed:
             little = [g for g in G if orc._image_momentum(spaces[q], g, gens, orders) == q]
-            seen |= {complex(round(tr[pick].real, 6), round(tr[pick].imag, 6))
-                     for _, _, tr in orc._irreducible_copies(spaces[q], little)}
+            seen |= {
+                complex(round(tr[pick].real, 6), round(tr[pick].imag, 6))
+                for _, _, tr in orc._irreducible_copies(spaces[q], little)
+            }
         chi = -1.0 + 0j if (-1.0 + 0j) in seen else sorted(seen, key=lambda c: (c == 1, c.real, c.imag))[0]
         sym = base.select(irrep_character={pick: chi})
         sel = ("sub", ("char", tuple(gens), orders, G, pick, chi))
@@ -178,8 +228,17 @@ def resolve_selection(mname, content):
             raise Mismatch(f"{mname}: no projected level in the n_up = {n0} spectrum")
         L = r.levels[i]
         sym = base.select(k0=[L.k0], irrep=[L.irrep])
-        sel = ("sub", ("irrep", tuple(tuple(a) for a in r._spec.abelian), tuple(complex(c) for c in L.momentum),
-                       tuple((tuple(R), complex(c)) for R, c in chars[i].items()), G, n0))
+        sel = (
+            "sub",
+            (
+                "irrep",
+                tuple(tuple(a) for a in r._spec.abelian),
+                tuple(complex(c) for c in L.momentum),
+                tuple((tuple(R), complex(c)) for R, c in chars[i].items()),
+                G,
+                n0,
+            ),
+        )
         assert ident in {R for R, _ in sel[1][3]}
     else:
         raise ValueError(content)
@@ -264,14 +323,14 @@ def _detailed_balance(orc, terms, got, ref, T, init):
 def _eig_check(got, ref_spec, content, k=4):
     """max |E - E_ref| over the lowest k energies (a spin restriction may return one member per
     multiplet: compared as distinct values), or (inf, note)."""
-    if content.startswith("su2"):   # targeting may return one member per multiplet
-        ref = np.unique(np.round(ref_spec, 8))[:len(np.unique(np.round(got, 8)))]
+    if content.startswith("su2"):  # targeting may return one member per multiplet
+        ref = np.unique(np.round(ref_spec, 8))[: len(np.unique(np.round(got, 8)))]
         got = np.unique(np.round(got, 8))
     else:
         ref = ref_spec[:k]
     if len(got) < len(ref):
         return math.inf, f"returned {len(got)} of {len(ref)} levels"
-    return float(np.max(np.abs(got[:len(ref)] - ref))), ""
+    return float(np.max(np.abs(got[: len(ref)] - ref))), ""
 
 
 def _labels(m, orc, pairs, r, s_H):
@@ -301,8 +360,9 @@ def _labels(m, orc, pairs, r, s_H):
             w["mom"] = max(w["mom"], abs(np.vdot(v, apply_perm(orc._imgs(a), v)) - complex(chi)))
         if phys:
             for g, th in zip(gens, r.momentum(i, gens)):
-                w["theta"] = max(w["theta"], abs(np.vdot(v, apply_perm(orc._imgs(g), v))
-                                                 - np.exp(-2j * math.pi * float(th))))
+                w["theta"] = max(
+                    w["theta"], abs(np.vdot(v, apply_perm(orc._imgs(g), v)) - np.exp(-2j * math.pi * float(th)))
+                )
         ch = {tuple(R): complex(c) for R, c in r.irrep_characters(i).items()}
         if not ch:
             continue
@@ -317,11 +377,18 @@ def _labels(m, orc, pairs, r, s_H):
         for R, c in ch.items():
             tr = np.trace(B.conj().T @ apply_perm(orc._imgs(R), B)) / copies
             w["chi"] = max(w["chi"], abs(tr - c))
-    ok = (not bad and max(w["mom"], w["theta"], w["chi"]) < 1e-8 and w["res"] <= 1e-9 * s_H
-          and w["energy"] <= 1e-9 * s_H and w["orth"] <= 1e-12)
-    note = (f"{len(pairs)} levels ({nchar} with characters): |mom| {w['mom']:.1e} |theta| {w['theta']:.1e} "
-            f"|chi| {w['chi']:.1e} residual {w['res']:.1e} (s_H {s_H:.3g}) |E| {w['energy']:.1e} "
-            f"orth {w['orth']:.1e}" + ("; " + "; ".join(bad) if bad else ""))
+    ok = (
+        not bad
+        and max(w["mom"], w["theta"], w["chi"]) < 1e-8
+        and w["res"] <= 1e-9 * s_H
+        and w["energy"] <= 1e-9 * s_H
+        and w["orth"] <= 1e-12
+    )
+    note = (
+        f"{len(pairs)} levels ({nchar} with characters): |mom| {w['mom']:.1e} |theta| {w['theta']:.1e} "
+        f"|chi| {w['chi']:.1e} residual {w['res']:.1e} (s_H {s_H:.3g}) |E| {w['energy']:.1e} "
+        f"orth {w['orth']:.1e}" + ("; " + "; ".join(bad) if bad else "")
+    )
     metric = max(w["mom"], w["theta"], w["chi"], w["res"] / s_H, w["orth"])
     return ok, metric, note
 
@@ -355,8 +422,14 @@ def _run(task, content, mname, device, monkeypatch):
         n_below = int(np.sum(ref_spec < cut - tol))
         n_top = int(np.sum(np.abs(ref_spec - cut) <= tol))
         tiled = below == n_below and top <= n_top and below + top >= min(k, len(ref_spec))
-        return err < 1e-7 and tiled, err, (f"tiling: multiplicities {below} below the top level "
-                                           f"(reference {n_below}), {top} at it (reference {n_top})")
+        return (
+            err < 1e-7 and tiled,
+            err,
+            (
+                f"tiling: multiplicities {below} below the top level "
+                f"(reference {n_below}), {top} at it (reference {n_top})"
+            ),
+        )
 
     if task == "vectors":
         # Each vector must be an eigenvector (residual <= 1e-9 s_H), its Rayleigh energy must be
@@ -373,8 +446,11 @@ def _run(task, content, mname, device, monkeypatch):
         V = np.array([np.asarray(v, complex) for v in vecs])
         orth = float(np.max(np.abs(V.conj() @ V.T - np.eye(len(V)))))
         err = max(res, pair, low)
-        return err < 1e-6 and res <= 1e-9 * s_H and orth <= 1e-12, max(err, orth), \
-            f"residual {res:.1e} (s_H {s_H:.3g}) pairing {pair:.1e} lowest {low:.1e} |V^dag V - 1| {orth:.1e}"
+        return (
+            err < 1e-6 and res <= 1e-9 * s_H and orth <= 1e-12,
+            max(err, orth),
+            f"residual {res:.1e} (s_H {s_H:.3g}) pairing {pair:.1e} lowest {low:.1e} |V^dag V - 1| {orth:.1e}",
+        )
 
     if task == "labels":
         pairs, r = api.labelled(m, H, content, device, k=6)
@@ -402,15 +478,17 @@ def _run(task, content, mname, device, monkeypatch):
         # complex conjugation (it averages to zero over time-reversed partners).
         ops = [dot(0, 1)]
         if not spin:
-            ops += [[(1.0, (("z", 0), ("z", 2))), (0.3, (("+", 0),)), (0.3, (("-", 0),))],
-                    [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
+            ops += [
+                [(1.0, (("z", 0), ("z", 2))), (0.3, (("+", 0),)), (0.3, (("-", 0),))],
+                [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))],
+            ]
         rows = api.expect(m, H, content, device, [Model("obs", m.N, t, [], (), []).operator() for t in ops], k=4)
         worst, checked = 0.0, 0
         for oi, t in enumerate(ops):
             for E, dim, tr in orc.cluster_traces(sel, t):
                 mine = [(mult, vals[oi]) for e, mult, vals in rows if abs(e - E) < 1e-7]
                 if sum(mult for mult, _ in mine) != dim:
-                    continue                          # cluster cut by the k window
+                    continue  # cluster cut by the k window
                 worst = max(worst, abs(sum(mult * v for mult, v in mine) - tr))
                 checked += 1
         if checked < len(ops):
@@ -439,15 +517,15 @@ def _run(task, content, mname, device, monkeypatch):
         T = T_EXACT if method == "exact" else T_SAMPLED
         ops = [dot(0, 1)]
         if not spin:
-            ops += [[(1.0, (("z", 0), ("z", 2)))],
-                    [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
+            ops += [[(1.0, (("z", 0), ("z", 2)))], [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))]]
         Os = [Model("obs", m.N, t, [], (), []).operator() for t in ops]
         ref = orc.thermal_expect(sel, ops, T)
-        dmd = None if method == "exact" else 0     # grid blocks: sample them, never the exact fallback
+        dmd = None if method == "exact" else 0  # grid blocks: sample them, never the exact fallback
 
         def run(dev, samples):
-            return api.thermal(m, H, content, dev, method, T, samples=samples, krylov=60, seed=7,
-                               observables=Os, dense_max_dim=dmd)["O"]
+            return api.thermal(
+                m, H, content, dev, method, T, samples=samples, krylov=60, seed=7, observables=Os, dense_max_dim=dmd
+            )["O"]
 
         if method == "exact":
             err = float(np.max(np.abs(run(device, 1) - ref)))
@@ -465,14 +543,13 @@ def _run(task, content, mname, device, monkeypatch):
     if task.startswith("th_"):
         method = {"th_exact": "exact", "th_ftlm": "FTLM", "th_mtpq": "mTPQ"}[task]
         T = T_EXACT if method == "exact" else T_SAMPLED
-        if method == "mTPQ" and m.N < 12:   # mTPQ's own finite-size bias dominates N=9 below T~1
+        if method == "mTPQ" and m.N < 12:  # mTPQ's own finite-size bias dominates N=9 below T~1
             T = T[T >= 1.0]
-        dmd = None if method == "exact" else 0     # grid blocks: sample them, never the exact fallback
+        dmd = None if method == "exact" else 0  # grid blocks: sample them, never the exact fallback
         tol = {"exact": (1e-8, 1e-8), "FTLM": (0.01, 0.02), "mTPQ": (0.02, 0.04)}[method]
 
         def err(samples):
-            got = api.thermal(m, H, content, device, method, T, samples=samples,
-                              krylov=60, seed=7, dense_max_dim=dmd)
+            got = api.thermal(m, H, content, device, method, T, samples=samples, krylov=60, seed=7, dense_max_dim=dmd)
             ref = orc.thermo(ref_spec, got["T"])
             eE = float(np.max(np.abs(got["E"] - ref["E"]))) / m.N
             eC = float(np.max(np.abs(got["C"] - ref["C"]))) / m.N
@@ -484,8 +561,18 @@ def _run(task, content, mname, device, monkeypatch):
         if device == "gpu":
             # The CPU cell pins the method against the dense oracle. The device path must
             # reproduce the CPU path: same seeds, hence the same random vectors, at a few samples.
-            run = lambda dev: api.thermal(m, H, content, dev, method, T, samples=4, krylov=60, seed=7,  # noqa: E731
-                                          dense_max_dim=dmd)
+            run = lambda dev: api.thermal(
+                m,
+                H,
+                content,
+                dev,
+                method,
+                T,
+                samples=4,
+                krylov=60,
+                seed=7,  # noqa: E731
+                dense_max_dim=dmd,
+            )
             got, cpu = run("gpu"), run("cpu")
             d = max(float(np.max(np.abs(got[q] - cpu[q]))) for q in ("E", "C")) / m.N
             lim = GPU_VS_CPU[method]
@@ -513,13 +600,35 @@ def _run(task, content, mname, device, monkeypatch):
         # GPU and CPU agree only to 2.6e-6 at one sample and up to 7.7e-4 at 2-4 (chain12, diag
         # 62311516; each side is bit-reproducible): those cells are held to the dense reference.
         if device == "gpu" and T is not None and not spin:
-            run = lambda dev: api.dynamics(m, H, content, dev, obs, Q[mname], OMEGA, ETA, T,  # noqa: E731
-                                           samples=4, krylov=40)
+            run = lambda dev: api.dynamics(
+                m,
+                H,
+                content,
+                dev,
+                obs,
+                Q[mname],
+                OMEGA,
+                ETA,
+                T,  # noqa: E731
+                samples=4,
+                krylov=40,
+            )
             got, cpu = run("gpu"), run("cpu")
             d = _rel_l1(got, cpu)
             return d < GPU_VS_CPU["dynamics"], d, f"gpu vs cpu, 4 samples: rel L1 {d:.1e}"
-        run = lambda samples: api.dynamics(m, H, content, device, obs, Q[mname], OMEGA, ETA, T,  # noqa: E731
-                                           samples=samples, krylov=150 if T is None else 80)
+        run = lambda samples: api.dynamics(
+            m,
+            H,
+            content,
+            device,
+            obs,
+            Q[mname],
+            OMEGA,
+            ETA,
+            T,  # noqa: E731
+            samples=samples,
+            krylov=150 if T is None else 80,
+        )
         got = run(60)
         init = orc.mask(sel) if sel is None or sel[0] in ("n_up", "parity") else orc.eigbasis(sel)
         if sel is not None and sel[0] == "sub" and sel[1][0] == "mom":
@@ -534,8 +643,9 @@ def _run(task, content, mname, device, monkeypatch):
         if T is None:
             return err < tol and sr < SUM_RULE[True], max(err, sr), f"rel L1 {err:.3f}; sum rule {sr:.1e}"
         db = _detailed_balance(orc, terms, got, ref, T, init)
-        note = (f"rel L1 {err:.3f}; sum rule {sr:.1e}; detailed balance "
-                + ("not measurable" if db is None else f"{db:.1e}"))
+        note = f"rel L1 {err:.3f}; sum rule {sr:.1e}; detailed balance " + (
+            "not measurable" if db is None else f"{db:.1e}"
+        )
         if sr < SUM_RULE[False] and (db is None or db < DETAILED_BALANCE):
             return err < tol, max(err, sr), note
         # As for sampled thermodynamics: past tolerance at 60 samples, 4x the samples must shrink
@@ -545,8 +655,11 @@ def _run(task, content, mname, device, monkeypatch):
         db4 = _detailed_balance(orc, terms, got4, ref, T, init)
         ok_sr = sr4 < SUM_RULE[False] or sr4 < 0.65 * sr
         ok_db = db is None or db4 < DETAILED_BALANCE or db4 < 0.65 * db
-        return err < tol and ok_sr and ok_db, max(err, sr4), \
-            note + f"; at 240 samples: sum rule {sr4:.1e}, detailed balance {db4 if db4 is None else f'{db4:.1e}'}"
+        return (
+            err < tol and ok_sr and ok_db,
+            max(err, sr4),
+            note + f"; at 240 samples: sum rule {sr4:.1e}, detailed balance {db4 if db4 is None else f'{db4:.1e}'}",
+        )
 
     raise ValueError(task)
 
@@ -575,10 +688,19 @@ def test_cell(task, content, mname, backend, monkeypatch):
         status, note = ("refused" if deliberate else "crash"), f"RuntimeError: {e}"
     except Exception as e:  # noqa: BLE001 -- a crash is a measured outcome
         status, note = "crash", f"{type(e).__name__}: {e}"
-    REPORT.append({"cell": cell, "task": task, "content": content, "model": mname,
-                   "backend": backend, "status": status,
-                   "metric": None if metric is None or not math.isfinite(metric) else metric,
-                   "note": note[:400], "secs": round(time.time() - t0, 2)})
+    REPORT.append(
+        {
+            "cell": cell,
+            "task": task,
+            "content": content,
+            "model": mname,
+            "backend": backend,
+            "status": status,
+            "metric": None if metric is None or not math.isfinite(metric) else metric,
+            "note": note[:400],
+            "secs": round(time.time() - t0, 2),
+        }
+    )
     was = _baseline(backend).get(cell)
     if was == "pass":
         assert status == "pass", f"{cell}: regressed from pass to {status} ({note})"

@@ -28,12 +28,8 @@ Permutation identity_internal(std::size_t n) {
 
 } // namespace
 
-std::vector<Permutation>
-generate_group(const std::vector<Permutation>& generators) {
-    if (generators.empty()) {
-        throw std::invalid_argument(
-            "ed::sym::generate_group: need at least one generator");
-    }
+std::vector<Permutation> generate_group(const std::vector<Permutation>& generators) {
+    if (generators.empty()) { throw std::invalid_argument("ed::sym::generate_group: need at least one generator"); }
     const std::size_t n = generators.front().size();
     for (const auto& g : generators) {
         validate(g, static_cast<int>(n));   // narrow-ok: a site count
@@ -51,9 +47,7 @@ generate_group(const std::vector<Permutation>& generators) {
         for (const auto& g : generators) {
             Permutation next(n);
             for (std::size_t i = 0; i < n; ++i) next[i] = g[curr[i]];
-            if (seen.insert(next).second) {
-                queue.push(std::move(next));
-            }
+            if (seen.insert(next).second) { queue.push(std::move(next)); }
         }
     }
 

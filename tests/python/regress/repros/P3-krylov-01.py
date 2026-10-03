@@ -13,6 +13,7 @@ independently built sparse sector matrix.  CONFIRMED when QED needs >= 2x ARPACK
 RESTATED 2026-10-02 (P6.2): the matvecs are the block's applies from result.block_stats (the thick-restart
 kernel builds its basis itself and emits no [lanczos_kernel] line, which made the count 0); the profile
 lines are still reported where there are any."""
+
 import json
 import os
 import re
@@ -46,12 +47,12 @@ PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms")
 
 
 def run_qed(k):
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")  # the profile line is an Info record
     p = subprocess.run([sys.executable, "-c", CHILD, str(k)], capture_output=True, text=True, env=env, timeout=280)
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
+            res = json.loads(line[len("RESULT_JSON:") :])
     calls = [(int(m.group(1)), float(m.group(2))) for m in PAT.finditer(p.stderr)]
     if res is None:
         raise RuntimeError(f"child failed rc={p.returncode}: {p.stderr[-500:]}")
@@ -67,23 +68,27 @@ states = allst[pc == NUP]
 D = states.size
 diag = np.zeros(D)
 rows, cols, vals = [], [], []
-for (i, j, jxy, jz) in bonds:
+for i, j, jxy, jz in bonds:
     bi = (states >> i) & 1
     bj = (states >> j) & 1
     diag += jz * (bi - 0.5) * (bj - 0.5)
     m = bi != bj
     src = np.nonzero(m)[0]
     dst = np.searchsorted(states, states[m] ^ ((1 << i) | (1 << j)))
-    rows.append(dst); cols.append(src); vals.append(np.full(src.size, 0.5 * jxy))
+    rows.append(dst)
+    cols.append(src)
+    vals.append(np.full(src.size, 0.5 * jxy))
 Hs = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(D, D))
 Hs = Hs + sp.diags(diag)
 
 
 def run_arpack(k):
     cnt = [0]
+
     def mv(x):
         cnt[0] += 1
         return Hs @ x
+
     op = LinearOperator((D, D), matvec=mv, dtype=float)
     v0 = np.random.default_rng(7).standard_normal(D)
     w = eigsh(op, k=k, which="SA", ncv=min(D - 1, 2 * k + 60), tol=1e-10, v0=v0, return_eigenvectors=False)
@@ -96,24 +101,37 @@ try:
         res, calls = run_qed(k)
         w, nmv = run_arpack(k)
         qmv = res["applies"]
-        dE = float(np.max(np.abs(np.array(res["E"][:k]) - w[:len(res["E"][:k])]))) if res["E"] else float("nan")
-        out[k] = dict(qed_matvecs=qmv, qed_factorisations=len(calls), qed_ms=sum(c[1] for c in calls),
-                      arpack_matvecs=nmv, maxdE=dE, complete=res["complete"], nE=len(res["E"]))
-        print(f"k={k}: QED matvecs={qmv} in {len(calls)} factorisations ({out[k]['qed_ms']:.0f} ms), "
-              f"ARPACK matvecs={nmv}, max|dE|={dE:.2e}, complete={res['complete']}")
+        dE = float(np.max(np.abs(np.array(res["E"][:k]) - w[: len(res["E"][:k])]))) if res["E"] else float("nan")
+        out[k] = dict(
+            qed_matvecs=qmv,
+            qed_factorisations=len(calls),
+            qed_ms=sum(c[1] for c in calls),
+            arpack_matvecs=nmv,
+            maxdE=dE,
+            complete=res["complete"],
+            nE=len(res["E"]),
+        )
+        print(
+            f"k={k}: QED matvecs={qmv} in {len(calls)} factorisations ({out[k]['qed_ms']:.0f} ms), "
+            f"ARPACK matvecs={nmv}, max|dE|={dE:.2e}, complete={res['complete']}"
+        )
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:300]}")
     sys.exit(0)
 
 if any(not (out[k]["maxdE"] < 1e-7) for k in out):
-    print(f"REPRO: INCONCLUSIVE eigenvalues disagree with the independent sector matrix "
-          f"(maxdE {[out[k]['maxdE'] for k in out]}); model convention mismatch?")
+    print(
+        f"REPRO: INCONCLUSIVE eigenvalues disagree with the independent sector matrix "
+        f"(maxdE {[out[k]['maxdE'] for k in out]}); model convention mismatch?"
+    )
     sys.exit(0)
 r6 = out[6]["qed_matvecs"] / max(out[6]["arpack_matvecs"], 1)
 r3 = out[3]["qed_matvecs"] / max(out[3]["arpack_matvecs"], 1)
 g6 = out[6]["qed_matvecs"] / max(out[1]["qed_matvecs"], 1)
-msg = (f"k=6 QED/ARPACK matvecs {out[6]['qed_matvecs']}/{out[6]['arpack_matvecs']} = {r6:.2f}x, "
-       f"k=3 {r3:.2f}x, QED k=6/k=1 = {g6:.1f}x, k=6 factorisations={out[6]['qed_factorisations']}")
+msg = (
+    f"k=6 QED/ARPACK matvecs {out[6]['qed_matvecs']}/{out[6]['arpack_matvecs']} = {r6:.2f}x, "
+    f"k=3 {r3:.2f}x, QED k=6/k=1 = {g6:.1f}x, k=6 factorisations={out[6]['qed_factorisations']}"
+)
 if r6 >= 2.0:
     print("REPRO: CONFIRMED " + msg)
 elif r6 < 1.3:

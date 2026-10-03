@@ -46,13 +46,10 @@ namespace ed::ops {
 /// by every per-sector factory that restricts H itself: the rep-basis
 /// RepSectorMatVec (walk.h block_operator builds it over a block basis) and
 /// the dense assembly paths.
-[[nodiscard]] inline std::shared_ptr<::Operator>
-make_S2_carrier(std::uint64_t n_sites) {
+[[nodiscard]] inline std::shared_ptr<::Operator> make_S2_carrier(std::uint64_t n_sites) {
     using Cx = std::complex<double>;
     auto op = std::make_shared<::Operator>(n_sites, 0.5f);
-    for (std::uint64_t i = 0; i < n_sites; ++i) {
-        op->addTwoBodyTerm(2, i, 2, i, Cx(3.0, 0.0));
-    }
+    for (std::uint64_t i = 0; i < n_sites; ++i) { op->addTwoBodyTerm(2, i, 2, i, Cx(3.0, 0.0)); }
     for (std::uint64_t i = 0; i < n_sites; ++i) {
         for (std::uint64_t j = i + 1; j < n_sites; ++j) {
             op->addTwoBodyTerm(2, i, 2, j, Cx(2.0, 0.0));

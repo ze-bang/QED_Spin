@@ -4,6 +4,7 @@
 """Claim: qed.dynamics validates only T > 0. eta = 0 gives S == 0, eta < 0 a negative spectrum,
 krylov = 0 at T > 0 and degeneracy_tol < 0 give NaN, T = [] silently runs T = 0, T = [nan] passes.
 Test: 6-site Heisenberg ring, O = Sz_pi; each bad input is called and the output inspected."""
+
 import cmath
 import signal
 import numpy as np
@@ -37,11 +38,17 @@ for name, kw in cases.items():
     try:
         r = qed.dynamics(H, O, omega, sym=sym, seed=3, **kw)
         S = np.asarray(r.S)
-        desc = (f"nan={bool(np.isnan(S).any())} min={np.nanmin(S) if S.size and not np.isnan(S).all() else 'nan'} "
-                f"max={np.nanmax(S) if S.size and not np.isnan(S).all() else 'nan'} rows={S.shape[0]} T={np.asarray(r.T).tolist()} "
-                f"gm={r.ground_manifold}")
-        bad = (np.isnan(S).any() or np.nanmax(np.abs(S)) == 0.0 or (np.nanmin(S) < -1e-12)
-               or (name == "T=[]" and np.allclose(S[0], ref0)))
+        desc = (
+            f"nan={bool(np.isnan(S).any())} min={np.nanmin(S) if S.size and not np.isnan(S).all() else 'nan'} "
+            f"max={np.nanmax(S) if S.size and not np.isnan(S).all() else 'nan'} rows={S.shape[0]} T={np.asarray(r.T).tolist()} "
+            f"gm={r.ground_manifold}"
+        )
+        bad = (
+            np.isnan(S).any()
+            or np.nanmax(np.abs(S)) == 0.0
+            or (np.nanmin(S) < -1e-12)
+            or (name == "T=[]" and np.allclose(S[0], ref0))
+        )
         print(f"{name:20s} returned: {desc}")
         if bad:
             silent.append(name)

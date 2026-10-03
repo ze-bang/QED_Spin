@@ -20,8 +20,8 @@
 #include <ed/matvec/cpu_backend.h>
 
 #ifdef WITH_CUDA
-#  include <ed/gpu/cuda_backend.cuh>
-#  include <cuda_runtime.h>
+#include <ed/gpu/cuda_backend.cuh>
+#include <cuda_runtime.h>
 #endif
 
 #include <algorithm>
@@ -42,13 +42,8 @@ constexpr double kTol = 1e-10;
 // give an algorithm-agnostic gold copy to compare against.
 // ---------------------------------------------------------------------------
 
-void ref_gemm(char opA, char opB,
-              std::size_t m, std::size_t n, std::size_t k,
-              Complex alpha,
-              const Complex* A, std::size_t lda,
-              const Complex* B, std::size_t ldb,
-              Complex beta,
-              Complex* C, std::size_t ldc) {
+void ref_gemm(char opA, char opB, std::size_t m, std::size_t n, std::size_t k, Complex alpha, const Complex* A,
+              std::size_t lda, const Complex* B, std::size_t ldb, Complex beta, Complex* C, std::size_t ldc) {
     auto a_at = [&](std::size_t i, std::size_t j) -> Complex {
         Complex v = (opA == 'N' || opA == 'n') ? A[i + j * lda] : A[j + i * lda];
         if (opA == 'C' || opA == 'c' || opA == 'H' || opA == 'h') v = std::conj(v);
@@ -74,8 +69,7 @@ double max_abs_diff(const Complex* a, const Complex* b, std::size_t n) {
     return w;
 }
 
-std::vector<Complex> random_matrix(std::size_t rows, std::size_t cols,
-                                   std::uint64_t seed) {
+std::vector<Complex> random_matrix(std::size_t rows, std::size_t cols, std::uint64_t seed) {
     std::mt19937_64 rng(seed);
     std::uniform_real_distribution<double> uni(-1.0, 1.0);
     std::vector<Complex> M(rows * cols);
@@ -86,7 +80,10 @@ std::vector<Complex> random_matrix(std::size_t rows, std::size_t cols,
 #ifdef WITH_CUDA
 bool cuda_available() {
     int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) { cudaGetLastError(); return false; }
+    if (cudaGetDeviceCount(&n) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
     return n > 0;
 }
 #endif
@@ -97,27 +94,21 @@ bool cuda_available() {
 // CpuBackend BLAS-3
 // =============================================================================
 
-TEST_CASE("CpuBackend::gemm matches naive reference",
-          "[backend-blas3][cpu]") {
+TEST_CASE("CpuBackend::gemm matches naive reference", "[backend-blas3][cpu]") {
     ed::matvec::CpuBackend be;
     const std::size_t m = 7, n = 5, k = 4;
     auto A = random_matrix(m, k, 0xA1);
     auto B = random_matrix(k, n, 0xB2);
-    auto C_be  = random_matrix(m, n, 0xC3);
+    auto C_be = random_matrix(m, n, 0xC3);
     auto C_ref = C_be;
 
     const Complex alpha{0.7, -0.3}, beta{-0.4, 0.2};
-    be.gemm('N', 'N', m, n, k, alpha,
-            A.data(), m, B.data(), k, beta,
-            C_be.data(), m);
-    ref_gemm('N', 'N', m, n, k, alpha,
-             A.data(), m, B.data(), k, beta,
-             C_ref.data(), m);
+    be.gemm('N', 'N', m, n, k, alpha, A.data(), m, B.data(), k, beta, C_be.data(), m);
+    ref_gemm('N', 'N', m, n, k, alpha, A.data(), m, B.data(), k, beta, C_ref.data(), m);
     REQUIRE(max_abs_diff(C_be.data(), C_ref.data(), m * n) < kTol);
 }
 
-TEST_CASE("CpuBackend::gemm honors conjugate-transpose ops",
-          "[backend-blas3][cpu]") {
+TEST_CASE("CpuBackend::gemm honors conjugate-transpose ops", "[backend-blas3][cpu]") {
     ed::matvec::CpuBackend be;
     const std::size_t m = 4, n = 5, k = 6;
     auto A = random_matrix(k, m, 0xA1);
@@ -125,12 +116,8 @@ TEST_CASE("CpuBackend::gemm honors conjugate-transpose ops",
     std::vector<Complex> C_be(m * n, Complex{0, 0});
     std::vector<Complex> C_ref(m * n, Complex{0, 0});
 
-    be.gemm('C', 'N', m, n, k, Complex{1, 0},
-            A.data(), k, B.data(), k, Complex{0, 0},
-            C_be.data(), m);
-    ref_gemm('C', 'N', m, n, k, Complex{1, 0},
-             A.data(), k, B.data(), k, Complex{0, 0},
-             C_ref.data(), m);
+    be.gemm('C', 'N', m, n, k, Complex{1, 0}, A.data(), k, B.data(), k, Complex{0, 0}, C_be.data(), m);
+    ref_gemm('C', 'N', m, n, k, Complex{1, 0}, A.data(), k, B.data(), k, Complex{0, 0}, C_ref.data(), m);
     REQUIRE(max_abs_diff(C_be.data(), C_ref.data(), m * n) < kTol);
 }
 
@@ -140,19 +127,19 @@ TEST_CASE("CpuBackend::gemm honors conjugate-transpose ops",
 
 #ifdef WITH_CUDA
 
-TEST_CASE("CudaBackend::gemm matches naive reference",
-          "[backend-blas3][cuda]") {
-    if (!cuda_available()) { SUCCEED("no CUDA device, skipping"); return; }
+TEST_CASE("CudaBackend::gemm matches naive reference", "[backend-blas3][cuda]") {
+    if (!cuda_available()) {
+        SUCCEED("no CUDA device, skipping");
+        return;
+    }
     ed::matvec::CudaBackend be;
     const std::size_t m = 7, n = 5, k = 4;
     auto A = random_matrix(m, k, 0xA1);
     auto B = random_matrix(k, n, 0xB2);
-    auto C_in  = random_matrix(m, n, 0xC3);
+    auto C_in = random_matrix(m, n, 0xC3);
     auto C_ref = C_in;
     const Complex alpha{0.7, -0.3}, beta{-0.4, 0.2};
-    ref_gemm('N', 'N', m, n, k, alpha,
-             A.data(), m, B.data(), k, beta,
-             C_ref.data(), m);
+    ref_gemm('N', 'N', m, n, k, alpha, A.data(), m, B.data(), k, beta, C_ref.data(), m);
 
     auto dA = be.make_zero_vector(m * k);
     auto dB = be.make_zero_vector(k * n);
@@ -160,9 +147,7 @@ TEST_CASE("CudaBackend::gemm matches naive reference",
     be.copy_from_host(A.data(), dA.get(), m * k);
     be.copy_from_host(B.data(), dB.get(), k * n);
     be.copy_from_host(C_in.data(), dC.get(), m * n);
-    be.gemm('N', 'N', m, n, k, alpha,
-            dA.get(), m, dB.get(), k, beta,
-            dC.get(), m);
+    be.gemm('N', 'N', m, n, k, alpha, dA.get(), m, dB.get(), k, beta, dC.get(), m);
     std::vector<Complex> C_be(m * n);
     be.copy_to_host(dC.get(), C_be.data(), m * n);
     REQUIRE(max_abs_diff(C_be.data(), C_ref.data(), m * n) < kTol);
@@ -196,7 +181,8 @@ TEST_CASE("CpuBackend dot_many, axpy_many and copy match naive loops", "[backend
             REQUIRE(std::abs(c[k] - ref) <= 1e-12 * std::max(1.0, std::abs(ref)) + 1e-13 * static_cast<double>(n));
         }
         std::vector<Complex> a(M);
-        for (std::size_t k = 0; k < M; ++k) a[k] = Complex(0.3 * static_cast<double>(k) - 1.0, 0.1 * static_cast<double>(k));
+        for (std::size_t k = 0; k < M; ++k)
+            a[k] = Complex(0.3 * static_cast<double>(k) - 1.0, 0.1 * static_cast<double>(k));
         auto y = v, y_ref = v;
         be.axpy_many(a.data(), ptrs.data(), M, y.data(), n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -215,24 +201,37 @@ TEST_CASE("BasicCpuBackend<double>: level-1, batched and gemm match naive loops"
     ed::matvec::BasicCpuBackend<double> be;
     std::mt19937_64 rng(0x7EA1ull);
     std::uniform_real_distribution<double> uni(-1.0, 1.0);
-    auto rnd = [&](std::size_t m) { std::vector<double> v(m); for (auto& x : v) x = uni(rng); return v; };
+    auto rnd = [&](std::size_t m) {
+        std::vector<double> v(m);
+        for (auto& x : v) x = uni(rng);
+        return v;
+    };
     for (const std::size_t n : {std::size_t{1}, std::size_t{2049}, std::size_t{70001}}) {
         INFO("n " << n);
         const auto x = rnd(n), z = rnd(n);
         auto y = rnd(n);
         double d = 0.0, s2 = 0.0;
-        for (std::size_t i = 0; i < n; ++i) { d += x[i] * y[i]; s2 += x[i] * x[i]; }
+        for (std::size_t i = 0; i < n; ++i) {
+            d += x[i] * y[i];
+            s2 += x[i] * x[i];
+        }
         REQUIRE(std::abs(be.dot(x.data(), y.data(), n) - d) <= 1e-12 * std::max(1.0, std::abs(d)));
         REQUIRE(std::abs(be.nrm2(x.data(), n) - std::sqrt(s2)) <= 1e-12 * std::sqrt(s2));
         auto y2 = y;
         const double ad = be.axpy_dot(0.7, x.data(), y2.data(), z.data(), n);
         double ref = 0.0;
-        for (std::size_t i = 0; i < n; ++i) { REQUIRE(y2[i] == y[i] + 0.7 * x[i]); ref += z[i] * y2[i]; }
+        for (std::size_t i = 0; i < n; ++i) {
+            REQUIRE(y2[i] == y[i] + 0.7 * x[i]);
+            ref += z[i] * y2[i];
+        }
         REQUIRE(std::abs(ad - ref) <= 1e-12 * std::max(1.0, std::abs(ref)));
         const std::size_t M = 5;
         std::vector<std::vector<double>> basis;
         std::vector<const double*> ptrs;
-        for (std::size_t k = 0; k < M; ++k) { basis.push_back(rnd(n)); ptrs.push_back(basis.back().data()); }
+        for (std::size_t k = 0; k < M; ++k) {
+            basis.push_back(rnd(n));
+            ptrs.push_back(basis.back().data());
+        }
         std::vector<double> c(M), a{0.5, -1.0, 0.25, 2.0, -0.75};
         be.dot_many(ptrs.data(), M, y.data(), n, c.data());
         auto w = y, w_ref = y;

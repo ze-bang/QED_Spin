@@ -2,6 +2,7 @@
 block without a device kernel raises instead of running on the host), and every verb reports
 where its solves ran (audit C03-bindings-10, L3-concurrency-09, L6-silent-12, K2-task-backend-08).
 The tests marked `gpu` need a visible CUDA device; the gate runs this file on a GPU node too."""
+
 from __future__ import annotations
 
 import subprocess
@@ -31,9 +32,12 @@ def _sz(n, site=0):
 def test_gpu_without_a_device_is_refused_before_any_work(monkeypatch):
     monkeypatch.setattr(qed._core, "cuda_device_count", lambda: 0)
     H = _ring(8)
-    for verb in (lambda: qed.eigs(H, 1, device="gpu"), lambda: qed.spectrum(H, device="gpu"),
-                 lambda: qed.thermal(H, [1.0], method="exact", device="gpu"),
-                 lambda: qed.dynamics(H, _sz(8), [0.0, 1.0], device="gpu")):
+    for verb in (
+        lambda: qed.eigs(H, 1, device="gpu"),
+        lambda: qed.spectrum(H, device="gpu"),
+        lambda: qed.thermal(H, [1.0], method="exact", device="gpu"),
+        lambda: qed.dynamics(H, _sz(8), [0.0, 1.0], device="gpu"),
+    ):
         with pytest.raises(qed.errors.DeviceUnavailable):
             verb()
 
@@ -42,9 +46,12 @@ def test_every_verb_reports_where_it_ran():
     n = 10
     H = _ring(n)
     T = qed.Symmetry(spatial=[[(i + 1) % n for i in range(n)]], point_group=False)
-    for r in (qed.eigs(H, 2, sym=T), qed.spectrum(H, sym=T),
-              qed.thermal(H, [1.0], method="ftlm", sym=T, samples=2, krylov=20),
-              qed.dynamics(H, _sz(n), [0.0, 1.0], sym=T, krylov=20)):
+    for r in (
+        qed.eigs(H, 2, sym=T),
+        qed.spectrum(H, sym=T),
+        qed.thermal(H, [1.0], method="ftlm", sym=T, samples=2, krylov=20),
+        qed.dynamics(H, _sz(n), [0.0, 1.0], sym=T, krylov=20),
+    ):
         p = r.placement
         assert set(p) == _KEYS and p["device_krylov"] == p["device_dense"] == 0
         assert p["host_krylov"] + p["host_dense"] > 0
@@ -78,7 +85,8 @@ def _context_after(device):
         "    cu.cuDeviceGet(ctypes.byref(dev), d)\n"
         "    cu.cuDevicePrimaryCtxGetState(dev, ctypes.byref(flags), ctypes.byref(on))\n"
         "    active |= on.value\n"
-        "print('CONTEXT' if active else 'CLEAN')\n")
+        "print('CONTEXT' if active else 'CLEAN')\n"
+    )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr[-500:]
     return out.stdout.strip().splitlines()[-1]
@@ -97,9 +105,11 @@ def test_the_context_probe_sees_a_gpu_run():
 @gpu
 def test_gpu_runs_every_krylov_solve_on_the_device():
     H = _ring(16)
-    sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")   # one 12870-state block
-    for r in (qed.eigs(H, 1, sym=sym, device="gpu"),
-              qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu")):
+    sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")  # one 12870-state block
+    for r in (
+        qed.eigs(H, 1, sym=sym, device="gpu"),
+        qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu"),
+    ):
         assert r.placement["device_krylov"] >= 1 and r.placement["host_krylov"] == 0
 
 
@@ -109,8 +119,12 @@ def _square4x4_c4v():
     L = 4
     idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
     xy = [(x, y) for y in range(L) for x in range(L)]
-    group = [[idx(x + 1, y) for x, y in xy], [idx(x, y + 1) for x, y in xy],
-             [idx(-y, x) for x, y in xy], [idx(y, x) for x, y in xy]]
+    group = [
+        [idx(x + 1, y) for x, y in xy],
+        [idx(x, y + 1) for x, y in xy],
+        [idx(-y, x) for x, y in xy],
+        [idx(y, x) for x, y in xy],
+    ]
     b = qed.input.HamiltonianBuilder(L * L)
     b.heisenberg([(idx(x, y), idx(x + 1, y)) for x, y in xy] + [(idx(x, y), idx(x, y + 1)) for x, y in xy], J=1.0)
     return b.to_operator(), qed.Symmetry(spatial=group, sz=8)
@@ -156,9 +170,10 @@ def test_gpu_runs_oftlm_on_the_device():
     H = _ring(10)
     T = [0.3, 1.0, 3.0]
     trans = [[(i + 1) % 10 for i in range(10)]]
-    for sz, exact, krylov in ((None, 2, 40), ("off", 3, 120)):   # blocks of at most 26 / 102 states
-        sym = qed.Symmetry(spatial=trans, point_group=False, spin_flip="off", time_reversal="off",
-                           **({"sz": sz} if sz else {}))
+    for sz, exact, krylov in ((None, 2, 40), ("off", 3, 120)):  # blocks of at most 26 / 102 states
+        sym = qed.Symmetry(
+            spatial=trans, point_group=False, spin_flip="off", time_reversal="off", **({"sz": sz} if sz else {})
+        )
         kw = dict(method="ftlm", exact_states=exact, samples=4, krylov=krylov, seed=7, sym=sym, dense_max_dim=0)
         c = qed.thermal(H, T, device="cpu", **kw)
         g = qed.thermal(H, T, device="gpu", **kw)
@@ -173,7 +188,7 @@ def test_gpu_and_cpu_certify_the_same_blocks(monkeypatch):
     # completeness, every Krylov solve on the device -- on the device CSR (P7.1), and on the device
     # walk when the CSR budget admits nothing.
     H = _ring(16)
-    sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")   # one 12870-state block
+    sym = qed.Symmetry(spatial=None, sz=8, spin_flip="off", time_reversal="off")  # one 12870-state block
     for budget, lane in ((None, "device-csr"), ("0", "device-gather")):
         if budget is None:
             monkeypatch.delenv("ED_GPU_CSR_BUDGET_GIB", raising=False)
@@ -211,8 +226,9 @@ def test_dense_blocks_larger_than_a_batch_run_on_the_device(monkeypatch):
     monkeypatch.setenv("ED_GPU_DENSE_BATCH_GIB", "0.25")
     n = 15
     plain = qed.Symmetry(spatial=None, sz=7, spin_flip="off", time_reversal="off")
-    by_k = qed.Symmetry(spatial=[[(i + 1) % n for i in range(n)]], point_group=False, sz=7, spin_flip="off",
-                        time_reversal="off")
+    by_k = qed.Symmetry(
+        spatial=[[(i + 1) % n for i in range(n)]], point_group=False, sz=7, spin_flip="off", time_reversal="off"
+    )
     for phi in (0.0, 0.3):
         H = _ring_hopping(n, phi)
         g = qed.spectrum(H, sym=plain, device="gpu")
@@ -226,15 +242,18 @@ def test_dense_blocks_larger_than_a_batch_run_on_the_device(monkeypatch):
 def test_auto_solves_small_dense_blocks_on_the_host():
     # Under device='auto' a dense block below the measured crossover (kDeviceDenseMinDim = 1024) goes
     # to the host pool and a larger one to the device; under 'gpu' every block runs on the device.
-    H = _ring_hopping(12, 0.3)   # Sz sectors of 1..924 states
+    H = _ring_hopping(12, 0.3)  # Sz sectors of 1..924 states
     a = qed.spectrum(H, sym=qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off"), device="auto")
     assert a.placement["device_dense"] == 0 and a.placement["host_dense"] > 0, a.placement
     g = qed.spectrum(H, sym=qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off"), device="gpu")
     assert g.placement["host_dense"] == 0 and g.placement["device_dense"] > 0, g.placement
     np.testing.assert_allclose(np.sort(g.energies), np.sort(a.energies), atol=1e-10)
-    big = qed.spectrum(_ring_hopping(14, 0.3), sym=qed.Symmetry(spatial=None, sz=7, spin_flip="off",
-                                                                 time_reversal="off"), device="auto")
-    assert big.placement["device_dense"] == 1, big.placement   # 3432 states
+    big = qed.spectrum(
+        _ring_hopping(14, 0.3),
+        sym=qed.Symmetry(spatial=None, sz=7, spin_flip="off", time_reversal="off"),
+        device="auto",
+    )
+    assert big.placement["device_dense"] == 1, big.placement  # 3432 states
 
 
 @gpu
@@ -242,7 +261,12 @@ def test_small_device_blocks_are_dense_on_the_host():
     # The transitional rule: a device-bound eigs block of at most 32 states is solved densely on
     # the host (P6.2 / P7.4 retire it). The 10-ring's momentum blocks are all that small.
     H = _ring(10)
-    r = qed.eigs(H, 1, sym=qed.Symmetry(spatial=[[(i + 1) % 10 for i in range(10)]], point_group=False),
-                 device="gpu", dense_max_dim=0)
+    r = qed.eigs(
+        H,
+        1,
+        sym=qed.Symmetry(spatial=[[(i + 1) % 10 for i in range(10)]], point_group=False),
+        device="gpu",
+        dense_max_dim=0,
+    )
     assert r.placement["host_krylov"] == 0 and r.placement["device_krylov"] == 0
     assert r.placement["host_dense"] >= 1

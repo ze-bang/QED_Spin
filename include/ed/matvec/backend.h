@@ -53,8 +53,7 @@ using Complex = std::complex<double>;
 //
 // All vector arguments are dimension `n`.
 // ----------------------------------------------------------------------------
-template <class Scalar>
-class BasicBackend {
+template <class Scalar> class BasicBackend {
 public:
     using scalar_type = Scalar;
 
@@ -77,12 +76,8 @@ public:
     // Host <-> backend transfer. Mainly used by I/O code that materialises
     // initial vectors from disk or pushes results out; the hot path
     // touches these rarely.
-    virtual void copy_from_host(const Scalar* host_src,
-                                Scalar* backend_dst,
-                                std::size_t n) const = 0;
-    virtual void copy_to_host(const Scalar* backend_src,
-                              Scalar* host_dst,
-                              std::size_t n) const = 0;
+    virtual void copy_from_host(const Scalar* host_src, Scalar* backend_dst, std::size_t n) const = 0;
+    virtual void copy_to_host(const Scalar* backend_src, Scalar* host_dst, std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
     // Level-1 BLAS primitives. Naming mirrors BLAS.
@@ -91,15 +86,14 @@ public:
     //   dot:   returns x^H * y   (conj on left)
     //   nrm2:  returns ||x||_2
     // ------------------------------------------------------------------
-    virtual void   axpy(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const = 0;
-    virtual void   scale(Scalar alpha, Scalar* x, std::size_t n) const = 0;
+    virtual void axpy(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const = 0;
+    virtual void scale(Scalar alpha, Scalar* x, std::size_t n) const = 0;
     [[nodiscard]] virtual Scalar dot(const Scalar* x, const Scalar* y, std::size_t n) const = 0;
-    [[nodiscard]] virtual double  nrm2(const Scalar* x, std::size_t n) const = 0;
+    [[nodiscard]] virtual double nrm2(const Scalar* x, std::size_t n) const = 0;
 
     // Convenience: y <- alpha*x + beta*y in one pass (saves one stream
     // through y for fused-update inner loops in Lanczos & TPQ).
-    virtual void axpby(Scalar alpha, const Scalar* x,
-                       Scalar beta,  Scalar* y, std::size_t n) const = 0;
+    virtual void axpby(Scalar alpha, const Scalar* x, Scalar beta, Scalar* y, std::size_t n) const = 0;
 
     // ------------------------------------------------------------------
     // Fused Lanczos-recurrence primitives.
@@ -111,13 +105,12 @@ public:
     // kernels (`lanczos_kernel` issues three fused calls per
     // iteration instead of seven separate BLAS-1 calls).
     // ------------------------------------------------------------------
-    [[nodiscard]] virtual Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y,
-                                          const Scalar* z, std::size_t n) const {
+    [[nodiscard]] virtual Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y, const Scalar* z,
+                                          std::size_t n) const {
         axpy(alpha, x, y, n);
         return dot(z, y, n);
     }
-    [[nodiscard]] virtual double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y,
-                                           std::size_t n) const {
+    [[nodiscard]] virtual double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const {
         axpy(alpha, x, y, n);
         return nrm2(y, n);
     }
@@ -137,27 +130,17 @@ public:
     /// Compute `coeffs_out[k] = <basis[k], v>` for k in [0, num_basis).
     /// `basis[k]` and `v` are dimension-`n` vectors. The default impl
     /// loops over `dot()`.
-    virtual void dot_many(const Scalar* const*  basis,
-                          std::size_t           num_basis,
-                          const Scalar*         v,
-                          std::size_t           n,
-                          Scalar*               coeffs_out) const {
-        for (std::size_t k = 0; k < num_basis; ++k) {
-            coeffs_out[k] = dot(basis[k], v, n);
-        }
+    virtual void dot_many(const Scalar* const* basis, std::size_t num_basis, const Scalar* v, std::size_t n,
+                          Scalar* coeffs_out) const {
+        for (std::size_t k = 0; k < num_basis; ++k) { coeffs_out[k] = dot(basis[k], v, n); }
     }
 
     /// Compute `v += sum_k alphas[k] * basis[k]`. No reductions
     /// involved (axpy is a local operation). The default impl loops
     /// over `axpy()`.
-    virtual void axpy_many(const Scalar*         alphas,
-                           const Scalar* const*  basis,
-                           std::size_t           num_basis,
-                           Scalar*               v,
-                           std::size_t           n) const {
-        for (std::size_t k = 0; k < num_basis; ++k) {
-            axpy(alphas[k], basis[k], v, n);
-        }
+    virtual void axpy_many(const Scalar* alphas, const Scalar* const* basis, std::size_t num_basis, Scalar* v,
+                           std::size_t n) const {
+        for (std::size_t k = 0; k < num_basis; ++k) { axpy(alphas[k], basis[k], v, n); }
     }
 
     // ------------------------------------------------------------------
@@ -170,13 +153,9 @@ public:
     /// op = 'N' (none), 'T' (transpose), 'C' (conjugate-transpose).
     /// All matrices column-major. `m`, `n`, `k` follow BLAS convention:
     /// op(A) is m x k, op(B) is k x n, C is m x n.
-    virtual void gemm(char /*opA*/, char /*opB*/,
-                      std::size_t /*m*/, std::size_t /*n*/, std::size_t /*k*/,
-                      Scalar /*alpha*/,
-                      const Scalar* /*A*/, std::size_t /*lda*/,
-                      const Scalar* /*B*/, std::size_t /*ldb*/,
-                      Scalar /*beta*/,
-                      Scalar* /*C*/, std::size_t /*ldc*/) const {
+    virtual void gemm(char /*opA*/, char /*opB*/, std::size_t /*m*/, std::size_t /*n*/, std::size_t /*k*/,
+                      Scalar /*alpha*/, const Scalar* /*A*/, std::size_t /*lda*/, const Scalar* /*B*/,
+                      std::size_t /*ldb*/, Scalar /*beta*/, Scalar* /*C*/, std::size_t /*ldc*/) const {
         throw std::runtime_error("Backend::gemm not implemented for this backend");
     }
 

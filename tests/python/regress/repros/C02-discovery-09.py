@@ -6,6 +6,7 @@
 Theta = (prod_i i sigma^y_i) K. A Heisenberg + D_z ring is Theta-invariant (it is a bilinear
 spin model) but has complex coefficients, so time_reversal='require' raises and 'auto' never
 folds. Dense check of Theta H Theta^-1 = H from H.apply."""
+
 import signal
 import numpy as np
 import qed
@@ -21,7 +22,8 @@ H = b.to_operator()
 d = 1 << N
 M = np.zeros((d, d), complex)
 for j in range(d):
-    e = np.zeros(d, complex); e[j] = 1.0
+    e = np.zeros(d, complex)
+    e[j] = 1.0
     M[:, j] = np.asarray(H.apply(e))
 herm = float(np.max(np.abs(M - M.conj().T)))
 # U = prod_i (i sigma^y_i): |s> -> sign(s) |s ^ all-ones>, sign = prod over sites of (+1 or -1)
@@ -39,8 +41,10 @@ try:
     err = None
 except Exception as e:
     err = f"{type(e).__name__}: {str(e)[:110]}"
-info = (f"hermiticity {herm:.1e}; ||Theta H Theta^-1 - H||={theta_res:.1e}; ||K H K - H||={k_res:.2e}; "
-        f"time_reversal='require' -> {err!r}")
+info = (
+    f"hermiticity {herm:.1e}; ||Theta H Theta^-1 - H||={theta_res:.1e}; ||K H K - H||={k_res:.2e}; "
+    f"time_reversal='require' -> {err!r}"
+)
 if theta_res < 1e-12 and k_res > 1e-3 and err is not None:
     print("REPRO: CONFIRMED " + info)
 elif err is None:

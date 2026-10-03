@@ -40,24 +40,19 @@ namespace ed::symmetry {
 /// On a non-CUDA build this throws ``std::logic_error``; callers reach it
 /// only through ``bind_cuda`` of an operator whose ``has_device_kernel()`` is true, which
 /// needs WITH_CUDA.
-ed::LinearOperator::MatvecFn
-make_sector_matvec_gpu_rep(const RepSectorData&            rep,
-                           const ed::ops::MaskedProgram&   rows);
+ed::LinearOperator::MatvecFn make_sector_matvec_gpu_rep(const RepSectorData& rep, const ed::ops::MaskedProgram& rows);
 
 /// O from sector `src` to sector `tgt` on the device: the rows of the target, each walk
 /// target looked up in the source (``rows`` = compile_program({O^dagger}, tgt, src), the
 /// host CrossSectorMatVec's program). Takes device pointers (in: src dim, out: tgt dim).
-ed::LinearOperator::MatvecFn
-make_cross_matvec_gpu_rep(const RepSectorData&            src,
-                          const RepSectorData&            tgt,
-                          const ed::ops::MaskedProgram&   rows);
+ed::LinearOperator::MatvecFn make_cross_matvec_gpu_rep(const RepSectorData& src, const RepSectorData& tgt,
+                                                       const ed::ops::MaskedProgram& rows);
 
 /// The same sector matvec on k vectors at once (device pointers ins[i] -> outs[i]): one walk
 /// over each row's terms and orbit lookups serves up to 8 vectors, and every output equals
 /// the single-vector apply bit for bit.
-ed::LinearOperator::MultiMatvecFn
-make_sector_matvec_gpu_rep_multi(const RepSectorData&            rep,
-                                 const ed::ops::MaskedProgram&   rows);
+ed::LinearOperator::MultiMatvecFn make_sector_matvec_gpu_rep_multi(const RepSectorData& rep,
+                                                                   const ed::ops::MaskedProgram& rows);
 
 /// HOST-pointer twin of ``make_sector_matvec_gpu_rep`` for callers whose
 /// Krylov loop keeps its vectors in host RAM (the little-group engine's
@@ -66,9 +61,8 @@ make_sector_matvec_gpu_rep_multi(const RepSectorData&            rep,
 /// kernel's O(dim * terms * |G|) walk, so it is negligible for the large
 /// sectors this exists for. Same non-CUDA / no-device failure contract
 /// as the device-pointer factory.
-ed::LinearOperator::MatvecFn
-make_sector_matvec_gpu_rep_hostptr(const RepSectorData&            rep,
-                                   const ed::ops::MaskedProgram&   rows);
+ed::LinearOperator::MatvecFn make_sector_matvec_gpu_rep_hostptr(const RepSectorData& rep,
+                                                                const ed::ops::MaskedProgram& rows);
 
 /// An operator's reduced CSR on one sector, built and kept on the device (P7.1). Opaque here;
 /// freed with its last holder.
@@ -76,10 +70,10 @@ struct DeviceCsr;
 
 /// What a device CSR holds and what its build took.
 struct DeviceCsrInfo {
-    std::uint64_t nnz     = 0;
-    std::uint64_t bytes   = 0;
-    double        build_s = 0.0;
-    int           lanes   = 0;   ///< threads per row of its SpMV
+    std::uint64_t nnz = 0;
+    std::uint64_t bytes = 0;
+    double build_s = 0.0;
+    int lanes = 0;   ///< threads per row of its SpMV
 };
 
 /// The reduced CSR of the operator whose row program is ``rows`` on the 1-dim sector ``rep``,
@@ -87,20 +81,18 @@ struct DeviceCsrInfo {
 /// build_sector_csr (merged by column in emission order, exact zeros dropped), its values in a
 /// dictionary up to kCsrDictMax distinct ones, else whole. Null when it would take more than
 /// ``max_bytes`` of device memory, the device is out of memory, or the sector is not 1-dim.
-std::shared_ptr<const DeviceCsr>
-build_sector_csr_gpu(const RepSectorData&            rep,
-                     const ed::ops::MaskedProgram&   rows,
-                     std::uint64_t                   max_bytes);
+std::shared_ptr<const DeviceCsr> build_sector_csr_gpu(const RepSectorData& rep, const ed::ops::MaskedProgram& rows,
+                                                      std::uint64_t max_bytes);
 
 /// A reduced CSR built on the host, uploaded as is (P7.5: the device kernel of a sector of an
 /// irrep of dimension > 1, whose rows the host builds). Null when it holds more than `max_bytes`
 /// or the device is out of memory.
-std::shared_ptr<const DeviceCsr>
-upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& csr, std::uint64_t max_bytes);
+std::shared_ptr<const DeviceCsr> upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& csr,
+                                                std::uint64_t max_bytes);
 
 /// Its applies on device pointers: one vector, and k at once (every output of the k-vector
 /// apply equals the single apply bit for bit).
-ed::LinearOperator::MatvecFn      csr_matvec_gpu(std::shared_ptr<const DeviceCsr> csr);
+ed::LinearOperator::MatvecFn csr_matvec_gpu(std::shared_ptr<const DeviceCsr> csr);
 ed::LinearOperator::MultiMatvecFn csr_matvec_gpu_multi(std::shared_ptr<const DeviceCsr> csr);
 
 DeviceCsrInfo device_csr_info(const DeviceCsr& csr);

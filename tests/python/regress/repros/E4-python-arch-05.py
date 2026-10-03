@@ -7,6 +7,7 @@ enumeration) unconditionally; translation_only only suppresses the clique step a
 Restated after P2.1, which removed the option (owner-approved): the call must now raise TypeError,
 and the one automorphism search must run once per operator (the memo), not once per call.
 Restated after P2.8, which moved the search into qed._automorphism.automorphisms."""
+
 import signal
 
 signal.alarm(250)
@@ -30,7 +31,7 @@ orig = auto.automorphisms
 def counting(*a, **k):
     calls["n"] += 1
     out = orig(*a, **k)
-    calls["autos"] = out[1]                 # nauty's |Aut|
+    calls["autos"] = out[1]  # nauty's |Aut|
     return out
 
 
@@ -50,8 +51,10 @@ except ImportError as e:
 finally:
     auto.automorphisms = orig
 
-info = (f"translation_only removed={removed}; 3 calls ran the automorphism search {calls['n']}x "
-        f"(|Aut|={calls['autos']}); split |A|={len(reps[0].abelian)} residues={len(reps[0].residues)}")
+info = (
+    f"translation_only removed={removed}; 3 calls ran the automorphism search {calls['n']}x "
+    f"(|Aut|={calls['autos']}); split |A|={len(reps[0].abelian)} residues={len(reps[0].residues)}"
+)
 if not removed:
     print(f"REPRO: CONFIRMED {info}")
 else:

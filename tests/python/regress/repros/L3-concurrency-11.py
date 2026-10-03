@@ -14,6 +14,7 @@ a one-dimensional S=4 tower, so FTLM is exact there. thermal(method='ftlm', samp
 observables=[S0.S1]) on device='cpu' and device='gpu' with the same seed, against an independent
 dense S=4 restricted average. CONFIRMED when CPU matches dense (1e-8) and GPU differs from CPU
 by more than 1e-6."""
+
 import signal
 import sys
 import numpy as np
@@ -21,6 +22,7 @@ import numpy as np
 signal.alarm(110)
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -46,7 +48,7 @@ sz = np.array([[0.5, 0], [0, -0.5]], complex)
 
 
 def site(op, i):
-    return np.kron(np.kron(np.eye(2 ** i), op), np.eye(2 ** (N - i - 1)))
+    return np.kron(np.kron(np.eye(2**i), op), np.eye(2 ** (N - i - 1)))
 
 
 SX = [site(sx, i) for i in range(N)]
@@ -76,10 +78,8 @@ heis(O, 0, 1)
 T = [(i + 1) % N for i in range(N)]
 sym = qed.Symmetry(spatial=[T], point_group=False, spin_flip="off", time_reversal="off", total_spin=S)
 try:
-    rc = qed.thermal(H, TS, method="ftlm", sym=sym, samples=6, krylov=20, seed=5, device="cpu",
-                     observables=[O])
-    rg = qed.thermal(H, TS, method="ftlm", sym=sym, samples=6, krylov=20, seed=5, device="gpu",
-                     observables=[O])
+    rc = qed.thermal(H, TS, method="ftlm", sym=sym, samples=6, krylov=20, seed=5, device="cpu", observables=[O])
+    rg = qed.thermal(H, TS, method="ftlm", sym=sym, samples=6, krylov=20, seed=5, device="gpu", observables=[O])
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE thermal raised {type(ex).__name__}: {ex}")
     sys.exit(0)
@@ -89,9 +89,11 @@ if rg.device_blocks == 0:
 oc, og = np.asarray(rc.O[0]), np.asarray(rg.O[0])
 d_cpu_ref = float(np.max(np.abs(oc - ref)))
 d_gpu_cpu = float(np.max(np.abs(og - oc)))
-msg = (f"blocks={rg.blocks} device_blocks={rg.device_blocks} ref={np.round(ref, 10).tolist()} "
-       f"cpu={np.round(oc, 10).tolist()} gpu={np.round(og, 10).tolist()} "
-       f"max|cpu-ref|={d_cpu_ref:.2e} max|gpu-cpu|={d_gpu_cpu:.2e}")
+msg = (
+    f"blocks={rg.blocks} device_blocks={rg.device_blocks} ref={np.round(ref, 10).tolist()} "
+    f"cpu={np.round(oc, 10).tolist()} gpu={np.round(og, 10).tolist()} "
+    f"max|cpu-ref|={d_cpu_ref:.2e} max|gpu-cpu|={d_gpu_cpu:.2e}"
+)
 if d_cpu_ref < 1e-8 and d_gpu_cpu > 1e-6:
     print("REPRO: CONFIRMED " + msg)
 elif d_cpu_ref < 1e-8:

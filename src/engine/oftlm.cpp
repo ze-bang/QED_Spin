@@ -24,7 +24,7 @@
 
 namespace ed::thermal {
 
-using Complex       = std::complex<double>;
+using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 
 namespace {
@@ -38,20 +38,14 @@ struct SampleSpectrum {
 
 }  // namespace
 
-Curves oftlm(
-    const ed::matvec::Backend& be,
-    const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
-    std::uint64_t          N,
-    const OftlmOptions&    opts)
-{
-    if (N == 0)
-        throw std::invalid_argument("oftlm: N must be > 0");
-    if (opts.betas.empty())
-        throw std::invalid_argument("oftlm: opts.betas must be non-empty");
+Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Complex*, Complex*, std::size_t)>& apply_H,
+             std::uint64_t N, const OftlmOptions& opts) {
+    if (N == 0) throw std::invalid_argument("oftlm: N must be > 0");
+    if (opts.betas.empty()) throw std::invalid_argument("oftlm: opts.betas must be non-empty");
 
     const std::size_t nT = opts.betas.size();
-    const std::size_t R  = std::max<std::size_t>(opts.num_samples, 1);
-    const std::size_t M  = std::max<std::size_t>(opts.krylov_dim, 2);
+    const std::size_t R = std::max<std::size_t>(opts.num_samples, 1);
+    const std::size_t M = std::max<std::size_t>(opts.krylov_dim, 2);
 
     // seed == 0 == NONDETERMINISTIC (random_device), as for FTLM, so
     // independent default runs draw independent samples; explicit seeds
@@ -61,15 +55,15 @@ Curves oftlm(
     // -------------------------------------------------------------------------
     // 1. The N_V exact eigenpairs, certified by the caller.
     // -------------------------------------------------------------------------
-    const std::vector<double>&        exact_eigs = opts.exact_values;
+    const std::vector<double>& exact_eigs = opts.exact_values;
     const std::vector<ComplexVector>& exact_vecs = opts.exact_vectors;
     if (exact_vecs.size() != exact_eigs.size())
         throw std::invalid_argument("oftlm: " + std::to_string(exact_eigs.size()) + " exact values but "
                                     + std::to_string(exact_vecs.size()) + " exact vectors");
     for (const auto& v : exact_vecs)
         if (v.size() != N)
-            throw std::invalid_argument("oftlm: an exact vector has length " + std::to_string(v.size())
-                                        + ", the block " + std::to_string(N));
+            throw std::invalid_argument("oftlm: an exact vector has length " + std::to_string(v.size()) + ", the block "
+                                        + std::to_string(N));
     const std::size_t Nv = exact_vecs.size();
     if (Nv > N) throw std::invalid_argument("oftlm: more exact states than the block holds");
 
@@ -107,15 +101,13 @@ Curves oftlm(
         // redistribute the sample weight but leave the trace estimator
         // consistent. The run stops early when ||w|| <= opts.breakdown_tol.
         ed::krylov::LanczosKernelOptions lopts;
-        lopts.max_iter      = static_cast<std::size_t>(
-            std::min<std::uint64_t>(N, M));
-        lopts.reorth        = ed::krylov::ReorthPolicy::None;
-        lopts.keep_basis    = false;
+        lopts.max_iter = static_cast<std::size_t>(std::min<std::uint64_t>(N, M));
+        lopts.reorth = ed::krylov::ReorthPolicy::None;
+        lopts.keep_basis = false;
         lopts.breakdown_tol = opts.breakdown_tol;
         auto lres = ed::krylov::lanczos_kernel(be, apply_H, static_cast<std::size_t>(N), v.get(), lopts);
 
-        ed::krylov::TridiagEig t =
-            ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
+        ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
         SampleSpectrum sp;
         const std::vector<double> w = t.weights();
         for (std::size_t j = 0; j < w.size(); ++j)
@@ -157,8 +149,8 @@ Curves oftlm(
         double Z = 0.0, EZ = 0.0, E2Z = 0.0;
         for (double e : exact_eigs) {
             const double bw = std::exp(-beta * (e - e_min));
-            Z   += bw;                         // moments about e_min: no E^2 cancellation
-            EZ  += (e - e_min) * bw;
+            Z += bw;                         // moments about e_min: no E^2 cancellation
+            EZ += (e - e_min) * bw;
             E2Z += (e - e_min) * (e - e_min) * bw;
         }
 
@@ -166,28 +158,28 @@ Curves oftlm(
         double Zr = 0.0, EZr = 0.0, E2Zr = 0.0;
         for (const auto& sp : samples) {
             for (std::size_t j = 0; j < sp.ritz.size(); ++j) {
-                const double e  = sp.ritz[j];
+                const double e = sp.ritz[j];
                 const double bw = sp.weights[j] * std::exp(-beta * (e - e_min));
-                Zr   += bw;
-                EZr  += (e - e_min) * bw;
+                Zr += bw;
+                EZr += (e - e_min) * bw;
                 E2Zr += (e - e_min) * (e - e_min) * bw;
             }
         }
-        Z   += pref * Zr;
-        EZ  += pref * EZr;
+        Z += pref * Zr;
+        EZ += pref * EZr;
         E2Z += pref * E2Zr;
 
         if (Z > 1e-300) {
-            const double dE  = EZ / Z;
+            const double dE = EZ / Z;
             const double dE2 = E2Z / Z;
             // Z here is the full (shifted) trace Tr e^{-beta(H-e_min)}: ln Z_full = ln Z - beta e_min.
             out.lnZ[t] = std::log(Z) - beta * e_min;
-            out.E[t]   = e_min + dE;
-            out.V[t]   = std::max(dE2 - dE * dE, 0.0);
+            out.E[t] = e_min + dE;
+            out.V[t] = std::max(dE2 - dE * dE, 0.0);
         } else {
             out.lnZ[t] = -beta * e_min;
-            out.E[t]   = e_min;
-            out.V[t]   = 0.0;
+            out.E[t] = e_min;
+            out.V[t] = 0.0;
         }
     }
 

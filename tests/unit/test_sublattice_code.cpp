@@ -38,16 +38,16 @@ using Perms = std::vector<std::vector<int>>;
 
 struct EnvGuard {   // ED_SYM_SUBLATTICE for one test, restored after
     explicit EnvGuard(const char* v) {
-        if (v) setenv("ED_SYM_SUBLATTICE", v, 1);
-        else   unsetenv("ED_SYM_SUBLATTICE");
+        if (v)
+            setenv("ED_SYM_SUBLATTICE", v, 1);
+        else
+            unsetenv("ED_SYM_SUBLATTICE");
     }
     ~EnvGuard() { unsetenv("ED_SYM_SUBLATTICE"); }
 };
 
 // D_N on a ring: N translations and N reflections.
-Perms dihedral(int N) {
-    return ed::sym::generate_group({ed::sym::translation(N, 1), ed::sym::reflection_1d(N)});
-}
+Perms dihedral(int N) { return ed::sym::generate_group({ed::sym::translation(N, 1), ed::sym::reflection_1d(N)}); }
 
 // p4m on an L x L square torus: translations, the fourfold rotation and a mirror.
 Perms square_p4m(int L) {
@@ -56,8 +56,8 @@ Perms square_p4m(int L) {
     std::vector<int> tx(N), ty(N), rot(N), mir(N);
     for (int y = 0; y < L; ++y)
         for (int x = 0; x < L; ++x) {
-            tx[site(x, y)]  = site(x + 1, y);
-            ty[site(x, y)]  = site(x, y + 1);
+            tx[site(x, y)] = site(x + 1, y);
+            ty[site(x, y)] = site(x, y + 1);
             rot[site(x, y)] = site(-y, x);
             mir[site(x, y)] = site(y, x);
         }
@@ -158,7 +158,10 @@ TEST_CASE("sublattice code: the candidates hold every element reaching the key-l
             std::vector<int> reach;
             for (std::size_t g = 0; g < c.perms.size(); ++g) {
                 const std::uint64_t ik = v.key(apply(c.perms[g], s, c.flips[g]));
-                if (ik < best) { best = ik; reach.clear(); }
+                if (ik < best) {
+                    best = ik;
+                    reach.clear();
+                }
                 if (ik == best) reach.push_back(static_cast<int>(g));
             }
             std::vector<int> cand;

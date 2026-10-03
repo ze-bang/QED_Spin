@@ -6,6 +6,7 @@ distinct physical bonds: honeycomb(1,4,pbc=True) has no Kitaev x (bond_type 0) b
 loses bonds relative to the 2N bonds of the kagome torus.
 Restated with the fix: the lattices with a basis refuse a periodic length of 1 (an exception naming
 it), which is not the silent loss claimed; the smallest tori they accept must keep every bond."""
+
 from collections import Counter
 
 import qed
@@ -41,5 +42,7 @@ if len(k2.nn_bonds) != 2 * k2.num_sites:
 if bad:
     print("REPRO: CONFIRMED " + "; ".join(bad))
 else:
-    print(f"REPRO: NOT_REPRODUCED length 1: honeycomb {err_h or 'kept every bond'}, kagome "
-          f"{err_k or 'kept every bond'}; the 2-cell tori keep every bond")
+    print(
+        f"REPRO: NOT_REPRODUCED length 1: honeycomb {err_h or 'kept every bond'}, kagome "
+        f"{err_k or 'kept every bond'}; the 2-cell tori keep every bond"
+    )

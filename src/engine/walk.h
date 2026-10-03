@@ -37,16 +37,16 @@ inline std::vector<Perm> abelian_or_identity(const Spec& s, int n_sites) {
 /// The walk options of one subspace.
 inline ed::solvers::LittleGroupOptions engine_options(const Spec& s, const Subspace& sub) {
     ed::solvers::LittleGroupOptions o;
-    o.n_up          = sub.n_up;
-    o.sz_parity     = sub.sz_parity;
+    o.n_up = sub.n_up;
+    o.sz_parity = sub.sz_parity;
     // subspaces() already enforced 'require' against H. Inside a subspace the engine engages
     // the flip where the subspace is its own image (n_up = N/2, a parity half with N even, the
     // full space) and not elsewhere: an Sz = S tower, an explicit n_up != N/2 or a mirror pair
     // (which gets the symmetry through the fold) -- 'auto' there, never a refusal.
-    o.spin_flip     = s.spin_flip == 1 ? -1 : s.spin_flip;
+    o.spin_flip = s.spin_flip == 1 ? -1 : s.spin_flip;
     o.time_reversal = s.time_reversal;
-    o.only_k0       = s.only_k0;
-    o.only_irrep    = s.only_irrep;
+    o.only_k0 = s.only_k0;
+    o.only_irrep = s.only_irrep;
     o.only_irrep_chars = s.only_irrep_chars;
     return o;
 }
@@ -72,8 +72,7 @@ inline std::shared_ptr<ed::planner::CsrBudget> block_budget(std::uint64_t workin
 inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
                               const ed::solvers::lg_detail::StarBuild& sb,
                               const std::shared_ptr<ed::solvers::BlockData>& bi,
-                              const std::shared_ptr<::Operator>& s2_carrier,
-                              Device device = Device::Cpu,
+                              const std::shared_ptr<::Operator>& s2_carrier, Device device = Device::Cpu,
                               const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
     using namespace ed::solvers::lg_detail;
     BlockOp b;
@@ -87,8 +86,7 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
         if (dev) rep->enable_device(true);   // its device kernel: op->has_device_kernel()
         return b;
     }
-    const auto towers = ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up, sub.sz_parity,
-                                                             bi->tag.flip_parity);
+    const auto towers = ed::symmetry::allowed_two_S_in_block(n_sites, sub.n_up, sub.sz_parity, bi->tag.flip_parity);
     if (std::find(towers.begin(), towers.end(), s.two_S) == towers.end()) {
         b.op.reset();                   // this flip-parity block holds no spin-S state
         return b;
@@ -97,9 +95,9 @@ inline BlockOp block_operator(const Spec& s, int n_sites, const Subspace& sub,
     const std::shared_ptr<const ed::symmetry::RepSectorData> sec = bi->gop ? bi->gsec : sb.hk->rep_data_ptr();
     auto t = std::make_shared<Tower>();
     t->sector = sec;
-    t->two_S  = s.two_S;
+    t->two_S = s.two_S;
     t->towers = towers;
-    t->dim    = tower_dimension(*sec, s.two_S);
+    t->dim = tower_dimension(*sec, s.two_S);
     if (t->dim == 0) {
         b.op.reset();
         return b;
@@ -139,14 +137,14 @@ inline Antiunitary fold_of(Antiunitary star_tr, const Subspace& sub, const ed::s
 /// subspace mirrored by it.
 inline void note_time_reversal(Antiunitary& seen, const ed::solvers::lg_detail::EngineContext& cx,
                                const Subspace& sub) {
-    if (cx.tr != Antiunitary::None) seen = cx.tr;
-    else if (sub.mirror == 2 && sub.theta) seen = Antiunitary::Theta;
+    if (cx.tr != Antiunitary::None)
+        seen = cx.tr;
+    else if (sub.mirror == 2 && sub.theta)
+        seen = Antiunitary::Theta;
 }
 
 /// Whether a level's mirror is its Theta image (else the spin flip's, when it has one).
-inline bool theta_mirror(const Level& L) {
-    return L.mirror == 2 && L.fold == Antiunitary::Theta && !L.tag.tr_folded;
-}
+inline bool theta_mirror(const Level& L) { return L.mirror == 2 && L.fold == Antiunitary::Theta && !L.tag.tr_folded; }
 
 /// The S^z members a level stands for: 2S + 1 for a whole SU(2) multiplet solved at its Sz = S
 /// member, else 1 (H in a uniform field: every member is a level of its own).
@@ -178,8 +176,7 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
 /// 19.4 s on 32; dsyevd 3.1 / 2.4 s; dev/p67/lapack_scale.py), so a threaded solve of one block
 /// after another left all but one core idle (tri20 exact thermal: 3256 s, probe 62624309).
 // DenseBatch's packing of a matrix make() forms into the device batch: real when real_block says so.
-template <class Make>
-auto pack_formed(const Make& make) {
+template <class Make> auto pack_formed(const Make& make) {
     return [&make](ed::solvers::LgBlocksPacked& p) {
         const Eigen::MatrixXcd Hb = make();
         const auto n = static_cast<std::int64_t>(Hb.rows());
@@ -216,8 +213,10 @@ public:
             return H;
         };
         return add_lazy(mv.dim(), real, make, [&csr, real, n](ed::solvers::LgBlocksPacked& p) {
-            if (real) csr_to_dense(csr, p.add_block(n, true));
-            else      csr_to_dense(csr, reinterpret_cast<Complex*>(p.add_block(n, false)));
+            if (real)
+                csr_to_dense(csr, p.add_block(n, true));
+            else
+                csr_to_dense(csr, reinterpret_cast<Complex*>(p.add_block(n, false)));
         });
     }
     /// The same for a block given as its matrix (a spin tower's Q^dag H Q).
@@ -259,7 +258,7 @@ private:
         spectra_.emplace_back();
         ed::BlockRequest req;
         req.task = ed::Task::DenseBatch;
-        req.dim  = dim;
+        req.dim = dim;
         req.verb = verb_;
         lanes_.push_back(ed::place(device_, req));
         const std::uint64_t bytes = 16 * dim * dim;   // as a complex matrix (the host's form)
@@ -276,8 +275,7 @@ private:
             }
         }
         if (!ed::on_device(lanes_.back())) {
-            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host,
-                                        "dense spectrum");
+            ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host, "dense spectrum");
             if (host_budget_ == 0) host_budget_ = host_budget();
             if (bytes > host_budget_) {          // too large for the pool: alone, on the threaded LAPACK
                 Eigen::MatrixXcd M = make();
@@ -314,12 +312,15 @@ private:
         const auto free = ed::core::available_device_bytes(/*fresh=*/true);
         if (!free) return false;
         try {
-            const std::uint64_t need = (real ? 8 : 16) * dim * dim
+            const std::uint64_t need =
+                (real ? 8 : 16) * dim * dim
                 + ed::solvers::lg_block_workspace_bytes_gpu(static_cast<std::int64_t>(dim), real);
             return need <= *free / 2;
         } catch (const std::exception& e) {
-            ED_LOG(Warn, "dense spectra: cuSOLVER's workspace query for a block of %llu states failed (%s); "
-                         "solving it on the host", static_cast<unsigned long long>(dim), e.what());
+            ED_LOG(Warn,
+                   "dense spectra: cuSOLVER's workspace query for a block of %llu states failed (%s); "
+                   "solving it on the host",
+                   static_cast<unsigned long long>(dim), e.what());
             return false;
         }
 #else
@@ -355,9 +356,11 @@ private:
             } else {
                 const auto n = static_cast<Eigen::Index>(nb);
                 const double* d = packed_.data.data() + packed_.offset[q];
-                Eigen::MatrixXcd Hb = packed_.real[q]
-                    ? Eigen::MatrixXcd(Eigen::Map<const Eigen::MatrixXd>(d, n, n).cast<std::complex<double>>())
-                    : Eigen::MatrixXcd(Eigen::Map<const Eigen::MatrixXcd>(reinterpret_cast<const std::complex<double>*>(d), n, n));
+                Eigen::MatrixXcd Hb =
+                    packed_.real[q]
+                        ? Eigen::MatrixXcd(Eigen::Map<const Eigen::MatrixXd>(d, n, n).cast<std::complex<double>>())
+                        : Eigen::MatrixXcd(
+                            Eigen::Map<const Eigen::MatrixXcd>(reinterpret_cast<const std::complex<double>*>(d), n, n));
                 spectra_[queued_[q]] = ed::solvers::lg_detail::dense_eigenvalues_inplace(Hb);
                 lanes_[queued_[q]] = ed::Lane::HostDense;
             }
@@ -389,13 +392,13 @@ private:
             });
             const ed::parallel::ThreadBudgetScope blas_serial(team, 1);
             std::exception_ptr err;
-            #pragma omp parallel for schedule(dynamic, 1)
+#pragma omp parallel for schedule(dynamic, 1)
             for (long long q = 0; q < static_cast<long long>(order.size()); ++q) {
                 auto& [id, M] = host_[order[static_cast<std::size_t>(q)]];
                 try {
                     spectra_[id] = ed::solvers::lg_detail::dense_eigenvalues_inplace(M);
                 } catch (...) {
-                    #pragma omp critical(qed_dense_batch_error)
+#pragma omp critical(qed_dense_batch_error)
                     if (!err) err = std::current_exception();
                 }
                 M.resize(0, 0);
@@ -438,15 +441,15 @@ private:
 
     Device device_;
     const char* verb_;
-    std::vector<ed::Lane>             lanes_;
-    ed::solvers::LgBlocksPacked       packed_;
-    std::vector<std::size_t>          queued_;
-    std::vector<std::vector<double>>  spectra_;
-    std::size_t                       device_blocks_ = 0;
-    std::uint64_t                     budget_ = 0;   // bytes of the current batch's matrices at most
+    std::vector<ed::Lane> lanes_;
+    ed::solvers::LgBlocksPacked packed_;
+    std::vector<std::size_t> queued_;
+    std::vector<std::vector<double>> spectra_;
+    std::size_t device_blocks_ = 0;
+    std::uint64_t budget_ = 0;   // bytes of the current batch's matrices at most
     std::vector<std::pair<std::size_t, Eigen::MatrixXcd>> host_;   // (entry, matrix) for solve_host
-    std::uint64_t                     host_bytes_  = 0;
-    std::uint64_t                     host_budget_ = 0;
+    std::uint64_t host_bytes_ = 0;
+    std::uint64_t host_budget_ = 0;
 
     // Phase seconds under ED_SYM_PROFILE, one line when the batch dies: forming and packing the
     // device blocks, the device solves (wall, host fallback included), forming and solving the host
@@ -469,9 +472,11 @@ private:
 public:
     ~DenseBatch() {
         if (prof_.dev_blocks + prof_.host_blocks == 0 || !ed::env::flag("ED_SYM_PROFILE", false)) return;
-        ED_LOG(Info, "[dense] %s: device %zu blocks (sum n^3 %.3g): form %.3f s, solve %.3f s | host %zu "
-               "blocks: form %.3f s, solve %.3f s", verb_, prof_.dev_blocks, prof_.dev_n3, prof_.form_s,
-               prof_.dev_s, prof_.host_blocks, prof_.host_form_s, prof_.host_s);
+        ED_LOG(Info,
+               "[dense] %s: device %zu blocks (sum n^3 %.3g): form %.3f s, solve %.3f s | host %zu "
+               "blocks: form %.3f s, solve %.3f s",
+               verb_, prof_.dev_blocks, prof_.dev_n3, prof_.form_s, prof_.dev_s, prof_.host_blocks, prof_.host_form_s,
+               prof_.host_s);
     }
 };
 
@@ -491,7 +496,8 @@ inline std::vector<Perm> close_group(const std::vector<Perm>& gens, int n) {
             Perm y(id.size());
             for (std::size_t i = 0; i < y.size(); ++i) y[i] = g[static_cast<std::size_t>(out[head][i])];
             if (seen.insert(y).second) out.push_back(std::move(y));
-            if (out.size() > 1'000'000) throw std::runtime_error("symmetry group too large to average an operator over");
+            if (out.size() > 1'000'000)
+                throw std::runtime_error("symmetry group too large to average an operator over");
         }
     return out;
 }
@@ -562,8 +568,8 @@ block_observable(const std::shared_ptr<const ed::ops::MaskedProgram>& A, const e
 /// The co-group character table of block `irrep` of a star, as (elements, characters): a group
 /// sector's row; for the plain block of a trivial co-group the trivial irrep (the identity, character
 /// 1); none (false) for an irrep index the star does not have.
-inline bool irrep_table(const ed::solvers::LittleGroupStarInfo& info, int irrep,
-                        const std::vector<int>*& elems, const std::vector<Complex>*& chars) {
+inline bool irrep_table(const ed::solvers::LittleGroupStarInfo& info, int irrep, const std::vector<int>*& elems,
+                        const std::vector<Complex>*& chars) {
     using namespace ed::solvers::lg_detail;
     if (irrep >= 0) {
         if (static_cast<std::size_t>(irrep) >= info.little_characters.size()) return false;
@@ -605,8 +611,9 @@ inline bool has_selection(const Spec& s) {
 /// EmptySelection instead of answering for an empty space.
 inline void require_some_block(const Spec& s, std::size_t n_blocks, const char* verb) {
     if (has_selection(s) && n_blocks == 0)
-        throw ed::EmptySelection(std::string(verb) + ": the selection matches no block: no star of the "
-                                 "requested Sz sectors has that momentum, star index or little-group irrep");
+        throw ed::EmptySelection(std::string(verb)
+                                 + ": the selection matches no block: no star of the "
+                                   "requested Sz sectors has that momentum, star index or little-group irrep");
 }
 
 /// The same after the spin-tower filter: under total_spin a selected block can hold no state of
@@ -632,7 +639,8 @@ inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
 /// Why a block has no device kernel, for place()'s refusal.
 inline const char* no_kernel_reason(int irrep_dim) {
     if (irrep_dim > 1)
-        return "is a sector of an irrep of dimension > 1, whose device kernel -- its reduced CSR, built on the host and "
+        return "is a sector of an irrep of dimension > 1, whose device kernel -- its reduced CSR, built on the host "
+               "and "
                "uploaded -- does not fit the block's CSR budget or the device CSR budget";
     return "has no device kernel";
 }
@@ -643,8 +651,8 @@ inline const char* no_kernel_reason(int irrep_dim) {
 inline void note_restricted_ensemble(const Spec& s, Diagnostics& out, const char* verb) {
     std::vector<std::string> parts;
     if (s.two_S >= 0)
-        parts.push_back("total spin S = " + (s.two_S % 2 ? std::to_string(s.two_S) + "/2"
-                                                          : std::to_string(s.two_S / 2)));
+        parts.push_back("total spin S = "
+                        + (s.two_S % 2 ? std::to_string(s.two_S) + "/2" : std::to_string(s.two_S / 2)));
     if (s.n_up >= 0) parts.push_back("one Sz sector");
     if (s.sz_parity >= 0) parts.push_back("one Sz parity");
     if (!s.only_k0.empty() || !s.only_momentum.empty()) parts.push_back("the selected momenta");
@@ -652,15 +660,14 @@ inline void note_restricted_ensemble(const Spec& s, Diagnostics& out, const char
     if (parts.empty()) return;
     std::string what = parts.front();
     for (std::size_t i = 1; i < parts.size(); ++i) what += ", " + parts[i];
-    out.emplace_back("restricted_ensemble", std::string(verb) + ": the averages run over " + what +
-                                                " only: a restricted ensemble, not the canonical one");
+    out.emplace_back("restricted_ensemble", std::string(verb) + ": the averages run over " + what
+                                                + " only: a restricted ensemble, not the canonical one");
 }
 
 /// fn(cx, tr_on, star) for every star of one subspace, one star resident at a time. Returns the
 /// number of blocks handed to fn, after the selection.
 template <class Fn>
-std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::LittleGroupOptions& opt,
-                 Fn&& fn) {
+std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solvers::LittleGroupOptions& opt, Fn&& fn) {
     using namespace ed::solvers::lg_detail;
     EngineContext cx;
     bool tr_on = false;
@@ -704,9 +711,13 @@ std::size_t walk(const ::Operator& H, int n_sites, const Spec& s, const ed::solv
         sb.info.momentum = momentum_of(k0);
         // build_star_blocks solved only the wanted irreps already; the filter states the contract.
         if (!s.only_irrep_chars.empty())
-            sb.blocks.erase(std::remove_if(sb.blocks.begin(), sb.blocks.end(), [&](const auto& bi) {
-                return !meets(s.only_irrep_chars, [&](int i) { return irrep_char(sb.info, bi->tag.irrep, i); });
-            }), sb.blocks.end());
+            sb.blocks.erase(std::remove_if(sb.blocks.begin(), sb.blocks.end(),
+                                           [&](const auto& bi) {
+                                               return !meets(s.only_irrep_chars, [&](int i) {
+                                                   return irrep_char(sb.info, bi->tag.irrep, i);
+                                               });
+                                           }),
+                            sb.blocks.end());
         n_blocks += sb.blocks.size();
         fn(cx, tr_on, sb);
     }
@@ -730,15 +741,15 @@ private:
 
 /// One member of a level's multiplet: a unit vector of a momentum sector of A, in its subspace.
 struct Member {
-    Subspace    sub;
+    Subspace sub;
     BlockVector v;
 };
 
 /// The momentum sectors a call's members land in, per subspace (n_up, sz_parity).
 struct MemberSectors {
-    const ::Operator&  H;
-    std::vector<Perm>  A;
-    int                n_sites = 0;
+    const ::Operator& H;
+    std::vector<Perm> A;
+    int n_sites = 0;
     std::map<std::pair<int, int>, std::unique_ptr<MomentumSectors>> by_sub;
 };
 
@@ -747,7 +758,7 @@ struct MemberSectors {
 /// antiunitary fold and its flip / Theta mirror (multiplet()'s operations). Each member is gathered
 /// at its sector's representatives from v's amplitudes, so no vector of the whole Sz sector is
 /// formed. Throws std::logic_error when the closure does not hold `count` states.
-[[nodiscard]] std::vector<Member>
-members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s, MemberSectors& ms);
+[[nodiscard]] std::vector<Member> members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s,
+                                             MemberSectors& ms);
 
 }  // namespace ed::sectors::detail

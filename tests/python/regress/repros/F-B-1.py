@@ -23,6 +23,7 @@ odd N with block_size=1 return the exact ground energy.
 Restated after P2.1, which removed block Krylov-Schur and eigs(block_size=) (owner-approved): the
 claim holds only while eigs still accepts block_size; the single-vector lane must stay exact on the
 same odd blocks."""
+
 import os
 import signal
 
@@ -93,5 +94,7 @@ if not all(rows.values()):
 elif not removed:
     print(f"REPRO: CONFIRMED eigs still accepts block_size: {st2} {val2}")
 else:
-    print("REPRO: NOT_REPRODUCED block Krylov-Schur is removed (block_size raises TypeError); the "
-          "single-vector lane is exact on the odd blocks")
+    print(
+        "REPRO: NOT_REPRODUCED block Krylov-Schur is removed (block_size raises TypeError); the "
+        "single-vector lane is exact on the odd blocks"
+    )

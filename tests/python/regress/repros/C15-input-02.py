@@ -5,6 +5,7 @@
 reverses D on the wrap bond of a periodic chain (stored as (0, L-1) instead of (L-1, 0)). The resulting
 spectrum differs from the uniform-D ring D.(S_i x S_{i+1}) and equals the dense ring with the wrap bond's
 D reversed. Independent dense numpy reference, N=8, J=1, Dz=0.5."""
+
 import signal
 
 import numpy as np
@@ -29,7 +30,7 @@ S = [[site(o, i) for o in (sx, sy, sz)] for i in range(N)]
 
 
 def dense(bonds):
-    H = np.zeros((2 ** N, 2 ** N), complex)
+    H = np.zeros((2**N, 2**N), complex)
     for i, j in bonds:
         H += J * sum(S[i][a] @ S[j][a] for a in range(3))
         H += Dz * (S[i][0] @ S[j][1] - S[i][1] @ S[j][0])
@@ -62,7 +63,9 @@ else:
     print("nn_pairs:", pairs)
     print(f"E0 uniform-D ring {E_or[0]:.10f}, E0 via nn_pairs {E_q_lat[0]:.10f}, E0 wrap-reversed {E_rev[0]:.10f}")
     if d_or > 1e-6 and d_rev < 1e-8:
-        print(f"REPRO: CONFIRMED wrap bond stored as {pairs[-1]}; max|E(nn_pairs)-E(uniform)|={d_or:.3e}, "
-              f"max|E(nn_pairs)-E(wrap reversed)|={d_rev:.1e}")
+        print(
+            f"REPRO: CONFIRMED wrap bond stored as {pairs[-1]}; max|E(nn_pairs)-E(uniform)|={d_or:.3e}, "
+            f"max|E(nn_pairs)-E(wrap reversed)|={d_rev:.1e}"
+        )
     else:
         print(f"REPRO: NOT_REPRODUCED d_uniform={d_or:.3e} d_reversed={d_rev:.3e}")

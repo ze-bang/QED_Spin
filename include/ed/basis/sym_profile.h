@@ -23,9 +23,7 @@
 namespace ed::symmetry {
 
 [[nodiscard]] inline bool sym_profile_enabled() noexcept {
-    static const bool on = [] {
-        return ed::env::flag("ED_SYM_PROFILE", false);
-    }();
+    static const bool on = [] { return ed::env::flag("ED_SYM_PROFILE", false); }();
     return on;
 }
 
@@ -34,36 +32,31 @@ namespace ed::symmetry {
 class SymPhaseTimer {
 public:
     explicit SymPhaseTimer(const char* phase) noexcept
-        : phase_(phase),
-          on_(sym_profile_enabled()),
-          t0_(on_ ? std::chrono::steady_clock::now()
-                  : std::chrono::steady_clock::time_point{}) {}
+        : phase_(phase), on_(sym_profile_enabled()),
+          t0_(on_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
 
     void set_items(std::uint64_t n) noexcept { items_ = n; }
 
     ~SymPhaseTimer() {
         if (!on_) return;
-        const double s = std::chrono::duration<double>(
-                             std::chrono::steady_clock::now() - t0_)
-                             .count();
+        const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
         if (items_ != kNoItems) {
-            ED_LOG(Info, "[sym-profile] %s: %.3f s  (%llu items)", phase_, s,
-                   static_cast<unsigned long long>(items_));
+            ED_LOG(Info, "[sym-profile] %s: %.3f s  (%llu items)", phase_, s, static_cast<unsigned long long>(items_));
         } else {
             ED_LOG(Info, "[sym-profile] %s: %.3f s", phase_, s);
         }
     }
 
-    SymPhaseTimer(const SymPhaseTimer&)            = delete;
+    SymPhaseTimer(const SymPhaseTimer&) = delete;
     SymPhaseTimer& operator=(const SymPhaseTimer&) = delete;
 
 private:
     static constexpr std::uint64_t kNoItems = ~0ULL;
 
-    const char*                                 phase_;
-    bool                                        on_;
-    std::chrono::steady_clock::time_point      t0_;
-    std::uint64_t                               items_ = kNoItems;
+    const char* phase_;
+    bool on_;
+    std::chrono::steady_clock::time_point t0_;
+    std::uint64_t items_ = kNoItems;
 };
 
 }  // namespace ed::symmetry

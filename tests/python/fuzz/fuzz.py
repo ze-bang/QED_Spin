@@ -30,6 +30,7 @@ clears a set one; Symmetry(sz=n) selects the sector with n up spins (S^z = n - N
 tower is solved at its S^z = +S member (n_up = N/2 + S); permutation p acts on states as
 bit i of U|s> = bit p[i] of |s>, and a momentum theta means T|psi> = exp(-2 pi i theta)|psi>.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -51,8 +52,7 @@ import numpy as np
 
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
-STATUSES = ("pass", "wrong", "crash", "refused", "timeout", "invalid_ok", "invalid_bad",
-            "harness_error", "skip")
+STATUSES = ("pass", "wrong", "crash", "refused", "timeout", "invalid_ok", "invalid_bad", "harness_error", "skip")
 OK_STATUSES = ("pass", "invalid_ok", "skip")
 # A device refusal of a block kind that has no device kernel yet (classify): documented, a pass.
 DOCUMENTED_NO_KERNEL = re.compile(r"is a sector of an irrep of dimension > 1, whose device kernel")
@@ -78,19 +78,20 @@ def _expand(coeff, ops):
 
 def dot(i, j, J=1.0, jz=None):
     jz = J if jz is None else jz
-    return [(0.5 * J, (("+", i), ("-", j))), (0.5 * J, (("-", i), ("+", j))),
-            (complex(jz), (("z", i), ("z", j)))]
+    return [(0.5 * J, (("+", i), ("-", j))), (0.5 * J, (("-", i), ("+", j))), (complex(jz), (("z", i), ("z", j)))]
 
 
 def xyz(i, j, jx, jy, jz):
-    return (_expand(jx, (("x", i), ("x", j))) + _expand(jy, (("y", i), ("y", j)))
-            + [(complex(jz), (("z", i), ("z", j)))])
+    return _expand(jx, (("x", i), ("x", j))) + _expand(jy, (("y", i), ("y", j))) + [(complex(jz), (("z", i), ("z", j)))]
 
 
 def hop(i, j, t, phi, jz):
     e = cmath.exp(1j * phi)
-    return [(0.5 * t * e, (("+", i), ("-", j))), (0.5 * t * e.conjugate(), (("-", i), ("+", j))),
-            (complex(jz), (("z", i), ("z", j)))]
+    return [
+        (0.5 * t * e, (("+", i), ("-", j))),
+        (0.5 * t * e.conjugate(), (("-", i), ("+", j))),
+        (complex(jz), (("z", i), ("z", j))),
+    ]
 
 
 def dm_z(i, j, D):
@@ -101,8 +102,14 @@ def dm_z(i, j, D):
 def triple(i, j, k, chi):
     """chi S_i.(S_j x S_k): SU(2) invariant, odd under complex conjugation."""
     terms = []
-    for a, b, c, s in (("x", "y", "z", 1), ("y", "z", "x", 1), ("z", "x", "y", 1),
-                       ("x", "z", "y", -1), ("y", "x", "z", -1), ("z", "y", "x", -1)):
+    for a, b, c, s in (
+        ("x", "y", "z", 1),
+        ("y", "z", "x", 1),
+        ("z", "x", "y", 1),
+        ("x", "z", "y", -1),
+        ("y", "x", "z", -1),
+        ("z", "y", "x", -1),
+    ):
         terms += _expand(s * chi, ((a, i), (b, j), (c, k)))
     return terms
 
@@ -111,7 +118,7 @@ def ring4(p, K):
     """K (P + P^-1) for the cyclic exchange P of the four spins p = (a, b, c, d): site p[k]
     takes the spin of site p[k-1]. Written as |P s><s| = prod_k |(P s)_k><s_k| (four-site
     terms; SU(2) invariant, real)."""
-    one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}      # (new, old), 1 = up
+    one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}  # (new, old), 1 = up
     out = []
     for s in range(16):
         old = [(s >> k) & 1 for k in range(4)]
@@ -159,6 +166,7 @@ def sparse_op(terms, N):
     """Sum of the terms in the 2^N basis; a set bit is spin up. The rightmost factor acts
     first, so same-site products are exact."""
     import scipy.sparse as sp
+
     dim = 1 << N
     states = np.arange(dim, dtype=np.int64)
     rows, cols, vals = [], [], []
@@ -266,11 +274,34 @@ def _commutes_states(H, q):
 # Model families
 # =============================================================================
 
-FAMILIES = {"ring": 3.0, "ladder": 2.0, "tri": 2.0, "square": 1.5, "kagome": 1.0, "sawtooth": 1.0,
-            "obc_chain": 1.0, "obc_ladder": 1.0, "tri_patch": 1.0, "wheel": 0.7}
-TASKS = {"eigs": 20, "vectors": 11, "expect": 10, "spectrum": 12, "th_exact": 9, "th_ftlm": 7,
-         "th_oftlm": 4, "th_mtpq": 4, "th_obs": 6, "dyn0": 7, "dynT": 4, "irrep_partition": 3, "invalid": 9}
-DMAX = (None, None, 64, 64, 1, 8, 0, 512)          # eigs dense crossover choices (None: automatic)
+FAMILIES = {
+    "ring": 3.0,
+    "ladder": 2.0,
+    "tri": 2.0,
+    "square": 1.5,
+    "kagome": 1.0,
+    "sawtooth": 1.0,
+    "obc_chain": 1.0,
+    "obc_ladder": 1.0,
+    "tri_patch": 1.0,
+    "wheel": 0.7,
+}
+TASKS = {
+    "eigs": 20,
+    "vectors": 11,
+    "expect": 10,
+    "spectrum": 12,
+    "th_exact": 9,
+    "th_ftlm": 7,
+    "th_oftlm": 4,
+    "th_mtpq": 4,
+    "th_obs": 6,
+    "dyn0": 7,
+    "dynT": 4,
+    "irrep_partition": 3,
+    "invalid": 9,
+}
+DMAX = (None, None, 64, 64, 1, 8, 0, 512)  # eigs dense crossover choices (None: automatic)
 
 
 def wchoice(rng, items):
@@ -281,7 +312,7 @@ def wchoice(rng, items):
 
 def gen_params(rng, fams):
     fam = wchoice(rng, {f: w for f, w in FAMILIES.items() if f in fams})
-    uni = bool(rng.random() < 0.25)          # uniform couplings: degenerate spectra
+    uni = bool(rng.random() < 0.25)  # uniform couplings: degenerate spectra
 
     def c(lo, hi, nice=1.0):
         return float(nice) if uni else float(rng.uniform(lo, hi))
@@ -307,19 +338,29 @@ def gen_params(rng, fams):
         if var == "dm":
             p["D"] = c(0.1, 0.8, 0.3)
     elif fam == "ladder":
-        p.update(L=int(rng.integers(3, 7)), Jl=c(0.5, 1.5), Jr=c(0.3, 1.5, 0.5),
-                 Jd=0.0 if rng.random() < 0.6 else c(0.1, 0.6, 0.25), Delta=delta(),
-                 K4=0.0 if rng.random() < 0.75 else c(-0.4, 0.4, 0.2))
+        p.update(
+            L=int(rng.integers(3, 7)),
+            Jl=c(0.5, 1.5),
+            Jr=c(0.3, 1.5, 0.5),
+            Jd=0.0 if rng.random() < 0.6 else c(0.1, 0.6, 0.25),
+            Delta=delta(),
+            K4=0.0 if rng.random() < 0.75 else c(-0.4, 0.4, 0.2),
+        )
     elif fam == "obc_ladder":
         p.update(L=int(rng.integers(2, 7)), Jl=c(0.5, 1.5), Jr=c(0.3, 1.5, 0.5), Delta=delta())
     elif fam == "tri":
         Lx, Ly = [(3, 3), (4, 3), (3, 4), (2, 3), (3, 2), (2, 4), (4, 2)][int(rng.integers(7))]
-        p.update(Lx=Lx, Ly=Ly, J=c(0.5, 1.5), Delta=delta(),
-                 chi=0.0 if rng.random() < 0.6 else c(0.1, 0.6, 0.25))
+        p.update(Lx=Lx, Ly=Ly, J=c(0.5, 1.5), Delta=delta(), chi=0.0 if rng.random() < 0.6 else c(0.1, 0.6, 0.25))
     elif fam == "square":
         Lx, Ly = [(3, 3), (4, 3), (3, 4), (2, 4), (4, 2), (2, 3), (3, 2)][int(rng.integers(7))]
-        p.update(Lx=Lx, Ly=Ly, J1=c(0.5, 1.5), J2=0.0 if rng.random() < 0.5 else c(0.1, 0.8, 0.5),
-                 Delta=delta(), K4=0.0 if rng.random() < 0.7 else c(-0.4, 0.4, 0.2))
+        p.update(
+            Lx=Lx,
+            Ly=Ly,
+            J1=c(0.5, 1.5),
+            J2=0.0 if rng.random() < 0.5 else c(0.1, 0.8, 0.5),
+            Delta=delta(),
+            K4=0.0 if rng.random() < 0.7 else c(-0.4, 0.4, 0.2),
+        )
     elif fam == "kagome":
         J = c(0.5, 1.5)
         p.update(J=J, Jdown=J if rng.random() < 0.6 else c(0.3, 1.5, 0.5), Delta=delta())
@@ -329,8 +370,7 @@ def gen_params(rng, fams):
         N = int(rng.integers(5, 13))
         nb = N - 1
         half = [c(0.5, 1.5) for _ in range((nb + 1) // 2)]
-        p.update(N=N, J=half + half[: nb // 2][::-1], J2=0.0 if rng.random() < 0.5 else c(0.1, 0.6, 0.5),
-                 Delta=delta())
+        p.update(N=N, J=half + half[: nb // 2][::-1], J2=0.0 if rng.random() < 0.5 else c(0.1, 0.6, 0.5), Delta=delta())
     elif fam == "tri_patch":
         p.update(L=int(rng.choice([2, 3])), J=c(0.5, 1.5), chi=0.0 if rng.random() < 0.6 else c(0.1, 0.6, 0.25))
     elif fam == "wheel":
@@ -340,9 +380,12 @@ def gen_params(rng, fams):
         p["field"] = None
     else:
         kind = wchoice(rng, {"z": 4, "x": 2, "y": 1, "xz": 1})
-        p["field"] = {"z": {"hz": c(0.1, 0.7, 0.5)}, "x": {"hx": c(0.1, 0.7, 0.5)},
-                      "y": {"hy": c(0.1, 0.7, 0.5)},
-                      "xz": {"hx": c(0.1, 0.5, 0.3), "hz": c(0.1, 0.5, 0.4)}}[kind]
+        p["field"] = {
+            "z": {"hz": c(0.1, 0.7, 0.5)},
+            "x": {"hx": c(0.1, 0.7, 0.5)},
+            "y": {"hy": c(0.1, 0.7, 0.5)},
+            "xz": {"hx": c(0.1, 0.5, 0.3), "hz": c(0.1, 0.5, 0.4)},
+        }[kind]
     # 15%: the library gets the raw records (duplicates, cancelling x/y parts, factors in a
     # shuffled order) instead of the merged terms; it must read the same operator either way.
     p["unmerged"] = int(rng.integers(1, 1 << 30)) if rng.random() < 0.15 else 0
@@ -377,6 +420,7 @@ def build_model(fam, p):
 
         def s(x, l):
             return (x % L) + L * l
+
         for x in range(L):
             for l in (0, 1):
                 if pbc or x + 1 < L:
@@ -387,7 +431,7 @@ def build_model(fam, p):
                 t += dot(s(x, 1), s(x + 1, 0), p["Jd"], p["Jd"] * D)
             if p.get("K4") and pbc:
                 t += ring4((s(x, 0), s(x + 1, 0), s(x + 1, 1), s(x, 1)), p["K4"])
-        sites = [(x, l) for l in (0, 1) for x in range(L)]          # index x + L*l
+        sites = [(x, l) for l in (0, 1) for x in range(L)]  # index x + L*l
         swap = [s(x, 1 - l) for x, l in sites]
         if pbc:
             trans, orders = [[s(x + 1, l) for x, l in sites]], [L]
@@ -401,6 +445,7 @@ def build_model(fam, p):
 
         def idx(x, y):
             return (x % Lx) + Lx * (y % Ly)
+
         xy = [(x, y) for y in range(Ly) for x in range(Lx)]
         for x, y in xy:
             if fam == "tri":
@@ -430,6 +475,7 @@ def build_model(fam, p):
 
         def site(x, y, s):
             return 3 * ((x % 2) + 2 * (y % 2)) + s
+
         for x in range(2):
             for y in range(2):
                 A, B, C = site(x, y, 0), site(x, y, 1), site(x, y, 2)
@@ -449,6 +495,7 @@ def build_model(fam, p):
 
         def a(x):
             return 2 * (x % L) + 1
+
         for x in range(L):
             t += dot(b(x), b(x + 1), p["J1"], p["J1"] * D)
             t += dot(a(x), b(x), p["J2"], p["J2"] * D)
@@ -469,7 +516,7 @@ def build_model(fam, p):
         sites = [(i, j) for j in range(L + 1) for i in range(L + 1 - j)]
         ix = {s: n for n, s in enumerate(sites)}
         N = len(sites)
-        for (i, j) in sites:
+        for i, j in sites:
             for di, dj in ((1, 0), (0, 1), (-1, 1)):
                 if (i + di, j + dj) in ix:
                     t += dot(ix[(i, j)], ix[(i + di, j + dj)], p["J"], p["J"])
@@ -500,8 +547,15 @@ def build_model(fam, p):
         lib = raw
     else:
         lib = merged
-    return {"N": N, "terms": merged, "terms_lib": lib, "trans": trans, "orders": orders, "coords": coords,
-            "point": point}
+    return {
+        "N": N,
+        "terms": merged,
+        "terms_lib": lib,
+        "trans": trans,
+        "orders": orders,
+        "coords": coords,
+        "point": point,
+    }
 
 
 def verify_content(m):
@@ -520,6 +574,7 @@ def verify_content(m):
     # time reversal Theta = prod_i (i sigma^y_i) K: <s'^m|Theta H Theta^-1|s^m> = sign(s') sign(s) conj(H_s's),
     # sign(s) = (-1)^(down spins of s), m = all bits
     import scipy.sparse as sp
+
     sgn = np.where((N - pop) % 2 == 0, 1.0, -1.0)
     Ht = sp.coo_matrix((sgn[r] * sgn[c] * np.conj(v), (r ^ (dim - 1), c ^ (dim - 1))), shape=(dim, dim)).tocsr()
     theta = _spmax(Ht - H) < 1e-10
@@ -534,14 +589,26 @@ def verify_content(m):
         su2_field = abs(h.imag) < 1e-12 and _spmax(C - h.real * Sp) < 1e-9
     trans = bool(m["trans"]) and all(_commutes_states(H, perm_states(T, N)) for T in m["trans"])
     point = [list(map(int, P)) for P in m["point"] if _commutes_states(H, perm_states(P, N))]
-    return {"N": N, "hermitian": bool(herm), "u1": u1, "parity": parity, "real": real, "flip": bool(flip),
-            "su2": bool(su2), "su2_field": bool(su2_field), "theta": bool(theta), "trans": trans, "point": point,
-            "s_H": float(sum(abs(c) for c, _ in m["terms"]))}
+    return {
+        "N": N,
+        "hermitian": bool(herm),
+        "u1": u1,
+        "parity": parity,
+        "real": real,
+        "flip": bool(flip),
+        "su2": bool(su2),
+        "su2_field": bool(su2_field),
+        "theta": bool(theta),
+        "trans": trans,
+        "point": point,
+        "s_H": float(sum(abs(c) for c, _ in m["terms"])),
+    }
 
 
 # =============================================================================
 # Case generation (parent; numpy/scipy only)
 # =============================================================================
+
 
 def gen_ops(rng, N, model, content, n, su2_only=False, probe=False, noninv=0.0):
     """Operator specs. su2_only: SU(2)-invariant kinds, except that with probability noninv
@@ -555,8 +622,7 @@ def gen_ops(rng, N, model, content, n, su2_only=False, probe=False, noninv=0.0):
         if has_T:
             kinds.update(szq=3, spq=2)
     else:
-        kinds = {"bond": 3, "zz": 2, "sx": 1, "splus": 1, "current": 1, "nonherm": 0.5, "chir": 0.7,
-                 "samesite": 0.5}
+        kinds = {"bond": 3, "zz": 2, "sx": 1, "splus": 1, "current": 1, "nonherm": 0.5, "chir": 0.7, "samesite": 0.5}
         if has_T:
             kinds["szq"] = 1
     out = []
@@ -589,7 +655,7 @@ def op_terms(spec, model):
         return [(0.5j, (("+", i), ("-", j))), (-0.5j, (("-", i), ("+", j)))]
     if k == "nonherm":
         return [(1.0 + 0j, (("+", i), ("-", j)))]
-    if k == "samesite":          # S+_i S^z_i (S^z acting first) = -S+_i / 2, plus a zz bond
+    if k == "samesite":  # S+_i S^z_i (S^z acting first) = -S+_i / 2, plus a zz bond
         return [(1.0 + 0j, (("+", i), ("z", i))), (0.5 + 0j, (("z", j), ("z", l)))]
     if k == "chir":
         return merge(triple(i, j, l, 1.0))
@@ -620,7 +686,7 @@ def gen_request(rng, fam, model, content, kind):
         Ss = [N % 2 / 2 + j for j in range(N // 2 + 1) if N % 2 / 2 + j <= N / 2]
         S = float(Ss[min(int(rng.geometric(0.5)) - 1, len(Ss) - 1)]) if rng.random() < 0.9 else float(Ss[-1])
     if S is not None:
-        sz = int(round(N / 2 + S)) if rng.random() < 0.2 else "auto"     # the tower's Sz = +S member
+        sz = int(round(N / 2 + S)) if rng.random() < 0.2 else "auto"  # the tower's Sz = +S member
     elif content["u1"]:
         r = rng.random()
         if r < 0.35:
@@ -653,35 +719,79 @@ def gen_request(rng, fam, model, content, kind):
                 spatial = "split_TP"
                 L = model["orders"][0]
                 th = [0, L] if (L % 2 == 1 or rng.random() < 0.5) else [L // 2, L]
-                select = {"kind": "irrep", "R": res[int(rng.integers(len(res)))], "theta": th,
-                          "chi": int(rng.choice([1, -1]))}
-    return {"spatial": spatial, "point_group": pg, "sz": sz, "spin_flip": flip, "time_reversal": tr,
-            "total_spin": S, "select": select}
+                select = {
+                    "kind": "irrep",
+                    "R": res[int(rng.integers(len(res)))],
+                    "theta": th,
+                    "chi": int(rng.choice([1, -1])),
+                }
+    return {
+        "spatial": spatial,
+        "point_group": pg,
+        "sz": sz,
+        "spin_flip": flip,
+        "time_reversal": tr,
+        "total_spin": S,
+        "select": select,
+    }
 
 
 # Invalid requests after which the worker is replaced (they used to be undefined behaviour).
-INVALID_RESTART = {"sz_out_of_range", "obs_wrong_size", "none_in_ops", "load_damaged", "nonfinite_H",
-                   "thermal_obs_wrong_size", "dyn_obs_wrong_size"}
+INVALID_RESTART = {
+    "sz_out_of_range",
+    "obs_wrong_size",
+    "none_in_ops",
+    "load_damaged",
+    "nonfinite_H",
+    "thermal_obs_wrong_size",
+    "dyn_obs_wrong_size",
+}
 # Invalid requests whose documented refusal is a builtin class rather than a qed.errors one.
 INVALID_BUILTIN_OK = {"nonfinite_H": (RuntimeError,)}
 
 
 def gen_invalid(rng, model, content):
     N = model["N"]
-    kinds = {"half_S": 1, "non_perm": 1, "bad_device": 0.5, "bad_method": 0.5, "dyn_T_nonpositive": 0.6,
-             "k_zero": 0.6, "sz_out_of_range": 0.5, "sz_negative": 0.4, "sz_bool": 0.3, "eta_nonpositive": 0.4,
-             "obs_wrong_size": 0.3, "none_in_ops": 0.2, "non_hermitian_H": 0.5, "negative_window": 0.4,
-             "bad_perm": 1.5, "T_empty": 0.4, "T_nonfinite": 0.4, "omega_nonfinite": 0.4,
-             "thermal_krylov_zero": 0.3, "thermal_samples_zero": 0.3, "mtpq_krylov": 0.3, "ftlm_steps": 0.3,
-             "dyn_krylov_zero": 0.3, "dyn_samples_zero": 0.3, "neg_degeneracy_tol": 0.3,
-             "dense_max_dim_negative": 0.3, "bad_spatial_string": 0.3, "bad_toggle": 0.3,
-             "thermal_obs_wrong_size": 0.3, "dyn_obs_wrong_size": 0.3, "load_damaged": 0.4,
-             "load_format1": 0.3, "nonfinite_H": 0.3}
+    kinds = {
+        "half_S": 1,
+        "non_perm": 1,
+        "bad_device": 0.5,
+        "bad_method": 0.5,
+        "dyn_T_nonpositive": 0.6,
+        "k_zero": 0.6,
+        "sz_out_of_range": 0.5,
+        "sz_negative": 0.4,
+        "sz_bool": 0.3,
+        "eta_nonpositive": 0.4,
+        "obs_wrong_size": 0.3,
+        "none_in_ops": 0.2,
+        "non_hermitian_H": 0.5,
+        "negative_window": 0.4,
+        "bad_perm": 1.5,
+        "T_empty": 0.4,
+        "T_nonfinite": 0.4,
+        "omega_nonfinite": 0.4,
+        "thermal_krylov_zero": 0.3,
+        "thermal_samples_zero": 0.3,
+        "mtpq_krylov": 0.3,
+        "ftlm_steps": 0.3,
+        "dyn_krylov_zero": 0.3,
+        "dyn_samples_zero": 0.3,
+        "neg_degeneracy_tol": 0.3,
+        "dense_max_dim_negative": 0.3,
+        "bad_spatial_string": 0.3,
+        "bad_toggle": 0.3,
+        "thermal_obs_wrong_size": 0.3,
+        "dyn_obs_wrong_size": 0.3,
+        "load_damaged": 0.4,
+        "load_format1": 0.3,
+        "nonfinite_H": 0.3,
+    }
     if not content["flip"]:
         kinds["flip_require"] = 2
-    if not content["real"] and not content["theta"]:   # time reversal is K or Theta
+    if not content["real"] and not content["theta"]:  # time reversal is K or Theta
         kinds["tr_require"] = 2
-    if not content["su2_field"]:            # total_spin also takes SU(2) in a uniform field
+    if not content["su2_field"]:  # total_spin also takes SU(2) in a uniform field
         kinds["su2_on_non_su2"] = 2
     if content["su2"]:
         kinds["bad_S"] = 1.5
@@ -727,32 +837,56 @@ def gen_task(rng, fam, model, content, req, kind):
     su2_only = req["total_spin"] is not None
     if kind == "eigs":
         k_over = rng.random() < 0.06
-        t.update(k=(1 << N) + 3 if k_over else int(rng.choice([1, 1, 2, 3, 4, 5, 6, 8, 12])),
-                 window=0.0 if (k_over or rng.random() < 0.7) else float(rng.uniform(0.05, 1.0)),
-                 prune=bool(rng.random() < 0.6), dmax=DMAX[int(rng.integers(len(DMAX)))])
+        t.update(
+            k=(1 << N) + 3 if k_over else int(rng.choice([1, 1, 2, 3, 4, 5, 6, 8, 12])),
+            window=0.0 if (k_over or rng.random() < 0.7) else float(rng.uniform(0.05, 1.0)),
+            prune=bool(rng.random() < 0.6),
+            dmax=DMAX[int(rng.integers(len(DMAX)))],
+        )
     elif kind == "vectors":
-        t.update(k=int(rng.integers(1, 7)), prune=bool(rng.random() < 0.6), dmax=DMAX[int(rng.integers(len(DMAX)))],
-                 save=bool(rng.random() < 0.5), sz_basis=bool(content["u1"] and rng.random() < 0.5),
-                 ops=gen_ops(rng, N, model, content, 1, su2_only=su2_only))
+        t.update(
+            k=int(rng.integers(1, 7)),
+            prune=bool(rng.random() < 0.6),
+            dmax=DMAX[int(rng.integers(len(DMAX)))],
+            save=bool(rng.random() < 0.5),
+            sz_basis=bool(content["u1"] and rng.random() < 0.5),
+            ops=gen_ops(rng, N, model, content, 1, su2_only=su2_only),
+        )
     elif kind == "expect":
-        t.update(k=int(rng.integers(1, 7)), prune=bool(rng.random() < 0.6), dmax=DMAX[int(rng.integers(len(DMAX)))],
-                 ops=gen_ops(rng, N, model, content, int(rng.integers(1, 4)), su2_only=su2_only, noninv=0.2),
-                 me_op=gen_ops(rng, N, model, content, 1)[0])
+        t.update(
+            k=int(rng.integers(1, 7)),
+            prune=bool(rng.random() < 0.6),
+            dmax=DMAX[int(rng.integers(len(DMAX)))],
+            ops=gen_ops(rng, N, model, content, int(rng.integers(1, 4)), su2_only=su2_only, noninv=0.2),
+            me_op=gen_ops(rng, N, model, content, 1)[0],
+        )
     elif kind == "th_exact":
         t["T"] = sorted({round(float(x), 4) for x in rng.uniform(0.1, 5.0, size=8)})
     elif kind in ("th_ftlm", "th_oftlm", "th_mtpq"):
-        t.update(seed=int(rng.integers(1, 10000)), exact_small=bool(rng.random() < 0.5),
-                 krylov=int(rng.choice([40, 100])))
+        t.update(
+            seed=int(rng.integers(1, 10000)), exact_small=bool(rng.random() < 0.5), krylov=int(rng.choice([40, 100]))
+        )
         if kind == "th_oftlm":
             t["exact_states"] = int(rng.choice([1, 4, 8, 32]))
-        t["T"] = [round(float(x), 4) for x in (np.linspace(1.0, 4.0, 6) if kind == "th_mtpq" else np.linspace(0.4, 4.0, 8))]
+        t["T"] = [
+            round(float(x), 4) for x in (np.linspace(1.0, 4.0, 6) if kind == "th_mtpq" else np.linspace(0.4, 4.0, 8))
+        ]
     elif kind == "th_obs":
-        t.update(method=str(rng.choice(["exact", "ftlm"])), seed=int(rng.integers(1, 10000)),
-                 ops=gen_ops(rng, N, model, content, int(rng.integers(1, 4)), su2_only=su2_only, noninv=0.2))
-        t["T"] = [round(float(x), 4) for x in (np.linspace(0.2, 4.0, 8) if t["method"] == "exact" else np.linspace(0.4, 4.0, 8))]
+        t.update(
+            method=str(rng.choice(["exact", "ftlm"])),
+            seed=int(rng.integers(1, 10000)),
+            ops=gen_ops(rng, N, model, content, int(rng.integers(1, 4)), su2_only=su2_only, noninv=0.2),
+        )
+        t["T"] = [
+            round(float(x), 4)
+            for x in (np.linspace(0.2, 4.0, 8) if t["method"] == "exact" else np.linspace(0.4, 4.0, 8))
+        ]
     elif kind in ("dyn0", "dynT"):
-        t.update(probe=gen_ops(rng, N, model, content, 1, probe=True)[0], eta=float(rng.choice([0.05, 0.1, 0.2])),
-                 seed=int(rng.integers(1, 10000)))
+        t.update(
+            probe=gen_ops(rng, N, model, content, 1, probe=True)[0],
+            eta=float(rng.choice([0.05, 0.1, 0.2])),
+            seed=int(rng.integers(1, 10000)),
+        )
         if kind == "dynT":
             t.update(T=float(rng.choice([0.5, 1.0, 2.0])), samples=60, krylov=80)
         else:
@@ -788,15 +922,24 @@ def generate_case(seed, index, fams=None, tasks=None):
     else:
         req = gen_request(rng, fam, model, content, kind)
         task = gen_task(rng, fam, model, content, req, kind)
-    env = {}           # per-case environment overrides (none drawn at present)
-    return {"case_id": f"{seed}-{index}", "seed": int(seed), "index": int(index),
-            "model": {"family": fam, "params": params, "N": int(N)}, "content": content,
-            "request": req, "task": task, "env": env, "restart_after": restart}
+    env = {}  # per-case environment overrides (none drawn at present)
+    return {
+        "case_id": f"{seed}-{index}",
+        "seed": int(seed),
+        "index": int(index),
+        "model": {"family": fam, "params": params, "N": int(N)},
+        "content": content,
+        "request": req,
+        "task": task,
+        "env": env,
+        "restart_after": restart,
+    }
 
 
 # =============================================================================
 # Dense oracle (worker)
 # =============================================================================
+
 
 class HarnessError(Exception):
     pass
@@ -827,7 +970,7 @@ class Oracle:
         self.N = N = model["N"]
         self.dim = 1 << N
         self.H = sparse_op(model["terms"], N)
-        self.pop = popcounts(N)                   # the number of up spins of each state
+        self.pop = popcounts(N)  # the number of up spins of each state
         self.u1, self.parity = content["u1"], content["parity"]
         self.s_H = float(content.get("s_H") or sum(abs(c) for c, _ in model["terms"]))
         self._S2 = None
@@ -858,8 +1001,11 @@ class Oracle:
             if not self.u1:
                 raise HarnessError("total spin on a non-U(1) model")
             two = int(round(2 * S))
-            return [np.flatnonzero(pop == a) for a in range(N + 1)
-                    if abs(N - 2 * a) <= two and (two - abs(N - 2 * a)) % 2 == 0]
+            return [
+                np.flatnonzero(pop == a)
+                for a in range(N + 1)
+                if abs(N - 2 * a) <= two and (two - abs(N - 2 * a)) % 2 == 0
+            ]
         if isinstance(sz, int):
             return [np.flatnonzero(pop == sz)]
         if sz in ("even", "odd"):
@@ -886,7 +1032,7 @@ class Oracle:
         pi = self.bperm(idx, p)
         m = perm_order(list(p))
         d = len(idx)
-        if abs(lam ** m - 1) > 1e-9:
+        if abs(lam**m - 1) > 1e-9:
             return np.zeros((d, d), complex)
         P = np.zeros((d, d), complex)
         cur, cols = np.arange(d), np.arange(d)
@@ -933,8 +1079,14 @@ class Oracle:
                 P = Ps[0]
                 for X in Ps[1:]:
                     P = P @ X
-                if len(Ps) > 1 and d <= 1024 and (np.max(np.abs(P @ P - P), initial=0.0) > 1e-8
-                                                  or np.max(np.abs(P - P.conj().T), initial=0.0) > 1e-8):
+                if (
+                    len(Ps) > 1
+                    and d <= 1024
+                    and (
+                        np.max(np.abs(P @ P - P), initial=0.0) > 1e-8
+                        or np.max(np.abs(P - P.conj().T), initial=0.0) > 1e-8
+                    )
+                ):
                     raise HarnessError("restriction projectors do not commute")
                 P = 0.5 * (P + P.conj().T)
                 w, Q = np.linalg.eigh(P)
@@ -945,7 +1097,7 @@ class Oracle:
                 V = Q @ Vq
             else:
                 E, V = np.linalg.eigh(Hb)
-            sz = (float(self.pop[idx[0]]) - self.N / 2) if self.u1 else None     # Sz = n_up - N/2
+            sz = (float(self.pop[idx[0]]) - self.N / 2) if self.u1 else None  # Sz = n_up - N/2
             out.append((E, V, idx, sz))
         self._cache[key] = out
         return out
@@ -1060,8 +1212,8 @@ class Oracle:
         x, w = x[m], w[m]
         S = np.zeros(len(omega))
         for a in range(0, len(x), 4000):
-            xa, wa = x[a:a + 4000], w[a:a + 4000]
-            S += (wa[None, :] * (eta / math.pi) / ((omega[:, None] - xa[None, :]) ** 2 + eta ** 2)).sum(axis=1)
+            xa, wa = x[a : a + 4000], w[a : a + 4000]
+            S += (wa[None, :] * (eta / math.pi) / ((omega[:, None] - xa[None, :]) ** 2 + eta**2)).sum(axis=1)
         return S, float(w.sum()), float((w * x).sum()), E0
 
 
@@ -1069,12 +1221,18 @@ class Oracle:
 # Worker-side case execution
 # =============================================================================
 
+
 def mk(status, metric=None, message="", known_id=None, **extra):
     if metric is not None and not (isinstance(metric, (int, float)) and math.isfinite(metric)):
         message = f"{message} (metric {metric})".strip()
         metric = None
-    return {"status": status, "metric": None if metric is None else float(metric), "message": str(message)[:1500],
-            "known_id": known_id, "extra": extra}
+    return {
+        "status": status,
+        "metric": None if metric is None else float(metric),
+        "message": str(message)[:1500],
+        "known_id": known_id,
+        "extra": extra,
+    }
 
 
 def classify(exc, qed):
@@ -1112,8 +1270,10 @@ def result_extra(ctx, r):
         e["placement"] = {str(k): int(v) for k, v in dict(pl).items() if v}
     if ctx.device == "gpu":
         nb = int(getattr(r, "device_blocks", 0) or 0)
-        e.update(device_blocks=nb, device_engaged=bool(nb > 0 or (pl and (pl.get("device_krylov", 0)
-                                                                          or pl.get("device_dense", 0)))))
+        e.update(
+            device_blocks=nb,
+            device_engaged=bool(nb > 0 or (pl and (pl.get("device_krylov", 0) or pl.get("device_dense", 0)))),
+        )
     return e
 
 
@@ -1174,8 +1334,10 @@ class Ctx:
         if kind == "split_T":
             return self.qed.Symmetries(abelian=[list(t) for t in md["trans"]], residues=[])
         if kind == "split_TP":
-            return self.qed.Symmetries(abelian=[list(t) for t in md["trans"]],
-                                       residues=point_residues(md["trans"], self.content["point"], self.N))
+            return self.qed.Symmetries(
+                abelian=[list(t) for t in md["trans"]],
+                residues=point_residues(md["trans"], self.content["point"], self.N),
+            )
         if kind == "list_T":
             return [list(t) for t in md["trans"]]
         if kind == "list_TP":
@@ -1186,14 +1348,21 @@ class Ctx:
 
     def sym(self, with_select=True):
         q, r = self.qed, self.req
-        s = q.Symmetry(spatial=self.spatial(r["spatial"]), sz=r["sz"], spin_flip=r["spin_flip"],
-                       time_reversal=r["time_reversal"], point_group=bool(r["point_group"]),
-                       total_spin=r["total_spin"])
+        s = q.Symmetry(
+            spatial=self.spatial(r["spatial"]),
+            sz=r["sz"],
+            spin_flip=r["spin_flip"],
+            time_reversal=r["time_reversal"],
+            point_group=bool(r["point_group"]),
+            total_spin=r["total_spin"],
+        )
         sel = r.get("select") if with_select else None
         if not sel:
             return s
         if sel["kind"] == "momentum":
-            alts = [{tuple(self.model["trans"][j]): Fraction(m_, L) for j, (m_, L) in enumerate(a)} for a in sel["alts"]]
+            alts = [
+                {tuple(self.model["trans"][j]): Fraction(m_, L) for j, (m_, L) in enumerate(a)} for a in sel["alts"]
+            ]
             return qcall(s.select, momentum=alts if len(alts) > 1 else alts[0])
         if sel["kind"] == "irrep":
             A, res = qcall(s.groups, self.H)
@@ -1212,8 +1381,13 @@ class Ctx:
     def base_R(self):
         r = self.req
         sz = r["sz"]
-        R = {"sz": sz if (isinstance(sz, int) or sz in ("even", "odd")) else None, "S": r["total_spin"],
-             "trans": None, "mom": None, "irrep": None}
+        R = {
+            "sz": sz if (isinstance(sz, int) or sz in ("even", "odd")) else None,
+            "S": r["total_spin"],
+            "trans": None,
+            "mom": None,
+            "irrep": None,
+        }
         sel = r.get("select")
         if sel and sel["kind"] == "momentum":
             R["trans"] = self.model["trans"]
@@ -1238,7 +1412,7 @@ class Ctx:
         if r["sz"] in ("even", "odd") and self.content["u1"] and r["total_spin"] is None:
             R3 = dict(R)
             R3["sz"] = None
-            out.append(("parity_ignored", R3, "diagnostic"))       # the fixed C01-pyapi-05 reading
+            out.append(("parity_ignored", R3, "diagnostic"))  # the fixed C01-pyapi-05 reading
         return out
 
     def eigs_kw(self):
@@ -1369,6 +1543,7 @@ def empty_case(ctx, call):
 
 # ---- tasks -------------------------------------------------------------------
 
+
 def t_eigs(ctx):
     t = ctx.task
     k, window = int(t["k"]), float(t.get("window", 0.0))
@@ -1380,8 +1555,9 @@ def t_eigs(ctx):
         return empty_case(ctx, lambda: qcall(ctx.qed.eigs, ctx.H, k, sym=sym, device=ctx.device, **kw))
     r = qcall(ctx.qed.eigs, ctx.H, k, sym=sym, device=ctx.device, **kw)
     got = np.asarray(r.energies, float)
-    extra = dict(levels=len(r.levels), complete=bool(r.complete), pruned_blocks=int(r.pruned_blocks),
-                 **result_extra(ctx, r))
+    extra = dict(
+        levels=len(r.levels), complete=bool(r.complete), pruned_blocks=int(r.pruned_blocks), **result_extra(ctx, r)
+    )
     out = best_match(ctx, lambda R: cmp_lowest(got, ctx.orc.energies(R), k, window, 1e-7))
     if not r.complete:
         out = mk("wrong", out["metric"], f"complete=False without allow_partial; {out['message']}")
@@ -1453,12 +1629,17 @@ def t_vectors(ctx):
     sym = ctx.sym()
     orc = ctx.orc
     if len(orc.energies(ctx.base_R())) == 0:
-        return empty_case(ctx, lambda: qcall(ctx.qed.eigs, ctx.H, k, sym=sym, vectors=True, device=ctx.device,
-                                             **ctx.eigs_kw()))
+        return empty_case(
+            ctx, lambda: qcall(ctx.qed.eigs, ctx.H, k, sym=sym, vectors=True, device=ctx.device, **ctx.eigs_kw())
+        )
     r = qcall(ctx.qed.eigs, ctx.H, k, sym=sym, vectors=True, device=ctx.device, **ctx.eigs_kw())
     vs = qcall(r.vectors)
-    extra = dict(levels=len(r.levels), time_reversal=r.time_reversal,
-                 tr_folded=any(bool(getattr(L, "tr_folded", False)) for L in r.levels), **result_extra(ctx, r))
+    extra = dict(
+        levels=len(r.levels),
+        time_reversal=r.time_reversal,
+        tr_folded=any(bool(getattr(L, "tr_folded", False)) for L in r.levels),
+        **result_extra(ctx, r),
+    )
     problems = []
 
     def check(R):
@@ -1540,12 +1721,12 @@ def t_expect(ctx):
     ops = [ctx.to_op(op_terms(s, ctx.model), ctx.N) for s in specs]
     Os = [sparse_op(op_terms(s, ctx.model), ctx.N) for s in specs]
     if len(orc.energies(ctx.base_R())) == 0:
-        return empty_case(ctx, lambda: qcall(ctx.qed.expect, ctx.H, ops, k, sym=sym, device=ctx.device,
-                                             **ctx.eigs_kw()))
+        return empty_case(
+            ctx, lambda: qcall(ctx.qed.expect, ctx.H, ops, k, sym=sym, device=ctx.device, **ctx.eigs_kw())
+        )
     r = qcall(ctx.qed.expect, ctx.H, ops, k, sym=sym, device=ctx.device, **ctx.eigs_kw())
     rows = [(float(e), int(m_), np.asarray(v)) for e, m_, v in zip(r.energies, r.multiplicities, r.values)]
-    extra = dict(levels=len(rows), time_reversal=r.eigs.time_reversal,
-                 **result_extra(ctx, r.eigs))
+    extra = dict(levels=len(rows), time_reversal=r.eigs.time_reversal, **result_extra(ctx, r.eigs))
 
     def check(R):
         worst, checked, conj_ok, msgs = 0.0, 0, True, []
@@ -1564,7 +1745,7 @@ def t_expect(ctx):
         okE, errE, msgE = cmp_lowest(np.asarray(r.eigs.energies, float), orc.energies(R), k, 0.0, 1e-7)
         if not okE:
             return False, errE, f"energies: {msgE}"
-        if checked == 0:     # k cut every degenerate cluster across blocks: nothing partner-free to test
+        if checked == 0:  # k cut every degenerate cluster across blocks: nothing partner-free to test
             return True, 0.0, "energies ok; no complete degenerate cluster (unchecked values)"
         ok = worst < 1e-7 * max(1, max(d for _, d, _ in orc.clusters(R, Os[0])))
         msgs.append(f"{checked} clusters, max|sum mult*<O> - Tr(P_E O)| {worst:.1e}")
@@ -1669,17 +1850,29 @@ def _sampled(ctx, method, extra_kw, tol, R_samples):
     dmd = 0 if (ctx.device == "gpu" or not t.get("exact_small", True)) else None
 
     def run(dev, samples):
-        return qcall(ctx.qed.thermal, ctx.H, T, method=method, sym=sym, samples=samples,
-                     krylov=None if method == "mtpq" else t["krylov"], seed=t["seed"], device=dev,
-                     dense_max_dim=dmd, **extra_kw)
+        return qcall(
+            ctx.qed.thermal,
+            ctx.H,
+            T,
+            method=method,
+            sym=sym,
+            samples=samples,
+            krylov=None if method == "mtpq" else t["krylov"],
+            seed=t["seed"],
+            device=dev,
+            dense_max_dim=dmd,
+            **extra_kw,
+        )
 
     if len(ctx.orc.energies(ctx.base_R())) == 0:
         return empty_case(ctx, lambda: run(ctx.device, 4)), None
-    if ctx.device == "gpu":   # OFTLM too: it has a device lane since P7.5
+    if ctx.device == "gpu":  # OFTLM too: it has a device lane since P7.5
         g = run("gpu", 4)
         c = run("cpu", 4)
-        d = max(float(np.max(np.abs(np.asarray(getattr(g, q)) - np.asarray(getattr(c, q))))) / N
-                for q in ("E", "C", "entropy", "F", "lnZ"))
+        d = max(
+            float(np.max(np.abs(np.asarray(getattr(g, q)) - np.asarray(getattr(c, q))))) / N
+            for q in ("E", "C", "entropy", "F", "lnZ")
+        )
         st = "pass" if d < 1e-8 else "wrong"
         return mk(st, d, f"gpu vs cpu at seed {t['seed']}, 4 samples: {d:.1e}", **result_extra(ctx, g)), None
     r1 = run("cpu", R_samples)
@@ -1733,11 +1926,22 @@ def t_th_obs(ctx):
     specs = t["ops"]
     ops = [ctx.to_op(op_terms(s, ctx.model), ctx.N) for s in specs]
     Os = [sparse_op(op_terms(s, ctx.model), ctx.N) for s in specs]
-    dmd = 0 if t["method"] == "ftlm" else None          # FTLM always samples here
+    dmd = 0 if t["method"] == "ftlm" else None  # FTLM always samples here
 
     def run(dev, samples):
-        return qcall(ctx.qed.thermal, ctx.H, T, method=t["method"], sym=sym, samples=samples, krylov=60,
-                     seed=t["seed"], device=dev, observables=ops, dense_max_dim=dmd)
+        return qcall(
+            ctx.qed.thermal,
+            ctx.H,
+            T,
+            method=t["method"],
+            sym=sym,
+            samples=samples,
+            krylov=60,
+            seed=t["seed"],
+            device=dev,
+            observables=ops,
+            dense_max_dim=dmd,
+        )
 
     if len(ctx.orc.energies(ctx.base_R())) == 0:
         return empty_case(ctx, lambda: run(ctx.device, 4))
@@ -1792,8 +1996,19 @@ def t_dyn(ctx):
     om = _omega(ctx, eta)
 
     def run(dev, samples, krylov):
-        return qcall(ctx.qed.dynamics, ctx.H, O, om, eta=eta, T=None if T is None else [T], sym=sym,
-                     krylov=krylov, samples=samples, seed=t["seed"], device=dev)
+        return qcall(
+            ctx.qed.dynamics,
+            ctx.H,
+            O,
+            om,
+            eta=eta,
+            T=None if T is None else [T],
+            sym=sym,
+            krylov=krylov,
+            samples=samples,
+            seed=t["seed"],
+            device=dev,
+        )
 
     su2 = ctx.req["total_spin"] is not None
     # GPU T > 0: the device lane against the host lane at the same seed (one random stream for both;
@@ -1811,8 +2026,9 @@ def t_dyn(ctx):
             # relative change of H measures it (seen 5.6e-4 at krylov 40 on a 64-state block, 1e-14
             # at 20 and 80). The lanes must agree to 10x that.
             Hs = ctx.H * (1.0 + 1e-14)
-            cs = qcall(ctx.qed.dynamics, Hs, O, om, eta=eta, T=[T], sym=sym, krylov=40, samples=4,
-                       seed=t["seed"], device="cpu")
+            cs = qcall(
+                ctx.qed.dynamics, Hs, O, om, eta=eta, T=[T], sym=sym, krylov=40, samples=4, seed=t["seed"], device="cpu"
+            )
             sens = _rel_l1(np.asarray(cs.S[0]), np.asarray(c.S[0]), om)
             tol = max(tol, 10 * sens)
             msg += f"; host sensitivity to a 1e-14 change of H {sens:.1e}, tolerance {tol:.1e}"
@@ -1838,8 +2054,10 @@ def t_dyn(ctx):
         err = _rel_l1(S, ref, om)
         mq0, mr0 = float(_trapz(S, om)), float(_trapz(ref, om))
         mq1, mr1 = float(_trapz(S * om, om)), float(_trapz(ref * om, om))
-        msg = (f"rel L1 {err:.3e}; m0 qed {mq0:.5f} ref {mr0:.5f} (exact {m0:.5f}); "
-               f"m1 qed {mq1:.5f} ref {mr1:.5f} (exact {m1:.5f})")
+        msg = (
+            f"rel L1 {err:.3e}; m0 qed {mq0:.5f} ref {mr0:.5f} (exact {m0:.5f}); "
+            f"m1 qed {mq1:.5f} ref {mr1:.5f} (exact {m1:.5f})"
+        )
         if T is None:
             msg += f"; e0 qed {r.e0:.10f} ref {E0:.10f}"
             if abs(r.e0 - E0) > 1e-7 * max(1, abs(E0)):
@@ -1953,21 +2171,28 @@ def t_invalid(ctx):
         "sz_out_of_range": lambda: eigs(Sym(spatial=None, sz=N + 1)),
         "sz_negative": lambda: eigs(Sym(spatial=None, sz=-1)),
         "sz_bool": lambda: eigs(Sym(spatial=None, sz=True)),
-        "mom_not_in_group": lambda: eigs(Sym(spatial=ctx.spatial("split_T")).select(
-            momentum={tuple(t["perm"]): 0}), k=1),
-        "mom_nonexistent": lambda: eigs(Sym(spatial=ctx.spatial("split_T")).select(
-            momentum={tuple(trans[0]): Fraction(3, 10) if ctx.model["orders"][0] % 10 else Fraction(1, 7)}), k=1),
+        "mom_not_in_group": lambda: eigs(
+            Sym(spatial=ctx.spatial("split_T")).select(momentum={tuple(t["perm"]): 0}), k=1
+        ),
+        "mom_nonexistent": lambda: eigs(
+            Sym(spatial=ctx.spatial("split_T")).select(
+                momentum={tuple(trans[0]): Fraction(3, 10) if ctx.model["orders"][0] % 10 else Fraction(1, 7)}
+            ),
+            k=1,
+        ),
         "irrep_bad_R": lambda: eigs(Sym(spatial=ctx.spatial("split_T")).select(irrep_character={tuple(trans[0]): 1})),
         "bad_device": lambda: q.eigs(H, 1, device="tpu"),
         "bad_method": lambda: q.thermal(H, [1.0], method="kpm"),
         "dyn_T_nonpositive": lambda: q.dynamics(H, sz0(), [0.0, 1.0], T=[0.0], device=ctx.device),
         "k_zero": lambda: eigs(Sym(spatial=None), k=0),
         "eta_nonpositive": lambda: q.dynamics(H, sz0(), np.linspace(0, 3, 31), eta=0.0, device=ctx.device),
-        "obs_wrong_size": lambda: q.expect(H, [ctx.to_op([(1.0, (("z", N + 1),))], N + 2)], 1, sym=Sym(spatial=None),
-                                           device=ctx.device),
+        "obs_wrong_size": lambda: q.expect(
+            H, [ctx.to_op([(1.0, (("z", N + 1),))], N + 2)], 1, sym=Sym(spatial=None), device=ctx.device
+        ),
         "none_in_ops": lambda: q.expect(H, [None], 1, sym=Sym(spatial=None), device=ctx.device),
-        "non_hermitian_H": lambda: q.eigs(ctx.to_op(list(ctx.model["terms"]) + [(0.3, (("+", 0),))], N), 2,
-                                          sym=Sym(spatial=None), device=ctx.device),
+        "non_hermitian_H": lambda: q.eigs(
+            ctx.to_op(list(ctx.model["terms"]) + [(0.3, (("+", 0),))], N), 2, sym=Sym(spatial=None), device=ctx.device
+        ),
         "negative_window": lambda: eigs(Sym(spatial=None), window=-1.0),
         # a spin-S tower is solved at n_up = N/2 + S; this n_up has |Sz| > S
         "sz_su2_disagree": lambda: eigs(Sym(spatial=None, sz=N // 2 + 1 + N % 2, total_spin=N % 2 / 2)),
@@ -1984,14 +2209,20 @@ def t_invalid(ctx):
         "dense_max_dim_negative": lambda: eigs(Sym(spatial=None), dense_max_dim=-1),
         "bad_spatial_string": lambda: eigs(Sym(spatial="everything")),
         "bad_toggle": lambda: eigs(Sym(spatial=None, spin_flip="maybe")),
-        "thermal_obs_wrong_size": lambda: q.thermal(H, [1.0], method="exact", device=ctx.device,
-                                                    observables=[ctx.to_op([(1.0, (("z", N),))], N + 1)]),
-        "dyn_obs_wrong_size": lambda: q.dynamics(H, ctx.to_op([(1.0, (("z", N),))], N + 1), [0.0, 1.0],
-                                                 device=ctx.device),
+        "thermal_obs_wrong_size": lambda: q.thermal(
+            H, [1.0], method="exact", device=ctx.device, observables=[ctx.to_op([(1.0, (("z", N),))], N + 1)]
+        ),
+        "dyn_obs_wrong_size": lambda: q.dynamics(
+            H, ctx.to_op([(1.0, (("z", N),))], N + 1), [0.0, 1.0], device=ctx.device
+        ),
         "load_damaged": lambda: _damaged_file(ctx, H, Sym),
         "load_format1": lambda: _format1_file(ctx, H, Sym),
-        "nonfinite_H": lambda: q.eigs(ctx.to_op(list(ctx.model["terms"]) + [(nan, (("z", 0), ("z", 1)))], N), 2,
-                                      sym=Sym(spatial=None), device=ctx.device),
+        "nonfinite_H": lambda: q.eigs(
+            ctx.to_op(list(ctx.model["terms"]) + [(nan, (("z", 0), ("z", 1)))], N),
+            2,
+            sym=Sym(spatial=None),
+            device=ctx.device,
+        ),
     }
     try:
         res = calls[kind]()
@@ -2004,8 +2235,13 @@ def t_invalid(ctx):
         if not str(e).strip():
             return mk("invalid_bad", None, f"{kind}: raised without a message: {msg}", error_class=cls, qed_error=is_q)
         if not is_q and not isinstance(e, INVALID_BUILTIN_OK.get(kind, ())):
-            return mk("invalid_bad", None, f"{kind}: refused with builtin {cls}, not a qed.errors class: {e}",
-                      error_class=cls, qed_error=False)
+            return mk(
+                "invalid_bad",
+                None,
+                f"{kind}: refused with builtin {cls}, not a qed.errors class: {e}",
+                error_class=cls,
+                qed_error=False,
+            )
         return mk("invalid_ok", None, f"{kind}: {msg}", error_class=cls, qed_error=is_q)
     desc = type(res).__name__
     for a in ("energies", "S", "values"):
@@ -2017,17 +2253,29 @@ def t_invalid(ctx):
                 desc += f" first={np.round(arr[:3], 6).tolist()}"
     if kind == "nonfinite_H" and getattr(res, "energies", None) is not None:
         # what was solved: the lowest energies of H with the NaN term left out
-        ref = np.sort(np.concatenate([np.linalg.eigvalsh(ctx.orc.H[b][:, b].toarray())
-                                      for b in ctx.orc.natural_blocks()]))[: len(res.energies)]
+        ref = np.sort(
+            np.concatenate([np.linalg.eigvalsh(ctx.orc.H[b][:, b].toarray()) for b in ctx.orc.natural_blocks()])
+        )[: len(res.energies)]
         same = bool(np.allclose(np.sort(np.asarray(res.energies, float)), ref, atol=1e-8))
         desc += f"; H without the NaN term: {np.round(ref[:3], 6).tolist()} ({'equal' if same else 'different'})"
     return mk("invalid_bad", None, f"{kind}: returned {desc} without error")
 
 
-DISPATCH = {"eigs": t_eigs, "spectrum": t_spectrum, "vectors": t_vectors, "expect": t_expect,
-            "th_exact": t_th_exact, "th_ftlm": t_th_ftlm, "th_oftlm": t_th_oftlm, "th_mtpq": t_th_mtpq,
-            "th_obs": t_th_obs, "dyn0": t_dyn, "dynT": t_dyn, "irrep_partition": t_irrep_partition,
-            "invalid": t_invalid}
+DISPATCH = {
+    "eigs": t_eigs,
+    "spectrum": t_spectrum,
+    "vectors": t_vectors,
+    "expect": t_expect,
+    "th_exact": t_th_exact,
+    "th_ftlm": t_th_ftlm,
+    "th_oftlm": t_th_oftlm,
+    "th_mtpq": t_th_mtpq,
+    "th_obs": t_th_obs,
+    "dyn0": t_dyn,
+    "dynT": t_dyn,
+    "irrep_partition": t_irrep_partition,
+    "invalid": t_invalid,
+}
 
 # One symmetry toggle at a time, rerun on a failing case: which ones make it pass (a signature).
 VARIANTS = (("time_reversal", "off"), ("point_group", False), ("spin_flip", "off"))
@@ -2085,7 +2333,7 @@ def run_case(case, qed, tmpdir, soft_timeout=None, diagnose=True):
         out = mk("timeout", None, f"soft alarm after {soft_timeout} s")
     except SkipCase as e:
         out = mk("skip", None, str(e), e.known_id)
-    except QedRaised as e:          # building H itself
+    except QedRaised as e:  # building H itself
         st, msg, ex = classify(e.exc, qed)
         out = mk(st, None, f"building H: {msg}", **ex)
     except HarnessError as e:
@@ -2108,6 +2356,7 @@ def run_case(case, qed, tmpdir, soft_timeout=None, diagnose=True):
 # =============================================================================
 # Accepted known failures (known.json)
 # =============================================================================
+
 
 def _field(rec, path):
     cur = rec
@@ -2182,6 +2431,7 @@ def match_known(rec, entries):
 # Process isolation
 # =============================================================================
 
+
 def _worker_main(conn, logpath, tmpdir, diagnose):
     try:
         fd = os.open(logpath, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
@@ -2191,6 +2441,7 @@ def _worker_main(conn, logpath, tmpdir, diagnose):
         pass
     try:
         import qed
+
         ndev = None
         f = getattr(qed._core, "cuda_device_count", None)
         if f is not None:
@@ -2198,9 +2449,16 @@ def _worker_main(conn, logpath, tmpdir, diagnose):
                 ndev = int(f())
             except Exception:  # noqa: BLE001
                 ndev = None
-        conn.send({"ready": True, "qed_file": qed.__file__, "version": getattr(qed, "__version__", "?"),
-                   "cuda_build": bool(qed.has_cuda_build()), "cuda_devices": ndev,
-                   "env": dict(qed.env_snapshot()) if hasattr(qed, "env_snapshot") else {}})
+        conn.send(
+            {
+                "ready": True,
+                "qed_file": qed.__file__,
+                "version": getattr(qed, "__version__", "?"),
+                "cuda_build": bool(qed.has_cuda_build()),
+                "cuda_devices": ndev,
+                "env": dict(qed.env_snapshot()) if hasattr(qed, "env_snapshot") else {},
+            }
+        )
     except Exception as e:  # noqa: BLE001
         conn.send({"ready": False, "error": f"{type(e).__name__}: {e}"})
         return
@@ -2282,18 +2540,24 @@ def main(argv=None):
     ap.add_argument("--cases", type=int, default=150)
     ap.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
     ap.add_argument("--out", default=".")
-    ap.add_argument("--budget-seconds", type=float, default=3000.0,
-                    help="stop drawing new cases once this much wall time is spent")
+    ap.add_argument(
+        "--budget-seconds", type=float, default=3000.0, help="stop drawing new cases once this much wall time is spent"
+    )
     ap.add_argument("--case-timeout", type=float, default=240.0, help="hard per-case limit (worker killed)")
     ap.add_argument("--families", default="", help="comma list restricting the model families")
     ap.add_argument("--tasks", default="", help="comma list restricting the tasks")
     ap.add_argument("--start", type=int, default=0, help="first case index")
-    ap.add_argument("--known", default=os.path.join(HERE, "known.json"),
-                    help="accepted known failures ('' for none)")
-    ap.add_argument("--manifest", default=os.path.join(HERE, "..", "regress", "manifest.json"),
-                    help="regression manifest: known.json may only name ledger ids open there")
-    ap.add_argument("--strict", action="store_true",
-                    help="exit 1 on any unexplained non-pass record or harness_error, 2 on a stale known.json")
+    ap.add_argument("--known", default=os.path.join(HERE, "known.json"), help="accepted known failures ('' for none)")
+    ap.add_argument(
+        "--manifest",
+        default=os.path.join(HERE, "..", "regress", "manifest.json"),
+        help="regression manifest: known.json may only name ledger ids open there",
+    )
+    ap.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 on any unexplained non-pass record or harness_error, 2 on a stale known.json",
+    )
     ap.add_argument("--no-diagnose", action="store_true", help="skip the toggle reruns of failing cases")
     ap.add_argument("--inprocess", action="store_true", help="no worker process (debug; a crash kills the run)")
     ap.add_argument("--replay", default="", help="SEED-INDEX: rerun one case in-process and print the record")
@@ -2311,6 +2575,7 @@ def main(argv=None):
         case = generate_case(s, i, fams, tasks)
         case["device"] = a.device
         import qed
+
         rec = run_case(case, qed, tmpdir, soft_timeout=int(a.case_timeout), diagnose=not a.no_diagnose)
         if rec["status"] not in OK_STATUSES:
             m = match_known(rec, known)
@@ -2328,6 +2593,7 @@ def main(argv=None):
     meta = {}
     if a.inprocess:
         import qed as qed_mod
+
         meta = {"qed_file": qed_mod.__file__, "version": getattr(qed_mod, "__version__", "?")}
     with open(path, "w") as fh:
         for i in range(a.start, a.start + a.cases):
@@ -2338,9 +2604,17 @@ def main(argv=None):
             try:
                 case = generate_case(a.seed, i, fams, tasks)
             except Exception as e:  # noqa: BLE001
-                rec = {"case_id": f"{a.seed}-{i}", "seed": a.seed, "index": i, "device": a.device,
-                       "status": "harness_error", "metric": None, "known_id": None, "extra": {},
-                       "message": f"generation failed: {type(e).__name__}: {e} | {traceback.format_exc(limit=4)}"}
+                rec = {
+                    "case_id": f"{a.seed}-{i}",
+                    "seed": a.seed,
+                    "index": i,
+                    "device": a.device,
+                    "status": "harness_error",
+                    "metric": None,
+                    "known_id": None,
+                    "extra": {},
+                    "message": f"generation failed: {type(e).__name__}: {e} | {traceback.format_exc(limit=4)}",
+                }
                 case = None
             if case is not None:
                 case["device"] = a.device
@@ -2364,11 +2638,28 @@ def main(argv=None):
                             break
                     rec, err = worker.run(case, timeout)
                     if rec is None:
-                        rec = {k: case[k] for k in ("case_id", "seed", "index", "device", "model", "content",
-                                                    "request", "task", "env")}
+                        rec = {
+                            k: case[k]
+                            for k in (
+                                "case_id",
+                                "seed",
+                                "index",
+                                "device",
+                                "model",
+                                "content",
+                                "request",
+                                "task",
+                                "env",
+                            )
+                        }
                         st = "timeout" if err == "timeout" else "crash"
-                        rec.update(status=st, metric=None, known_id=None, extra={},
-                                   message=f"{err} (hard limit {timeout:.0f} s)" if st == "timeout" else err)
+                        rec.update(
+                            status=st,
+                            metric=None,
+                            known_id=None,
+                            extra={},
+                            message=f"{err} (hard limit {timeout:.0f} s)" if st == "timeout" else err,
+                        )
                         worker = None
                     elif case.get("restart_after"):
                         worker.close()
@@ -2393,18 +2684,34 @@ def main(argv=None):
         worker.close()
     seconds = round(time.time() - t0, 1)
     with open(os.path.join(a.out, f"fuzz_{a.device}_{a.seed}.meta.json"), "w") as fm:
-        json.dump({"argv": sys.argv, "seed": a.seed, "device": a.device, "cases_run": done,
-                   "cases_requested": a.cases, "budget_exhausted": done < a.cases,
-                   "seconds": seconds, "library": meta, "counts": counts, "known_hits": known_hits,
-                   "unexplained": unexplained, "known_problems": kproblems},
-                  fm, default=_json_default, indent=1)
+        json.dump(
+            {
+                "argv": sys.argv,
+                "seed": a.seed,
+                "device": a.device,
+                "cases_run": done,
+                "cases_requested": a.cases,
+                "budget_exhausted": done < a.cases,
+                "seconds": seconds,
+                "library": meta,
+                "counts": counts,
+                "known_hits": known_hits,
+                "unexplained": unexplained,
+                "known_problems": kproblems,
+            },
+            fm,
+            default=_json_default,
+            indent=1,
+        )
     try:
         os.rmdir(tmpdir)
     except OSError:
         pass
     summ = " ".join(f"{k}={v}" for k, v in counts.items() if v)
-    print(f"fuzz seed={a.seed} device={a.device} cases={done}/{a.cases} {summ} known={known_n} "
-          f"unexplained={len(unexplained)} gpu_not_engaged={not_engaged} seconds={seconds:.0f} out={path}")
+    print(
+        f"fuzz seed={a.seed} device={a.device} cases={done}/{a.cases} {summ} known={known_n} "
+        f"unexplained={len(unexplained)} gpu_not_engaged={not_engaged} seconds={seconds:.0f} out={path}"
+    )
     for u in unexplained:
         print(f"  UNEXPLAINED {u}")
     for name, n in sorted(known_hits.items()):

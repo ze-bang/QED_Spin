@@ -10,6 +10,7 @@ Test: Heisenberg ring N=22, translations only, n_up=11, k=1 with vectors. In one
 (ru_maxrss) after eigs, after expect([one structure factor]), then after expect([12 other structure factors]).
 If the operators were released one at a time, the second call would add ~nothing to the peak (same per-op size
 as the first). If they are retained, it adds ~11x the first call's increment."""
+
 import math
 import resource
 
@@ -62,8 +63,12 @@ print(f"peak RSS: after eigs {base:.0f} MB; +{d1:.0f} MB for expect(1 op); +{d12
 if d1 < 15:
     print(f"REPRO: INCONCLUSIVE single-operator increment too small to calibrate ({d1:.1f} MB)")
 elif d12 > 6.0 * d1:
-    print(f"REPRO: CONFIRMED expect(12 ops) raised peak RSS by {d12:.0f} MB = {d12 / d1:.1f}x the one-op "
-          f"increment ({d1:.0f} MB): per-operator CSRs are all held until expect() returns")
+    print(
+        f"REPRO: CONFIRMED expect(12 ops) raised peak RSS by {d12:.0f} MB = {d12 / d1:.1f}x the one-op "
+        f"increment ({d1:.0f} MB): per-operator CSRs are all held until expect() returns"
+    )
 else:
-    print(f"REPRO: NOT_REPRODUCED expect(12 ops) added {d12:.0f} MB vs {d1:.0f} MB for one op "
-          f"(ratio {d12 / max(d1, 1e-9):.1f})")
+    print(
+        f"REPRO: NOT_REPRODUCED expect(12 ops) added {d12:.0f} MB vs {d1:.0f} MB for one op "
+        f"(ratio {d12 / max(d1, 1e-9):.1f})"
+    )

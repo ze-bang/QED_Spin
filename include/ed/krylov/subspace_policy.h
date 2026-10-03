@@ -27,16 +27,13 @@
 
 namespace ed::krylov {
 
-[[nodiscard]] inline std::size_t krylov_subspace_dim(std::size_t   nev,
-                                                     std::size_t   requested,
-                                                     std::uint64_t global_dim,
+[[nodiscard]] inline std::size_t krylov_subspace_dim(std::size_t nev, std::size_t requested, std::uint64_t global_dim,
                                                      std::uint64_t max_vectors) {
     std::size_t m = 2 * nev + 20;                 // floor: resolve nev per cycle
     if (requested > m) m = requested;             // grow toward the convergence hint
     if (max_vectors > 0 && static_cast<std::uint64_t>(m) > max_vectors)
         m = static_cast<std::size_t>(max_vectors);  // memory budget cap (predictable)
-    if (global_dim > 0 && static_cast<std::uint64_t>(m) > global_dim)
-        m = static_cast<std::size_t>(global_dim);
+    if (global_dim > 0 && static_cast<std::uint64_t>(m) > global_dim) m = static_cast<std::size_t>(global_dim);
     if (m < nev + 1) m = nev + 1;                 // need at least nev+1 to extract nev
     return m;
 }

@@ -53,8 +53,7 @@ double norm_of(const std::vector<Cx>& v) {
 }
 
 // ||S^2 v - lam v|| / ||v||
-double eigen_residual(const ed::LinearOperator& s2,
-                      const std::vector<Cx>& v, double lam) {
+double eigen_residual(const ed::LinearOperator& s2, const std::vector<Cx>& v, double lam) {
     std::vector<Cx> w(v.size());
     s2.apply(v.data(), w.data(), v.size());
     double r2 = 0.0, n2 = 0.0;
@@ -66,8 +65,7 @@ double eigen_residual(const ed::LinearOperator& s2,
 }
 
 // Heisenberg ring J = 1 on N sites (terms only; caller picks the operator).
-template <class Op>
-void add_heisenberg_ring(Op& op, std::uint64_t N) {
+template <class Op> void add_heisenberg_ring(Op& op, std::uint64_t N) {
     for (std::uint64_t i = 0; i < N; ++i) {
         const std::uint64_t j = (i + 1) % N;
         op.addTwoBodyTerm(2, i, 2, j, Cx(1.0, 0.0));
@@ -84,24 +82,18 @@ TEST_CASE("allowed_two_S_in_block: floors, parities, guards", "[casimir_proj]") 
     // Fixed Sz: N = 8, n_up = 3 -> |2*3-8| = 2.
     REQUIRE(allowed_two_S_in_block(8, 3) == std::vector<int>{2, 4, 6, 8});
     // Sz parity: N = 6, N/2 = 3 odd -> S = 0 lives in the ODD half.
-    REQUIRE(allowed_two_S_in_block(6, -1, /*sz_parity=*/0) ==
-            std::vector<int>{2, 4, 6});
-    REQUIRE(allowed_two_S_in_block(6, -1, /*sz_parity=*/1) ==
-            std::vector<int>{0, 2, 4, 6});
+    REQUIRE(allowed_two_S_in_block(6, -1, /*sz_parity=*/0) == std::vector<int>{2, 4, 6});
+    REQUIRE(allowed_two_S_in_block(6, -1, /*sz_parity=*/1) == std::vector<int>{0, 2, 4, 6});
     // Flip parity at half filling, N = 6: (N - 2S)/2 % 2 selects.
-    REQUIRE(allowed_two_S_in_block(6, 3, -1, /*flip=*/0) ==
-            std::vector<int>{2, 6});
-    REQUIRE(allowed_two_S_in_block(6, 3, -1, /*flip=*/1) ==
-            std::vector<int>{0, 4});
+    REQUIRE(allowed_two_S_in_block(6, 3, -1, /*flip=*/0) == std::vector<int>{2, 6});
+    REQUIRE(allowed_two_S_in_block(6, 3, -1, /*flip=*/1) == std::vector<int>{0, 4});
     // Flip in a non-admissible block throws (n_up != N/2).
     REQUIRE_THROWS(allowed_two_S_in_block(6, 2, -1, 0));
 }
 
-TEST_CASE("Lowdin projector: eigenspace, idempotence, orthogonality, trace",
-          "[casimir_proj]") {
+TEST_CASE("Lowdin projector: eigenspace, idempotence, orthogonality, trace", "[casimir_proj]") {
     const std::uint64_t N = 6, dim = 1ULL << N;
-    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(
-        std::shared_ptr<::Operator>(make_S2_carrier(N)));
+    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(std::shared_ptr<::Operator>(make_S2_carrier(N)));
     const auto towers = allowed_two_S_in_block(static_cast<int>(N));
 
     for (int ts : towers) {
@@ -139,19 +131,15 @@ TEST_CASE("Lowdin projector: eigenspace, idempotence, orthogonality, trace",
             P.project(e.data(), dim);
             trace += e[j].real();
         }
-        const double expected =
-            static_cast<double>((ts + 1) *
-                                multiplet_count(static_cast<int>(N), ts));
+        const double expected = static_cast<double>((ts + 1) * multiplet_count(static_cast<int>(N), ts));
         REQUIRE(std::abs(trace - expected) < 1e-8);
     }
 }
 
-TEST_CASE("Lowdin projector matches the dense eigenbasis projector",
-          "[casimir_proj]") {
+TEST_CASE("Lowdin projector matches the dense eigenbasis projector", "[casimir_proj]") {
     const std::uint64_t N = 5, dim = 1ULL << N;
     auto carrier = make_S2_carrier(N);
-    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(
-        std::shared_ptr<::Operator>(carrier));
+    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(std::shared_ptr<::Operator>(carrier));
 
     Eigen::MatrixXcd M(dim, dim);
     {
@@ -188,8 +176,7 @@ TEST_CASE("Lowdin projector matches the dense eigenbasis projector",
     REQUIRE(std::sqrt(d2) / pref.norm() < 1e-9);
 }
 
-TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
-          "[casimir_proj]") {
+TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector", "[casimir_proj]") {
     const std::uint64_t N = 8;
     const int n_up = 3;  // Sz = -1, dim = C(8,3) = 56
     auto s2sz = std::make_shared<ed_tests::SzSectorOperator>(make_S2_carrier(N), n_up);
@@ -197,8 +184,7 @@ TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
     REQUIRE(dim == 56);
 
     const auto towers = allowed_two_S_in_block(static_cast<int>(N), n_up);
-    auto s2 =
-        std::static_pointer_cast<const ed::LinearOperator>(s2sz);
+    auto s2 = std::static_pointer_cast<const ed::LinearOperator>(s2sz);
     for (int ts : towers) {
         LowdinS2Projector P(s2, ts, towers);
         const double lam = 0.25 * ts * (ts + 2);
@@ -215,9 +201,7 @@ TEST_CASE("fixed-Sz composition: trace(P_S) == M(N,S) per Sz sector",
             trace += e[j].real();
         }
         // One state per multiplet at any admissible Sz.
-        const double expected = static_cast<double>(
-            multiplet_count(static_cast<int>(N), ts));
+        const double expected = static_cast<double>(multiplet_count(static_cast<int>(N), ts));
         REQUIRE(std::abs(trace - expected) < 1e-8);
     }
 }
-

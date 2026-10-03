@@ -7,12 +7,14 @@ Test (restated in P7.3 terms: the profile line of the original is gone): random 
 open), N=22, Sz=0 block (dim 705432, 11 MB vectors), solved on the device with and without vectors;
 block_stats gives the device lane's applies. CONFIRMED when the vectors run applies H at least
 1.8x as often as the eigenvalue-only run (a replayed recurrence)."""
+
 import json
 import subprocess
 import sys
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -48,7 +50,7 @@ except Exception as e:
 res = None
 for line in p.stdout.splitlines():
     if line.startswith("RESULT_JSON:"):
-        res = json.loads(line[len("RESULT_JSON:"):])
+        res = json.loads(line[len("RESULT_JSON:") :])
 if res is None:
     print(f"REPRO: INCONCLUSIVE child rc={p.returncode}: {p.stderr[-300:]}")
     sys.exit(0)
@@ -56,8 +58,10 @@ a, b = res["False"], res["True"]
 if min(a["device_blocks"], b["device_blocks"]) < 1:
     print(f"REPRO: INCONCLUSIVE a solve did not run on the device: {res}")
     sys.exit(0)
-msg = (f"applies {a['applies']} (values) vs {b['applies']} (vectors), lanes {a['lane']}/{b['lane']}, "
-       f"E0 {a['E']:.12f} / {b['E']:.12f}")
+msg = (
+    f"applies {a['applies']} (values) vs {b['applies']} (vectors), lanes {a['lane']}/{b['lane']}, "
+    f"E0 {a['E']:.12f} / {b['E']:.12f}"
+)
 if a["applies"] < 10:
     print("REPRO: INCONCLUSIVE too few applies to tell: " + msg)
 elif b["applies"] >= 1.8 * a["applies"]:

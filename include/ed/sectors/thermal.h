@@ -28,13 +28,13 @@ namespace ed::sectors {
 struct ThermalSpec {
     enum class Method { Exact, FTLM, mTPQ } method = Method::FTLM;
     std::vector<double> temperatures;
-    std::size_t   samples      = 40;
-    std::size_t   krylov       = 100;   ///< FTLM / OFTLM Lanczos depth (>= 1)
-    std::size_t   steps        = 0;     ///< mTPQ steps per sample (0 = sized for the coldest T)
-    std::size_t   exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
+    std::size_t samples = 40;
+    std::size_t krylov = 100;   ///< FTLM / OFTLM Lanczos depth (>= 1)
+    std::size_t steps = 0;     ///< mTPQ steps per sample (0 = sized for the coldest T)
+    std::size_t exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
     std::uint64_t dense_max_dim = 512;  ///< FTLM / mTPQ diagonalise blocks up to this dimension; 0: always sample
-    std::uint64_t seed         = 0;     ///< 0 = draw one
-    Device        device       = Device::Cpu;
+    std::uint64_t seed = 0;     ///< 0 = draw one
+    Device device = Device::Cpu;
     /// Static observables <O>(T) (method Exact or FTLM without exact_states). Each O is
     /// averaged over the symmetries every block uses, so it may break them; with a spin
     /// restriction it must be SU(2) invariant. Exact runs diagonalise these blocks on the host.
@@ -45,17 +45,16 @@ struct ThermalCurves {
     std::vector<double> T, lnZ, E, C, S, F;
     std::vector<double> M, chi;          ///< empty unless H conserves Sz
     std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables
-    double        e0        = 0.0;       ///< lowest energy seen (exact: the ground state)
+    double e0 = 0.0;       ///< lowest energy seen (exact: the ground state)
     /// States in the ensemble: block dimension x multiplicity summed over the blocks; under a
     /// total-spin restriction the tower's states (2S + 1 per multiplet).
     std::uint64_t total_dim = 0;
-    std::size_t   blocks    = 0;
-    std::size_t   device_blocks = 0;   ///< blocks sampled on a GPU
-    Placement     placement;
-    Diagnostics   diagnostics;
+    std::size_t blocks = 0;
+    std::size_t device_blocks = 0;   ///< blocks sampled on a GPU
+    Placement placement;
+    Diagnostics diagnostics;
 };
 
-[[nodiscard]] ThermalCurves thermal(const ::Operator& H, const Spec& s,
-                                    const ThermalSpec& t);
+[[nodiscard]] ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t);
 
 }  // namespace ed::sectors

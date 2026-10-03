@@ -4,6 +4,7 @@
 """Claim: read_positions_file accepts a line only if three doubles parse, so a two-column (2D)
 positions file is skipped line by line without error; every site sits at the origin and the
 phase factors do not depend on Q. Test: 4-site 2-column file, Q=(0,0,0) and (pi,0,0)."""
+
 import os
 import tempfile
 
@@ -38,7 +39,9 @@ diff = max(abs(c0[i] - c1[i]) for i in range(4))
 expect_pi = [0.5 * np.exp(1j * np.pi * i) for i in range(4)]
 err_pi = max(abs(c1[i] - expect_pi[i]) for i in range(4))
 if diff < 1e-12:
-    print(f"REPRO: CONFIRMED 2-column positions accepted silently; S(Q=0) and S(Q=pi) coefficients identical "
-          f"(max diff {diff:.1e}, expected Q=pi phases off by {err_pi:.2f})")
+    print(
+        f"REPRO: CONFIRMED 2-column positions accepted silently; S(Q=0) and S(Q=pi) coefficients identical "
+        f"(max diff {diff:.1e}, expected Q=pi phases off by {err_pi:.2f})"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED phases differ by {diff:.3e}")

@@ -37,29 +37,29 @@ namespace lg_detail {
 // Through the orbit-table registry: the estimate walk, each survivor's re-walk and the next call
 // on the same group reuse the table. The subspace: n_up >= 0 fixed Sz, else sz_parity >= 0 a parity
 // half, else the full space.
-std::shared_ptr<const ed::symmetry::OrbitTable>
-group_orbit_table(const std::vector<std::vector<int>>& perms, int n_sites, int n_up, int sz_parity, bool flip) {
+std::shared_ptr<const ed::symmetry::OrbitTable> group_orbit_table(const std::vector<std::vector<int>>& perms,
+                                                                  int n_sites, int n_up, int sz_parity, bool flip) {
     check_group_args(perms, n_sites, n_up, flip);
-    const ed::symmetry::CompiledGroup cg = flip
-        ? ed::symmetry::make_flip_extended_group_from_perms(perms, static_cast<std::uint64_t>(n_sites))
-        : ed::symmetry::CompiledGroup::from_permutations(perms, n_sites);
+    const ed::symmetry::CompiledGroup cg =
+        flip ? ed::symmetry::make_flip_extended_group_from_perms(perms, static_cast<std::uint64_t>(n_sites))
+             : ed::symmetry::CompiledGroup::from_permutations(perms, n_sites);
     const auto n = static_cast<std::uint64_t>(n_sites);
     if (n_up >= 0) return ed::symmetry::acquire_orbit_table_fixed_sz_compiled(n, n_up, cg);
     if (sz_parity >= 0) return ed::symmetry::acquire_orbit_table_parity_compiled(n, sz_parity, cg);
     return ed::symmetry::acquire_orbit_table_full_compiled(n, cg);
 }
 
-ed::symmetry::RepSectorData
-group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
-                        int n_sites, int n_up, bool flip, const std::vector<Complex>& characters) {
-    const std::size_t G  = perms.size();
+ed::symmetry::RepSectorData group_sector_from_table(const ed::symmetry::OrbitTable& tab,
+                                                    const std::vector<std::vector<int>>& perms, int n_sites, int n_up,
+                                                    bool flip, const std::vector<Complex>& characters) {
+    const std::size_t G = perms.size();
     const std::size_t Gx = flip ? 2 * G : G;
     if (characters.size() != Gx)
         throw std::invalid_argument("group sector: characters must have length |G| (2|G| with flip), got "
                                     + std::to_string(characters.size()) + " for |G| = " + std::to_string(G));
     ed::symmetry::RepSectorData rd;
-    rd.n_sites    = n_sites;
-    rd.n_up       = n_up;
+    rd.n_sites = n_sites;
+    rd.n_up = n_up;
     rd.group_size = static_cast<int>(Gx);
     rd.characters = characters;
     rd.perms_flat.reserve(Gx * static_cast<std::size_t>(n_sites));
@@ -75,23 +75,23 @@ group_sector_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<s
     return rd;
 }
 
-ed::symmetry::RepSectorData
-group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::vector<std::vector<int>>& perms,
-                              int n_sites, int n_up, bool flip, int d, const std::vector<Complex>& D) {
+ed::symmetry::RepSectorData group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab,
+                                                          const std::vector<std::vector<int>>& perms, int n_sites,
+                                                          int n_up, bool flip, int d, const std::vector<Complex>& D) {
     const std::size_t Gx = (flip ? 2 : 1) * perms.size();
     const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
     if (d < 1 || d > 255 || D.size() != Gx * dd)
         throw std::invalid_argument("group sector: an irrep of dimension d needs |G| d x d matrices (2|G| with flip)");
-    std::vector<Complex> chi(Gx, Complex(0.0, 0.0));   // the characters, for the label and 1-dim readers
+    std::vector<Complex> chi(Gx, Complex(0.0, 0.0)); // the characters, for the label and 1-dim readers
     for (std::size_t g = 0; g < Gx; ++g)
         for (int i = 0; i < d; ++i) chi[g] += D[g * dd + static_cast<std::size_t>(i) * static_cast<std::size_t>(d + 1)];
     if (d == 1) return group_sector_from_table(tab, perms, n_sites, n_up, flip, chi);
     // The 1-dim fields come from the shared construction (the perms and masks); the reps are redone.
-    ed::symmetry::RepSectorData rd = group_sector_from_table(tab, perms, n_sites, n_up, flip,
-                                                             std::vector<Complex>(Gx, Complex(1.0, 0.0)));
+    ed::symmetry::RepSectorData rd =
+        group_sector_from_table(tab, perms, n_sites, n_up, flip, std::vector<Complex>(Gx, Complex(1.0, 0.0)));
     rd.characters = chi;
-    rd.irrep_dim  = d;
-    rd.irrep_D    = D;
+    rd.irrep_dim = d;
+    rd.irrep_D = D;
     // Per stabiliser class: Mt = sum_{s in Stab} D(s)* is |Stab| times a projector; its eigenvectors
     // of eigenvalue |Stab| scaled by 1/sqrt(|Stab|) give C with C^dag Mt C = I.
     const std::size_t n_class = tab.stab_elems.size();
@@ -108,9 +108,9 @@ group_sector_irrep_from_table(const ed::symmetry::OrbitTable& tab, const std::ve
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(M);
         const double size = static_cast<double>(S.size());
         int rank = 0;
-        for (int k = d - 1; k >= 0; --k) {           // eigenvalues ascending: the kept ones are last
+        for (int k = d - 1; k >= 0; --k) { // eigenvalues ascending: the kept ones are last
             const double lam = es.eigenvalues()(k);
-            if (!(lam > 0.5 * size)) break;         // 0 or |Stab|: the midpoint separates them
+            if (!(lam > 0.5 * size)) break; // 0 or |Stab|: the midpoint separates them
             for (int i = 0; i < d; ++i)
                 rd.class_C[c * dd + static_cast<std::size_t>(i * d + rank)] = es.eigenvectors()(i, k) / std::sqrt(lam);
             ++rank;
@@ -153,7 +153,7 @@ std::shared_ptr<const ed::symmetry::RepSectorData> raised_sector(const ed::symme
 
 void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
                  ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local) {
-    rd.slc = tab.slc;   // the rule the table's representatives were found with
+    rd.slc = tab.slc; // the rule the table's representatives were found with
     const std::size_t n = tab.reps.size();
     int T = 1;
 #ifdef _OPENMP
@@ -161,10 +161,10 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
 #endif
     const std::size_t C = std::max<std::size_t>(1, std::min<std::size_t>(n, 4 * static_cast<std::size_t>(T)));
     const auto bound = [n, C](std::size_t c) { return c * (n / C) + std::min(c, n % C); };
-    std::vector<double> inv(n);           // 1/norm, 0 where the rep cancels
+    std::vector<double> inv(n); // 1/norm, 0 where the rep cancels
     std::vector<std::size_t> at(C + 1, 0);
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(static) num_threads(T)
+#pragma omp parallel for schedule(static) num_threads(T)
 #endif
     for (long long c = 0; c < static_cast<long long>(C); ++c) {
         std::size_t kept = 0;
@@ -181,7 +181,7 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
     rd.inv_norms.resize(at[C]);
     if (local) local->resize(n);
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(static) num_threads(T)
+#pragma omp parallel for schedule(static) num_threads(T)
 #endif
     for (long long c = 0; c < static_cast<long long>(C); ++c) {
         std::size_t pos = at[static_cast<std::size_t>(c)];
@@ -199,8 +199,8 @@ void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>
     }
 }
 
-std::vector<Complex>
-lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v) {
+std::vector<Complex> lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k,
+                                       const Complex* v) {
     if (g.n_sites != k.n_sites || g.n_up != k.n_up)
         throw std::invalid_argument("lift_group_vector: sectors differ in n_sites / n_up");
     const auto pg = g.make_policy();
@@ -209,26 +209,31 @@ lift_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepS
     // carries coefficients larger by sqrt(|G|/|H|) in the subgroup basis: rescale to keep it normalised.
     const double scale = std::sqrt(static_cast<double>(k.group_size) / static_cast<double>(g.group_size));
     const std::size_t n = k.reps.size();
-    std::unique_ptr<Complex[]> buf(new Complex[n]);        // no serial zero fill: the parallel loop first-touches
+    std::unique_ptr<Complex[]> buf(new Complex[n]); // no serial zero fill: the parallel loop first-touches
     long long bad = 0;
-    #pragma omp parallel for reduction(+ : bad) schedule(static)
+#pragma omp parallel for reduction(+ : bad) schedule(static)
     for (long long jj = 0; jj < static_cast<long long>(n); ++jj) {
         const std::size_t j = static_cast<std::size_t>(jj);
         const std::uint64_t st = k.reps[j];
         Complex pgp, pkp;
-        const std::int64_t i  = pg.index_and_projection(st, pgp);
+        const std::int64_t i = pg.index_and_projection(st, pgp);
         const std::int64_t j2 = pk.index_and_projection(st, pkp);
-        if (j2 != static_cast<std::int64_t>(j) || std::abs(pkp) == 0.0) { ++bad; buf[j] = Complex(0, 0); continue; }
+        if (j2 != static_cast<std::int64_t>(j) || std::abs(pkp) == 0.0) {
+            ++bad;
+            buf[j] = Complex(0, 0);
+            continue;
+        }
         // conj convention: pinned by group_convert_test (complex characters reproduce <H> only this way)
         buf[j] = (i < 0) ? Complex(0, 0) : v[static_cast<std::size_t>(i)] * (std::conj(pgp) / std::conj(pkp)) * scale;
     }
-    if (bad) throw std::runtime_error("lift_group_vector: " + std::to_string(bad)
-                                      + " target reps are not their own representative (inconsistent sectors)");
+    if (bad)
+        throw std::runtime_error("lift_group_vector: " + std::to_string(bad)
+                                 + " target reps are not their own representative (inconsistent sectors)");
     return std::vector<Complex>(buf.get(), buf.get() + n);
 }
 
-std::vector<Complex>
-restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k, const Complex* v) {
+std::vector<Complex> restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::RepSectorData& k,
+                                           const Complex* v) {
     if (g.n_sites != k.n_sites || g.n_up != k.n_up)
         throw std::invalid_argument("restrict_group_vector: sectors differ in n_sites / n_up");
     if (g.irrep_dim != 1) throw std::invalid_argument("restrict_group_vector: an irrep of dimension > 1");
@@ -239,7 +244,7 @@ restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::
     // (pg_j / pk_j) scale x_j over the j of i -- a scatter (several k-orbits make one g-orbit).
     std::vector<Complex> y(g.reps.size(), Complex(0, 0));
     double* yd = reinterpret_cast<double*>(y.data());
-    #pragma omp parallel for schedule(dynamic, 1024)
+#pragma omp parallel for schedule(dynamic, 1024)
     for (long long jj = 0; jj < static_cast<long long>(k.reps.size()); ++jj) {
         const std::size_t j = static_cast<std::size_t>(jj);
         if (v[j] == Complex(0, 0)) continue;
@@ -247,14 +252,14 @@ restrict_group_vector(const ed::symmetry::RepSectorData& g, const ed::symmetry::
         const std::int64_t i = pg.index_and_projection(k.reps[j], pgp);
         if (i < 0 || pk.index_and_projection(k.reps[j], pkp) < 0 || pkp == Complex(0, 0)) continue;
         const Complex c = (pgp / pkp) * scale * v[j];
-        #pragma omp atomic
+#pragma omp atomic
         yd[2 * i] += c.real();
-        #pragma omp atomic
+#pragma omp atomic
         yd[2 * i + 1] += c.imag();
     }
     return y;
 }
 
-}  // namespace lg_detail
+} // namespace lg_detail
 
-}  // namespace ed::solvers
+} // namespace ed::solvers

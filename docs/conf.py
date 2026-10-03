@@ -39,17 +39,17 @@ release = version = re.search(r'^version = "([0-9.]+)"$', (REPO_ROOT / "pyprojec
 
 extensions = [
     "sphinx.ext.autodoc",
-    "sphinx.ext.napoleon",        # Google / NumPy style docstrings
+    "sphinx.ext.napoleon",  # Google / NumPy style docstrings
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx.ext.mathjax",
-    "myst_parser",                # Markdown source files
-    "breathe",                    # Doxygen XML -> Sphinx
+    "myst_parser",  # Markdown source files
+    "breathe",  # Doxygen XML -> Sphinx
 ]
 
 source_suffix = {
     ".rst": "restructuredtext",
-    ".md":  "markdown",
+    ".md": "markdown",
 }
 
 templates_path = ["_templates"]
@@ -78,8 +78,8 @@ breathe_show_include = True
 # -- Autodoc -----------------------------------------------------------------
 
 autodoc_default_options = {
-    "members":         True,
-    "undoc-members":   True,
+    "members": True,
+    "undoc-members": True,
     "show-inheritance": True,
 }
 autoclass_content = "both"
@@ -91,9 +91,9 @@ autodoc_mock_imports = ["qed._core", "numpy"]
 # -- intersphinx -------------------------------------------------------------
 
 intersphinx_mapping = {
-    "python":   ("https://docs.python.org/3", None),
-    "numpy":    ("https://numpy.org/doc/stable/", None),
-    "scipy":    ("https://docs.scipy.org/doc/scipy/", None),
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable/", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy/", None),
 }
 
 # -- HTML output -------------------------------------------------------------

@@ -11,6 +11,7 @@ eigs(k=2, device='gpu') takes the device Krylov-Schur lane with m = 200 (orch_so
 the basis alone is 5.8 GB, basis + staging grows to 11.7 GB. Control: eigs(k=1) on the same block
 (Lanczos, no kept basis). Each run in its own child process. CONFIRMED when the control runs on the
 device and k=2 raises an out-of-memory error although the 200-vector basis alone would fit."""
+
 import json
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from math import comb
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -61,7 +63,7 @@ def run(k):
         return {"ok": False, "crash": True, "err": "timeout"}
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+            return json.loads(line[len("RESULT_JSON:") :])
     return {"ok": False, "crash": True, "err": f"rc={p.returncode} stderr_tail={p.stderr[-300:]!r}"}
 
 
@@ -70,9 +72,11 @@ if not ctl.get("ok") or ctl.get("device_blocks", 0) < 1:
     print(f"REPRO: INCONCLUSIVE control k=1 did not run on the device: {ctl}")
     sys.exit(0)
 two = run(2)
-msg = (f"D={D} vec={VEC/1e6:.1f}MB basis200={200*VEC/1e9:.2f}GB basis+staging={400*VEC/1e9:.2f}GB; "
-       f"k=1 ok E0={ctl['E'][0]:.10f} wall={ctl['wall']:.1f}s; k=2 ok={two.get('ok')} "
-       f"err={str(two.get('err'))[:200]!r}")
+msg = (
+    f"D={D} vec={VEC/1e6:.1f}MB basis200={200*VEC/1e9:.2f}GB basis+staging={400*VEC/1e9:.2f}GB; "
+    f"k=1 ok E0={ctl['E'][0]:.10f} wall={ctl['wall']:.1f}s; k=2 ok={two.get('ok')} "
+    f"err={str(two.get('err'))[:200]!r}"
+)
 err = str(two.get("err", "")).lower()
 if not two.get("ok") and not two.get("crash") and "out of memory" in err and 200 * VEC < 9e9:
     tag = " (failing allocation: staging)" if "staging" in err else ""

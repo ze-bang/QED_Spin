@@ -1,4 +1,5 @@
 """``qed.expect``: expectation values of operators in the lowest levels of H."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,8 +30,7 @@ class ExpectResult:
 
 
 @_log.replays
-def expect(H, ops, k: int = 1, *, sym: Optional[Symmetry] = None, device: str = "cpu",
-           **eigs_kwargs) -> ExpectResult:
+def expect(H, ops, k: int = 1, *, sym: Optional[Symmetry] = None, device: str = "cpu", **eigs_kwargs) -> ExpectResult:
     """<O> for every operator in ``ops`` in each of the lowest levels of ``H``.
 
     Runs :func:`qed.eigs` with vectors (``eigs_kwargs`` pass through) and evaluates each
@@ -45,7 +45,11 @@ def expect(H, ops, k: int = 1, *, sym: Optional[Symmetry] = None, device: str = 
     single = not isinstance(ops, (list, tuple))
     ops = [ops] if single else list(ops)
     r = eigs(H, k, sym=sym, vectors=True, device=device, **eigs_kwargs)
-    return ExpectResult(energies=np.array([L.energy for L in r.levels], float),
-                        multiplicities=np.array([L.multiplicity for L in r.levels], int),
-                        values=r.expect(ops), levels=r.levels, eigs=r,
-                        diagnostics=list(r.diagnostics))
+    return ExpectResult(
+        energies=np.array([L.energy for L in r.levels], float),
+        multiplicities=np.array([L.multiplicity for L in r.levels], int),
+        values=r.expect(ops),
+        levels=r.levels,
+        eigs=r,
+        diagnostics=list(r.diagnostics),
+    )

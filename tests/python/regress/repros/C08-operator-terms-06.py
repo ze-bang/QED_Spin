@@ -5,6 +5,7 @@
 term_kernels_assemble.h, lg_walk.h) make the engine non scale-invariant: a Heisenberg ring with
 J = 1.6e-22 (meV in joules) yields H = 0 and E0 = 0 instead of J * E0(J=1).
 Test: 8-site ring at J=1 and J=1.6e-22, compared with a dense numpy reference."""
+
 import signal
 
 import numpy as np
@@ -33,8 +34,10 @@ for J in (1.0, 1.6e-22):
     b = qed.input.HamiltonianBuilder(N)
     b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=J)
     H = b.to_operator()
-    for name, fn in (("eigs", lambda: float(np.asarray(qed.eigs(H, 1, sym=qed.Symmetry.none()).energies)[0])),
-                     ("spectrum", lambda: float(np.min(np.asarray(qed.spectrum(H, sym=qed.Symmetry.none()).energies))))):
+    for name, fn in (
+        ("eigs", lambda: float(np.asarray(qed.eigs(H, 1, sym=qed.Symmetry.none()).energies)[0])),
+        ("spectrum", lambda: float(np.min(np.asarray(qed.spectrum(H, sym=qed.Symmetry.none()).energies)))),
+    ):
         try:
             res[(J, name)] = fn()
         except Exception as e:

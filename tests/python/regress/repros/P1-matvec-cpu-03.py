@@ -14,6 +14,7 @@ less the Krylov working set). J1-J2-J3 chain N=32, n_up=16, k=0, one spin-flip h
 entries per row -> about 10 GiB); a 3-step FTLM sample on it, the default budget, ED_SYM_PROFILE reporting
 whether the CSR engaged. INCONCLUSIVE below 32 GiB of free memory (the fixed budget would then decline
 rightly); CONFIRMED when the CSR is declined; NOT_REPRODUCED when it engages."""
+
 import json
 import os
 import subprocess
@@ -52,14 +53,14 @@ def free_gib():
             except OSError:
                 mx = "max"
             if mx != "max":
-                return (int(mx) - cur) / 2 ** 30
+                return (int(mx) - cur) / 2**30
             path = os.path.dirname(path)
     except (OSError, ValueError):
         pass
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) / 2 ** 20
+                return int(line.split()[1]) / 2**20
     return 0.0
 
 
@@ -82,5 +83,7 @@ elif free < 32:
 elif engaged:
     print(f"REPRO: NOT_REPRODUCED the ~10 GiB CSR engaged under the default budget with {free:.1f} GiB free")
 else:
-    print(f"REPRO: CONFIRMED the default budget declined a ~10 GiB CSR (the walk runs every apply) although "
-          f"{free:.1f} GiB are free")
+    print(
+        f"REPRO: CONFIRMED the default budget declined a ~10 GiB CSR (the walk runs every apply) although "
+        f"{free:.1f} GiB are free"
+    )

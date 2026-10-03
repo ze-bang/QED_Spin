@@ -19,20 +19,18 @@ namespace ed::solvers {
 
 namespace {
 
-#define ED_CUDA_CHECK(call)                                                    \
-    do {                                                                       \
-        cudaError_t _e = (call);                                               \
-        if (_e != cudaSuccess)                                                 \
-            throw std::runtime_error(std::string("little_group_gpu CUDA: ")    \
-                                     + cudaGetErrorString(_e));                \
+#define ED_CUDA_CHECK(call)                                                                                            \
+    do {                                                                                                               \
+        cudaError_t _e = (call);                                                                                       \
+        if (_e != cudaSuccess)                                                                                         \
+            throw std::runtime_error(std::string("little_group_gpu CUDA: ") + cudaGetErrorString(_e));                 \
     } while (0)
 
-#define ED_CUSOLVER_CHECK(call)                                                \
-    do {                                                                       \
-        cusolverStatus_t _s = (call);                                          \
-        if (_s != CUSOLVER_STATUS_SUCCESS)                                     \
-            throw std::runtime_error("little_group_gpu cuSOLVER error "        \
-                                     + std::to_string(static_cast<int>(_s)));  \
+#define ED_CUSOLVER_CHECK(call)                                                                                        \
+    do {                                                                                                               \
+        cusolverStatus_t _s = (call);                                                                                  \
+        if (_s != CUSOLVER_STATUS_SUCCESS)                                                                             \
+            throw std::runtime_error("little_group_gpu cuSOLVER error " + std::to_string(static_cast<int>(_s)));       \
     } while (0)
 
 // syevd's device and host workspace for one n x n block of the given type (A and W may be null:
@@ -41,8 +39,8 @@ void workspace(cusolverDnHandle_t h, cusolverDnParams_t p, std::int64_t n, bool 
                std::size_t& host) {
     const cudaDataType t = real ? CUDA_R_64F : CUDA_C_64F;
     ED_CUSOLVER_CHECK(cusolverDnXsyevd_bufferSize(h, p, CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER, n, t,
-                                                  nullptr, std::max<std::int64_t>(1, n), CUDA_R_64F, nullptr, t,
-                                                  &dev, &host));
+                                                  nullptr, std::max<std::int64_t>(1, n), CUDA_R_64F, nullptr, t, &dev,
+                                                  &host));
 }
 
 }  // namespace
@@ -65,8 +63,7 @@ std::size_t lg_block_workspace_bytes_gpu(std::int64_t n, bool real) {
     return dev + static_cast<std::size_t>(n) * sizeof(double) + sizeof(int);
 }
 
-std::vector<double>
-lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
+std::vector<double> lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
     const std::size_t nblk = P.block_dim.size();
     if (nblk == 0) return {};
 
@@ -76,8 +73,10 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
     for (std::size_t b = 0; b < nblk; ++b) {
         eig_off[b] = total_eigs;
         total_eigs += static_cast<std::size_t>(P.block_dim[b]);
-        if (P.real[b]) max_real = std::max(max_real, P.block_dim[b]);
-        else           max_complex = std::max(max_complex, P.block_dim[b]);
+        if (P.real[b])
+            max_real = std::max(max_real, P.block_dim[b]);
+        else
+            max_complex = std::max(max_complex, P.block_dim[b]);
     }
 
     // Device resources, all null-initialised so the cleanup below is safe on any partial-init
@@ -91,8 +90,14 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
         try {
             ED_CUSOLVER_CHECK(cusolverDnCreate(&h));
             ED_CUSOLVER_CHECK(cusolverDnCreateParams(&p));
-            if (max_real > 0)    { workspace(h, p, max_real, true, d, hb);     ws = std::max(ws, d); }
-            if (max_complex > 0) { workspace(h, p, max_complex, false, d, hb); ws = std::max(ws, d); }
+            if (max_real > 0) {
+                workspace(h, p, max_real, true, d, hb);
+                ws = std::max(ws, d);
+            }
+            if (max_complex > 0) {
+                workspace(h, p, max_complex, false, d, hb);
+                ws = std::max(ws, d);
+            }
         } catch (...) {
             if (p) cusolverDnDestroyParams(p);
             if (h) cusolverDnDestroy(h);
@@ -102,7 +107,8 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
         cusolverDnDestroy(h);
         std::size_t free_b = 0, total_b = 0;
         if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
-            const std::size_t room = free_b > P.bytes() ? (free_b - P.bytes()) / 5 * 4 : 0;   // 80% of what the matrices leave
+            const std::size_t room =
+                free_b > P.bytes() ? (free_b - P.bytes()) / 5 * 4 : 0;   // 80% of what the matrices leave
             K = std::max(1, std::min<int>(K, static_cast<int>(room / ws)));
         } else {
             cudaGetLastError();
@@ -110,17 +116,17 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
     }
     double* d_data = nullptr;
     double* d_eigs = nullptr;
-    int*    d_info = nullptr;                           // per-block convergence code
-    std::vector<cudaStream_t>       streams(K, nullptr);
+    int* d_info = nullptr;                           // per-block convergence code
+    std::vector<cudaStream_t> streams(K, nullptr);
     std::vector<cusolverDnHandle_t> handles(K, nullptr);
     std::vector<cusolverDnParams_t> params(K, nullptr);
-    std::vector<void*>              d_work(K, nullptr);
-    std::vector<std::size_t>        d_bytes(K, 0);
-    std::vector<std::vector<char>>  h_work(K);
+    std::vector<void*> d_work(K, nullptr);
+    std::vector<std::size_t> d_bytes(K, 0);
+    std::vector<std::vector<char>> h_work(K);
     auto cleanup = [&]() noexcept {
         for (int k = 0; k < K; ++k) {
-            if (d_work[k])  cudaFree(d_work[k]);
-            if (params[k])  cusolverDnDestroyParams(params[k]);
+            if (d_work[k]) cudaFree(d_work[k]);
+            if (params[k]) cusolverDnDestroyParams(params[k]);
             if (handles[k]) cusolverDnDestroy(handles[k]);
             if (streams[k]) cudaStreamDestroy(streams[k]);
         }
@@ -145,8 +151,16 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
             ED_CUSOLVER_CHECK(cusolverDnSetStream(handles[k], streams[k]));
             ED_CUSOLVER_CHECK(cusolverDnCreateParams(&params[k]));
             std::size_t dev = 1, host = 1, d, h;
-            if (max_real > 0)    { workspace(handles[k], params[k], max_real, true, d, h);     dev = std::max(dev, d); host = std::max(host, h); }
-            if (max_complex > 0) { workspace(handles[k], params[k], max_complex, false, d, h); dev = std::max(dev, d); host = std::max(host, h); }
+            if (max_real > 0) {
+                workspace(handles[k], params[k], max_real, true, d, h);
+                dev = std::max(dev, d);
+                host = std::max(host, h);
+            }
+            if (max_complex > 0) {
+                workspace(handles[k], params[k], max_complex, false, d, h);
+                dev = std::max(dev, d);
+                host = std::max(host, h);
+            }
             ED_CUDA_CHECK(cudaMalloc(&d_work[k], dev));
             d_bytes[k] = dev;
             h_work[k].resize(host);
@@ -169,12 +183,11 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
             const std::int64_t n = P.block_dim[b];
             const cudaDataType t = P.real[b] ? CUDA_R_64F : CUDA_C_64F;
             ED_CUSOLVER_CHECK(cusolverDnXsyevd(
-                handles[k], params[k], CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER, n, t,
-                d_data + P.offset[b], std::max<std::int64_t>(1, n), CUDA_R_64F, d_eigs + eig_off[b], t,
-                d_work[k], d_bytes[k], h_work[k].data(), h_work[k].size(), d_info + static_cast<std::ptrdiff_t>(b)));
+                handles[k], params[k], CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER, n, t, d_data + P.offset[b],
+                std::max<std::int64_t>(1, n), CUDA_R_64F, d_eigs + eig_off[b], t, d_work[k], d_bytes[k],
+                h_work[k].data(), h_work[k].size(), d_info + static_cast<std::ptrdiff_t>(b)));
         }
-        for (int k = 0; k < K; ++k)
-            ED_CUDA_CHECK(cudaStreamSynchronize(streams[k]));
+        for (int k = 0; k < K; ++k) ED_CUDA_CHECK(cudaStreamSynchronize(streams[k]));
 
         // Convergence / argument check for every block.
         std::vector<int> info(nblk);
@@ -182,8 +195,8 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
         for (std::size_t b = 0; b < nblk; ++b)
             if (info[b] != 0)
                 throw std::runtime_error("little_group_gpu: syevd did not converge for block " + std::to_string(b)
-                                         + " (n = " + std::to_string(P.block_dim[b]) + ", info = "
-                                         + std::to_string(info[b]) + ")");
+                                         + " (n = " + std::to_string(P.block_dim[b])
+                                         + ", info = " + std::to_string(info[b]) + ")");
 
         // --- single download of all eigenvalues ----------------------------
         ED_CUDA_CHECK(cudaMemcpy(eigs.data(), d_eigs, total_eigs * sizeof(double), cudaMemcpyDeviceToHost));

@@ -8,6 +8,7 @@ term lists alone, never through the library's matvec, so they are an independent
 the grid, golden and regress suites; terms_of() reads an operator that exists only as a library
 Operator through its canonical terms (Operator.terms()).
 """
+
 from __future__ import annotations
 
 import math
@@ -34,8 +35,7 @@ def _expand(coeff, ops):
 def dot(i, j, J=1.0, jz=None):
     """J S_i.S_j (or XXZ with jz) as expanded terms."""
     jz = J if jz is None else jz
-    return [(0.5 * J, (("+", i), ("-", j))), (0.5 * J, (("-", i), ("+", j))),
-            (jz, (("z", i), ("z", j)))]
+    return [(0.5 * J, (("+", i), ("-", j))), (0.5 * J, (("-", i), ("+", j))), (jz, (("z", i), ("z", j)))]
 
 
 def ring(a, b, c, d, K):
@@ -43,11 +43,11 @@ def ring(a, b, c, d, K):
     16 + 16 matrix elements: |P s><s| = prod_i |(Ps)_i><s_i| with |up><up| = u, |dn><dn| = d,
     |up><dn| = S+, |dn><up| = S-."""
     sites = (a, b, c, d)
-    one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}   # (new, old), 1 = up
+    one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}  # (new, old), 1 = up
     terms = []
     for s in range(16):
         old = [(s >> i) & 1 for i in range(4)]
-        new = [old[(i - 1) % 4] for i in range(4)]   # site i receives the spin of site i - 1
+        new = [old[(i - 1) % 4] for i in range(4)]  # site i receives the spin of site i - 1
         terms.append((K, tuple((one[(n, o)], x) for n, o, x in zip(new, old, sites))))
         terms.append((K, tuple((one[(o, n)], x) for n, o, x in zip(new, old, sites))))
     return terms
@@ -56,8 +56,14 @@ def ring(a, b, c, d, K):
 def triple(i, j, k, chi):
     """chi S_i.(S_j x S_k), SU(2) invariant and time-reversal odd."""
     terms = []
-    for a, b, c, s in (("x", "y", "z", 1), ("y", "z", "x", 1), ("z", "x", "y", 1),
-                       ("x", "z", "y", -1), ("y", "x", "z", -1), ("z", "y", "x", -1)):
+    for a, b, c, s in (
+        ("x", "y", "z", 1),
+        ("y", "z", "x", 1),
+        ("z", "x", "y", 1),
+        ("x", "z", "y", -1),
+        ("y", "x", "z", -1),
+        ("z", "y", "x", -1),
+    ):
         terms += _expand(s * chi, ((a, i), (b, j), (c, k)))
     return terms
 
@@ -120,12 +126,10 @@ def fourier(N, coords, shape, q, op):
     return out
 
 
-
 def adjoint(terms):
     """The terms of O^dagger: (A B C)^dagger = C^dagger B^dagger A^dagger, S+ <-> S-."""
     dag = {"+": "-", "-": "+"}
-    return [(complex(c).conjugate(), tuple((dag.get(op, op), s) for op, s in reversed(ops)))
-            for c, ops in terms]
+    return [(complex(c).conjugate(), tuple((dag.get(op, op), s) for op, s in reversed(ops))) for c, ops in terms]
 
 
 def scale(terms):
@@ -136,6 +140,7 @@ def scale(terms):
 # ---------------------------------------------------------------------------
 # Site permutations acting on basis states (for symmetry-resolved references)
 # ---------------------------------------------------------------------------
+
 
 def compose(a, b):
     """(a o b)[i] = a[b[i]] -- b first, as in qed.symmetry.compose."""

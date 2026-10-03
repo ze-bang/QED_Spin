@@ -5,6 +5,7 @@
 H = J S.S + Dz z.(S_i x S_j), which conserves total Sz, is classified as not U(1): conserves_sz()
 is False, sz_content is Parity, and Symmetry(sz=n_up) raises.
 Test: 8-site ring; verify [H, Sz_tot] = 0 densely from Operator.apply, then query the library."""
+
 import signal
 
 import numpy as np
@@ -20,7 +21,7 @@ b.dm(bonds, [(0.0, 0.0, 0.3)] * N)
 H = b.to_operator()
 
 # dense H from apply, then check commutation with total Sz (set bit = down)
-dim = 2 ** N
+dim = 2**N
 Hd = np.zeros((dim, dim), complex)
 for c in range(dim):
     e = np.zeros(dim, complex)
@@ -36,7 +37,7 @@ try:
     content = str(qed._core.sectors.sz_content(H))
 except Exception as e:
     content = f"err {type(e).__name__}"
-cs = "U1" in content          # Operator.conserves_sz was removed (P2.1); sz_content is the engine's view
+cs = "U1" in content  # Operator.conserves_sz was removed (P2.1); sz_content is the engine's view
 pp = [t for t in H.iter_two_body_terms() if int(t[0]) == int(t[2]) and int(t[0]) in (0, 1)]
 print(f"U1={cs} sz_content={content} S+S+/S-S- records={len(pp)}")
 try:
@@ -50,8 +51,10 @@ except Exception as e:
 print(eig_msg)
 
 if comm < 1e-10 and (not cs or eig_fail):
-    print(f"REPRO: CONFIRMED [H,Sz]={comm:.1e} but sz_content={content}, "
-          f"{len(pp)} cancelling S+S+/S-S- records; {eig_msg[:90]}")
+    print(
+        f"REPRO: CONFIRMED [H,Sz]={comm:.1e} but sz_content={content}, "
+        f"{len(pp)} cancelling S+S+/S-S- records; {eig_msg[:90]}"
+    )
 elif comm >= 1e-10:
     print(f"REPRO: INCONCLUSIVE dense H does not commute with Sz ({comm:.2e})")
 else:

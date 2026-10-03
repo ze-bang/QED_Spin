@@ -1,5 +1,6 @@
 """The environment registry as seen from Python: the dump covers every family, the
 snapshot reports what is set, and a misspelt variable is loud at import."""
+
 from __future__ import annotations
 
 import os
@@ -13,8 +14,14 @@ import qed
 
 def test_dump_covers_every_family():
     text = qed.debug_env()
-    for name in ("ED_SYM_SECTOR_CSR_BUDGET_GIB", "ED_LANCZOS_KERNEL_PROFILE", "ED_GPU_SYM_CACHE_GIB",
-                 "ED_XSEC_CSR_BUDGET_GIB", "ED_NUMA_PIN_THREADS", "QED_CORE_DIR"):
+    for name in (
+        "ED_SYM_SECTOR_CSR_BUDGET_GIB",
+        "ED_LANCZOS_KERNEL_PROFILE",
+        "ED_GPU_SYM_CACHE_GIB",
+        "ED_XSEC_CSR_BUDGET_GIB",
+        "ED_NUMA_PIN_THREADS",
+        "QED_CORE_DIR",
+    ):
         assert name in text
     assert "ED_LANCZOS" not in qed.debug_env("ED_SYM_")
     assert len(qed._core.env_names()) > 10
@@ -52,9 +59,11 @@ def test_clean_environment_is_silent():
 def test_flag_set_to_zero_is_off(monkeypatch):
     """ED_SYM_PROFILE=0 switches every one of its read sites OFF."""
     monkeypatch.setenv("ED_SYM_PROFILE", "0")
-    code = ("import qed; from qed import _core; H=qed.Operator(4);\n"
-            "[H.add_two_body(_core.OP_SZ,i,_core.OP_SZ,(i+1)%4,1.0) for i in range(4)];\n"
-            "qed.eigs(H, 1, sym=qed.Symmetry(spatial=[[(i+1)%4 for i in range(4)]], sz=2))")
+    code = (
+        "import qed; from qed import _core; H=qed.Operator(4);\n"
+        "[H.add_two_body(_core.OP_SZ,i,_core.OP_SZ,(i+1)%4,1.0) for i in range(4)];\n"
+        "qed.eigs(H, 1, sym=qed.Symmetry(spatial=[[(i+1)%4 for i in range(4)]], sz=2))"
+    )
     r = subprocess.run([sys.executable, "-c", code], env=dict(os.environ), capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "reduced CSR engaged" not in r.stderr and "GPU rep gather" not in r.stderr
@@ -80,15 +89,23 @@ def test_a_malformed_value_is_refused(monkeypatch):
     # refuses to run until each set registered variable parses as its kind.
     b = qed.input.HamiltonianBuilder(4)
     H = b.heisenberg([(i, (i + 1) % 4) for i in range(4)]).to_operator()
-    for name, value in (("ED_SYM_SECTOR_CSR_BUDGET_GIB", "8GB"), ("ED_SYM_PROFILE", "maybe"),
-                        ("ED_CSR_DIM_MAX", "1e3"), ("ED_XSEC_CSR_BUDGET_GIB", "inf")):
+    for name, value in (
+        ("ED_SYM_SECTOR_CSR_BUDGET_GIB", "8GB"),
+        ("ED_SYM_PROFILE", "maybe"),
+        ("ED_CSR_DIM_MAX", "1e3"),
+        ("ED_XSEC_CSR_BUDGET_GIB", "inf"),
+    ):
         monkeypatch.setenv(name, value)
         assert f"{name}={value}" in qed._core.env_malformed()
         with pytest.raises(qed.errors.InvalidRequest, match=name):
             qed.eigs(H, 1)
         monkeypatch.delenv(name)
-    for name, value in (("ED_SYM_SECTOR_CSR_BUDGET_GIB", " 8 "), ("ED_SYM_PROFILE", "Off"),
-                        ("ED_CSR_DIM_MAX", "1000"), ("ED_SYM_LG_GPU", "0")):
+    for name, value in (
+        ("ED_SYM_SECTOR_CSR_BUDGET_GIB", " 8 "),
+        ("ED_SYM_PROFILE", "Off"),
+        ("ED_CSR_DIM_MAX", "1000"),
+        ("ED_SYM_LG_GPU", "0"),
+    ):
         monkeypatch.setenv(name, value)
     assert qed._core.env_malformed() == []
     qed.eigs(H, 1)

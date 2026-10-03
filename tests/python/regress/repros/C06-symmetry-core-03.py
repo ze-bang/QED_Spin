@@ -9,6 +9,7 @@ attempts') after 16 dense O(|A|^3) eigensolves. Test: fully frustrated two-leg l
 R rung swaps (R=10 -> |A|=1024, R=11 -> |A|=2048), passed through _core.sectors.Spec. Each case runs
 in a subprocess with a timeout; we record whether the call fails in decompose_irreps and how long
 it took."""
+
 import subprocess
 import sys
 import time
@@ -77,8 +78,12 @@ for R, cap in ((10, 110.0), (11, None)):
 
 fails = [R for R in out if out[R][0] == "FAIL"]
 if fails:
-    print("REPRO: CONFIRMED decompose_irreps failed after 16 seeds for |A|=" + ",".join(str(2 ** R) for R in fails)
-          + "; " + " | ".join(f"{2**R}:{v[1]}" for R, v in out.items()))
+    print(
+        "REPRO: CONFIRMED decompose_irreps failed after 16 seeds for |A|="
+        + ",".join(str(2**R) for R in fails)
+        + "; "
+        + " | ".join(f"{2**R}:{v[1]}" for R, v in out.items())
+    )
 elif all(v[0] == "OK" for v in out.values()):
     print("REPRO: NOT_REPRODUCED " + " | ".join(f"{2**R}:{v[1]}" for R, v in out.items()))
 else:

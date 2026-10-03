@@ -61,10 +61,8 @@ namespace ed::symmetry {
 [[nodiscard]] inline bool rep_rank_table_enabled(std::uint64_t table_entries) noexcept {
     if (table_entries == 0) return false;
     const double budget_gib = std::max(0.0, ed::env::real("ED_SYM_REP_RANKTABLE_BUDGET_GIB", 0.5));
-    const long double table_bytes =
-        static_cast<long double>(table_entries) * sizeof(std::int32_t);
-    const long double budget_bytes =
-        static_cast<long double>(budget_gib) * 1024.0L * 1024.0L * 1024.0L;
+    const long double table_bytes = static_cast<long double>(table_entries) * sizeof(std::int32_t);
+    const long double budget_bytes = static_cast<long double>(budget_gib) * 1024.0L * 1024.0L * 1024.0L;
     return table_bytes <= budget_bytes;
 }
 
@@ -76,26 +74,24 @@ namespace ed::symmetry {
 // ``local_of_shared`` remap (int32 x #reps, ~76 MB at N=32).
 // ---------------------------------------------------------------------------
 struct SharedRankLookup {
-    ed::core::NumaVector<std::int32_t>  shared_of_rank;  // rank -> shared idx, -1
+    ed::core::NumaVector<std::int32_t> shared_of_rank;  // rank -> shared idx, -1
     /// Unique per table (device caches key on it; an address can be reused after a free).
-    std::uint64_t                       uid = 0;
+    std::uint64_t uid = 0;
     ed::core::combinadic::BinomialTable binom;
-    int                                 n_sites = 0;
-    int                                 n_up    = -1;
+    int n_sites = 0;
+    int n_up = -1;
 };
 
 [[nodiscard]] inline std::shared_ptr<const SharedRankLookup>
-make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
-                        int n_sites, int n_up)
-{
+make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps, int n_sites, int n_up) {
     if (n_up < 0 || n_sites <= 0) return nullptr;
     // The table holds int32 indices: past INT32_MAX representatives the lookups binary-search.
     if (shared_reps.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) return nullptr;
     auto srl = std::make_shared<SharedRankLookup>();
     static std::atomic<std::uint64_t> next_uid{1};
-    srl->uid     = next_uid.fetch_add(1);
+    srl->uid = next_uid.fetch_add(1);
     srl->n_sites = n_sites;
-    srl->n_up    = n_up;
+    srl->n_up = n_up;
     srl->binom.resize(n_sites);
     const std::uint64_t dim_full_sz = srl->binom.at(n_sites, n_up);
     if (dim_full_sz == 0) return nullptr;
@@ -103,20 +99,18 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
     // are spread over the NUMA nodes rather than all on the calling thread's.
     srl->shared_of_rank.resize(static_cast<std::size_t>(dim_full_sz));
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
     for (long long r = 0; r < static_cast<long long>(dim_full_sz); ++r)
         srl->shared_of_rank[static_cast<std::size_t>(r)] = std::int32_t{-1};
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
     for (long long i = 0; i < static_cast<long long>(shared_reps.size()); ++i) {
-        const std::int64_t r = ed::core::combinadic::rank_state(
-            shared_reps[static_cast<std::size_t>(i)], n_sites, n_up,
-            srl->binom);
+        const std::int64_t r =
+            ed::core::combinadic::rank_state(shared_reps[static_cast<std::size_t>(i)], n_sites, n_up, srl->binom);
         if (r >= 0 && static_cast<std::uint64_t>(r) < dim_full_sz) {
-            srl->shared_of_rank[static_cast<std::size_t>(r)] =
-                static_cast<std::int32_t>(i);
+            srl->shared_of_rank[static_cast<std::size_t>(r)] = static_cast<std::int32_t>(i);
         }
     }
     return srl;
@@ -125,8 +119,8 @@ make_shared_rank_lookup(const std::vector<std::uint64_t>& shared_reps,
 /// The shared rank lookup of a fixed-Sz orbit table: built once, on first use, and kept with the
 /// table (OrbitTable::rank_slot), so the walks of one call and the calls that reuse the table from
 /// the registry share it. Null when the table cannot carry one (make_shared_rank_lookup).
-[[nodiscard]] inline std::shared_ptr<const SharedRankLookup>
-rank_lookup_of(const OrbitTable& tab, int n_sites, int n_up) {
+[[nodiscard]] inline std::shared_ptr<const SharedRankLookup> rank_lookup_of(const OrbitTable& tab, int n_sites,
+                                                                            int n_up) {
     auto& slot = *tab.rank_slot;
     std::lock_guard<std::mutex> lk(slot.mu);
     if (!slot.tried) {
@@ -138,13 +132,13 @@ rank_lookup_of(const OrbitTable& tab, int n_sites, int n_up) {
 }
 
 struct RepSectorData {
-    std::vector<std::uint64_t>        reps;        // representative per orbit index
-    std::vector<double>               inv_norms;   // 1/norm per orbit index
+    std::vector<std::uint64_t> reps;        // representative per orbit index
+    std::vector<double> inv_norms;   // 1/norm per orbit index
     std::vector<std::complex<double>> characters;  // chi_k(g), length group_size
-    std::vector<int>                  perms_flat;  // group_size * n_sites, row-major
+    std::vector<int> perms_flat;  // group_size * n_sites, row-major
     int group_size = 0;
-    int n_sites    = 0;
-    int n_up       = -1;  // -1 => not a fixed-Sz sector (full-space sentinel)
+    int n_sites = 0;
+    int n_up = -1;  // -1 => not a fixed-Sz sector (full-space sentinel)
 
     // Optional O(1) reverse lookup (host twin of the GPU dense rank table,
     // symmetry_spmv_optimizations.pdf Section 3.3). ``rep_index_of_rank`` maps
@@ -153,7 +147,7 @@ struct RepSectorData {
     // default => the policy falls back to a binary search over ``reps``. Built
     // once per sector (``build_rank_table``) and reused across every solver
     // iteration. Cost: C(n_sites, n_up) * 4 B (~2.4 GiB at N=32, n_up=16).
-    std::vector<std::int32_t>          rep_index_of_rank;
+    std::vector<std::int32_t> rep_index_of_rank;
     ed::core::combinadic::BinomialTable binom;
 
     // Per-element XOR masks for flip-extended groups (element action =
@@ -188,22 +182,18 @@ struct RepSectorData {
     // |G|=72 -- L2-resident on host and device).
     // Built by build_perm_lut(); empty when perms are absent.
     std::vector<std::uint64_t> perm_lut_data;
-    int                        perm_lut_bpw = 0;
+    int perm_lut_bpw = 0;
 
-    [[nodiscard]] std::uint64_t dim() const noexcept {
-        return static_cast<std::uint64_t>(reps.size());
-    }
+    [[nodiscard]] std::uint64_t dim() const noexcept { return static_cast<std::uint64_t>(reps.size()); }
 
-    [[nodiscard]] bool has_rank_table() const noexcept {
-        return !rep_index_of_rank.empty();
-    }
+    [[nodiscard]] bool has_rank_table() const noexcept { return !rep_index_of_rank.empty(); }
 
     // Two-level reverse lookup: the SHARED per-(N,n_up) rank table
     // (co-owned across all irrep sectors) + this sector's small
     // shared-idx -> local-idx remap. Preferred over the dense per-sector
     // table when present (``make_policy`` honors it).
     std::shared_ptr<const SharedRankLookup> shared_rank;
-    std::vector<std::int32_t>               local_of_shared;  // -1 = cancelled here
+    std::vector<std::int32_t> local_of_shared;  // -1 = cancelled here
 
     // ---- an irrep of dimension d > 1 (P6.3) -------------------------------------------------
     // Representative r holds rank(r) <= d states, the partner-0 states
@@ -214,10 +204,10 @@ struct RepSectorData {
     // d = 1 sector is the case C = inv_norm, kept in inv_norms; these fields stay empty there.
     int irrep_dim = 1;
     std::vector<std::complex<double>> irrep_D;        // per element: D(g), d x d row-major (|G| d^2)
-    std::vector<std::uint8_t>         class_rank;     // per stabiliser class
+    std::vector<std::uint8_t> class_rank;     // per stabiliser class
     std::vector<std::complex<double>> class_C;        // per class: C, d x d row-major, columns >= rank zero
-    std::vector<std::uint16_t>        rep_class;      // per rep: its stabiliser class
-    std::vector<std::uint64_t>        state_offset;   // per rep, and one past: the index of its first state
+    std::vector<std::uint16_t> rep_class;      // per rep: its stabiliser class
+    std::vector<std::uint64_t> state_offset;   // per rep, and one past: the index of its first state
 
     /// The number of basis states: reps for d = 1, the sum of the ranks for d > 1.
     [[nodiscard]] std::uint64_t states() const noexcept {
@@ -225,9 +215,7 @@ struct RepSectorData {
                               : (state_offset.empty() ? 0 : state_offset.back());
     }
 
-    [[nodiscard]] bool has_two_level() const noexcept {
-        return shared_rank != nullptr && !local_of_shared.empty();
-    }
+    [[nodiscard]] bool has_two_level() const noexcept { return shared_rank != nullptr && !local_of_shared.empty(); }
 
     // Number of int32 entries a full rank table would need for this sector
     // (== C(n_sites, n_up)). 0 when the sector cannot carry a rank table.
@@ -258,11 +246,9 @@ struct RepSectorData {
             // rank_table_entries + rep_rank_table_enabled).
             if (n_sites > 31) return;
             const std::uint64_t dim_all = (1ULL << n_sites);
-            rep_index_of_rank.assign(static_cast<std::size_t>(dim_all),
-                                     std::int32_t{-1});
+            rep_index_of_rank.assign(static_cast<std::size_t>(dim_all), std::int32_t{-1});
             for (std::size_t i = 0; i < reps.size(); ++i) {
-                rep_index_of_rank[static_cast<std::size_t>(reps[i])] =
-                    static_cast<std::int32_t>(i);
+                rep_index_of_rank[static_cast<std::size_t>(reps[i])] = static_cast<std::int32_t>(i);
             }
             binom.resize(n_sites);   // policy precondition (unused here)
             return;
@@ -270,14 +256,11 @@ struct RepSectorData {
         binom.resize(n_sites);
         const std::uint64_t dim_full_sz = binom.at(n_sites, n_up);
         if (dim_full_sz == 0) return;
-        rep_index_of_rank.assign(static_cast<std::size_t>(dim_full_sz),
-                                 std::int32_t{-1});
+        rep_index_of_rank.assign(static_cast<std::size_t>(dim_full_sz), std::int32_t{-1});
         for (std::size_t i = 0; i < reps.size(); ++i) {
-            const std::int64_t r = ed::core::combinadic::rank_state(
-                reps[i], n_sites, n_up, binom);
+            const std::int64_t r = ed::core::combinadic::rank_state(reps[i], n_sites, n_up, binom);
             if (r >= 0 && static_cast<std::uint64_t>(r) < dim_full_sz) {
-                rep_index_of_rank[static_cast<std::size_t>(r)] =
-                    static_cast<std::int32_t>(i);
+                rep_index_of_rank[static_cast<std::size_t>(r)] = static_cast<std::int32_t>(i);
             }
         }
     }
@@ -288,8 +271,8 @@ struct RepSectorData {
     // instead of all the reps (25 dependent cache misses at tri36 Gamma's 2.1e7). At most 2^24
     // buckets (64 MB) over the keys the reps occupy; for a sector without a rank table.
     std::vector<std::uint32_t> bucket_off;   // n_buckets + 1 offsets
-    std::uint64_t              bucket_base  = 0;
-    int                        bucket_shift = 0;
+    std::uint64_t bucket_base = 0;
+    int bucket_shift = 0;
 
     [[nodiscard]] std::uint64_t key_of(std::uint64_t s) const noexcept {
         return n_up < 0 ? s : static_cast<std::uint64_t>(ed::core::combinadic::rank_state(s, n_sites, n_up, binom));
@@ -305,18 +288,19 @@ struct RepSectorData {
         while ((std::uint64_t{1} << bits) < reps.size() && bits < 24) ++bits;
         int key_bits = 0;
         while (key_bits < 63 && (std::uint64_t{1} << key_bits) < span) ++key_bits;
-        bucket_base  = lo;
+        bucket_base = lo;
         bucket_shift = std::max(0, key_bits - bits);
         const std::uint64_t nb = ((span - 1) >> bucket_shift) + 1;
         bucket_off.resize(static_cast<std::size_t>(nb + 1));
         const auto bucket = [this](std::uint64_t s) { return (key_of(s) - bucket_base) >> bucket_shift; };
         // Every bucket's offset is written once: by the first rep at or past it.
-        #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
         for (long long ii = 0; ii < static_cast<long long>(reps.size()); ++ii) {
             const auto i = static_cast<std::size_t>(ii);
             const std::uint64_t b = bucket(reps[i]);
             const std::uint64_t from = i == 0 ? 0 : bucket(reps[i - 1]) + 1;
-            for (std::uint64_t c = from; c <= b; ++c) bucket_off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(i);
+            for (std::uint64_t c = from; c <= b; ++c)
+                bucket_off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(i);
         }
         for (std::uint64_t c = bucket(reps.back()) + 1; c <= nb; ++c)
             bucket_off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(reps.size());
@@ -327,10 +311,10 @@ struct RepSectorData {
     void build_perm_lut() {
         if (!perm_lut_data.empty()) return;
         if (n_sites <= 0 || n_sites > 64 || perms_flat.empty()) return;
-        const int G   = group_size;
-        const int N   = n_sites;
+        const int G = group_size;
+        const int N = n_sites;
         const int BPW = (N + 7) / 8;   // 5 for N=36
-        perm_lut_bpw  = BPW;
+        perm_lut_bpw = BPW;
         perm_lut_data.assign(static_cast<std::size_t>(G) * BPW * 256, 0ULL);
         for (int g = 0; g < G; ++g) {
             const int* p = perms_flat.data() + g * N;
@@ -343,12 +327,10 @@ struct RepSectorData {
                 for (int byte_val = 0; byte_val < 256; ++byte_val) {
                     std::uint64_t out = 0;
                     for (int b = 0; b < 8 && bit_base + b < N; ++b) {
-                        if ((byte_val >> b) & 1)
-                            out |= (1ULL << p_inv[bit_base + b]);
+                        if ((byte_val >> b) & 1) out |= (1ULL << p_inv[bit_base + b]);
                     }
                     const std::size_t idx =
-                        (static_cast<std::size_t>(g) * BPW + byte_idx) * 256
-                        + static_cast<std::size_t>(byte_val);
+                        (static_cast<std::size_t>(g) * BPW + byte_idx) * 256 + static_cast<std::size_t>(byte_val);
                     perm_lut_data[idx] = out;
                 }
             }
@@ -362,50 +344,47 @@ struct RepSectorData {
     // never drift between consumers. The returned view holds raw
     // pointers into this object's vectors -- keep it alive for the policy's
     // lifetime.
-    [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy
-    make_policy() const {
+    [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy make_policy() const {
         ed::matvec::basis::RepSymmetryBasisPolicy p;
-        p.reps       = reps.data();
-        p.inv_norms  = inv_norms.data();
-        p.perms      = perms_flat.data();
+        p.reps = reps.data();
+        p.inv_norms = inv_norms.data();
+        p.perms = perms_flat.data();
         p.characters = characters.data();
-        p.dim_       = reps.size();
+        p.dim_ = reps.size();
         p.group_size = group_size;
-        p.n_sites    = n_sites;
-        p.n_up       = n_up;
+        p.n_sites = n_sites;
+        p.n_up = n_up;
         // Two-level lookup takes precedence: shared rank table (one per
         // (N, n_up)) + per-sector local remap. Then the dense per-sector
         // table; index_of_rep falls back to binary search when neither is
         // set.
         if (has_two_level()) {
-            p.shared_rank_of  = shared_rank->shared_of_rank.data();
+            p.shared_rank_of = shared_rank->shared_of_rank.data();
             p.local_of_shared = local_of_shared.data();
-            p.binom           = &shared_rank->binom;
+            p.binom = &shared_rank->binom;
         } else if (has_rank_table()) {
             p.rep_index_of_rank = rep_index_of_rank.data();
-            p.binom             = &binom;
+            p.binom = &binom;
         } else if (!bucket_off.empty()) {
-            p.bucket_off   = bucket_off.data();
-            p.n_buckets    = bucket_off.size() - 1;
-            p.bucket_base  = bucket_base;
+            p.bucket_off = bucket_off.data();
+            p.n_buckets = bucket_off.size() - 1;
+            p.bucket_base = bucket_base;
             p.bucket_shift = bucket_shift;
-            p.binom        = &binom;
+            p.binom = &binom;
         }
         // Fast apply_perm: byte-decomposition LUT (ceil(N/8) lookups vs N iters).
         if (!perm_lut_data.empty()) {
-            p.perm_lut     = perm_lut_data.data();
+            p.perm_lut = perm_lut_data.data();
             p.perm_lut_bpw = perm_lut_bpw;
         }
         // Flip-extended elements (perm THEN xor).
-        if (!flip_masks.empty()) {
-            p.flips = flip_masks.data();
-        }
+        if (!flip_masks.empty()) { p.flips = flip_masks.data(); }
         if (irrep_dim > 1) {
-            p.irrep_dim    = irrep_dim;
-            p.irrep_D      = irrep_D.data();
-            p.class_C      = class_C.data();
-            p.class_rank   = class_rank.data();
-            p.rep_class    = rep_class.data();
+            p.irrep_dim = irrep_dim;
+            p.irrep_D = irrep_D.data();
+            p.class_C = class_C.data();
+            p.class_rank = class_rank.data();
+            p.rep_class = rep_class.data();
             p.state_offset = state_offset.data();
         }
         if (slc) p.slc = slc->view();
@@ -414,9 +393,7 @@ struct RepSectorData {
 
     /// The sublattice code the representatives were found with (slc), or null: the plain order.
     /// Every canonicalisation of the sector -- host policy, device mirror -- takes it here.
-    [[nodiscard]] const std::shared_ptr<const ed::symmetry::SublatticeCode>& sublattice() const noexcept {
-        return slc;
-    }
+    [[nodiscard]] const std::shared_ptr<const ed::symmetry::SublatticeCode>& sublattice() const noexcept { return slc; }
 
     // A RepSectorData is usable by the rep matvec only when it carries a
     // non-empty group action with matching characters / permutations, and
@@ -424,11 +401,9 @@ struct RepSectorData {
     [[nodiscard]] bool usable() const noexcept {
         // n_up == -1 is the full-space sentinel (the rep policy skips the
         // popcount filter) and must be accepted.
-        return n_up >= -1 && group_size > 0 && n_sites > 0
-            && !reps.empty()
-            && characters.size() == static_cast<std::size_t>(group_size)
-            && perms_flat.size() ==
-                   static_cast<std::size_t>(group_size) * n_sites;
+        return n_up >= -1 && group_size > 0 && n_sites > 0 && !reps.empty()
+               && characters.size() == static_cast<std::size_t>(group_size)
+               && perms_flat.size() == static_cast<std::size_t>(group_size) * n_sites;
     }
 };
 

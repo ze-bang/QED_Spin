@@ -47,12 +47,12 @@ using ed::Task;
 static_assert(std::is_same_v<ed::matvec::CpuBackend::scalar_type, std::complex<double>>);
 static_assert(std::is_base_of_v<ed::matvec::Backend, ed::matvec::CpuBackend>);
 static_assert(ed::matvec::is_cpu_backend_v<ed::matvec::CpuBackend>);
-static_assert(std::is_same_v<decltype(ed::krylov::lanczos_kernel(
-                                  std::declval<const ed::matvec::CpuBackend&>(),
-                                  std::declval<ed::LinearOperator::MatvecFn&>(), std::size_t{},
-                                  std::declval<const std::complex<double>*>(),
-                                  std::declval<const ed::krylov::LanczosKernelOptions&>())),
-                             ed::krylov::LanczosKernelResult>);
+static_assert(
+    std::is_same_v<decltype(ed::krylov::lanczos_kernel(std::declval<const ed::matvec::CpuBackend&>(),
+                                                       std::declval<ed::LinearOperator::MatvecFn&>(), std::size_t{},
+                                                       std::declval<const std::complex<double>*>(),
+                                                       std::declval<const ed::krylov::LanczosKernelOptions&>())),
+                   ed::krylov::LanczosKernelResult>);
 #ifdef WITH_CUDA
 static_assert(std::is_base_of_v<ed::matvec::Backend, ed::matvec::CudaBackend>);
 static_assert(!ed::matvec::is_cpu_backend_v<ed::matvec::CudaBackend>);
@@ -66,35 +66,40 @@ struct FakeMachine {
     static inline bool device = true;
     static inline std::optional<std::size_t> free = std::size_t{1} << 40;
     static inline int available_calls = 0, free_calls = 0, fresh_calls = 0;
-    static bool available() noexcept { ++available_calls; return device; }
+    static bool available() noexcept {
+        ++available_calls;
+        return device;
+    }
     static std::optional<std::size_t> free_bytes(bool fresh) noexcept {
         ++free_calls;
         if (fresh) ++fresh_calls;
         return free;
     }
     static void reset(bool dev = true, std::optional<std::size_t> f = std::size_t{1} << 40) {
-        device = dev; free = f;
+        device = dev;
+        free = f;
         available_calls = free_calls = fresh_calls = 0;
     }
     static ed::DeviceProbe probe() { return {&FakeMachine::available, &FakeMachine::free_bytes}; }
 };
 
-constexpr Task kTasks[] = {Task::Eigs, Task::Sampled, Task::Oftlm, Task::DenseBatch,
-                           Task::DynamicsCf, Task::DynamicsFtlm};
+constexpr Task kTasks[] = {Task::Eigs,       Task::Sampled,    Task::Oftlm,
+                           Task::DenseBatch, Task::DynamicsCf, Task::DynamicsFtlm};
 
 ed::BlockRequest req(Task t, std::uint64_t dim, bool kernel = true, std::uint64_t want = 1) {
     ed::BlockRequest r;
-    r.task = t; r.dim = dim; r.want = want; r.device_kernel = kernel; r.verb = "eigs";
+    r.task = t;
+    r.dim = dim;
+    r.want = want;
+    r.device_kernel = kernel;
+    r.verb = "eigs";
     return r;
 }
 
-template <class E>
-std::string message_of(Device d, const ed::BlockRequest& r) {
+template <class E> std::string message_of(Device d, const ed::BlockRequest& r) {
     try {
         (void)ed::place(d, r, FakeMachine::probe());
-    } catch (const E& e) {
-        return e.what();
-    }
+    } catch (const E& e) { return e.what(); }
     FAIL("place() did not throw the expected class");
     return {};
 }
@@ -159,7 +164,7 @@ TEST_CASE("place: Gpu refuses in order and says why", "[place]") {
     FakeMachine::reset();
     auto w = req(Task::Eigs, 924, /*kernel=*/false);
     w.what = [] { return std::string("the block of star 3, irrep 1, n_up 6 (dim 924)"); };
-    w.why  = "is a sector of an irrep of dimension > 1, which has no device kernel";
+    w.why = "is a sector of an irrep of dimension > 1, which has no device kernel";
     REQUIRE(message_of<ed::DeviceUnsupported>(Device::Gpu, w)
             == "eigs: device='gpu', but the block of star 3, irrep 1, n_up 6 (dim 924) is a sector of an irrep "
                "of dimension > 1, which has no device kernel; use device='auto' or 'cpu'");
@@ -210,8 +215,7 @@ TEST_CASE("place: Auto floors", "[place]") {
 TEST_CASE("place: Auto with too little device memory stays on the host", "[place]") {
     // The two-pass GS vector: 5 device vectors, 80 B per state.
     FakeMachine::reset(true, (std::size_t{80} << 20) - 1);
-    REQUIRE(ed::place(Device::Auto, req(Task::Eigs, std::uint64_t{1} << 20), FakeMachine::probe())
-            == Lane::HostKrylov);
+    REQUIRE(ed::place(Device::Auto, req(Task::Eigs, std::uint64_t{1} << 20), FakeMachine::probe()) == Lane::HostKrylov);
     FakeMachine::reset(true, std::size_t{80} << 20);
     REQUIRE(ed::place(Device::Auto, req(Task::Eigs, std::uint64_t{1} << 20), FakeMachine::probe())
             == Lane::DeviceKrylov);
@@ -243,7 +247,10 @@ TEST_CASE("place: the request's device working set is what must fit", "[place]")
     REQUIRE(ed::place(Device::Gpu, r, FakeMachine::probe()) == Lane::DeviceKrylov);
     REQUIRE(ed::place(Device::Auto, r, FakeMachine::probe()) == Lane::DeviceKrylov);
     REQUIRE(FakeMachine::free_calls == 0);
-    if (old) setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1); else unsetenv("ED_MEM_GUARD_OFF");
+    if (old)
+        setenv("ED_MEM_GUARD_OFF", saved.c_str(), 1);
+    else
+        unsetenv("ED_MEM_GUARD_OFF");
 }
 
 TEST_CASE("place: DenseBatch", "[place]") {
@@ -258,8 +265,7 @@ TEST_CASE("place: DenseBatch", "[place]") {
     REQUIRE(ed::place(Device::Gpu, req(Task::DenseBatch, 10, false), FakeMachine::probe()) == Lane::DeviceDense);
     FakeMachine::reset(false);
     REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, 10), FakeMachine::probe()) == Lane::HostDense);
-    REQUIRE_THROWS_AS(ed::place(Device::Gpu, req(Task::DenseBatch, 10), FakeMachine::probe()),
-                      ed::DeviceUnavailable);
+    REQUIRE_THROWS_AS(ed::place(Device::Gpu, req(Task::DenseBatch, 10), FakeMachine::probe()), ed::DeviceUnavailable);
 }
 
 TEST_CASE("place: the transitional small-eigs rule", "[place]") {
@@ -290,13 +296,11 @@ TEST_CASE("place: the system probe", "[place]") {
 }
 
 TEST_CASE("with_backend: a fresh backend of the lane", "[place]") {
-    const bool cpu = ed::with_backend(Lane::HostKrylov, [](auto& be) {
-        return std::is_same_v<std::decay_t<decltype(be)>, ed::matvec::CpuBackend>;
-    });
+    const bool cpu = ed::with_backend(
+        Lane::HostKrylov, [](auto& be) { return std::is_same_v<std::decay_t<decltype(be)>, ed::matvec::CpuBackend>; });
     REQUIRE(cpu);
-    REQUIRE(ed::with_backend(Lane::HostDense, [](auto& be) {
-        return std::is_same_v<std::decay_t<decltype(be)>, ed::matvec::CpuBackend>;
-    }));
+    REQUIRE(ed::with_backend(
+        Lane::HostDense, [](auto& be) { return std::is_same_v<std::decay_t<decltype(be)>, ed::matvec::CpuBackend>; }));
 #ifndef WITH_CUDA
     REQUIRE_THROWS_AS(ed::with_backend(Lane::DeviceKrylov, [](auto&) { return 0; }), std::logic_error);
 #endif
@@ -332,7 +336,8 @@ std::vector<double> exact_energies(const std::vector<double>& eigs) {
         double z = 0.0, num = 0.0;
         for (double e : eigs) {
             const double w = std::exp(-(e - e0) / t);
-            z += w; num += e * w;
+            z += w;
+            num += e * w;
         }
         E.push_back(num / z);
     }
@@ -341,12 +346,12 @@ std::vector<double> exact_energies(const std::vector<double>& eigs) {
 
 ed::sectors::ThermalSpec few_samples(ed::sectors::ThermalSpec::Method m, std::size_t exact_states = 0) {
     ed::sectors::ThermalSpec t;
-    t.method       = m;
+    t.method = m;
     t.temperatures = kT;
-    t.samples      = 4;     // far too few to be accurate...
-    t.krylov       = 8;     // ...with a far too short Krylov space
+    t.samples = 4;     // far too few to be accurate...
+    t.krylov = 8;     // ...with a far too short Krylov space
     t.exact_states = exact_states;
-    t.seed         = 12345;
+    t.seed = 12345;
     return t;
 }
 
@@ -357,8 +362,8 @@ TEST_CASE("thermal: a block up to dense_max_dim is exact for every sampling meth
     auto H = ed_tests::build_heisenberg_chain(kRing, 1.0, /*periodic=*/true);
     const auto E = exact_energies(ring_spectrum());
     // 4 samples of 8 Lanczos steps cannot reach 1e-10 at any temperature: the dense path ran.
-    for (const auto& [m, exact_states] : {std::pair{M::FTLM, std::size_t{0}}, std::pair{M::FTLM, std::size_t{2}},
-                                          std::pair{M::mTPQ, std::size_t{0}}}) {
+    for (const auto& [m, exact_states] :
+         {std::pair{M::FTLM, std::size_t{0}}, std::pair{M::FTLM, std::size_t{2}}, std::pair{M::mTPQ, std::size_t{0}}}) {
         const auto r = ed::sectors::thermal(*H, one_block(), few_samples(m, exact_states));
         INFO("method " << static_cast<int>(m) << ", exact_states " << exact_states);
         REQUIRE(r.placement.host_dense == 1);
@@ -448,9 +453,16 @@ struct ToyBlock {
 
 // Open chain, ring, Ising-heavy and field-XXZ models; full spaces and Sz sectors; dims 3..256.
 std::vector<ToyBlock> toy_blocks() {
-    struct Model { const char* name; int N; bool periodic; double Jxy, Jz, hz; };
-    const Model models[] = {{"open", 6, false, 1.0, 1.0, 0.0},    {"ring", 8, true, 1.0, 1.0, 0.0},
-                            {"ising", 7, true, 0.2, 1.0, 0.0},    {"field", 8, true, 1.0, 0.5, 0.31}};
+    struct Model {
+        const char* name;
+        int N;
+        bool periodic;
+        double Jxy, Jz, hz;
+    };
+    const Model models[] = {{"open", 6, false, 1.0, 1.0, 0.0},
+                            {"ring", 8, true, 1.0, 1.0, 0.0},
+                            {"ising", 7, true, 0.2, 1.0, 0.0},
+                            {"field", 8, true, 1.0, 0.5, 0.31}};
     std::vector<ToyBlock> out;
     for (const Model& m : models) {
         auto H = xxz_chain(m.N, m.periodic, m.Jxy, m.Jz, m.hz);
@@ -458,9 +470,8 @@ std::vector<ToyBlock> toy_blocks() {
         out.push_back({std::string(m.name) + "/full", H, ed_tests::reference_from_operator(*H, full).H});
         for (int n_up : {1, m.N / 2}) {
             auto S = std::make_shared<ed_tests::SzSectorOperator>(H, n_up);
-            Eigen::MatrixXcd D = ed_tests::apply_to_dense([&S](const Complex* in, Complex* o, int n) {
-                S->apply(in, o, static_cast<std::size_t>(n));
-            }, S->dim());
+            Eigen::MatrixXcd D = ed_tests::apply_to_dense(
+                [&S](const Complex* in, Complex* o, int n) { S->apply(in, o, static_cast<std::size_t>(n)); }, S->dim());
             out.push_back({std::string(m.name) + "/n_up=" + std::to_string(n_up), S, std::move(D)});
         }
     }
@@ -521,9 +532,8 @@ TEST_CASE("lanes: Krylov-Schur pairs are orthonormal eigenpairs", "[lanes]") {
     REQUIRE(sol.converged);
     REQUIRE(sol.values.size() == 5);
     REQUIRE(sol.vectors.size() == 5);
-    const auto sector = eigen_values(ed_tests::apply_to_dense([&H](const Complex* in, Complex* o, int n) {
-        H->apply(in, o, static_cast<std::size_t>(n));
-    }, H->dim()));
+    const auto sector = eigen_values(ed_tests::apply_to_dense(
+        [&H](const Complex* in, Complex* o, int n) { H->apply(in, o, static_cast<std::size_t>(n)); }, H->dim()));
     for (std::size_t i = 0; i < 5; ++i) {
         REQUIRE(std::abs(sol.values[i] - sector[i]) < 1e-9);
         REQUIRE(residual(*H, sol.values[i], sol.vectors[i]) < 1e-7);
@@ -637,9 +647,10 @@ TEST_CASE("lanes: CudaBackend runs the same lanes as CpuBackend", "[lanes][cuda]
         const auto kb = lg::solve_gs_vector(gpu, D, /*kept_basis_max_dim=*/D.dim());
         REQUIRE(kb.certified == c1.converged);
     }
-    ed_tests::DenseOperator D(ed_tests::apply_to_dense([H = sz_sector(10, true, 5)](const Complex* in, Complex* o, int n) {
-        H->apply(in, o, static_cast<std::size_t>(n));
-    }, 252));
+    ed_tests::DenseOperator D(
+        ed_tests::apply_to_dense([H = sz_sector(10, true, 5)](const Complex* in, Complex* o,
+                                                              int n) { H->apply(in, o, static_cast<std::size_t>(n)); },
+                                 252));
     // Six levels of 252 states take several thick-restart cycles (m = 48): the restart rewrites the
     // basis columns in place, which the device's staged copies must follow.
     const auto c6 = lg::solve_block_lowest(cpu, D, 6), g6 = lg::solve_block_lowest(gpu, D, 6);
@@ -694,7 +705,10 @@ TEST_CASE("dense: solve_block_dense and solve_block_full", "[dense]") {
 
 TEST_CASE("dense: a block past the LAPACK index range is refused before it is built", "[dense]") {
     // 32-bit LAPACK addresses n x n only up to n = 46340 (C10-krylov-01: silently wrong spectra).
-    if (ed::core::lapack_max_dense_n() > 46340) { SUCCEED("64-bit LAPACK"); return; }
+    if (ed::core::lapack_max_dense_n() > 46340) {
+        SUCCEED("64-bit LAPACK");
+        return;
+    }
     struct Huge final : ed::LinearOperator {
         std::size_t dim() const override { return 46341; }
         void apply(const Complex*, Complex*, std::size_t) const override {
@@ -784,10 +798,11 @@ constexpr int kL = 4;   // the 4 x 4 square torus
 
 int site(int x, int y) { return ((x % kL + kL) % kL) + kL * ((y % kL + kL) % kL); }
 
-ed::sectors::Perm square_map(int a, int b, int c, int d, int tx, int ty) {   // (x, y) -> (a x + b y + tx, c x + d y + ty)
+ed::sectors::Perm square_map(int a, int b, int c, int d, int tx, int ty) { // (x, y) -> (a x + b y + tx, c x + d y + ty)
     ed::sectors::Perm p(kL * kL);
     for (int y = 0; y < kL; ++y)
-        for (int x = 0; x < kL; ++x) p[static_cast<std::size_t>(site(x, y))] = site(a * x + b * y + tx, c * x + d * y + ty);
+        for (int x = 0; x < kL; ++x)
+            p[static_cast<std::size_t>(site(x, y))] = site(a * x + b * y + tx, c * x + d * y + ty);
     return p;
 }
 
@@ -809,7 +824,7 @@ std::shared_ptr<Operator> square_j1j2(double J2) {
     return H;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("members: a level's multiplet in momentum sectors", "[members]") {
     // One thread: the full-basis multiplet() check runs thousands of short parallel loops, which under
@@ -821,10 +836,15 @@ TEST_CASE("members: a level's multiplet in momentum sectors", "[members]") {
     for (int ty = 0; ty < kL; ++ty)
         for (int tx = 0; tx < kL; ++tx) s.abelian.push_back(square_map(1, 0, 0, 1, tx, ty));
     using ed::sectors::Perm;
-    const Perm c4 = square_map(0, -1, 1, 0, 0, 0), c2 = square_map(-1, 0, 0, -1, 0, 0), c4i = square_map(0, 1, -1, 0, 0, 0);
+    const Perm c4 = square_map(0, -1, 1, 0, 0, 0), c2 = square_map(-1, 0, 0, -1, 0, 0),
+               c4i = square_map(0, 1, -1, 0, 0, 0);
     const Perm sx = square_map(1, 0, 0, -1, 0, 0), sy = square_map(-1, 0, 0, 1, 0, 0);
     const Perm sd = square_map(0, 1, 1, 0, 0, 0), sa = square_map(0, -1, -1, 0, 0, 0);
-    struct Case { const char* name; std::vector<Perm> residues; int n_up; };
+    struct Case {
+        const char* name;
+        std::vector<Perm> residues;
+        int n_up;
+    };
     // C4v: real irreps, two-dimensional E at Gamma and M. C4 alone: complex irreps, folded by K.
     // n_up = 8: the flip-projected half filling; n_up = -1: every Sz, n_up and N - n_up mirrored.
     const Case cases[] = {{"C4v, n_up 8", {c4, c2, c4i, sx, sy, sd, sa}, N / 2},
@@ -845,7 +865,8 @@ TEST_CASE("members: a level's multiplet in momentum sectors", "[members]") {
             const auto& v = r.vectors[static_cast<std::size_t>(L.vector)];
             const std::uint64_t count = L.tag.multiplicity * static_cast<std::uint64_t>(L.mirror);
             INFO("level E " << L.energy << " k0 " << L.tag.k0 << " irrep " << L.tag.irrep << " d " << L.tag.irrep_dim
-                 << " star " << L.tag.star_size << " mirror " << L.mirror << " tr_folded " << L.tag.tr_folded);
+                            << " star " << L.tag.star_size << " mirror " << L.mirror << " tr_folded "
+                            << L.tag.tr_folded);
             const auto members = ed::sectors::detail::members_of(L, v, count, sc, ms);
             REQUIRE(members.size() == count);
             saw_d2 = saw_d2 || L.tag.irrep_dim == 2;

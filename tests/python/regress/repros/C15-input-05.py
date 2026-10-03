@@ -5,6 +5,7 @@
 block becomes an extra (phantom) site; (b) an edge block headed 'BONDS' is not recognised, so every edge
 line becomes a site and the lattice has no bonds; (c) the documented 'id x y z' positions form is shifted
 by one column (z lost)."""
+
 import os
 import tempfile
 
@@ -17,9 +18,10 @@ edges = ["0 1", "1 2", "2 3", "3 0"]
 files = {
     "a_count_line": ["positions", "4"] + sq + ["edges"] + edges,
     "b_BONDS_header": ["positions"] + sq + ["BONDS"] + edges,
-    "c_id_x_y_z": ["positions"] + [f"{k} {s}" for k, s in
-                                   enumerate(["0.0 0.1 0.2", "1.0 0.1 0.2", "1.0 1.1 0.2", "0.0 1.1 0.2"])]
-                  + ["edges"] + edges,
+    "c_id_x_y_z": ["positions"]
+    + [f"{k} {s}" for k, s in enumerate(["0.0 0.1 0.2", "1.0 0.1 0.2", "1.0 1.1 0.2", "0.0 1.1 0.2"])]
+    + ["edges"]
+    + edges,
 }
 res = {}
 for name, lines in files.items():

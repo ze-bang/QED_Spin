@@ -46,18 +46,18 @@ namespace ed::solvers {
 using CharConstraint = std::vector<std::pair<int, std::complex<double>>>;
 
 struct LittleGroupOptions {
-    int  n_up          = -1;   ///< fixed-Sz subspace (-1 = none)
-    int  sz_parity     = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
+    int n_up = -1;   ///< fixed-Sz subspace (-1 = none)
+    int sz_parity = -1;   ///< Sz-parity half (-1 = none; excludes n_up)
     /// Spin-flip Z2 through the ABELIAN factor (A' = A x Z2 -- the
     /// flip commutes with every site permutation, so it never belongs to the
     /// little co-group). SymToggle convention: -1 auto (engage when
     /// [H, prod sigma^x] = 0 AND the subspace is flip-invariant: n_up = N/2,
     /// parity with N even, or the full space),
     /// 0 off, 1 require (throws when the symmetry or admissibility is absent).
-    int  spin_flip     = -1;
+    int spin_flip = -1;
     /// Time-reversal folding (star-level k <-> conj(k) merge +
     /// conjugate-irrep pairing). Same SymToggle convention.
-    int  time_reversal = -1;
+    int time_reversal = -1;
     /// Solve ONLY these star representatives (extended irrep indices -- the
     /// same ``k0`` that ``LittleGroupStarInfo::k0`` reports). Empty = every
     /// star, the default.
@@ -94,11 +94,11 @@ struct LittleGroupOptions {
 
 /// One star's diagnostics.
 struct LittleGroupStarInfo {
-    int  k0            = 0;    ///< star representative (extended irrep index:
+    int k0 = 0;    ///< star representative (extended irrep index:
                                ///< k + s*n_irr_raw when flip is engaged)
-    int  star_size     = 1;    ///< |star| (spectrum multiplicity factor)
-    int  little_order  = 1;    ///< |P_k0| actually used (1 = plain fallback)
-    int  flip_parity   = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
+    int star_size = 1;    ///< |star| (spectrum multiplicity factor)
+    int little_order = 1;    ///< |P_k0| actually used (1 = plain fallback)
+    int flip_parity = -1;   ///< 0 = (k,+), 1 = (k,-); -1 = flip not engaged
     /// Every extended irrep index folded into this star (always includes
     /// ``k0``). Answers "which star holds MY momentum?": ``only_k0`` filters
     /// on REPRESENTATIVES, so a caller whose momentum is a non-representative
@@ -142,18 +142,13 @@ struct LittleGroupStarInfo {
 /// each sector one at a time, freeing it before the next is built. Bounds the
 /// resident set to a single destination sector (each is ~15-20 GB at N=36
 /// half-filling; holding all 12 OOMs a 128 GB node).
-void little_group_k_sectors_stream(
-    const ::Operator&                     op,
-    const std::vector<std::vector<int>>&  abelian_group,
-    int                                   n_sites,
-    int                                   n_up,
-    int                                   sz_parity,
-    const std::function<void(ed::symmetry::RepSectorData&)>& fn);
+void little_group_k_sectors_stream(const ::Operator& op, const std::vector<std::vector<int>>& abelian_group,
+                                   int n_sites, int n_up, int sz_parity,
+                                   const std::function<void(ed::symmetry::RepSectorData&)>& fn);
 
 /// One shared, read-only copy of a sector basis with its permutation LUT built, so
 /// several operators on the SAME (k, n_up) sector (H and a batch of probes) do not
 /// each copy the reps / norms / perm tables (1-2 GB at N = 36).
-[[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData>
-share_rep_sector(ed::symmetry::RepSectorData rd);
+[[nodiscard]] std::shared_ptr<const ed::symmetry::RepSectorData> share_rep_sector(ed::symmetry::RepSectorData rd);
 
 }  // namespace ed::solvers

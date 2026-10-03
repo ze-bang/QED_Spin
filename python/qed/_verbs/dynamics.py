@@ -1,4 +1,5 @@
 """``qed.dynamics``: dynamical correlations S_AB(omega) over the sectors of H."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -52,11 +53,23 @@ def _probes(O, B):
 
 
 @_log.replays
-def dynamics(H, O, omega: Sequence[float], B=None, *, eta: float = 0.05,
-             T: Optional[Sequence[float]] = None, sym: Optional[Symmetry] = None,
-             krylov: int = 200, samples: int = 40, seed: int = 0,
-             degeneracy_tol: float = 1e-8, device: str = "cpu",
-             dense_max_dim: Optional[int] = None, prune: bool = True) -> DynamicsResult:
+def dynamics(
+    H,
+    O,
+    omega: Sequence[float],
+    B=None,
+    *,
+    eta: float = 0.05,
+    T: Optional[Sequence[float]] = None,
+    sym: Optional[Symmetry] = None,
+    krylov: int = 200,
+    samples: int = 40,
+    seed: int = 0,
+    degeneracy_tol: float = 1e-8,
+    device: str = "cpu",
+    dense_max_dim: Optional[int] = None,
+    prune: bool = True,
+) -> DynamicsResult:
     """S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>, Lorentzian width ``eta``.
 
     ``O`` is the probe A, or a sequence of them. ``B``: ``None`` gives each O's autocorrelation
@@ -100,14 +113,20 @@ def dynamics(H, O, omega: Sequence[float], B=None, *, eta: float = 0.05,
     d.device = _device.resolve(device)
     diagnostics: list = []
     r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), probes, d)
-    S = np.asarray(r.S, dtype=complex)            # [probe, row, omega]
-    if len(temps):                                # the caller's temperatures, in the caller's order
+    S = np.asarray(r.S, dtype=complex)  # [probe, row, omega]
+    if len(temps):  # the caller's temperatures, in the caller's order
         S = S[:, rows.reshape(-1), :]
     if not cross:
         S = S.real
     S = S.reshape(tuple(axes) + S.shape[1:])
-    return DynamicsResult(omega=np.asarray(r.omega), T=temps, S=S,
-                          e0=float(r.e0), ground_manifold=int(r.ground_manifold),
-                          device_blocks=int(r.device_blocks), symmetry=sym,
-                          diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
-                          placement=dict(r.placement))
+    return DynamicsResult(
+        omega=np.asarray(r.omega),
+        T=temps,
+        S=S,
+        e0=float(r.e0),
+        ground_manifold=int(r.ground_manifold),
+        device_blocks=int(r.device_blocks),
+        symmetry=sym,
+        diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+        placement=dict(r.placement),
+    )

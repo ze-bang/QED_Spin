@@ -7,6 +7,7 @@ load_orbit_table + orbit_table_consistent and is used, giving a wrong spectrum w
 Restated after the orbit-table disk cache was removed (owner-approved 2026-10-01; nothing used it): with
 ED_SYM_CACHE_DIR exported, a solve that builds orbit tables must write no .otab file anywhere under that
 directory, so no torn file can ever be read back."""
+
 import glob
 import os
 import subprocess

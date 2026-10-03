@@ -1,7 +1,8 @@
 """Lowest levels, eigenvectors and expectation values of a J1-J2 chain.
 
-    python examples/01_levels.py
+python examples/01_levels.py
 """
+
 import numpy as np
 
 import qed
@@ -15,22 +16,26 @@ H = b.to_operator()
 # Every symmetry H has (momenta, point group, Sz, spin flip, time reversal) is found and used.
 r = qed.eigs(H, 6)
 print("lowest energies (with multiplicity):", np.round(r.energies, 8))
-t = [(i + 1) % N for i in range(N)]       # translation by one site
+t = [(i + 1) % N for i in range(N)]  # translation by one site
 for i, L in enumerate(r.levels):
-    theta = r.momentum(i, [t])[0]          # t|psi> = exp(-2 pi i theta)|psi>
-    print(f"  E = {L.energy:.8f}  x{L.multiplicity}  Sz sector n_up={L.n_up}  momentum {theta}  "
-          f"little-group characters {np.round(list(r.irrep_characters(i).values()), 6)}")
+    theta = r.momentum(i, [t])[0]  # t|psi> = exp(-2 pi i theta)|psi>
+    print(
+        f"  E = {L.energy:.8f}  x{L.multiplicity}  Sz sector n_up={L.n_up}  momentum {theta}  "
+        f"little-group characters {np.round(list(r.irrep_characters(i).values()), 6)}"
+    )
 
 # Eigenvectors in the full 2^N basis (degenerate multiplets completed by symmetry).
 r = qed.eigs(H, 2, vectors=True)
 v0 = r.vectors()[0]
 print("||v0|| =", np.linalg.norm(v0), " <v0|H|v0> =", np.vdot(v0, H.apply(v0)).real)
 
+
 # <S0.S1> and <S0.S2> in the lowest levels, averaged over each level's symmetry multiplet.
 def bond(i, j):
     o = qed.input.HamiltonianBuilder(N)
     o.heisenberg([(i, j)], J=1.0)
     return o.to_operator()
+
 
 e = qed.expect(H, [bond(0, 1), bond(0, 2)], 4)
 for E, mult, (nn, nnn) in zip(e.energies, e.multiplicities, e.values.real):
@@ -44,5 +49,8 @@ import tempfile
 path = os.path.join(tempfile.mkdtemp(), "levels.npz")
 r.save(path)
 again = qed.load_eigs(path)
-print("reloaded:", np.allclose(again.energies, r.energies),
-      np.allclose(again.expect([bond(0, 1)]), r.expect([bond(0, 1)])))
+print(
+    "reloaded:",
+    np.allclose(again.energies, r.energies),
+    np.allclose(again.expect([bond(0, 1)]), r.expect([bond(0, 1)])),
+)

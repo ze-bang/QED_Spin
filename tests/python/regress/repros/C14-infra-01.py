@@ -12,6 +12,7 @@ must decide the lane, whatever the environment says.
   B: env '1',   dense_max_dim=100000           (the argument wins -> dense)
   C: env '1e5', default dense_max_dim          (automatic crossover 1600 -> dense)
   D: env '100000', dense_max_dim=0             (the argument wins -> Krylov)"""
+
 import os
 
 import qed

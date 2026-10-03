@@ -20,10 +20,7 @@ namespace ed_tests {
 
 // Compare two sorted-or-sortable eigenvalue vectors element-wise on the
 // overlap length, using `tol` as an absolute tolerance.
-inline void require_eigs_close(std::vector<double> got,
-                               std::vector<double> want,
-                               size_t n,
-                               double tol,
+inline void require_eigs_close(std::vector<double> got, std::vector<double> want, size_t n, double tol,
                                const std::string& label = "spectrum") {
     std::sort(got.begin(), got.end());
     std::sort(want.begin(), want.end());
@@ -35,12 +32,12 @@ inline void require_eigs_close(std::vector<double> got,
     size_t worst = 0;
     for (size_t i = 0; i < n; ++i) {
         double e = std::abs(got[i] - want[i]);
-        if (e > max_err) { max_err = e; worst = i; }
+        if (e > max_err) {
+            max_err = e;
+            worst = i;
+        }
     }
-    INFO(label << ": worst index=" << worst
-               << " got=" << got[worst]
-               << " want=" << want[worst]
-               << " |Δ|=" << max_err
+    INFO(label << ": worst index=" << worst << " got=" << got[worst] << " want=" << want[worst] << " |Δ|=" << max_err
                << " tol=" << tol);
     REQUIRE(max_err <= tol);
 }

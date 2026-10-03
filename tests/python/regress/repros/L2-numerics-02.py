@@ -14,6 +14,7 @@ it is 5e-6 and outside. Lorentzian S scales as S_s(s w; s eta) = S_1(w; eta) / s
 k and -k ground blocks go through the k = 1 Lanczos lane; ground_manifold is printed versus the
 scale s (the claim predicts it can drop when the first-pass error ~ (1e-7 ||H||)^2/gap > 1e-8).
 Run in a subprocess (it once needed an environment override)."""
+
 import signal
 import subprocess
 import sys
@@ -48,8 +49,10 @@ try:
     for s in (1.0, 1000.0):
         r = qed.dynamics(ring(N, s, h=5e-9), O, s * w, eta=s * eta, sym=sym)
         res[s] = (int(r.ground_manifold), s * np.asarray(r.S[0]), float(r.e0))
-        print(f"(a) s={s:g}: ground_manifold={res[s][0]} e0/s={res[s][2] / s:.12f} "
-              f"sum S dw={float(np.sum(res[s][1]) * (w[1] - w[0])):.6f}")
+        print(
+            f"(a) s={s:g}: ground_manifold={res[s][0]} e0/s={res[s][2] / s:.12f} "
+            f"sum S dw={float(np.sum(res[s][1]) * (w[1] - w[0])):.6f}"
+        )
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE (a) raised {type(ex).__name__}: {str(ex)[:200]}")
     raise SystemExit(0)
@@ -91,7 +94,9 @@ except Exception as ex:
 
 g1, g2 = res[1.0][0], res[1000.0][0]
 if g1 != g2 and dS > 1e-3:
-    print(f"REPRO: CONFIRMED ground_manifold {g1} (s=1) vs {g2} (s=1000) for the same physics; "
-          f"max rel diff of s*S_s(s w) vs S_1(w) = {dS:.3e}")
+    print(
+        f"REPRO: CONFIRMED ground_manifold {g1} (s=1) vs {g2} (s=1000) for the same physics; "
+        f"max rel diff of s*S_s(s w) vs S_1(w) = {dS:.3e}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED ground_manifold {g1} vs {g2}; max rel diff {dS:.3e}")

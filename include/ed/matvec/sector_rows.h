@@ -44,7 +44,10 @@ inline void for_each_cross_entry(const ed::ops::ProgramView<SectorComplex>& P, c
     const std::uint64_t s = row.state_of(j);
     const double w = row.inv_norm_of(j);
     ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const SectorComplex& h) {
-        if (same && t == s) { emit(j, std::conj(h)); return; }
+        if (same && t == s) {
+            emit(j, std::conj(h));
+            return;
+        }
         SectorComplex proj;
         const std::int64_t c = col.index_and_projection(t, proj);
         if (c < 0) return;                       // the target's orbit cancels in the column sector
@@ -54,8 +57,8 @@ inline void for_each_cross_entry(const ed::ops::ProgramView<SectorComplex>& P, c
 
 /// emit(j, value) for every entry of row r within one sector (columns may repeat).
 template <class Policy, class Emit>
-inline void for_each_sector_entry(const ed::ops::ProgramView<SectorComplex>& P, const Policy& pol,
-                                  std::uint64_t r, Emit&& emit) {
+inline void for_each_sector_entry(const ed::ops::ProgramView<SectorComplex>& P, const Policy& pol, std::uint64_t r,
+                                  Emit&& emit) {
     for_each_cross_entry(P, pol, pol, true, r, std::forward<Emit>(emit));
 }
 
@@ -78,7 +81,8 @@ inline void for_each_cross_block(const ed::ops::ProgramView<SectorComplex>& P, c
     ed::ops::for_each_connection(P, s, [&](std::uint64_t t, const SectorComplex& h) {
         const SectorComplex ch = std::conj(h);
         if (same && t == s) {
-            for (int a = 0; a < rr; ++a) emit(o_r + static_cast<std::uint64_t>(a), o_r + static_cast<std::uint64_t>(a), ch);
+            for (int a = 0; a < rr; ++a)
+                emit(o_r + static_cast<std::uint64_t>(a), o_r + static_cast<std::uint64_t>(a), ch);
             return;
         }
         const std::int64_t c = col.index_and_matrix(t, A);
@@ -107,18 +111,19 @@ template <class RowPolicy, class ColPolicy>
 inline void cross_gather(const ed::ops::ProgramView<SectorComplex>& P, const RowPolicy& row, const ColPolicy& col,
                          bool same, std::uint64_t rows, const SectorComplex* in, SectorComplex* out) {
     if (row.irrep_dim > 1) {
-        #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
         for (long long ir = 0; ir < static_cast<long long>(row.dim()); ++ir) {
             const std::uint64_t r = static_cast<std::uint64_t>(ir), o = row.first_state_of(r);
             SectorComplex acc[kMaxIrrepDim];
             for (int a = 0; a < kMaxIrrepDim; ++a) acc[a] = SectorComplex(0.0, 0.0);
-            for_each_cross_block(P, row, col, same, r,
-                                 [&](std::uint64_t i, std::uint64_t c, const SectorComplex& v) { acc[i - o] += v * in[c]; });
+            for_each_cross_block(P, row, col, same, r, [&](std::uint64_t i, std::uint64_t c, const SectorComplex& v) {
+                acc[i - o] += v * in[c];
+            });
             for (int a = 0; a < row.rank_of(r); ++a) out[o + static_cast<std::uint64_t>(a)] = acc[a];
         }
         return;
     }
-    #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
     for (long long ir = 0; ir < static_cast<long long>(rows); ++ir) {
         SectorComplex acc(0.0, 0.0);
         for_each_cross_entry(P, row, col, same, static_cast<std::uint64_t>(ir),
@@ -157,7 +162,8 @@ template <class RowPolicy, class ColPolicy>
 inline void cross_row(const ed::ops::ProgramView<SectorComplex>& P, const RowPolicy& rowp, const ColPolicy& colp,
                       bool same, std::uint64_t j, Row& row) {
     row.clear();
-    for_each_cross_entry(P, rowp, colp, same, j, [&](std::uint64_t c, const SectorComplex& v) { row.emplace_back(c, v); });
+    for_each_cross_entry(P, rowp, colp, same, j,
+                         [&](std::uint64_t c, const SectorComplex& v) { row.emplace_back(c, v); });
     merge_row(row);
 }
 
@@ -215,10 +221,9 @@ inline constexpr std::size_t kCsrDictMax = 65536;
 /// `max_full_bytes` caps the full-value fallback: when its exact size (20 bytes an entry, 8 a row)
 /// exceeds it, nothing is built (dim 0) and the caller takes the walk.
 template <class RowPolicy, class ColPolicy>
-inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramView<SectorComplex>& P,
-                                                         const RowPolicy& rowp, const ColPolicy& colp, bool same,
-                                                         std::uint64_t dim,
-                                                         std::uint64_t max_full_bytes = ~std::uint64_t{0}) {
+inline ReducedSymmetryCsr<SectorComplex>
+build_cross_csr(const ed::ops::ProgramView<SectorComplex>& P, const RowPolicy& rowp, const ColPolicy& colp, bool same,
+                std::uint64_t dim, std::uint64_t max_full_bytes = ~std::uint64_t{0}) {
     ReducedSymmetryCsr<SectorComplex> csr;
     csr.dim = dim;
     csr.row_ptr.assign(dim + 1, 0);
@@ -238,9 +243,10 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     const auto first_row = [&](std::uint64_t c) { return row_of_unit(first_unit(c)); };
     struct Slab {
         // Unmapped when released (core/numa_vector.h), so a copied slab leaves the RSS at once.
-        std::vector<std::uint32_t, ed::core::ReleasingAllocator<std::uint32_t>> col;   // per entry: column,
-        std::vector<std::uint16_t, ed::core::ReleasingAllocator<std::uint16_t>> id;    // and chunk-local value id (<= kCsrDictMax)
-        std::vector<SectorComplex> values;    // the chunk's distinct values, by local id
+        std::vector<std::uint32_t, ed::core::ReleasingAllocator<std::uint32_t>> col; // per entry: column,
+        std::vector<std::uint16_t, ed::core::ReleasingAllocator<std::uint16_t>>
+            id; // and chunk-local value id (<= kCsrDictMax)
+        std::vector<SectorComplex> values; // the chunk's distinct values, by local id
         std::unordered_map<ValueBits, std::uint32_t, ValueBitsHash> index;
     };
     std::vector<Slab> slabs(static_cast<std::size_t>(n_chunks));
@@ -260,10 +266,10 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
         if (nrows > 0) per_row = static_cast<double>(entries) / static_cast<double>(nrows);
     }
     std::atomic<bool> overflow{false};
-    #pragma omp parallel
+#pragma omp parallel
     {
         std::vector<detail::Row> rows;
-        #pragma omp for schedule(dynamic, 1)
+#pragma omp for schedule(dynamic, 1)
         for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
             if (overflow.load(std::memory_order_relaxed)) continue;
             Slab& slab = slabs[static_cast<std::size_t>(c)];
@@ -274,17 +280,21 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
                 slab.col.reserve(want);
                 slab.id.reserve(want);
             }
-            for (std::uint64_t u = first_unit(static_cast<std::uint64_t>(c)); u < first_unit(static_cast<std::uint64_t>(c) + 1);
-                 ++u) {
+            for (std::uint64_t u = first_unit(static_cast<std::uint64_t>(c));
+                 u < first_unit(static_cast<std::uint64_t>(c) + 1); ++u) {
                 detail::unit_rows(P, rowp, colp, same, u, rows);
                 const std::uint64_t r0 = row_of_unit(u);
                 bool full = false;
                 for (std::size_t a = 0; a < rows.size() && !full; ++a) {
                     csr.row_ptr[r0 + a + 1] = rows[a].size();
                     for (const auto& [j, v] : rows[a]) {
-                        const auto [it, fresh] = slab.index.try_emplace(bits_of(v), static_cast<std::uint32_t>(slab.values.size()));
+                        const auto [it, fresh] =
+                            slab.index.try_emplace(bits_of(v), static_cast<std::uint32_t>(slab.values.size()));
                         if (fresh) {
-                            if (slab.values.size() == kCsrDictMax) { full = true; break; }   // ids stay below 2^16
+                            if (slab.values.size() == kCsrDictMax) {
+                                full = true;
+                                break;
+                            } // ids stay below 2^16
                             slab.values.push_back(v);
                         }
                         slab.col.push_back(static_cast<std::uint32_t>(j));
@@ -314,10 +324,10 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
         slabs.clear();
         slabs.shrink_to_fit();
         csr.dict.clear();
-        #pragma omp parallel
+#pragma omp parallel
         {
             std::vector<detail::Row> rows;
-            #pragma omp for schedule(dynamic, 256)
+#pragma omp for schedule(dynamic, 256)
             for (long long iu = 0; iu < static_cast<long long>(units); ++iu) {
                 detail::unit_rows(P, rowp, colp, same, static_cast<std::uint64_t>(iu), rows);
                 const std::uint64_t r0 = row_of_unit(static_cast<std::uint64_t>(iu));
@@ -325,14 +335,14 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
             }
         }
         for (std::uint64_t r = 0; r < dim; ++r) csr.row_ptr[r + 1] += csr.row_ptr[r];
-        const std::uint64_t full_bytes = csr.row_ptr[dim] * (sizeof(SectorComplex) + sizeof(std::uint32_t))
-                                         + (dim + 1) * sizeof(std::uint64_t);
+        const std::uint64_t full_bytes =
+            csr.row_ptr[dim] * (sizeof(SectorComplex) + sizeof(std::uint32_t)) + (dim + 1) * sizeof(std::uint64_t);
         if (full_bytes > max_full_bytes) return ReducedSymmetryCsr<SectorComplex>{};
         csr.allocate_first_touch();
-        #pragma omp parallel
+#pragma omp parallel
         {
             std::vector<detail::Row> rows;
-            #pragma omp for schedule(dynamic, 256)
+#pragma omp for schedule(dynamic, 256)
             for (long long iu = 0; iu < static_cast<long long>(units); ++iu) {
                 detail::unit_rows(P, rowp, colp, same, static_cast<std::uint64_t>(iu), rows);
                 const std::uint64_t r0 = row_of_unit(static_cast<std::uint64_t>(iu));
@@ -360,19 +370,25 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     // peak when the CSR was touched first). The static chunk schedule puts each chunk's pages on
     // the thread that owns its rows in spmv's static partition.
     csr.col_idx.resize(nnz);
-    if (full)        csr.val.resize(nnz);
-    else if (narrow) csr.id8.resize(nnz);
-    else             csr.id16.resize(nnz);
-    #pragma omp parallel for schedule(static)
+    if (full)
+        csr.val.resize(nnz);
+    else if (narrow)
+        csr.id8.resize(nnz);
+    else
+        csr.id16.resize(nnz);
+#pragma omp parallel for schedule(static)
     for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
         Slab& slab = slabs[static_cast<std::size_t>(c)];
         const auto& map = to_global[static_cast<std::size_t>(c)];
         const std::uint64_t e0 = csr.row_ptr[first_row(static_cast<std::uint64_t>(c))];
         std::copy(slab.col.begin(), slab.col.end(), csr.col_idx.begin() + static_cast<std::ptrdiff_t>(e0));
         for (std::size_t i = 0; i < slab.id.size(); ++i) {
-            if (full)        csr.val[e0 + i] = slab.values[slab.id[i]];
-            else if (narrow) csr.id8[e0 + i] = static_cast<std::uint8_t>(map[slab.id[i]]);
-            else             csr.id16[e0 + i] = static_cast<std::uint16_t>(map[slab.id[i]]);
+            if (full)
+                csr.val[e0 + i] = slab.values[slab.id[i]];
+            else if (narrow)
+                csr.id8[e0 + i] = static_cast<std::uint8_t>(map[slab.id[i]]);
+            else
+                csr.id16[e0 + i] = static_cast<std::uint16_t>(map[slab.id[i]]);
         }
         slab = Slab{};
     }
@@ -392,7 +408,7 @@ template <class Policy>
 inline double sampled_sector_row_length(const ed::ops::ProgramView<SectorComplex>& P, const Policy& pol,
                                         std::uint64_t dim, std::uint64_t samples = 4096) {
     if (dim == 0) return 0.0;
-    if (pol.irrep_dim > 1) {   // by representative: its rows over its states (dim counts states)
+    if (pol.irrep_dim > 1) { // by representative: its rows over its states (dim counts states)
         const std::uint64_t reps = pol.dim(), n = std::min(reps, samples);
         std::vector<detail::Row> rows;
         double total = 0.0, states = 0.0;
@@ -413,4 +429,4 @@ inline double sampled_sector_row_length(const ed::ops::ProgramView<SectorComplex
     return total / static_cast<double>(n);
 }
 
-}  // namespace ed::matvec
+} // namespace ed::matvec

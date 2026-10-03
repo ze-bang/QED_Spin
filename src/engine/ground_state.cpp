@@ -10,14 +10,9 @@ namespace ed::solvers {
 
 using namespace lg_detail;
 
-void little_group_k_sectors_stream(
-    const ::Operator&                    op,
-    const std::vector<std::vector<int>>& abelian_group,
-    int                                  n_sites,
-    int                                  n_up,
-    int                                  sz_parity,
-    const std::function<void(ed::symmetry::RepSectorData&)>& fn)
-{
+void little_group_k_sectors_stream(const ::Operator& op, const std::vector<std::vector<int>>& abelian_group,
+                                   int n_sites, int n_up, int sz_parity,
+                                   const std::function<void(ed::symmetry::RepSectorData&)>& fn) {
     // Build ONE raw momentum
     // sector at a time, hand it to ``fn``, then free it before building the
     // next. Holding every k-sector resident
@@ -25,9 +20,9 @@ void little_group_k_sectors_stream(
     // OOMs a 128 GB node. This keeps the resident set at one destination
     // sector for the factorized static/dynamical structure-factor loops.
     LittleGroupOptions o;
-    o.n_up          = n_up;
-    o.sz_parity     = sz_parity;
-    o.spin_flip     = 0;      // destination sectors are RAW
+    o.n_up = n_up;
+    o.sz_parity = sz_parity;
+    o.spin_flip = 0;      // destination sectors are RAW
     o.time_reversal = 0;
     EngineContext cx;
     bool tr_on = false;
@@ -38,9 +33,7 @@ void little_group_k_sectors_stream(
     }
 }
 
-std::shared_ptr<const ed::symmetry::RepSectorData>
-share_rep_sector(ed::symmetry::RepSectorData rd)
-{
+std::shared_ptr<const ed::symmetry::RepSectorData> share_rep_sector(ed::symmetry::RepSectorData rd) {
     auto p = std::make_shared<ed::symmetry::RepSectorData>(std::move(rd));
     p->build_perm_lut();
     p->build_buckets();

@@ -6,6 +6,7 @@ silently run every block on the host (device_blocks == 0), because python/qed/ap
 resolve('gpu') checks only _core.has_cuda_build(), not whether a device is present.
 The risky calls run in a child process with CUDA_VISIBLE_DEVICES='' so the test is valid on
 any node (GPU or not)."""
+
 import os
 import subprocess
 import sys
@@ -36,8 +37,7 @@ print("RESULT " + "|".join(out) + f"|warnings={nw}")
 env = dict(os.environ)
 env["CUDA_VISIBLE_DEVICES"] = ""
 try:
-    p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True, text=True,
-                       timeout=240)
+    p = subprocess.run([sys.executable, "-c", CHILD], env=env, capture_output=True, text=True, timeout=240)
 except subprocess.TimeoutExpired:
     print("REPRO: INCONCLUSIVE child timed out")
     raise SystemExit(0)

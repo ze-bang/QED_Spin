@@ -37,15 +37,19 @@
 using Cx = std::complex<double>;
 using ed::ops::compile_program;
 using ed::ops::MaskedOperator;
-using ed::ops::RepVectorView;
 using ed::ops::rep_matrix_elements;
+using ed::ops::RepVectorView;
 using ed::symmetry::RepSectorData;
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-struct Element { std::vector<int> perm; std::uint64_t flip; std::vector<int> label; };
+struct Element {
+    std::vector<int> perm;
+    std::uint64_t flip;
+    std::vector<int> label;
+};
 
 // Abelian group Z_L1 x Z_L2 (x Z_2 flip) acting on an L1 x L2 torus (L2 = 1: ring).
 std::vector<Element> torus_group(int L1, int L2, bool with_flip) {
@@ -70,8 +74,8 @@ std::vector<Element> torus_group(int L1, int L2, bool with_flip) {
 // Sector with characters exp(2 pi i (k1 a / L1 + k2 b / L2)) * parity^f. Reps and norms
 // follow the engine: rep = min over the images of the policy's apply_perm, inv_norm =
 // 1 / sqrt(|sum_{Stab} chi|^2 / |Stab|), orbits with zero projected norm dropped.
-RepSectorData make_sector(const std::vector<Element>& G, int L1, int L2, int k1, int k2,
-                          int parity, int n_up, bool lut) {
+RepSectorData make_sector(const std::vector<Element>& G, int L1, int L2, int k1, int k2, int parity, int n_up,
+                          bool lut) {
     const int n = L1 * L2;
     RepSectorData rd;
     rd.n_sites = n;
@@ -82,8 +86,8 @@ RepSectorData make_sector(const std::vector<Element>& G, int L1, int L2, int k1,
         rd.perms_flat.insert(rd.perms_flat.end(), e.perm.begin(), e.perm.end());
         rd.flip_masks.push_back(e.flip);
         flips = flips || e.flip != 0;
-        const double ph = 2.0 * kPi * (static_cast<double>(k1 * e.label[0]) / L1
-                                       + static_cast<double>(k2 * e.label[1]) / L2);
+        const double ph =
+            2.0 * kPi * (static_cast<double>(k1 * e.label[0]) / L1 + static_cast<double>(k2 * e.label[1]) / L2);
         rd.characters.push_back(std::polar(1.0, ph) * ((e.label[2] && parity < 0) ? -1.0 : 1.0));
     }
     if (!flips) rd.flip_masks.clear();
@@ -96,7 +100,10 @@ RepSectorData make_sector(const std::vector<Element>& G, int L1, int L2, int k1,
         for (int g = 0; g < rd.group_size && is_rep; ++g) {
             const std::uint64_t img = pol.apply_perm(s, g);
             if (img < s) is_rep = false;
-            if (img == s) { sum += rd.characters[static_cast<std::size_t>(g)]; ++stab; }
+            if (img == s) {
+                sum += rd.characters[static_cast<std::size_t>(g)];
+                ++stab;
+            }
         }
         if (!is_rep) continue;
         const double nsq = std::norm(sum) / stab;
@@ -112,14 +119,17 @@ std::vector<Cx> random_vec(std::size_t d, std::mt19937& rng) {
     std::normal_distribution<double> g(0.0, 1.0);
     std::vector<Cx> v(d);
     double n2 = 0.0;
-    for (auto& x : v) { x = Cx(g(rng), g(rng)); n2 += std::norm(x); }
+    for (auto& x : v) {
+        x = Cx(g(rng), g(rng));
+        n2 += std::norm(x);
+    }
     for (auto& x : v) x /= std::sqrt(n2);
     return v;
 }
 
 // <E a| O |E b> on the full 2^N space.
-Cx dense_me(const MaskedOperator& O, const RepSectorData& tgt, const std::vector<Cx>& a,
-            const RepSectorData& src, const std::vector<Cx>& b) {
+Cx dense_me(const MaskedOperator& O, const RepSectorData& tgt, const std::vector<Cx>& a, const RepSectorData& src,
+            const std::vector<Cx>& b) {
     const auto pa = ed::sectors::expand(tgt, a, -1);
     const auto pb = ed::sectors::expand(src, b, -1);
     Cx r(0.0, 0.0);
@@ -155,9 +165,8 @@ MaskedOperator random_operator(int n, std::mt19937& rng) {
 }
 
 // Every observable of `ops` for every (bra, ket) pair, engine vs dense.
-double check_all(const std::vector<MaskedOperator>& ops, const RepSectorData& src,
-                 const RepSectorData& tgt, const std::vector<std::vector<Cx>>& kets,
-                 const std::vector<std::vector<Cx>>& bras) {
+double check_all(const std::vector<MaskedOperator>& ops, const RepSectorData& src, const RepSectorData& tgt,
+                 const std::vector<std::vector<Cx>>& kets, const std::vector<std::vector<Cx>>& bras) {
     const auto prog = compile_program(ops, src, tgt);
     std::vector<RepVectorView> kv, bv;
     for (const auto& v : kets) kv.push_back({v.data(), v.size()});
@@ -169,8 +178,8 @@ double check_all(const std::vector<MaskedOperator>& ops, const RepSectorData& sr
     double err = 0.0;
     for (std::size_t p = 0; p < pairs.size(); ++p)
         for (std::size_t o = 0; o < ops.size(); ++o) {
-            const Cx ref = dense_me(ops[o], tgt, bras[static_cast<std::size_t>(pairs[p].first)],
-                                    src, kets[static_cast<std::size_t>(pairs[p].second)]);
+            const Cx ref = dense_me(ops[o], tgt, bras[static_cast<std::size_t>(pairs[p].first)], src,
+                                    kets[static_cast<std::size_t>(pairs[p].second)]);
             err = std::max(err, std::abs(M[p * ops.size() + o] - ref));
         }
     return err;
@@ -180,11 +189,14 @@ double check_all(const std::vector<MaskedOperator>& ops, const RepSectorData& sr
 
 TEST_CASE("same-sector elements of random non-Hermitian operators", "[rep_me]") {
     std::mt19937 rng(11);
-    struct Sys { int L1, L2; bool flip; int k1, k2, parity; };
-    for (const Sys& y : {Sys{12, 1, false, 1, 0, 1}, Sys{12, 1, false, 4, 0, 1},
-                         Sys{12, 1, true, 6, 0, -1}, Sys{12, 1, true, 0, 0, 1},
-                         Sys{4, 4, false, 2, 2, 1}, Sys{4, 4, true, 0, 0, 1},
-                         Sys{4, 4, true, 1, 3, -1}}) {
+    struct Sys {
+        int L1, L2;
+        bool flip;
+        int k1, k2, parity;
+    };
+    for (const Sys& y :
+         {Sys{12, 1, false, 1, 0, 1}, Sys{12, 1, false, 4, 0, 1}, Sys{12, 1, true, 6, 0, -1}, Sys{12, 1, true, 0, 0, 1},
+          Sys{4, 4, false, 2, 2, 1}, Sys{4, 4, true, 0, 0, 1}, Sys{4, 4, true, 1, 3, -1}}) {
         const int n = y.L1 * y.L2;
         const auto G = torus_group(y.L1, y.L2, y.flip);
         const auto rd = make_sector(G, y.L1, y.L2, y.k1, y.k2, y.parity, n / 2, /*lut=*/n == 16);
@@ -268,9 +280,12 @@ TEST_CASE("sectors built by the engine", "[rep_me]") {
     auto op = std::make_unique<Operator>(N, 0.5f);
     for (int i = 0; i < N; ++i) {
         Operator::TransformData t;
-        t.op_type = 2; t.site_index = static_cast<std::uint64_t>(i); t.op_type_2 = 2;
+        t.op_type = 2;
+        t.site_index = static_cast<std::uint64_t>(i);
+        t.op_type_2 = 2;
         t.site_index_2 = static_cast<std::uint64_t>((i + 1) % N);
-        t.coefficient = Cx(1.0, 0.0); t.is_two_body = true;
+        t.coefficient = Cx(1.0, 0.0);
+        t.is_two_body = true;
         op->add_record(t);
     }
     std::vector<std::vector<int>> A;
@@ -280,17 +295,14 @@ TEST_CASE("sectors built by the engine", "[rep_me]") {
         A.push_back(std::move(p));
     }
     std::vector<RepSectorData> secs;
-    ed::solvers::little_group_k_sectors_stream(*op, A, N, N / 2, -1,
-                                               [&](RepSectorData& rd) { secs.push_back(rd); });
+    ed::solvers::little_group_k_sectors_stream(*op, A, N, N / 2, -1, [&](RepSectorData& rd) { secs.push_back(rd); });
     REQUIRE(secs.size() >= 2);
     std::mt19937 rng(14);
     std::vector<MaskedOperator> ops{MaskedOperator::product(N, "+-", {2, 3}, 1.0),
-                                    MaskedOperator::product(N, "zzz", {1, 4, 8}, 1.0),
-                                    random_operator(N, rng)};
+                                    MaskedOperator::product(N, "zzz", {1, 4, 8}, 1.0), random_operator(N, rng)};
     for (std::size_t i = 0; i < secs.size(); ++i)
         for (std::size_t j = 0; j < secs.size(); j += 3) {
-            const std::vector<std::vector<Cx>> k{random_vec(secs[i].dim(), rng)},
-                b{random_vec(secs[j].dim(), rng)};
+            const std::vector<std::vector<Cx>> k{random_vec(secs[i].dim(), rng)}, b{random_vec(secs[j].dim(), rng)};
             INFO("sectors " << i << " -> " << j);
             CHECK(check_all(ops, secs[i], secs[j], k, b) < 1e-12);
         }
@@ -385,7 +397,8 @@ TEST_CASE("constraint projector: <a|P O P|b> against dense", "[rep_me][balanced]
             const auto& tgt = cross ? c : a;
             const auto& vb = cross ? vc : va;
             const auto prog = compile_program(ops, a, tgt);
-            const auto M = rep_matrix_elements(a, tgt, prog, {{va.data(), va.size()}}, {{vb.data(), vb.size()}}, {{0, 0}}, opt);
+            const auto M =
+                rep_matrix_elements(a, tgt, prog, {{va.data(), va.size()}}, {{vb.data(), vb.size()}}, {{0, 0}}, opt);
             const auto pa = ed::sectors::expand(tgt, vb, -1);
             const auto pb = ed::sectors::expand(a, va, -1);
             double err = 0.0;
@@ -394,7 +407,8 @@ TEST_CASE("constraint projector: <a|P O P|b> against dense", "[rep_me][balanced]
                 for (std::uint64_t s = 0; s < pb.size(); ++s) {
                     if (pb[s] == Cx(0.0, 0.0) || !balanced_dense(s, masks)) continue;
                     for (const auto& t : ops[o].terms()) {
-                        std::uint64_t tt; double sg;
+                        std::uint64_t tt;
+                        double sg;
                         if (!ed::ops::masked_apply(t, s, tt, sg) || !balanced_dense(tt, masks)) continue;
                         ref += std::conj(pa[tt]) * t.coeff * sg * pb[s];
                     }
@@ -409,13 +423,16 @@ TEST_CASE("constraint projector: <a|P O P|b> against dense", "[rep_me][balanced]
         ed::ops::RepMEOptions bad;
         bad.balanced_masks = {window};
         const auto prog = compile_program(ops, a, a);
-        CHECK_THROWS(rep_matrix_elements(a, a, prog, {{va.data(), va.size()}}, {{va.data(), va.size()}}, {{0, 0}}, bad));
+        CHECK_THROWS(
+            rep_matrix_elements(a, a, prog, {{va.data(), va.size()}}, {{va.data(), va.size()}}, {{0, 0}}, bad));
         if (ed::ops::rep_matrix_elements_gpu_available()) {
             ed::ops::RepMEOptions g = opt;
             g.use_gpu = true;
             const auto P = compile_program(ops, a, c);
-            const auto M0 = rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, opt);
-            const auto M1 = rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, g);
+            const auto M0 =
+                rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, opt);
+            const auto M1 =
+                rep_matrix_elements(a, c, P, {{va.data(), va.size()}}, {{vc.data(), vc.size()}}, {{0, 0}}, g);
             for (std::size_t i = 0; i < M0.size(); ++i) CHECK(std::abs(M0[i] - M1[i]) < 1e-12);
         }
     }

@@ -3,13 +3,17 @@
 # SECONDS: 10
 """Claim: no lattice generator populates nnn_bonds / nnnn_bonds, so nnn_pairs() and nnnn_pairs() are
 always empty and HamiltonianBuilder.heisenberg(lat.nnn_pairs(), J2) silently adds nothing."""
+
 import qed
 
 lattice = qed.input.lattice
 lats = {
-    "chain8": lattice.chain(8, True), "square4x4": lattice.square(4, 4, True),
-    "tri3x3": lattice.triangular(3, 3, True), "honey2x2": lattice.honeycomb(2, 2, True),
-    "kagome2x2": lattice.kagome(2, 2, True), "pyro2": lattice.pyrochlore(2, 2, 2, True),
+    "chain8": lattice.chain(8, True),
+    "square4x4": lattice.square(4, 4, True),
+    "tri3x3": lattice.triangular(3, 3, True),
+    "honey2x2": lattice.honeycomb(2, 2, True),
+    "kagome2x2": lattice.kagome(2, 2, True),
+    "pyro2": lattice.pyrochlore(2, 2, 2, True),
 }
 counts = {k: (len(v.nn_pairs()), len(v.nnn_pairs()), len(v.nnnn_pairs())) for k, v in lats.items()}
 print("(nn, nnn, nnnn) counts:", counts)

@@ -52,12 +52,8 @@ namespace ed::matvec::basis {
 struct FullBasisPolicy {
     uint64_t n_bits;
 
-    [[nodiscard]] inline uint64_t dim() const noexcept {
-        return 1ULL << n_bits;
-    }
-    [[nodiscard]] inline uint64_t state_of(uint64_t idx) const noexcept {
-        return idx;
-    }
+    [[nodiscard]] inline uint64_t dim() const noexcept { return 1ULL << n_bits; }
+    [[nodiscard]] inline uint64_t state_of(uint64_t idx) const noexcept { return idx; }
     [[nodiscard]] inline int64_t index_of(uint64_t state) const noexcept {
         // The full basis contains every bitstring of length n_bits.
         // Out-of-range is technically impossible if the caller is well-
@@ -67,10 +63,10 @@ struct FullBasisPolicy {
         return state < (1ULL << n_bits) ? static_cast<int64_t>(state) : -1;
     }
 
-    static constexpr bool may_leave_basis  = false;
+    static constexpr bool may_leave_basis = false;
 
     // One computational state per row, no per-emit projection factor.
-    static constexpr bool needs_orbit_walk  = false;
+    static constexpr bool needs_orbit_walk = false;
     static constexpr bool has_coeff_modifier = false;
 };
 
@@ -78,8 +74,6 @@ struct FullBasisPolicy {
 // Convenience factory. Saves callers from spelling out the field types
 // each time they need a fresh view.
 // ---------------------------------------------------------------------------
-[[nodiscard]] inline FullBasisPolicy make_full_basis(uint64_t n_bits) noexcept {
-    return FullBasisPolicy{n_bits};
-}
+[[nodiscard]] inline FullBasisPolicy make_full_basis(uint64_t n_bits) noexcept { return FullBasisPolicy{n_bits}; }
 
 } // namespace ed::matvec::basis

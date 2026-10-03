@@ -1,7 +1,8 @@
 """Dynamical structure factor S^zz(q, omega) of the Heisenberg chain at T = 0 and T = 1.
 
-    python examples/03_dynamics.py
+python examples/03_dynamics.py
 """
+
 import cmath
 import math
 
@@ -9,7 +10,7 @@ import numpy as np
 
 import qed
 
-trapezoid = getattr(np, "trapezoid", None) or np.trapz   # numpy < 2 has only trapz
+trapezoid = getattr(np, "trapezoid", None) or np.trapz  # numpy < 2 has only trapz
 
 N = 16
 b = qed.input.HamiltonianBuilder(N)
@@ -28,9 +29,11 @@ def sz_q(q):
 omega = np.linspace(0.0, 4.0, 201)
 for n in (N // 4, N // 2):
     q = 2 * math.pi * n / N
-    ground = qed.dynamics(H, sz_q(q), omega, eta=0.05)          # averaged over the ground manifold
+    ground = qed.dynamics(H, sz_q(q), omega, eta=0.05)  # averaged over the ground manifold
     warm = qed.dynamics(H, sz_q(q), omega, eta=0.05, T=[1.0], samples=20, seed=1)
-    print(f"q = {q:.3f}: peak at omega = {omega[np.argmax(ground.S[0])]:.3f} (T=0), "
-          f"weight {trapezoid(ground.S[0], omega):.4f} (T=0), {trapezoid(warm.S[0], omega):.4f} (T=1)")
+    print(
+        f"q = {q:.3f}: peak at omega = {omega[np.argmax(ground.S[0])]:.3f} (T=0), "
+        f"weight {trapezoid(ground.S[0], omega):.4f} (T=0), {trapezoid(warm.S[0], omega):.4f} (T=1)"
+    )
 # S^+_q, S^-_q (operators that change Sz) work the same way; O need not share any
 # symmetry of H.

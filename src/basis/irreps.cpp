@@ -23,9 +23,7 @@ using Complex = std::complex<double>;
 std::vector<Complex> IrrepData::partner_diagonal(int n) const {
     std::vector<Complex> out;
     out.reserve(matrices.size());
-    for (const auto& M : matrices) {
-        out.push_back(M[static_cast<std::size_t>(n) * dim + n]);
-    }
+    for (const auto& M : matrices) { out.push_back(M[static_cast<std::size_t>(n) * dim + n]); }
     return out;
 }
 
@@ -34,8 +32,7 @@ namespace {
 // Group product consistent with the STATE action U(g)|s> = |applyPermutation(s,
 // perm_g)>: U(g)U(h) = U(g·h) with (g·h)[i] = perm_h[perm_g[i]]. Using this
 // convention makes the extracted D^Γ(g) usable directly in the matvec.
-[[nodiscard]] std::vector<int>
-compose(const std::vector<int>& pg, const std::vector<int>& ph) {
+[[nodiscard]] std::vector<int> compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     const std::size_t n = pg.size();
     std::vector<int> c(n);
     for (std::size_t i = 0; i < n; ++i) c[i] = ph[static_cast<std::size_t>(pg[i])];
@@ -47,10 +44,8 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 // the irreps cleanly (caller retries with a new seed). Works purely from the
 // (mult, inverse) tables -- the group can be abstract (little
 // co-groups have no faithful site-permutation realisation).
-[[nodiscard]] bool try_decompose(const std::vector<int>& inverse,
-                                 const std::vector<std::vector<int>>& mult,
-                                 std::uint64_t seed,
-                                 std::vector<IrrepData>& out) {
+[[nodiscard]] bool try_decompose(const std::vector<int>& inverse, const std::vector<std::vector<int>>& mult,
+                                 std::uint64_t seed, std::vector<IrrepData>& out) {
     const int n = static_cast<int>(mult.size());
 
     // ---- Random Hermitian commutant element M = Σ_h c_h R(h) -----------------
@@ -67,7 +62,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
             c[static_cast<std::size_t>(h)] = Complex(nd(gen), 0.0);  // involution -> real
         } else {
             const Complex z(nd(gen), nd(gen));
-            c[static_cast<std::size_t>(h)]  = z;
+            c[static_cast<std::size_t>(h)] = z;
             c[static_cast<std::size_t>(hi)] = std::conj(z);
             set[static_cast<std::size_t>(hi)] = 1;
         }
@@ -92,7 +87,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
     // ---- Cluster eigenvalues into eigenspaces (each = one irreducible copy) --
     const double span = std::max(1.0, evals(n - 1) - evals(0));
-    const double tol  = 1e-6 * span;
+    const double tol = 1e-6 * span;
     std::vector<std::pair<int, int>> clusters;  // [begin, end)
     int b = 0;
     for (int i = 1; i <= n; ++i) {
@@ -104,8 +99,11 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
     // ---- Per eigenspace: D(g)_{mn} = <v_m| L(g) |v_n>, character = tr --------
     // L(g) e_x = e_{mult[g][x]} : (L(g) v)[mult[g][x]] = v[x].
-    struct Cand { int dim = 0; std::vector<std::vector<Complex>> mats;
-                  std::vector<Complex> chi; };
+    struct Cand {
+        int dim = 0;
+        std::vector<std::vector<Complex>> mats;
+        std::vector<Complex> chi;
+    };
     std::vector<Cand> cands;
     for (const auto& cl : clusters) {
         const int d = cl.second - cl.first;
@@ -123,8 +121,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
             auto& flat = cand.mats[static_cast<std::size_t>(g)];
             flat.resize(static_cast<std::size_t>(d) * d);
             for (int m = 0; m < d; ++m)
-                for (int nn = 0; nn < d; ++nn)
-                    flat[static_cast<std::size_t>(m) * d + nn] = D(m, nn);
+                for (int nn = 0; nn < d; ++nn) flat[static_cast<std::size_t>(m) * d + nn] = D(m, nn);
             cand.chi[static_cast<std::size_t>(g)] = D.trace();
         }
         cands.push_back(std::move(cand));
@@ -132,18 +129,19 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
     // ---- Deduplicate by character; one IrrepData per distinct irrep ---------
     std::vector<IrrepData> irreps;
-    auto same_char = [&](const std::vector<Complex>& a,
-                         const std::vector<Complex>& bb) {
+    auto same_char = [&](const std::vector<Complex>& a, const std::vector<Complex>& bb) {
         for (int g = 0; g < n; ++g)
-            if (std::abs(a[static_cast<std::size_t>(g)] - bb[static_cast<std::size_t>(g)]) > 1e-5)
-                return false;
+            if (std::abs(a[static_cast<std::size_t>(g)] - bb[static_cast<std::size_t>(g)]) > 1e-5) return false;
         return true;
     };
     long long sum_d2 = 0;
     for (auto& cand : cands) {
         bool seen = false;
         for (const auto& ir : irreps)
-            if (ir.dim == cand.dim && same_char(ir.character, cand.chi)) { seen = true; break; }
+            if (ir.dim == cand.dim && same_char(ir.character, cand.chi)) {
+                seen = true;
+                break;
+            }
         if (seen) continue;
         IrrepData ir;
         ir.dim = cand.dim;
@@ -164,10 +162,10 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     p %= L;
     if ((4 * p) % L == 0) {
         switch ((4 * p) / L) {
-            case 0: return {1.0, 0.0};
-            case 1: return {0.0, 1.0};
-            case 2: return {-1.0, 0.0};
-            default: return {0.0, -1.0};
+        case 0: return {1.0, 0.0};
+        case 1: return {0.0, 1.0};
+        case 2: return {-1.0, 0.0};
+        default: return {0.0, -1.0};
         }
     }
     const double th = 6.283185307179586476925286766559 * static_cast<double>(p) / static_cast<double>(L);
@@ -182,9 +180,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 // i.e. b = phase_chi(g^m) / m + j L / m. The trivial character comes first.
 [[nodiscard]] std::vector<IrrepData> abelian_characters(const std::vector<std::vector<int>>& mult, int e) {
     const int n = static_cast<int>(mult.size());
-    const auto mul = [&mult](int a, int b) {
-        return mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)];
-    };
+    const auto mul = [&mult](int a, int b) { return mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)]; };
     long long L = 1;
     for (int a = 0; a < n; ++a) {
         long long ord = 1;
@@ -199,7 +195,10 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
         if (in_H[static_cast<std::size_t>(g)]) continue;
         std::vector<int> gk{e};                                  // g^0 .. g^(m-1)
         int x = g;
-        while (!in_H[static_cast<std::size_t>(x)]) { gk.push_back(x); x = mul(x, g); }
+        while (!in_H[static_cast<std::size_t>(x)]) {
+            gk.push_back(x);
+            x = mul(x, g);
+        }
         const int gm = x;                                        // g^m, in H
         const long long m = static_cast<long long>(gk.size());
         std::vector<int> grown;
@@ -249,8 +248,8 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 // M = M0 + M0^dagger with M0 = sum_h c_h R(h) is a generic Hermitian element of the right algebra;
 // its eigenspaces are single irreducible left modules, and D(g) = V^dagger L(g) V on each.
 [[nodiscard]] bool try_decompose_twisted(const std::vector<std::vector<int>>& mult,
-                                         const std::vector<std::vector<Complex>>& omega,
-                                         std::uint64_t seed, std::vector<IrrepData>& out) {
+                                         const std::vector<std::vector<Complex>>& omega, std::uint64_t seed,
+                                         std::vector<IrrepData>& out) {
     const int n = static_cast<int>(mult.size());
     std::mt19937_64 gen(seed);
     std::normal_distribution<double> nd(0.0, 1.0);
@@ -267,7 +266,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
     const Eigen::VectorXd& evals = es.eigenvalues();
     const Eigen::MatrixXcd& evecs = es.eigenvectors();
     const double span = std::max(1.0, evals(n - 1) - evals(0));
-    const double tol  = 1e-6 * span;
+    const double tol = 1e-6 * span;
     std::vector<IrrepData> irreps;
     long long sum_d2 = 0;
     for (int b = 0, i = 1; i <= n; ++i) {
@@ -296,8 +295,13 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
             if (other.dim != d) continue;
             bool same = true;
             for (int g = 0; g < n && same; ++g)
-                same = std::abs(other.character[static_cast<std::size_t>(g)] - ir.character[static_cast<std::size_t>(g)]) <= 1e-5;
-            if (same) { seen = true; break; }
+                same =
+                    std::abs(other.character[static_cast<std::size_t>(g)] - ir.character[static_cast<std::size_t>(g)])
+                    <= 1e-5;
+            if (same) {
+                seen = true;
+                break;
+            }
         }
         if (seen) continue;
         sum_d2 += static_cast<long long>(d) * d;
@@ -310,8 +314,7 @@ compose(const std::vector<int>& pg, const std::vector<int>& ph) {
 
 }  // namespace
 
-GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
-                             int /*n_sites*/) {
+GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique, int /*n_sites*/) {
     const int n = static_cast<int>(max_clique.size());
     if (n == 0) throw std::runtime_error("decompose_irreps: empty group");
 
@@ -321,21 +324,17 @@ GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique,
 
     auto lookup = [&](const std::vector<int>& p) -> int {
         auto it = idx.find(p);
-        if (it == idx.end())
-            throw std::runtime_error(
-                "decompose_irreps: group is not closed under composition");
+        if (it == idx.end()) throw std::runtime_error("decompose_irreps: group is not closed under composition");
         return it->second;
     };
 
     // Multiplication table; the rest (inverse, classes, numerical
     // decomposition) is abstract.
-    std::vector<std::vector<int>> mult(
-        static_cast<std::size_t>(n), std::vector<int>(static_cast<std::size_t>(n)));
+    std::vector<std::vector<int>> mult(static_cast<std::size_t>(n), std::vector<int>(static_cast<std::size_t>(n)));
     for (int a = 0; a < n; ++a)
         for (int b = 0; b < n; ++b)
             mult[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] =
-                lookup(compose(max_clique[static_cast<std::size_t>(a)],
-                               max_clique[static_cast<std::size_t>(b)]));
+                lookup(compose(max_clique[static_cast<std::size_t>(a)], max_clique[static_cast<std::size_t>(b)]));
     return decompose_irreps_tables(mult);
 }
 
@@ -345,7 +344,7 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
 
     GroupIrreps gi;
     gi.order = n;
-    gi.mult  = mult;
+    gi.mult = mult;
 
     // Identity + inverse from the table alone: e is the unique element with
     // mult[e][b] == b for every b; inverse[a] solves mult[a][x] == e.
@@ -359,9 +358,7 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
             }
         if (is_e) e = a;
     }
-    if (e < 0)
-        throw std::runtime_error(
-            "decompose_irreps_tables: multiplication table has no identity");
+    if (e < 0) throw std::runtime_error("decompose_irreps_tables: multiplication table has no identity");
     gi.inverse.assign(static_cast<std::size_t>(n), -1);
     for (int a = 0; a < n; ++a) {
         for (int x = 0; x < n; ++x) {
@@ -371,8 +368,7 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
             }
         }
         if (gi.inverse[static_cast<std::size_t>(a)] < 0)
-            throw std::runtime_error(
-                "decompose_irreps_tables: element without inverse (not a group)");
+            throw std::runtime_error("decompose_irreps_tables: element without inverse (not a group)");
     }
 
     // Conjugacy classes: a ~ x·a·x^{-1}.
@@ -381,7 +377,7 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
     for (int a = 0; a < n; ++a) {
         if (gi.class_of[static_cast<std::size_t>(a)] >= 0) continue;
         for (int x = 0; x < n; ++x) {
-            const int xa  = gi.mult[static_cast<std::size_t>(x)][static_cast<std::size_t>(a)];
+            const int xa = gi.mult[static_cast<std::size_t>(x)][static_cast<std::size_t>(a)];
             const int xax = gi.mult[static_cast<std::size_t>(xa)]
                                    [static_cast<std::size_t>(gi.inverse[static_cast<std::size_t>(x)])];
             gi.class_of[static_cast<std::size_t>(xax)] = nclasses;
@@ -402,12 +398,10 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
     for (std::uint64_t seed = 1; seed <= 16 && !ok; ++seed)
         ok = try_decompose(gi.inverse, gi.mult, 0x9E3779B97F4A7C15ull * seed, irreps);
     if (!ok)
-        throw std::runtime_error(
-            "decompose_irreps: numerical decomposition failed (Σ d_Γ² != |G|) "
-            "after 16 attempts");
+        throw std::runtime_error("decompose_irreps: numerical decomposition failed (Σ d_Γ² != |G|) "
+                                 "after 16 attempts");
     if (static_cast<int>(irreps.size()) != nclasses)
-        throw std::runtime_error(
-            "decompose_irreps: #irreps != #conjugacy-classes");
+        throw std::runtime_error("decompose_irreps: #irreps != #conjugacy-classes");
 
     // Order irreps by ascending dimension (1-D first), stable.
     std::stable_sort(irreps.begin(), irreps.end(),
@@ -420,12 +414,10 @@ GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult) {
 GroupIrreps decompose_projective_irreps(const std::vector<std::vector<int>>& mult,
                                         const std::vector<std::vector<Complex>>& omega) {
     const std::size_t n = mult.size();
-    if (omega.size() != n)
-        throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
+    if (omega.size() != n) throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
     bool trivial = true;
     for (std::size_t a = 0; a < n; ++a) {
-        if (omega[a].size() != n)
-            throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
+        if (omega[a].size() != n) throw std::invalid_argument("decompose_projective_irreps: omega must be |G| x |G|");
         for (std::size_t b = 0; b < n; ++b) {
             // scale-free: unit-modulus phases (group data)
             if (std::abs(std::abs(omega[a][b]) - 1.0) > 1e-8)
@@ -440,8 +432,8 @@ GroupIrreps decompose_projective_irreps(const std::vector<std::vector<int>>& mul
     int e = 0;   // the identity: e x = x for one x already
     while (gi.mult[static_cast<std::size_t>(e)][0] != 0) ++e;
     for (std::size_t x = 0; x < n; ++x) {
-        // scale-free: unit-modulus phases (group data)
-        if (std::abs(omega[static_cast<std::size_t>(e)][x] - 1.0) > 1e-8 || std::abs(omega[x][static_cast<std::size_t>(e)] - 1.0) > 1e-8)
+        if (std::abs(omega[static_cast<std::size_t>(e)][x] - 1.0) > 1e-8  // scale-free: unit-modulus phases
+            || std::abs(omega[x][static_cast<std::size_t>(e)] - 1.0) > 1e-8)
             throw std::invalid_argument("decompose_projective_irreps: omega is not normalised at the identity");
         for (std::size_t y = 0; y < n; ++y)
             for (std::size_t z = 0; z < n; ++z) {

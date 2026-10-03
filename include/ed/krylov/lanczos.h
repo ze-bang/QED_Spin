@@ -24,7 +24,7 @@
 //     Gram-Schmidt but batches the M projections of each pass into one
 //     dot_many / axpy_many call.
 //   * Breakdown detection via beta < tol.
-//   * Optional basis-vector retention for downstream FTLM / 
+//   * Optional basis-vector retention for downstream FTLM /
 //     observable-projection consumers.
 //
 // Pointer-convention notes:
@@ -70,8 +70,10 @@ using Complex = std::complex<double>;
 /// the form every start vector of the engine is drawn in.
 template <class Scalar, class Gen>
 [[nodiscard]] inline Scalar gaussian_entry(std::normal_distribution<double>& nd, Gen& gen) {
-    if constexpr (std::is_floating_point_v<Scalar>) return nd(gen);
-    else return Scalar(nd(gen), nd(gen));
+    if constexpr (std::is_floating_point_v<Scalar>)
+        return nd(gen);
+    else
+        return Scalar(nd(gen), nd(gen));
 }
 
 /// Reorthogonalisation policy.
@@ -96,8 +98,7 @@ enum class ReorthPolicy : std::uint8_t {
 };
 
 /// Options for `lanczos_kernel` on vectors of Scalar.
-template <class Scalar>
-struct LanczosKernelOptionsT {
+template <class Scalar> struct LanczosKernelOptionsT {
     std::size_t max_iter = 100;          ///< Krylov dimension cap.
 
     /// Genuine-invariant-subspace breakdown threshold on beta_{j+1}.
@@ -108,10 +109,10 @@ struct LanczosKernelOptionsT {
     /// `breakdown_tol` (this field) is *only* the invariant-subspace
     /// detection threshold. Callers that want the bare recurrence to
     /// stop on a small residual (||w|| < tol) set it explicitly.
-    double      breakdown_tol = 1e-300;
+    double breakdown_tol = 1e-300;
 
-    ReorthPolicy reorth  = ReorthPolicy::FullCGS2;
-    bool keep_basis      = true;         ///< Retain orthonormal basis (req'd for reorth ≠ None).
+    ReorthPolicy reorth = ReorthPolicy::FullCGS2;
+    bool keep_basis = true;         ///< Retain orthonormal basis (req'd for reorth ≠ None).
 
     /// Optional Ritz-convergence early-exit callback. Called every
     /// `convergence_check_interval` iterations (after the kernel has
@@ -130,9 +131,7 @@ struct LanczosKernelOptionsT {
     /// Typical use: solve the running tridiagonal (`tridiag_eig`) and test
     /// the Paige bound |beta_m z_{m,j}| of the wanted Ritz values, as the
     /// block lanes' k = 1 scan does (block_solve.cpp).
-    std::function<bool(const std::vector<double>& alpha,
-                       const std::vector<double>& beta)>
-        convergence_check;
+    std::function<bool(const std::vector<double>& alpha, const std::vector<double>& beta)> convergence_check;
 
     /// Stride (in iterations) between `convergence_check` invocations.
     /// 0 disables the check entirely (the kernel doesn't call the
@@ -200,8 +199,7 @@ using LanczosKernelOptions = LanczosKernelOptionsT<Complex>;
 /// at basis[j] = block + j n): the batched primitives read all of it in one call per pass
 /// (CudaBackend: one gemv, no copy). The capacity is fixed when it is made; a column is written
 /// when it is appended (the CPU backend's first touch, column by column).
-template <class Scalar>
-class KrylovBasis {
+template <class Scalar> class KrylovBasis {
 public:
     using Backend = ed::matvec::BasicBackend<Scalar>;
 
@@ -226,25 +224,24 @@ public:
 
 private:
     typename Backend::UniqueVec block_{nullptr, typename Backend::Deleter{nullptr}};
-    std::size_t                 n_ = 0, cap_ = 0;
-    std::vector<const Scalar*>  ptrs_;
+    std::size_t n_ = 0, cap_ = 0;
+    std::vector<const Scalar*> ptrs_;
 };
 
 /// Output of `lanczos_kernel`. `basis` is populated iff
 /// `opts.keep_basis == true`; ownership transfers to the caller.
-template <class Scalar>
-struct LanczosKernelResultT {
+template <class Scalar> struct LanczosKernelResultT {
     /// Diagonal of the tridiagonal matrix, size = `iters_done`.
-    std::vector<double>              alpha;
+    std::vector<double> alpha;
     /// Sub-diagonal of the tridiagonal matrix, size = `iters_done + 1`.
     /// `beta[0]` is unused, so `beta[j]` couples `alpha[j-1]` and `alpha[j]`.
-    std::vector<double>              beta;
+    std::vector<double> beta;
     /// Orthonormal Krylov basis in backend memory, contiguous. Each vector is
     /// dimension `local_n`. Empty iff `opts.keep_basis == false`.
-    KrylovBasis<Scalar>              basis;
+    KrylovBasis<Scalar> basis;
     /// Number of iterations actually completed (may be less than
     /// `opts.max_iter` if Lanczos broke down via beta < tol).
-    std::size_t                      iters_done = 0;
+    std::size_t iters_done = 0;
 };
 using LanczosKernelResult = LanczosKernelResultT<Complex>;
 
@@ -267,13 +264,9 @@ using LanczosKernelResult = LanczosKernelResultT<Complex>;
 inline constexpr double kDgksKappa = 0.7071067811865476;
 
 template <typename Scalar, typename MatvecFn>
-LanczosKernelResultT<Scalar> lanczos_kernel(
-    const ed::matvec::BasicBackend<Scalar>& be,
-    MatvecFn&& matvec,
-    std::size_t local_n,
-    const Scalar* v0_local,
-    const LanczosKernelOptionsT<Scalar>& opts)
-{
+LanczosKernelResultT<Scalar> lanczos_kernel(const ed::matvec::BasicBackend<Scalar>& be, MatvecFn&& matvec,
+                                            std::size_t local_n, const Scalar* v0_local,
+                                            const LanczosKernelOptionsT<Scalar>& opts) {
     using UniqueVec = typename ed::matvec::BasicBackend<Scalar>::UniqueVec;
 
     // ------------------------------------------------------------------
@@ -282,15 +275,12 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     // (the gate is a single getenv at kernel entry, the per-iter cost
     // is just `if (profile_on) accumulate`).
     // ------------------------------------------------------------------
-    const bool profile_on = []() {
-        return ed::env::flag("ED_LANCZOS_KERNEL_PROFILE", false);
-    }();
+    const bool profile_on = []() { return ed::env::flag("ED_LANCZOS_KERNEL_PROFILE", false); }();
     auto now_us = [] {
-        return std::chrono::duration<double, std::micro>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count();
     };
     double t_apply_us = 0.0, t_recur_us = 0.0, t_reorth_us = 0.0;
-    double t_norm_us  = 0.0, t_ring_us  = 0.0, t_check_us  = 0.0;
+    double t_norm_us = 0.0, t_ring_us = 0.0, t_check_us = 0.0;
     std::size_t iters_profiled = 0;
     const double kernel_t0 = profile_on ? now_us() : 0.0;
 
@@ -298,12 +288,9 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     // LocalDGKS3 owns its own ring buffer and does NOT require keep_basis.
     const bool needs_kept_basis = opts.reorth == ReorthPolicy::FullCGS2;
     if (needs_kept_basis && !opts.keep_basis) {
-        throw std::invalid_argument(
-            "lanczos_kernel: FullCGS2 requires keep_basis = true");
+        throw std::invalid_argument("lanczos_kernel: FullCGS2 requires keep_basis = true");
     }
-    if (opts.max_iter == 0) {
-        return LanczosKernelResultT<Scalar>{};
-    }
+    if (opts.max_iter == 0) { return LanczosKernelResultT<Scalar>{}; }
     // NB: `local_n == 0` does not short-circuit here. All host BLAS-1
     // locals below operate trivially on a length-0 buffer; the backend's
     // `make_zero_vector` is expected to handle `n == 0` (CpuBackend does).
@@ -323,8 +310,8 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     // pair to avoid the cost of an erase()/insert() on the hot path.
     // Sized to opts.local_ring_size when LocalDGKS3 is active.
     std::vector<UniqueVec> ring;
-    std::size_t            ring_head  = 0;
-    std::size_t            ring_count = 0;
+    std::size_t ring_head = 0;
+    std::size_t ring_count = 0;
 
     // Optional basis storage: one contiguous block (KrylovBasis), at most one column per step --
     // and a Krylov space never exceeds the dimension of the space.
@@ -336,25 +323,21 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
     // Normalise the initial vector in-place (we own a fresh copy).
     be.copy(v0_local, v_curr.get(), local_n);
     const double v0_norm = be.nrm2(v_curr.get(), local_n);
-    if (!(v0_norm > 0.0)) {
-        throw std::invalid_argument(
-            "lanczos_kernel: initial vector has non-positive norm");
-    }
+    if (!(v0_norm > 0.0)) { throw std::invalid_argument("lanczos_kernel: initial vector has non-positive norm"); }
     be.scale(Scalar(1.0 / v0_norm), v_curr.get(), local_n);
 
     if (opts.keep_basis) {
         basis = KrylovBasis<Scalar>(be, local_n, expected_total);
         basis.push_copy(be, v_curr.get());
     }
-    const bool ring_needed =
-        (opts.reorth == ReorthPolicy::LocalDGKS3 && opts.local_ring_size > 2);
+    const bool ring_needed = (opts.reorth == ReorthPolicy::LocalDGKS3 && opts.local_ring_size > 2);
     if (ring_needed) {
         ring.reserve(opts.local_ring_size);
         auto first = be.make_zero_vector(local_n);
         be.copy(v_curr.get(), first.get(), local_n);
         ring.emplace_back(std::move(first));
         ring_count = 1;
-        ring_head  = 0;
+        ring_head = 0;
     }
 
     // Reorth pointer set. When `aux_ortho_ptrs` is non-empty (the
@@ -375,9 +358,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
 
     // Scratch for CGS2 coefficients.
     std::vector<Scalar> coeffs;
-    if (needs_kept_basis) {
-        coeffs.reserve(n_aux + expected_total);
-    }
+    if (needs_kept_basis) { coeffs.reserve(n_aux + expected_total); }
 
     // A Krylov space never exceeds the dimension of the space.
     const std::size_t cap = std::min<std::size_t>(opts.max_iter, local_n);
@@ -397,28 +378,22 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
         // v_curr; overlap = <v_curr,w>} become two single-pass calls, and
         // for LocalDGKS3 with K <= 2 the projection onto v_curr is folded
         // into the norm pass below (three fused regions per iteration).
-        const Scalar aj = (j > 0)
-            ? be.axpy_dot(Scalar(-R.beta[j]), v_prev.get(), w.get(),
-                          v_curr.get(), local_n)
-            : be.dot(v_curr.get(), w.get(), local_n);
+        const Scalar aj = (j > 0) ? be.axpy_dot(Scalar(-R.beta[j]), v_prev.get(), w.get(), v_curr.get(), local_n)
+                                  : be.dot(v_curr.get(), w.get(), local_n);
         R.alpha.push_back(std::real(aj));
 
-        const bool fuse_local_k12 =
-            (opts.reorth == ReorthPolicy::LocalDGKS3) &&
-            (opts.local_ring_size <= 2) && (j > 0);
+        const bool fuse_local_k12 = (opts.reorth == ReorthPolicy::LocalDGKS3) && (opts.local_ring_size <= 2) && (j > 0);
         Scalar overlap_curr{};
         if (fuse_local_k12) {
             // w -= alpha[j] * v_curr, and the LocalDGKS3 overlap <v_curr, w>
-            overlap_curr = be.axpy_dot(Scalar(-R.alpha[j]), v_curr.get(),
-                                       w.get(), v_curr.get(), local_n);
+            overlap_curr = be.axpy_dot(Scalar(-R.alpha[j]), v_curr.get(), w.get(), v_curr.get(), local_n);
         } else {
             // w -= alpha[j] * v_curr
-            be.axpy(Scalar(-R.alpha[j]),
-                    v_curr.get(), w.get(), local_n);
+            be.axpy(Scalar(-R.alpha[j]), v_curr.get(), w.get(), local_n);
         }
         // Deferred projection coefficient folded into the norm pass (K == 1).
-        bool    defer_axpy = false;
-        Scalar  defer_coef{};
+        bool defer_axpy = false;
+        Scalar defer_coef{};
         const double t2 = profile_on ? now_us() : 0.0;
         if (profile_on) t_recur_us += (t2 - t1);
 
@@ -440,11 +415,9 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
 
             // ----- CGS2 pass 1 -----
             const double n_before = be.nrm2(w.get(), local_n);
-            be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
-                        w.get(), local_n, coeffs.data());
+            be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(), w.get(), local_n, coeffs.data());
             for (auto& c : coeffs) c = -c;
-            be.axpy_many(coeffs.data(), ortho_ptrs.data(),
-                         ortho_ptrs.size(), w.get(), local_n);
+            be.axpy_many(coeffs.data(), ortho_ptrs.data(), ortho_ptrs.size(), w.get(), local_n);
 
             // ----- CGS2 pass 2 (reprojection), DGKS-gated -----
             // "Twice is enough" (Daniel-Gragg-Kaufman-Stewart): a second
@@ -453,11 +426,9 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
             // cheaper than an unconditional 2m-sweep second pass.
             const double n_after = be.nrm2(w.get(), local_n);
             if (n_after < kDgksKappa * n_before) {
-                be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(),
-                            w.get(), local_n, coeffs.data());
+                be.dot_many(ortho_ptrs.data(), ortho_ptrs.size(), w.get(), local_n, coeffs.data());
                 for (auto& c : coeffs) c = -c;
-                be.axpy_many(coeffs.data(), ortho_ptrs.data(),
-                             ortho_ptrs.size(), w.get(), local_n);
+                be.axpy_many(coeffs.data(), ortho_ptrs.data(), ortho_ptrs.size(), w.get(), local_n);
             }
         } else if (opts.reorth == ReorthPolicy::LocalDGKS3) {
             // For the common cases K=1 and K=2 the kernel already holds
@@ -472,9 +443,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
                 // computed in the fused recurrence pass above; for K == 1
                 // the projection itself is folded into the norm pass.
                 if (j > 0) {
-                    const Scalar overlap = fuse_local_k12
-                        ? overlap_curr
-                        : be.dot(v_curr.get(), w.get(), local_n);
+                    const Scalar overlap = fuse_local_k12 ? overlap_curr : be.dot(v_curr.get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
                         if (K == 1) {
                             defer_axpy = true;
@@ -487,8 +456,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
                 // K==2: also project against V_{j-1} (= v_prev) when
                 // available. At j == 0 there is no prior basis vector.
                 if (K == 2 && j > 0) {
-                    const Scalar overlap =
-                        be.dot(v_prev.get(), w.get(), local_n);
+                    const Scalar overlap = be.dot(v_prev.get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
                         be.axpy(-overlap, v_prev.get(), w.get(), local_n);
                     }
@@ -497,13 +465,10 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
                 // K>=3: fall back to the ring buffer (still updated
                 // below). Walks most-recent-first, threshold-gated.
                 const std::size_t cap_ring = ring.size();
-                const std::size_t k_max    = std::min<std::size_t>(
-                    ring_count, opts.local_ring_size);
+                const std::size_t k_max = std::min<std::size_t>(ring_count, opts.local_ring_size);
                 for (std::size_t k = 0; k < k_max; ++k) {
-                    const std::size_t slot =
-                        (ring_head + ring_count - 1 - k) % cap_ring;
-                    const Scalar overlap =
-                        be.dot(ring[slot].get(), w.get(), local_n);
+                    const std::size_t slot = (ring_head + ring_count - 1 - k) % cap_ring;
+                    const Scalar overlap = be.dot(ring[slot].get(), w.get(), local_n);
                     if (std::abs(overlap) > opts.local_ortho_threshold) {
                         be.axpy(-overlap, ring[slot].get(), w.get(), local_n);
                     }
@@ -515,9 +480,8 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
         if (profile_on) t_reorth_us += (t3 - t2);
 
         // beta[j+1] = ||w||, fused with the deferred K == 1 projection when there is one.
-        const double bnext = defer_axpy
-            ? be.axpy_nrm2(defer_coef, v_curr.get(), w.get(), local_n)
-            : be.nrm2(w.get(), local_n);
+        const double bnext =
+            defer_axpy ? be.axpy_nrm2(defer_coef, v_curr.get(), w.get(), local_n) : be.nrm2(w.get(), local_n);
         R.beta.push_back(bnext);
         const double t4 = profile_on ? now_us() : 0.0;
         if (profile_on) t_norm_us += (t4 - t3);
@@ -559,10 +523,8 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
         // Optional Ritz-convergence early-exit, after the rotation and BEFORE the
         // next matvec. See the `LanczosKernelOptions::convergence_check`
         // comment for the exact alpha/beta sizes on entry.
-        if (opts.convergence_check &&
-            opts.convergence_check_interval > 0 &&
-            ((j + 1) % opts.convergence_check_interval == 0))
-        {
+        if (opts.convergence_check && opts.convergence_check_interval > 0
+            && ((j + 1) % opts.convergence_check_interval == 0)) {
             const double tc0 = profile_on ? now_us() : 0.0;
             const bool converged = opts.convergence_check(R.alpha, R.beta);
             if (profile_on) t_check_us += (now_us() - tc0);
@@ -581,9 +543,7 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
         // FTLM tridiag) see a basis of the right length.
         if (opts.keep_basis) {
             basis.push_copy(be, v_curr.get());
-            if (needs_kept_basis) {
-                ortho_ptrs.push_back(basis[basis.size() - 1]);
-            }
+            if (needs_kept_basis) { ortho_ptrs.push_back(basis[basis.size() - 1]); }
         }
     }
 
@@ -592,32 +552,23 @@ LanczosKernelResultT<Scalar> lanczos_kernel(
 
     if (profile_on) {
         const double t_total = now_us() - kernel_t0;
-        const double t_other = std::max(0.0,
-            t_total - t_apply_us - t_recur_us - t_reorth_us
-                    - t_norm_us  - t_ring_us  - t_check_us);
+        const double t_other =
+            std::max(0.0, t_total - t_apply_us - t_recur_us - t_reorth_us - t_norm_us - t_ring_us - t_check_us);
         const std::size_t iters = R.iters_done;
-        const double inv_iters = (iters > 0)
-            ? 1.0 / static_cast<double>(iters) : 0.0;
-        const auto pct = [&](double x) -> double {
-            return (t_total > 0.0) ? 100.0 * x / t_total : 0.0;
-        };
+        const double inv_iters = (iters > 0) ? 1.0 / static_cast<double>(iters) : 0.0;
+        const auto pct = [&](double x) -> double { return (t_total > 0.0) ? 100.0 * x / t_total : 0.0; };
         ED_LOG(Info,
-            "[lanczos_kernel] iters=%zu total=%.2f ms = "
-            "apply %.1f%% (%.1f us/it) "
-            "recur %.1f%% (%.1f us/it) "
-            "reorth %.1f%% (%.1f us/it) "
-            "norm %.1f%% (%.1f us/it) "
-            "ring %.1f%% (%.1f us/it) "
-            "check %.1f%% (%.1f us/it) "
-            "other %.1f%%",
-            iters, t_total / 1000.0,
-            pct(t_apply_us),  t_apply_us  * inv_iters,
-            pct(t_recur_us),  t_recur_us  * inv_iters,
-            pct(t_reorth_us), t_reorth_us * inv_iters,
-            pct(t_norm_us),   t_norm_us   * inv_iters,
-            pct(t_ring_us),   t_ring_us   * inv_iters,
-            pct(t_check_us),  t_check_us  * inv_iters,
-            pct(t_other));
+               "[lanczos_kernel] iters=%zu total=%.2f ms = "
+               "apply %.1f%% (%.1f us/it) "
+               "recur %.1f%% (%.1f us/it) "
+               "reorth %.1f%% (%.1f us/it) "
+               "norm %.1f%% (%.1f us/it) "
+               "ring %.1f%% (%.1f us/it) "
+               "check %.1f%% (%.1f us/it) "
+               "other %.1f%%",
+               iters, t_total / 1000.0, pct(t_apply_us), t_apply_us * inv_iters, pct(t_recur_us),
+               t_recur_us * inv_iters, pct(t_reorth_us), t_reorth_us * inv_iters, pct(t_norm_us), t_norm_us * inv_iters,
+               pct(t_ring_us), t_ring_us * inv_iters, pct(t_check_us), t_check_us * inv_iters, pct(t_other));
         (void)iters_profiled;  // available for callers that want it
     }
 

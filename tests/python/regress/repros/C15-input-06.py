@@ -7,6 +7,7 @@ equals the plain XXZ part), and include_isotropic=False silently ignores Jzz (Jz
 same spectrum). Uses the 4-site OBC pyrochlore tetrahedron.
 Restated with the fix: a refusal (an exception naming the problem) of each of the three requests is
 not the silent behaviour claimed, and the script must not crash on it."""
+
 import signal
 import subprocess
 import sys
@@ -39,23 +40,28 @@ E_ref = spec(HB(4).pyrochlore_non_kramers(ref, Jxx, Jyy, Jzz))
 E_xxz = spec(HB(4).xxz(pairs, (Jxx + Jyy) / 2, Jzz))
 d_ref_xxz = np.max(np.abs(E_ref - E_xxz))
 E_cus, err_cus = attempt(lambda: spec(HB(4).pyrochlore_non_kramers(custom, Jxx, Jyy, Jzz)))
-E_noiso1, err_jzz = attempt(lambda: spec(HB(4).pyrochlore_non_kramers(ref, Jxx, Jyy, 1.0,
-                                                                     include_isotropic=False)))
+E_noiso1, err_jzz = attempt(lambda: spec(HB(4).pyrochlore_non_kramers(ref, Jxx, Jyy, 1.0, include_isotropic=False)))
 E_noiso0 = spec(HB(4).pyrochlore_non_kramers(ref, Jxx, Jyy, 0.0, include_isotropic=False))
 silent_drop = err_cus is None and np.max(np.abs(E_cus - E_xxz)) < 1e-10
 silent_jzz = err_jzz is None and np.max(np.abs(E_noiso1 - E_noiso0)) < 1e-12
 
-code = ("import qed;L=qed.input.lattice;lat=L.pyrochlore(1,1,1,False);lat.sublattice=[0];"
-        "qed.input.HamiltonianBuilder(4).pyrochlore_non_kramers(lat,1.0,0.5,0.7);print('no error')")
+code = (
+    "import qed;L=qed.input.lattice;lat=L.pyrochlore(1,1,1,False);lat.sublattice=[0];"
+    "qed.input.HamiltonianBuilder(4).pyrochlore_non_kramers(lat,1.0,0.5,0.7);print('no error')"
+)
 r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
 short = f"rc={r.returncode} out={r.stdout.strip()[-60:]!r} err={r.stderr.strip()[-120:]!r}"
 silent_short = r.returncode == 0
-print(f"|E(tagged)-E(xxz)|={d_ref_xxz:.3e}; untagged: {err_cus or 'ran'}; Jzz with no-iso: "
-      f"{err_jzz or 'ran'}; short sublattice: {short}")
+print(
+    f"|E(tagged)-E(xxz)|={d_ref_xxz:.3e}; untagged: {err_cus or 'ran'}; Jzz with no-iso: "
+    f"{err_jzz or 'ran'}; short sublattice: {short}"
+)
 if d_ref_xxz <= 1e-6:
     print(f"REPRO: INCONCLUSIVE the tagged lattice shows no J_pmpm term (d={d_ref_xxz:.3e})")
 elif silent_drop or silent_jzz or silent_short:
-    print(f"REPRO: CONFIRMED untagged lattice drops J_pmpm silently={silent_drop}; include_isotropic=False "
-          f"ignores Jzz silently={silent_jzz}; short sublattice accepted={silent_short} ({short})")
+    print(
+        f"REPRO: CONFIRMED untagged lattice drops J_pmpm silently={silent_drop}; include_isotropic=False "
+        f"ignores Jzz silently={silent_jzz}; short sublattice accepted={silent_short} ({short})"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED all three refused: {err_cus}; {err_jzz}; short sublattice rc={r.returncode}")

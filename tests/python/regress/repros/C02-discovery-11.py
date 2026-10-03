@@ -5,6 +5,7 @@
 (close_group([]) returns None, api/symmetry.py:135-137) instead of running without spatial
 symmetry, and Symmetry(spatial=np.array([...])) crashes in split_nonabelian on
 `symmetry_or_gens or []` (_groups.py:134) with numpy's ambiguous-truth-value error."""
+
 import signal
 import numpy as np
 import qed

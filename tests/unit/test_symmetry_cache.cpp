@@ -20,16 +20,13 @@ using namespace ed::symmetry;
 namespace {
 
 bool tables_equal(const OrbitTable& a, const OrbitTable& b) {
-    return a.reps == b.reps && a.stab_id == b.stab_id &&
-           a.stab_elems == b.stab_elems &&
-           a.subspace_dim == b.subspace_dim &&
-           a.content_hash == b.content_hash;
+    return a.reps == b.reps && a.stab_id == b.stab_id && a.stab_elems == b.stab_elems
+           && a.subspace_dim == b.subspace_dim && a.content_hash == b.content_hash;
 }
 
 // Z_N translations of a ring, compiled.
 CompiledGroup translations(int N) {
-    return CompiledGroup::from_permutations(
-        ed::sym::generate_group({ed::sym::translation(N)}), N);
+    return CompiledGroup::from_permutations(ed::sym::generate_group({ed::sym::translation(N)}), N);
 }
 
 // The dihedral group of the ring (translations + reflection), compiled.
@@ -54,8 +51,7 @@ TEST_CASE("acquire returns the table the builders make", "[symmetry_cache]") {
     }
 }
 
-TEST_CASE("acquire: in-process registry returns the same shared table",
-          "[symmetry_cache]") {
+TEST_CASE("acquire: in-process registry returns the same shared table", "[symmetry_cache]") {
     const int N = 11;  // distinct N so other tests' registry entries don't alias
     const CompiledGroup cg = translations(N);
 

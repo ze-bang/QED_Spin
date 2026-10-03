@@ -26,10 +26,10 @@ namespace ed::solvers {
 /// Column-major dense blocks packed back to back: a real block as n^2 doubles, a complex one as
 /// n^2 complex values (2 n^2 doubles, interleaved).
 struct LgBlocksPacked {
-    std::vector<std::size_t>       offset;      ///< start of block b in `data`, in doubles
-    std::vector<std::int64_t>      block_dim;   ///< n_b (block b is n_b x n_b)
-    std::vector<char>              real;        ///< block b is stored (and solved) real
-    ed::core::NumaVector<double>   data;        ///< grown without zeroing: every slot is written whole
+    std::vector<std::size_t> offset;      ///< start of block b in `data`, in doubles
+    std::vector<std::int64_t> block_dim;   ///< n_b (block b is n_b x n_b)
+    std::vector<char> real;        ///< block b is stored (and solved) real
+    ed::core::NumaVector<double> data;        ///< grown without zeroing: every slot is written whole
 
     [[nodiscard]] std::size_t bytes() const noexcept { return data.size() * sizeof(double); }
     /// The slot of a new n x n column-major block, for the caller to fill whole: n^2 doubles
@@ -62,8 +62,7 @@ struct LgBlocksPacked {
 /// Returns the eigenvalues concatenated per block, ascending within each block. Throws on any
 /// CUDA/cuSOLVER failure (callers degrade to the CPU path). Defined in src/gpu/little_group.cu --
 /// only linked into WITH_CUDA builds; call sites must be #ifdef WITH_CUDA guarded.
-[[nodiscard]] std::vector<double>
-lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P);
+[[nodiscard]] std::vector<double> lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P);
 
 /// The device bytes lg_blocks_batched_eigenvalues_gpu needs beyond the matrices for a single
 /// block of dimension n (its workspace and eigenvalues). Throws like the solver.

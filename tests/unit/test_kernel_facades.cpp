@@ -38,9 +38,7 @@ namespace {
 // suitable for the kernel facades.
 struct MatvecCallable {
     const ed::LinearOperator* op;
-    void operator()(const Complex* in, Complex* out, std::size_t n) const {
-        op->apply(in, out, n);
-    }
+    void operator()(const Complex* in, Complex* out, std::size_t n) const { op->apply(in, out, n); }
 };
 
 }  // namespace
@@ -50,8 +48,8 @@ TEST_CASE("krylov::krylov_schur_kernel == dense lowest-k WITH multiplicity",
     // The Heisenberg ring has SU(2)-degenerate levels: a Krylov space grown from one
     // start vector holds one copy of each, so the k lowest eigenvalues *counting
     // multiplicity* need the fresh starts after locking and the degeneracy probe.
-    constexpr std::uint64_t N   = 6;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+    constexpr std::uint64_t N = 6;
+    constexpr std::size_t dim = std::size_t{1} << N;
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
 
     ed::matvec::CpuBackend backend;
@@ -74,9 +72,9 @@ TEST_CASE("krylov::krylov_schur_kernel == dense lowest-k WITH multiplicity",
     std::vector<Complex> v0(dim);
     for (auto& z : v0) z = Complex(nd(gen), nd(gen));
     ed::krylov::KrylovSchurOptions opts;
-    opts.num_eigs     = 6;
-    opts.max_iter     = 40;
-    opts.tolerance    = 1e-10;
+    opts.num_eigs = 6;
+    opts.max_iter = 40;
+    opts.tolerance = 1e-10;
     opts.max_restarts = 200;
     auto res = ed::krylov::krylov_schur_kernel(backend, apply, dim, v0.data(), opts);
 
@@ -107,9 +105,9 @@ TEST_CASE("krylov::krylov_schur_kernel degeneracy probe recovers skipped copies"
     v0[2] = v0[4] = v0[5] = Complex(0.0, 0.0);
 
     ed::krylov::KrylovSchurOptions opts;
-    opts.num_eigs     = 6;
-    opts.max_iter     = 40;
-    opts.tolerance    = 1e-10;
+    opts.num_eigs = 6;
+    opts.max_iter = 40;
+    opts.tolerance = 1e-10;
     opts.max_restarts = 200;
     opts.compute_vectors = true;
     const auto res = ed::krylov::krylov_schur_kernel(backend, apply, dim, v0.data(), opts);
@@ -129,12 +127,11 @@ TEST_CASE("krylov::krylov_schur_kernel degeneracy probe recovers skipped copies"
     REQUIRE(std::abs(bare.eigenvalues.back() - 5.0) < 1e-8);
 }
 
-TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap)",
-          "[kernel-facade][subspace]") {
+TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap)", "[kernel-facade][subspace]") {
     using ed::krylov::krylov_subspace_dim;
     // floor = 2k+20
-    REQUIRE(krylov_subspace_dim(1, 0, 0, 0)   == 22);
-    REQUIRE(krylov_subspace_dim(4, 0, 0, 0)   == 28);
+    REQUIRE(krylov_subspace_dim(1, 0, 0, 0) == 22);
+    REQUIRE(krylov_subspace_dim(4, 0, 0, 0) == 28);
     // grows with the requested (iteration budget)
     REQUIRE(krylov_subspace_dim(1, 200, 0, 0) == 200);
     // the MEMORY cap is the predictable upper bound (cannot OOM)
@@ -142,13 +139,12 @@ TEST_CASE("krylov::krylov_subspace_dim is predictable (floor / grow / memory cap
     // the dimension of the space caps it too
     REQUIRE(krylov_subspace_dim(1, 200, 30, 0) == 30);
     // never below nev+1
-    REQUIRE(krylov_subspace_dim(5, 1, 0, 2)   == 6);
+    REQUIRE(krylov_subspace_dim(5, 1, 0, 2) == 6);
 }
 
-TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
-          "[kernel-facade][krylov-schur][phase6]") {
-    constexpr std::uint64_t N   = 6;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues", "[kernel-facade][krylov-schur][phase6]") {
+    constexpr std::uint64_t N = 6;
+    constexpr std::size_t dim = std::size_t{1} << N;
 
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
 
@@ -156,8 +152,8 @@ TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
     MatvecCallable apply{H.get()};
 
     ed::krylov::KrylovSchurOptions opts;
-    opts.num_eigs  = 3;
-    opts.max_iter  = 40;
+    opts.num_eigs = 3;
+    opts.max_iter = 40;
     opts.tolerance = 1e-10;
 
     std::vector<std::complex<double>> seed(dim);
@@ -173,8 +169,7 @@ TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
         const double inv = 1.0 / std::sqrt(sumsq);
         for (auto& z : seed) z *= inv;
     }
-    auto res = ed::krylov::krylov_schur_kernel(
-        backend, apply, dim, seed.data(), opts);
+    auto res = ed::krylov::krylov_schur_kernel(backend, apply, dim, seed.data(), opts);
 
     REQUIRE(res.eigenvalues.size() >= opts.num_eigs);
     for (std::size_t i = 1; i < res.eigenvalues.size(); ++i) {
@@ -182,10 +177,9 @@ TEST_CASE("krylov::krylov_schur_kernel returns sane Heisenberg eigenvalues",
     }
 }
 
-TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
-          "[kernel-facade][ftlm][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid", "[kernel-facade][ftlm][phase6]") {
+    constexpr std::uint64_t N = 4;
+    constexpr std::size_t dim = std::size_t{1} << N;
 
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
 
@@ -194,22 +188,20 @@ TEST_CASE("thermal::ftlm_kernel returns thermodynamic data over a beta grid",
 
     ed::thermal::FtlmOptions opts;
     opts.num_samples = 3;
-    opts.krylov_dim  = 16;
-    opts.betas       = {0.1, 0.5, 1.0, 2.0};
+    opts.krylov_dim = 16;
+    opts.betas = {0.1, 0.5, 1.0, 2.0};
     opts.random_seed = 42;
 
-    auto res = ed::thermal::ftlm_kernel(
-        backend, apply, dim, opts);
+    auto res = ed::thermal::ftlm_kernel(backend, apply, dim, opts);
 
     REQUIRE(res.curves.E.size() == opts.betas.size());
     REQUIRE(res.curves.V.size() == opts.betas.size());
     REQUIRE(res.curves.lnZ.size() == opts.betas.size());
 }
 
-TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
-          "[kernel-facade][mtpq][phase6]") {
-    constexpr std::uint64_t N   = 4;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain", "[kernel-facade][mtpq][phase6]") {
+    constexpr std::uint64_t N = 4;
+    constexpr std::size_t dim = std::size_t{1} << N;
 
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
 
@@ -217,12 +209,11 @@ TEST_CASE("thermal::mtpq_kernel runs end-to-end on a small Heisenberg chain",
     MatvecCallable apply{H.get()};
 
     ed::thermal::MtpqOptions opts;
-    opts.num_samples  = 1;
-    opts.max_iter     = 50;
-    opts.large_value  = 50.0;
+    opts.num_samples = 1;
+    opts.max_iter = 50;
+    opts.large_value = 50.0;
 
-    auto res = ed::thermal::mtpq_kernel(
-        backend, apply, dim, opts);
+    auto res = ed::thermal::mtpq_kernel(backend, apply, dim, opts);
 
     REQUIRE_FALSE(res.energies.empty());
 }
@@ -233,8 +224,8 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
     // <psi0|e^{-beta H}|psi0>, so the estimator's ln Z, E and C are those of the ensemble
     // weighted by |<n|psi0>|^2 times D -- checked against the dense spectral decomposition of
     // the same start vector, at any beta the trajectory reaches.
-    constexpr std::uint64_t N   = 6;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+    constexpr std::uint64_t N = 6;
+    constexpr std::size_t dim = std::size_t{1} << N;
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, true);
     ed::matvec::CpuBackend backend;
     MatvecCallable apply{H.get()};
@@ -245,8 +236,7 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
         std::fill(unit.begin(), unit.end(), Complex(0, 0));
         unit[j] = Complex(1, 0);
         apply(unit.data(), col.data(), dim);
-        for (std::size_t i = 0; i < dim; ++i)
-            Hd(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = col[i];
+        for (std::size_t i = 0; i < dim; ++i) Hd(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = col[i];
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hd);
     const Eigen::VectorXd ev = es.eigenvalues();
@@ -256,7 +246,7 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
     opts.num_samples = 1;
     opts.random_seed = 99;
     opts.large_value = L;
-    opts.max_iter    = 300;
+    opts.max_iter = 300;
     const auto res = ed::thermal::mtpq_kernel(backend, apply, dim, opts);
     REQUIRE(res.sample_energies.size() == 1);
     REQUIRE(res.sample_energies[0].size() == 301);
@@ -280,7 +270,8 @@ TEST_CASE("thermal::mtpq_canonical_thermo reproduces its start vector's canonica
         double z = 0.0, ez = 0.0;
         for (Eigen::Index i = 0; i < ev.size(); ++i) {
             const double b = w(i) * std::exp(-beta * (ev(i) - ev(0)));
-            z += b; ez += b * ev(i);
+            z += b;
+            ez += b * ev(i);
         }
         const double E = ez / z;
         double v = 0.0;

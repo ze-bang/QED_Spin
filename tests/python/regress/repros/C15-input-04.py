@@ -5,6 +5,7 @@
 conserves Sz (checked with a dense numpy reference) is classified Parity by sz_content and
 qed.eigs(..., sym=Symmetry(spatial=None, sz=n_up)) raises 'does not conserve Sz'. Sanity: the same model
 written with only the net S+S- / S-S+ records is classified U1."""
+
 import signal
 
 import numpy as np
@@ -22,7 +23,7 @@ H = b.to_operator()
 
 b2 = qed.input.HamiltonianBuilder(N)
 b2.heisenberg(bonds, J)
-for i, j in bonds:   # net Dz (Sx_i Sy_j - Sy_i Sx_j) = (i Dz/2)(S+_i S-_j - S-_i S+_j)
+for i, j in bonds:  # net Dz (Sx_i Sy_j - Sy_i Sx_j) = (i Dz/2)(S+_i S-_j - S-_i S+_j)
     b2.add_two_body(Op.Sp, i, Op.Sm, j, 0.5j * Dz)
     b2.add_two_body(Op.Sm, i, Op.Sp, j, -0.5j * Dz)
 H2 = b2.to_operator()
@@ -40,8 +41,7 @@ def site(op, i):
 
 
 S = [[site(o, i) for o in (sx, sy, sz)] for i in range(N)]
-Hd = sum(J * sum(S[i][a] @ S[j][a] for a in range(3)) + Dz * (S[i][0] @ S[j][1] - S[i][1] @ S[j][0])
-         for i, j in bonds)
+Hd = sum(J * sum(S[i][a] @ S[j][a] for a in range(3)) + Dz * (S[i][0] @ S[j][1] - S[i][1] @ S[j][0]) for i, j in bonds)
 Sz = sum(S[i][2] for i in range(N))
 comm = np.max(np.abs(Hd @ Sz - Sz @ Hd))
 Ed = np.linalg.eigvalsh(Hd)
@@ -55,8 +55,10 @@ try:
     qed.eigs(H, 1, sym=qed.Symmetry(spatial=None, sz=N // 2))
 except Exception as e:  # noqa: BLE001
     err = f"{type(e).__name__}: {e}"
-print(f"dense ||[H,Sz]||max={comm:.1e}, max|E_qed-E_dense|={same:.1e}, sz_content(dm)={c1}, "
-      f"sz_content(net)={c2}, eigs(sz=4) -> {err}")
+print(
+    f"dense ||[H,Sz]||max={comm:.1e}, max|E_qed-E_dense|={same:.1e}, sz_content(dm)={c1}, "
+    f"sz_content(net)={c2}, eigs(sz=4) -> {err}"
+)
 if same > 1e-8:
     print(f"REPRO: INCONCLUSIVE dm spectrum differs from dense reference ({same:.2e})")
 elif comm < 1e-12 and str(c1).endswith("Parity") and str(c2).endswith("U1") and err is not None:

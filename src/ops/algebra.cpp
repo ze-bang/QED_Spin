@@ -17,12 +17,10 @@ inline std::uint64_t lowest_bit(std::uint64_t x) { return x & (~x + 1); }
 }  // namespace
 
 MaskedOperator::MaskedOperator(int n_sites) : n_(n_sites) {
-    if (n_sites < 1 || n_sites > 64)
-        throw std::invalid_argument("MaskedOperator: n_sites must be in [1, 64]");
+    if (n_sites < 1 || n_sites > 64) throw std::invalid_argument("MaskedOperator: n_sites must be in [1, 64]");
 }
 
-void MaskedOperator::add_canonical(std::uint64_t flip, std::uint64_t val,
-                                   std::uint64_t sign, Complex c) {
+void MaskedOperator::add_canonical(std::uint64_t flip, std::uint64_t val, std::uint64_t sign, Complex c) {
     accumulate(Key{flip, val, sign}, c);
 }
 
@@ -35,9 +33,11 @@ void MaskedOperator::accumulate(const Key& k, Complex c) {
 
 void MaskedOperator::add_term(const MaskedTerm& in) {
     // Iterative expansion to canonical form (cond_mask == flip_mask, sign disjoint).
-    struct Item { std::uint64_t C, V, F, S; Complex c; };
-    std::vector<Item> stack{{in.cond_mask, in.cond_val & in.cond_mask, in.flip_mask,
-                             in.sign_mask, in.coeff}};
+    struct Item {
+        std::uint64_t C, V, F, S;
+        Complex c;
+    };
+    std::vector<Item> stack{{in.cond_mask, in.cond_val & in.cond_mask, in.flip_mask, in.sign_mask, in.coeff}};
     const std::uint64_t all = (n_ == 64) ? ~0ULL : ((1ULL << n_) - 1ULL);
     if (((in.cond_mask | in.flip_mask | in.sign_mask) & ~all) != 0)
         throw std::invalid_argument("MaskedOperator::add_term: mask beyond n_sites");
@@ -71,34 +71,36 @@ void MaskedOperator::add_term(const MaskedTerm& in) {
     }
 }
 
-MaskedOperator MaskedOperator::product(int n_sites, const std::string& ops,
-                                       const std::vector<int>& sites, Complex coeff) {
+MaskedOperator MaskedOperator::product(int n_sites, const std::string& ops, const std::vector<int>& sites,
+                                       Complex coeff) {
     if (ops.size() != sites.size())
         throw std::invalid_argument("MaskedOperator::product: ops and sites differ in length");
     MaskedOperator r(n_sites);
     r.add_canonical(0, 0, 0, coeff);
     for (std::size_t k = 0; k < ops.size(); ++k) {
         const int i = sites[k];
-        if (i < 0 || i >= n_sites)
-            throw std::invalid_argument("MaskedOperator::product: site out of range");
+        if (i < 0 || i >= n_sites) throw std::invalid_argument("MaskedOperator::product: site out of range");
         const std::uint64_t b = 1ULL << i;
         const std::uint64_t up = up_bits(b), dn = down_bits(b);
         // Z = (-1)^bit is +1 on a clear bit: S^z = Z / 2 when a clear bit is up.
         const double zsign = kSetBitIsDown ? 1.0 : -1.0;
         MaskedOperator f(n_sites);
         switch (ops[k]) {
-            case '+': f.add_term({b, dn, b, 0, 1.0}); break;          // S+: down -> up
-            case '-': f.add_term({b, up, b, 0, 1.0}); break;          // S-: up -> down
-            case 'z': f.add_term({0, 0, 0, b, zsign * 0.5}); break;   // S^z = +-Z / 2
-            case 'x': f.add_term({b, dn, b, 0, 0.5}); f.add_term({b, up, b, 0, 0.5}); break;
-            case 'y': f.add_term({b, dn, b, 0, Complex(0.0, -0.5)});  // (S+ - S-) / 2i
-                      f.add_term({b, up, b, 0, Complex(0.0, 0.5)}); break;
-            case 'u': f.add_term({b, up, 0, 0, 1.0}); break;          // |up><up|
-            case 'd': f.add_term({b, dn, 0, 0, 1.0}); break;          // |dn><dn|
-            case 'I': f.add_canonical(0, 0, 0, 1.0); break;
-            default:
-                throw std::invalid_argument(std::string("MaskedOperator::product: unknown op '")
-                                            + ops[k] + "'");
+        case '+': f.add_term({b, dn, b, 0, 1.0}); break;          // S+: down -> up
+        case '-': f.add_term({b, up, b, 0, 1.0}); break;          // S-: up -> down
+        case 'z': f.add_term({0, 0, 0, b, zsign * 0.5}); break;   // S^z = +-Z / 2
+        case 'x':
+            f.add_term({b, dn, b, 0, 0.5});
+            f.add_term({b, up, b, 0, 0.5});
+            break;
+        case 'y':
+            f.add_term({b, dn, b, 0, Complex(0.0, -0.5)});  // (S+ - S-) / 2i
+            f.add_term({b, up, b, 0, Complex(0.0, 0.5)});
+            break;
+        case 'u': f.add_term({b, up, 0, 0, 1.0}); break;          // |up><up|
+        case 'd': f.add_term({b, dn, 0, 0, 1.0}); break;          // |dn><dn|
+        case 'I': f.add_canonical(0, 0, 0, 1.0); break;
+        default: throw std::invalid_argument(std::string("MaskedOperator::product: unknown op '") + ops[k] + "'");
         }
         r = r * f;
     }
@@ -107,7 +109,10 @@ MaskedOperator MaskedOperator::product(int n_sites, const std::string& ops,
 
 MaskedOperator& MaskedOperator::add(const MaskedOperator& o, Complex scale) {
     if (o.n_ != n_) throw std::invalid_argument("MaskedOperator::add: n_sites differ");
-    if (&o == this) { *this = o.scaled(1.0 + scale); return *this; }
+    if (&o == this) {
+        *this = o.scaled(1.0 + scale);
+        return *this;
+    }
     for (const auto& [k, c] : o.t_) accumulate(k, scale * c);
     return *this;
 }
@@ -225,10 +230,11 @@ int MaskedOperator::delta_set_bits() const {
         if (c == Complex(0.0, 0.0)) continue;
         const auto [F, V, S] = k;
         const int d = popc(F & ~V) - popc(F & V);   // clear -> set adds a set bit
-        if (first) { delta = d; first = false; }
-        else if (d != delta)
-            throw std::invalid_argument(
-                "MaskedOperator::delta_set_bits: terms change S^z by different amounts");
+        if (first) {
+            delta = d;
+            first = false;
+        } else if (d != delta)
+            throw std::invalid_argument("MaskedOperator::delta_set_bits: terms change S^z by different amounts");
     }
     return delta;
 }

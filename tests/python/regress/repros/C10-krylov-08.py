@@ -10,6 +10,7 @@ the block is diagonalised as real: qed.spectrum(s*H) != s*spectrum(H).
 Model: grid tri9chi (3x3 triangular Heisenberg + chi=0.25 scalar chirality), scaled by s.
 Symmetry(spatial=None) so every block is a small Sz block on the dense path. Reference: an
 independent dense numpy matrix of the same term list (grid.models.dense), eigvalsh, times s."""
+
 import signal
 import numpy as np
 import qed
@@ -57,8 +58,10 @@ if errs.get(1.0) is None or errs[1.0] > 1e-8:
 else:
     bad = {s: v for s, v in errs.items() if s != 1.0 and v is not None and v > 1e-6}
     if bad:
-        print("REPRO: CONFIRMED unit-dependent spectrum: relative errors "
-              + ", ".join(f"s={s:g}: {v:.3g}" for s, v in bad.items()) + f" (s=1: {errs[1.0]:.2g})")
+        print(
+            "REPRO: CONFIRMED unit-dependent spectrum: relative errors "
+            + ", ".join(f"s={s:g}: {v:.3g}" for s, v in bad.items())
+            + f" (s=1: {errs[1.0]:.2g})"
+        )
     else:
-        print("REPRO: NOT_REPRODUCED scaled spectra agree: "
-              + ", ".join(f"s={s:g}: {v}" for s, v in errs.items()))
+        print("REPRO: NOT_REPRODUCED scaled spectra agree: " + ", ".join(f"s={s:g}: {v}" for s, v in errs.items()))

@@ -33,16 +33,16 @@ namespace ed::krylov {
 using Complex = std::complex<double>;
 
 struct KrylovSchurOptions {
-    std::size_t num_eigs        = 1;
-    std::size_t max_iter        = 100;
+    std::size_t num_eigs = 1;
+    std::size_t max_iter = 100;
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
-    double      tolerance       = 1e-10;
-    bool        compute_vectors = false;
+    double tolerance = 1e-10;
+    bool compute_vectors = false;
     /// Maximum restart cycles before we give up.
-    std::size_t max_restarts    = 30;
+    std::size_t max_restarts = 30;
     /// Breakdown threshold passed to the per-cycle `lanczos_kernel`.
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
-    double      breakdown_tol   = 1e-13;
+    double breakdown_tol = 1e-13;
     /// Memory cap on the per-cycle Krylov subspace, in resident length-N
     /// vectors (the basis held during each restart cycle is the dominant cost).
     /// 0 = no cap. The block lanes set it from LanePolicy<B> (available RAM) so the
@@ -51,21 +51,20 @@ struct KrylovSchurOptions {
     std::uint64_t max_subspace_vectors = 0;
     /// After convergence, look for a level the single-vector restarts skipped (a second copy
     /// of a degenerate eigenvalue) with one extra cycle from a fresh random start.
-    bool        probe_degeneracy = true;
+    bool probe_degeneracy = true;
 };
 
-template <class Scalar>
-struct KrylovSchurResultT {
-    std::vector<double>                    eigenvalues;
+template <class Scalar> struct KrylovSchurResultT {
+    std::vector<double> eigenvalues;
     /// Locked Ritz vectors in backend memory, one per converged
     /// eigenvalue. Only populated when `opts.compute_vectors == true`.
     std::vector<typename ed::matvec::BasicBackend<Scalar>::UniqueVec> eigenvectors;
-    std::size_t                            iters_done = 0;
-    std::size_t                            restarts   = 0;
-    bool                                   converged  = false;
+    std::size_t iters_done = 0;
+    std::size_t restarts = 0;
+    bool converged = false;
     /// The locked vectors span the whole space: every eigenvalue was found (fewer than
     /// num_eigs when the space is smaller).
-    bool                                   exhausted  = false;
+    bool exhausted = false;
 };
 using KrylovSchurResult = KrylovSchurResultT<Complex>;
 
@@ -73,8 +72,7 @@ using KrylovSchurResult = KrylovSchurResultT<Complex>;
 /// every start of a run.
 struct GaussianStart {
     std::normal_distribution<double> nd{0.0, 1.0};
-    template <class Scalar>
-    void operator()(std::mt19937_64& gen, std::vector<Scalar>& v) {
+    template <class Scalar> void operator()(std::mt19937_64& gen, std::vector<Scalar>& v) {
         for (auto& z : v) z = gaussian_entry<Scalar>(nd, gen);
     }
 };
@@ -96,27 +94,24 @@ struct GaussianStart {
 /// copy of a degenerate eigenvalue).
 template <typename Backend, typename MatvecFn, typename Fresh = GaussianStart>
 KrylovSchurResultT<typename Backend::scalar_type>
-krylov_schur_kernel(Backend&                             be,
-                    MatvecFn&&                           matvec,
-                    std::size_t                          local_n,
-                    const typename Backend::scalar_type* seed_local,
-                    const KrylovSchurOptions&            opts,
-                    Fresh                                fresh = {})
-{
+krylov_schur_kernel(Backend& be, MatvecFn&& matvec, std::size_t local_n,
+                    const typename Backend::scalar_type* seed_local, const KrylovSchurOptions& opts, Fresh fresh = {}) {
     using Scalar = typename Backend::scalar_type;
     using UniqueVec = typename ed::matvec::BasicBackend<Scalar>::UniqueVec;
 
-    if (opts.max_iter == 0) {
-        throw std::invalid_argument("krylov_schur_kernel: max_iter == 0");
-    }
+    if (opts.max_iter == 0) { throw std::invalid_argument("krylov_schur_kernel: max_iter == 0"); }
     KrylovSchurResultT<Scalar> R;
     const std::size_t n = local_n;
-    if (n == 0) { R.converged = true; R.exhausted = true; return R; }
+    if (n == 0) {
+        R.converged = true;
+        R.exhausted = true;
+        return R;
+    }
 
     const std::size_t k = std::max<std::size_t>(1, opts.num_eigs);
     // The cycle: m basis vectors (within the memory cap and the space), p of them kept per restart.
-    const std::size_t m_cap = ed::krylov::krylov_subspace_dim(k, opts.max_iter, static_cast<std::uint64_t>(n),
-                                                              opts.max_subspace_vectors);
+    const std::size_t m_cap =
+        ed::krylov::krylov_subspace_dim(k, opts.max_iter, static_cast<std::uint64_t>(n), opts.max_subspace_vectors);
     const std::size_t p_want = k + std::max<std::size_t>(k / 2, 8);
     const std::size_t m = std::max<std::size_t>(1, std::min<std::size_t>({m_cap, 2 * p_want + 20, n}));
     const std::size_t p_keep = std::min(p_want, m > 1 ? m - 1 : std::size_t{1});
@@ -133,7 +128,7 @@ krylov_schur_kernel(Backend&                             be,
     auto col = [&](std::size_t j) { return V.get() + j * n; };
     auto w = be.make_zero_vector(n);
     std::vector<UniqueVec> found_vecs;
-    std::vector<double>    found_vals;
+    std::vector<double> found_vals;
 
     // Twice: x -= sum_c <c, x> c over the first `j` columns of V and the found vectors. Returns the
     // coefficients on the columns.
@@ -145,7 +140,10 @@ krylov_schur_kernel(Backend&                             be,
         std::vector<Scalar> c(b.size(), Scalar(0)), c2(b.size());
         for (int pass = 0; pass < 2 && !b.empty(); ++pass) {
             be.dot_many(b.data(), b.size(), x, n, c2.data());
-            for (std::size_t i = 0; i < b.size(); ++i) { c[i] += c2[i]; c2[i] = -c2[i]; }
+            for (std::size_t i = 0; i < b.size(); ++i) {
+                c[i] += c2[i];
+                c2[i] = -c2[i];
+            }
             be.axpy_many(c2.data(), b.data(), b.size(), x, n);
         }
         c.resize(j);
@@ -255,12 +253,18 @@ krylov_schur_kernel(Backend&                             be,
         const Outcome o = search(k - found_vals.size(), budget - R.restarts,
                                  std::numeric_limits<double>::infinity());   // never gives up
         if (o == kNullSeed) {
-            if (++null_starts >= 2) { exhausted = true; break; }
+            if (++null_starts >= 2) {
+                exhausted = true;
+                break;
+            }
             fresh_seed(fresh_gen);
             continue;
         }
         null_starts = 0;
-        if (o == kBudget) { stalled = true; break; }
+        if (o == kBudget) {
+            stalled = true;
+            break;
+        }
         if (found_vals.size() < k) fresh_seed(fresh_gen);
     }
     bool converged = !stalled && found_vals.size() >= k;
@@ -278,7 +282,10 @@ krylov_schur_kernel(Backend&                             be,
             const std::size_t before = found_vals.size();
             const Outcome o = search(1, std::max<std::size_t>(opts.max_restarts, 1), top - gap);
             if (o == kNothingBelow || o == kNullSeed) break;
-            if (found_vals.size() == before) { converged = false; break; }   // skipped, not recovered
+            if (found_vals.size() == before) {
+                converged = false;
+                break;
+            }   // skipped, not recovered
             if (found_vals.back() >= top - gap) {                            // converged above: nothing skipped
                 found_vals.pop_back();
                 found_vecs.pop_back();

@@ -1,4 +1,5 @@
 """``qed.eigs``: the lowest k levels of H over every symmetry sector, with vectors on demand."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -71,7 +72,7 @@ class EigResult(Labelled):
             try:
                 vs = self._raw.multiplet(self._spec, i, want, self.k - len(out))
             except EmptySelection:
-                continue                     # no component in this Sz sector; anything else raises
+                continue  # no component in this Sz sector; anything else raises
             out.extend(vs[: self.k - len(out)])
         return out
 
@@ -96,16 +97,25 @@ class EigResult(Labelled):
         vectors in the sector basis they were solved in (each basis once), and the symmetry
         data. :func:`qed.load_eigs` restores it; :meth:`vectors`, :meth:`expect` and
         :meth:`matrix_element` then work without H."""
-        arrays = {k: np.asarray(v) for k, v in
-                  _core.sectors.eigs_to_arrays(self._raw, self._spec).items()}
-        np.savez_compressed(path, format_version=np.int64(2), k=np.int64(self.k),
-                            energies=np.asarray(self.energies), **arrays)
+        arrays = {k: np.asarray(v) for k, v in _core.sectors.eigs_to_arrays(self._raw, self._spec).items()}
+        np.savez_compressed(
+            path, format_version=np.int64(2), k=np.int64(self.k), energies=np.asarray(self.energies), **arrays
+        )
 
 
 @_log.replays
-def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False,
-         dense_max_dim: Optional[int] = None, allow_partial: bool = False,
-         device: str = "cpu", prune: bool = True, window: float = 0.0) -> EigResult:
+def eigs(
+    H,
+    k: int = 1,
+    *,
+    sym: Optional[Symmetry] = None,
+    vectors: bool = False,
+    dense_max_dim: Optional[int] = None,
+    allow_partial: bool = False,
+    device: str = "cpu",
+    prune: bool = True,
+    window: float = 0.0,
+) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises when a block cannot certify levels
@@ -122,18 +132,34 @@ def eigs(H, k: int = 1, *, sym: Optional[Symmetry] = None, vectors: bool = False
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
-    raw = _core.sectors.eigs(H, spec, k=int(k), vectors=bool(vectors),
-                             dense_max_dim=-1 if dense_max_dim is None else int(dense_max_dim),
-                             allow_partial=bool(allow_partial), device=_device.resolve(device),
-                             prune=bool(prune), window=float(window))
+    raw = _core.sectors.eigs(
+        H,
+        spec,
+        k=int(k),
+        vectors=bool(vectors),
+        dense_max_dim=-1 if dense_max_dim is None else int(dense_max_dim),
+        allow_partial=bool(allow_partial),
+        device=_device.resolve(device),
+        prune=bool(prune),
+        window=float(window),
+    )
     rows = int(k) if window <= 0 else sum(int(L.multiplicity) for L in raw.levels)
-    return EigResult(energies=np.asarray(raw.energies(rows), float), levels=list(raw.levels),
-                     k=int(k), symmetry=sym, complete=bool(raw.complete),
-                     device_blocks=int(raw.device_blocks), pruned_blocks=int(raw.pruned_blocks),
-                     _raw=raw, _spec=spec, _n_sites=int(raw.n_sites),
-                     diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
-                     block_stats=list(raw.block_stats),
-                     placement=dict(raw.placement), time_reversal=raw.time_reversal)
+    return EigResult(
+        energies=np.asarray(raw.energies(rows), float),
+        levels=list(raw.levels),
+        k=int(k),
+        symmetry=sym,
+        complete=bool(raw.complete),
+        device_blocks=int(raw.device_blocks),
+        pruned_blocks=int(raw.pruned_blocks),
+        _raw=raw,
+        _spec=spec,
+        _n_sites=int(raw.n_sites),
+        diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
+        block_stats=list(raw.block_stats),
+        placement=dict(raw.placement),
+        time_reversal=raw.time_reversal,
+    )
 
 
 def load_eigs(path) -> "EigResult":
@@ -143,12 +169,23 @@ def load_eigs(path) -> "EigResult":
         d = {key: f[key] for key in f.files}
     version = int(d.get("format_version", 0))
     if version == 1:
-        raise InvalidRequest(f"{path}: an EigResult file of format 1, written when a set bit meant spin down "
-                         "(qed < 0.6); its states and n_up labels mean the opposite now -- recompute it")
+        raise InvalidRequest(
+            f"{path}: an EigResult file of format 1, written when a set bit meant spin down "
+            "(qed < 0.6); its states and n_up labels mean the opposite now -- recompute it"
+        )
     if version != 2:
         raise InvalidRequest(f"{path}: not an EigResult file (format_version 2)")
     raw, spec = _core.sectors.eigs_from_arrays(d)
-    return EigResult(energies=np.asarray(d["energies"], float), levels=list(raw.levels), k=int(d["k"]),
-                     symmetry=None, complete=bool(raw.complete), device_blocks=int(raw.device_blocks),
-                     pruned_blocks=int(raw.pruned_blocks), _raw=raw, _spec=spec, _n_sites=int(raw.n_sites),
-                     time_reversal=raw.time_reversal)
+    return EigResult(
+        energies=np.asarray(d["energies"], float),
+        levels=list(raw.levels),
+        k=int(d["k"]),
+        symmetry=None,
+        complete=bool(raw.complete),
+        device_blocks=int(raw.device_blocks),
+        pruned_blocks=int(raw.pruned_blocks),
+        _raw=raw,
+        _spec=spec,
+        _n_sites=int(raw.n_sites),
+        time_reversal=raw.time_reversal,
+    )

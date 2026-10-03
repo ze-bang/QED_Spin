@@ -43,13 +43,14 @@ namespace ed::core {
 /// x as the integer type T, or ed::ResourceLimit naming `what` when it does not fit: the one way a
 /// dimension is narrowed (scripts/check_int_narrowing.sh), so a sector past 2^31 states raises
 /// instead of wrapping.
-template <class T, class U>
-[[nodiscard]] T checked_narrow(U x, const char* what) {
+template <class T, class U> [[nodiscard]] T checked_narrow(U x, const char* what) {
     static_assert(std::is_integral_v<T> && std::is_integral_v<U>, "checked_narrow narrows integers");
     bool fits;
     if constexpr (std::is_signed_v<U>)
         fits = static_cast<long long>(x) >= static_cast<long long>(std::numeric_limits<T>::min())
-               && (x < 0 || static_cast<unsigned long long>(x) <= static_cast<unsigned long long>(std::numeric_limits<T>::max()));
+               && (x < 0
+                   || static_cast<unsigned long long>(x)
+                          <= static_cast<unsigned long long>(std::numeric_limits<T>::max()));
     else
         fits = static_cast<unsigned long long>(x) <= static_cast<unsigned long long>(std::numeric_limits<T>::max());
     if (!fits)

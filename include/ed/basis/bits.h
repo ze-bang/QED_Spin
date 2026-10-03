@@ -21,9 +21,7 @@
  * @param x Integer to count bits in
  * @return Number of bits set to 1
  */
-inline uint64_t popcount(uint64_t x) {
-    return __builtin_popcountll(x);
-}
+inline uint64_t popcount(uint64_t x) { return __builtin_popcountll(x); }
 
 /**
  * Apply a permutation to a basis state (represented as an integer)
@@ -33,9 +31,6 @@ inline uint64_t popcount(uint64_t x) {
  */
 inline uint64_t applyPermutation(uint64_t basis, const std::vector<int>& perm) {
     uint64_t result = 0;
-    for (size_t i = 0; i < perm.size(); ++i) {
-        result |= ((basis >> perm[i]) & 1) << i;
-    }
+    for (size_t i = 0; i < perm.size(); ++i) { result |= ((basis >> perm[i]) & 1) << i; }
     return result;
 }
-

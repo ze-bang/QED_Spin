@@ -14,7 +14,7 @@ from ._core import Operator  # type: ignore[attr-defined]
 
 Permutation = list[int]
 
-_OP_CODE = {"+": 0, "-": 1, "z": 2}   # Operator.terms() factors as OP_SPLUS / OP_SMINUS / OP_SZ
+_OP_CODE = {"+": 0, "-": 1, "z": 2}  # Operator.terms() factors as OP_SPLUS / OP_SMINUS / OP_SZ
 
 
 def _operator_to_graph_records(
@@ -33,16 +33,24 @@ def _operator_to_graph_records(
         c = complex(coeff)
         codes = [_OP_CODE[o] for o in ops]
         sites = [int(s) for s in sites]
-        if len(sites) == 1:      # every one-body term on the site colours it
+        if len(sites) == 1:  # every one-body term on the site colours it
             onsite[sites[0]][codes[0]] = onsite[sites[0]].get(codes[0], 0j) + c
         elif len(sites) == 2:
-            edges.append({"vertex1": sites[0], "vertex2": sites[1], "type1": codes[0], "type2": codes[1],
-                          "weight": (float(c.real), float(c.imag))})
+            edges.append(
+                {
+                    "vertex1": sites[0],
+                    "vertex2": sites[1],
+                    "type1": codes[0],
+                    "type2": codes[1],
+                    "weight": (float(c.real), float(c.imag)),
+                }
+            )
         elif len(sites) == 3:
             triples.append((tuple(sites), tuple(codes), c))
-    vertex_weights = {i: tuple(sorted((op, round(c.real, 8), round(c.imag, 8))
-                                      for op, c in d.items() if abs(c) > 1e-12))
-                      for i, d in onsite.items()}
+    vertex_weights = {
+        i: tuple(sorted((op, round(c.real, 8), round(c.imag, 8)) for op, c in d.items() if abs(c) > 1e-12))
+        for i, d in onsite.items()
+    }
     return vertex_weights, edges, triples
 
 
@@ -60,8 +68,6 @@ def _keep_hamiltonian_symmetries(operator: Any, autos: list[Permutation]) -> lis
         return autos
     keep = list(_core.check_generators_commute(operator, [list(map(int, p)) for p in autos]))
     return [p for p, ok in zip(autos, keep) if ok]
-
-
 
 
 @dataclass
@@ -83,10 +89,13 @@ class Symmetries:
     def describe(self) -> str:
         """The group's order, its abelian part and residues, then one line per cut made."""
         from ._perm import close_group
+
         A = close_group(self.abelian) if self.abelian else None
         a, r = (len(A) if A is not None else len(self.abelian)), len(self.residues)
-        lines = [f"{a * (r + 1)} spatial symmetries: an abelian part of {a} (the momenta) and "
-                 f"{r} residue(s) (the point group)"]
+        lines = [
+            f"{a * (r + 1)} spatial symmetries: an abelian part of {a} (the momenta) and "
+            f"{r} residue(s) (the point group)"
+        ]
         lines += [f"{code}: {msg}" for code, msg in self.diagnostics]
         return "\n".join(lines)
 
@@ -98,8 +107,9 @@ _FIND_SYM_MEMO_CAP = 32
 def _find_symmetries_key(operator):
     """Content key for the find_symmetries memo: H's canonical terms (unique however H was
     written; complex coefficients enter as (re, im))."""
-    terms = tuple((ops, tuple(int(s) for s in sites), complex(c).real, complex(c).imag)
-                  for c, ops, sites in operator.terms())
+    terms = tuple(
+        (ops, tuple(int(s) for s in sites), complex(c).real, complex(c).imag) for c, ops, sites in operator.terms()
+    )
     return (int(operator.num_sites), terms)
 
 
@@ -109,8 +119,7 @@ def _find_symmetries_key(operator):
 _AUT_ENUMERATION_CAP = 4096
 
 
-def find_symmetries(operator: Operator, *, verbose: bool = True,
-                    clique_budget: Optional[int] = None) -> Symmetries:
+def find_symmetries(operator: Operator, *, verbose: bool = True, clique_budget: Optional[int] = None) -> Symmetries:
     """The spatial symmetries of ``operator``, split for the sector engine.
 
     The automorphisms of H's coloured interaction graph that commute with H are split into the
@@ -127,9 +136,13 @@ def find_symmetries(operator: Operator, *, verbose: bool = True,
     """
     if clique_budget is not None:
         import warnings
-        warnings.warn("find_symmetries(clique_budget=...) has no effect: the abelian part is the "
-                      "largest normal abelian subgroup, found without a clique search",
-                      DeprecationWarning, stacklevel=2)
+
+        warnings.warn(
+            "find_symmetries(clique_budget=...) has no effect: the abelian part is the "
+            "largest normal abelian subgroup, found without a clique search",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     key = _find_symmetries_key(operator)
     if key is not None:
         hit = _FIND_SYM_MEMO.get(key)
@@ -163,9 +176,11 @@ def _find_symmetries_impl(operator: Operator, *, verbose: bool = True) -> Symmet
     identity = [list(range(num_sites))]
     autos, aut_order = automorphisms(vertex_weights, edges, triples, cap=_AUT_ENUMERATION_CAP)
     if autos is None:
-        msg = (f"H's interaction graph has {aut_order:.6g} automorphisms, more than "
-               f"{_AUT_ENUMERATION_CAP}: no spatial symmetry is used. Pass "
-               "Symmetry(spatial=[...]) with generators of a subgroup to use one.")
+        msg = (
+            f"H's interaction graph has {aut_order:.6g} automorphisms, more than "
+            f"{_AUT_ENUMERATION_CAP}: no spatial symmetry is used. Pass "
+            "Symmetry(spatial=[...]) with generators of a subgroup to use one."
+        )
         _log.log(note, "[qed.find_symmetries] %s", msg)
         diagnostics.append(("aut_capped", msg))
         autos = identity
@@ -174,5 +189,4 @@ def _find_symmetries_impl(operator: Operator, *, verbose: bool = True) -> Symmet
         return Symmetries(abelian=identity, residues=[], diagnostics=diagnostics)
     abelian, residues, notes = spatial_split(autos)
     diagnostics.extend(notes)
-    return Symmetries(abelian=[list(a) for a in abelian], residues=[list(r) for r in residues],
-                      diagnostics=diagnostics)
+    return Symmetries(abelian=[list(a) for a in abelian], residues=[list(r) for r in residues], diagnostics=diagnostics)

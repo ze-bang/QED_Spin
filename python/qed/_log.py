@@ -15,6 +15,7 @@ trajectory did not reach) is issued as a :class:`qed.errors.QEDWarning`. Then,
 At import, ``QED_LOG_LEVEL`` sets the level (above ``"warn"`` it also streams to stderr);
 ``ED_SYM_PROFILE=1`` without it means ``"info"`` on stderr, as the profile used to print.
 """
+
 from __future__ import annotations
 
 import functools
@@ -38,8 +39,7 @@ _handler: Optional[logging.Handler] = None
 
 
 class _Formatter(logging.Formatter):
-    _NAMES = {logging.ERROR: "error", logging.WARNING: "warn", logging.INFO: "info",
-              logging.DEBUG: "debug"}
+    _NAMES = {logging.ERROR: "error", logging.WARNING: "warn", logging.INFO: "info", logging.DEBUG: "debug"}
 
     def format(self, record: logging.LogRecord) -> str:
         return f"[qed {self._NAMES.get(record.levelno, record.levelname.lower())}] {record.getMessage()}"
@@ -76,7 +76,7 @@ def set_log_level(level, stream=None) -> None:
     Without a stream, warn- and error-level records are issued as ``QEDWarning``."""
     global _handler
     idx = _level_index(level)
-    flush()                                    # records queued under the old setting
+    flush()  # records queued under the old setting
     if _handler is not None:
         logger.removeHandler(_handler)
         _handler = None
@@ -101,7 +101,7 @@ def enabled(level: int) -> bool:
 
 def _emit(level: int, msg: str) -> None:
     logger.log(_TO_LOGGING[level] or logging.ERROR, msg)
-    if level <= WARN and _handler is None:      # no stream would show it: warn the caller
+    if level <= WARN and _handler is None:  # no stream would show it: warn the caller
         warnings.warn(msg, QEDWarning, stacklevel=4)
 
 
@@ -132,10 +132,12 @@ def configure_from_env() -> None:
 
 def replays(fn):
     """Decorator: replay the engine's records when ``fn`` returns or raises."""
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         finally:
             flush()
+
     return wrapper

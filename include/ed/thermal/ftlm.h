@@ -52,11 +52,11 @@ namespace ed::thermal {
 using Complex = std::complex<double>;
 
 struct FtlmOptions {
-    std::size_t num_samples  = 40;
-    std::size_t krylov_dim   = 100;
+    std::size_t num_samples = 40;
+    std::size_t krylov_dim = 100;
     /// A sample's Lanczos run stops at an invariant subspace, beta <= breakdown_tol (energy
     /// units; the engine passes 64 eps s_H, <ed/core/numerics.h>). 0: every step runs.
-    double      breakdown_tol = 0.0;
+    double breakdown_tol = 0.0;
     std::vector<double> betas;           ///< inverse-temperature grid (positive), any order
 
     std::uint64_t random_seed = 0;       ///< 0 = nondeterministic (random_device)
@@ -65,7 +65,7 @@ struct FtlmOptions {
     /// basis (ghost Ritz values only redistribute weight), so the default
     /// is local reorthogonalisation without a stored basis (no O(M^2 N)
     /// CGS2 traffic, no M x N basis). Set true for kept-basis FullCGS2.
-    bool          full_reorthogonalization = false;
+    bool full_reorthogonalization = false;
 
     /// Host-side transform applied to every
     /// Gaussian sample seed before it is normalised and staged (e.g. the
@@ -118,22 +118,22 @@ struct FtlmResult {
 /// removes. The caller therefore supplies pairs it has certified by their residuals (the engine
 /// uses its block eigensolver); the kernel does not compute them.
 struct OftlmOptions {
-    std::size_t   num_samples  = 20;   ///< R: random samples for the stochastic part
-    std::size_t   krylov_dim   = 100;  ///< M: Lanczos steps per random sample
+    std::size_t num_samples = 20;   ///< R: random samples for the stochastic part
+    std::size_t krylov_dim = 100;  ///< M: Lanczos steps per random sample
     /// The N_V exact states: eigenvalues and orthonormal eigenvectors (length N each) of the
     /// block, certified by their residuals. Empty is plain FTLM.
-    std::vector<double>                            exact_values;
+    std::vector<double> exact_values;
     std::vector<std::vector<std::complex<double>>> exact_vectors;
     /// Applied to every random start before it is orthogonalised to the exact states (a
     /// projection onto a spin tower); the random part's trace then runs over trace_dim states.
     std::function<void(std::complex<double>*, std::size_t)> seed_transform;
     std::uint64_t trace_dim = 0;   ///< 0: the block's N
     /// Random-part Ritz pairs with start weight below this are dropped (FtlmOptions::min_weight).
-    double        min_weight = 0.0;
+    double min_weight = 0.0;
     // scale-free: a default for C++ callers; the engine passes relative values (numerics.h)
-    double        breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
+    double breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
-    std::uint64_t random_seed  = 0;
+    std::uint64_t random_seed = 0;
 };
 
 /// OFTLM on one block on backend `be` -- the host's or a device's (src/engine/oftlm.cpp). apply_H:
@@ -153,8 +153,7 @@ struct SampleMoments {
     std::vector<double> Z, E1, E2;
 };
 
-[[nodiscard]] inline SampleMoments sample_moments(const std::vector<double>& ritz,
-                                                  const std::vector<double>& weights,
+[[nodiscard]] inline SampleMoments sample_moments(const std::vector<double>& ritz, const std::vector<double>& weights,
                                                   const std::vector<double>& betas) {
     SampleMoments m;
     // The reference is the lowest Ritz value that carries weight (one without weight -- a dropped
@@ -172,9 +171,13 @@ struct SampleMoments {
         for (std::size_t i = 0; i < ritz.size(); ++i) {
             const double x = ritz[i] - m.e_min;
             const double b = weights[i] * std::exp(-beta * x);
-            z += b; e1 += x * b; e2 += x * x * b;
+            z += b;
+            e1 += x * b;
+            e2 += x * x * b;
         }
-        m.Z[t] = z; m.E1[t] = e1; m.E2[t] = e2;
+        m.Z[t] = z;
+        m.E1[t] = e1;
+        m.E2[t] = e2;
     }
     return m;
 }
@@ -191,27 +194,31 @@ struct SampleMoments {
     double e_ref = samples.front().e_min;
     for (const auto& s : samples) e_ref = std::min(e_ref, s.e_min);
     const double ln_n = std::log(static_cast<double>(n));
-    c.lnZ.resize(nT); c.E.resize(nT); c.V.resize(nT);
+    c.lnZ.resize(nT);
+    c.E.resize(nT);
+    c.V.resize(nT);
     for (std::size_t t = 0; t < nT; ++t) {
         const double beta = betas[t];
         double z = 0.0, e1 = 0.0, e2 = 0.0;
         for (const auto& s : samples) {
             // x - e_ref = (x - e_min_s) + d for the moments about each sample's e_min.
             const double d = s.e_min - e_ref, r = std::exp(-beta * d);
-            z  += s.Z[t] * r;
+            z += s.Z[t] * r;
             e1 += (s.E1[t] + d * s.Z[t]) * r;
             e2 += (s.E2[t] + 2.0 * d * s.E1[t] + d * d * s.Z[t]) * r;
         }
-        z /= static_cast<double>(R); e1 /= static_cast<double>(R); e2 /= static_cast<double>(R);
+        z /= static_cast<double>(R);
+        e1 /= static_cast<double>(R);
+        e2 /= static_cast<double>(R);
         if (z > 1e-300) {
             const double m1 = e1 / z, m2 = e2 / z;
             c.lnZ[t] = ln_n + std::log(z) - beta * e_ref;
-            c.E[t]   = e_ref + m1;
-            c.V[t]   = std::max(m2 - m1 * m1, 0.0);
+            c.E[t] = e_ref + m1;
+            c.V[t] = std::max(m2 - m1 * m1, 0.0);
         } else {
             c.lnZ[t] = -beta * e_ref;
-            c.E[t]   = e_ref;
-            c.V[t]   = 0.0;
+            c.E[t] = e_ref;
+            c.V[t] = 0.0;
         }
     }
     return c;
@@ -258,34 +265,20 @@ struct SampleMoments {
 /// into the Curves, so the CPU and GPU lanes produce identical output to within Lanczos
 /// noise.
 template <typename Backend, typename MatvecFn>
-FtlmResult ftlm_kernel(const Backend& backend,
-                       MatvecFn&&     apply_H,
-                       std::size_t    local_n,
-                       const FtlmOptions& opts)
-{
-    if (local_n == 0) {
-        throw std::invalid_argument("ftlm_kernel: local_n must be > 0");
-    }
-    if (opts.krylov_dim < 2) {
-        throw std::invalid_argument(
-            "ftlm_kernel: krylov_dim must be >= 2");
-    }
-    if (opts.num_samples == 0) {
-        throw std::invalid_argument(
-            "ftlm_kernel: num_samples must be > 0");
-    }
+FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t local_n, const FtlmOptions& opts) {
+    if (local_n == 0) { throw std::invalid_argument("ftlm_kernel: local_n must be > 0"); }
+    if (opts.krylov_dim < 2) { throw std::invalid_argument("ftlm_kernel: krylov_dim must be >= 2"); }
+    if (opts.num_samples == 0) { throw std::invalid_argument("ftlm_kernel: num_samples must be > 0"); }
     // The curves are index-aligned with opts.betas, in the caller's order.
     const std::vector<double>& betas = opts.betas;
-    if (betas.empty())
-        throw std::invalid_argument("ftlm_kernel: opts.betas must be non-empty");
+    if (betas.empty()) throw std::invalid_argument("ftlm_kernel: opts.betas must be non-empty");
     for (double b : betas)
         if (!(b > 0.0)) throw std::invalid_argument("ftlm_kernel: opts.betas must be strictly positive");
 
     // Dim-aware OMP+BLAS thread cap. Harmless when the thermal verb
     // already applied it (see the doc comment above).
     const ed::parallel::ThreadBudgetScope budget(
-        ed::parallel::auto_threads_for_dim(
-            static_cast<std::uint64_t>(local_n)));
+        ed::parallel::auto_threads_for_dim(static_cast<std::uint64_t>(local_n)));
 
     // Seed contract: seed == 0 means
     // NONDETERMINISTIC ("use random_device"); explicit seeds are taken
@@ -315,11 +308,9 @@ FtlmResult ftlm_kernel(const Backend& backend,
         if (opts.seed_transform) {
             opts.seed_transform(v0_host.data(), local_n);
             if (!(normalize_host(v0_host.data(), local_n) > 0.0)) {
-                throw std::runtime_error(
-                    "ftlm_kernel: zero-norm random start vector for sample "
-                    + std::to_string(s)
-                    + " (the seed transform annihilated it -- the "
-                      "targeted subspace has no weight in this block)");
+                throw std::runtime_error("ftlm_kernel: zero-norm random start vector for sample " + std::to_string(s)
+                                         + " (the seed transform annihilated it -- the "
+                                           "targeted subspace has no weight in this block)");
             }
         }
 
@@ -332,13 +323,13 @@ FtlmResult ftlm_kernel(const Backend& backend,
         if (opts.breakdown_tol > 0.0) kopts.breakdown_tol = opts.breakdown_tol;
         // Observables need the Krylov basis itself, orthonormal (the Ritz vectors are built from it).
         if (opts.full_reorthogonalization || n_obs > 0) {
-            kopts.reorth     = ed::krylov::ReorthPolicy::FullCGS2;
+            kopts.reorth = ed::krylov::ReorthPolicy::FullCGS2;
             kopts.keep_basis = true;
         } else {
             // FTLM's first-component weights come from the tridiagonal
             // eigenvectors directly, so we only need a faithful (alpha,
             // beta) -- LocalDGKS3 is the cheap canonical reorth policy.
-            kopts.reorth     = ed::krylov::ReorthPolicy::LocalDGKS3;
+            kopts.reorth = ed::krylov::ReorthPolicy::LocalDGKS3;
             kopts.keep_basis = false;
         }
 
@@ -353,7 +344,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
                 for (std::size_t j = 0; j < t.m; ++j)   // a dropped pair keeps its value, without weight
                     if (t.vectors[j * t.m] * t.vectors[j * t.m] < opts.min_weight) t.vectors[j * t.m] = 0.0;
                 out.weights = t.weights();
-                out.ritz    = std::move(t.values);
+                out.ritz = std::move(t.values);
                 if (n_obs > 0) out.Y = std::move(t.vectors);
             }
             // Observables in the Ritz basis, A_ij = <psi_i|O|psi_j> = (Y^T B Y)_ij with
@@ -392,8 +383,7 @@ FtlmResult ftlm_kernel(const Backend& backend,
         }
         if (out.ritz.empty()) {
             // A failed sample is dropped, not fatal.
-            ED_LOG(Warn, "FTLM: sample %zu has no Ritz values; dropped",
-                   static_cast<std::size_t>(s));
+            ED_LOG(Warn, "FTLM: sample %zu has no Ritz values; dropped", static_cast<std::size_t>(s));
             return out;
         }
         // ---- 4. Host-side Boltzmann moments of this sample ----
@@ -472,9 +462,9 @@ FtlmResult ftlm_kernel(const Backend& backend,
     }
 
     if (moments.empty()) {
-        throw std::runtime_error(
-            "ftlm_kernel: every sample failed (no Ritz values from any "
-            "of the " + std::to_string(opts.num_samples) + " samples)");
+        throw std::runtime_error("ftlm_kernel: every sample failed (no Ritz values from any "
+                                 "of the "
+                                 + std::to_string(opts.num_samples) + " samples)");
     }
 
     // ---- 5. Jensen-correct sample averaging ----

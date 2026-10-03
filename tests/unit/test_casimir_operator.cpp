@@ -93,8 +93,7 @@ TEST_CASE("S^2 carrier matches the algebraic reference", "[casimir]") {
     }
 }
 
-TEST_CASE("S^2 spectrum is {S(S+1)} with multiplet-counting multiplicities",
-          "[casimir]") {
+TEST_CASE("S^2 spectrum is {S(S+1)} with multiplet-counting multiplicities", "[casimir]") {
     for (std::uint64_t N : {4ULL, 6ULL}) {
         auto op = make_S2_carrier(N);
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(dense_of(*op));
@@ -102,19 +101,16 @@ TEST_CASE("S^2 spectrum is {S(S+1)} with multiplet-counting multiplicities",
 
         std::map<int, std::uint64_t> mult;  // two_S -> count
         for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i) {
-            const int ts = snap_two_S(es.eigenvalues()[i],
-                                      static_cast<int>(N));
+            const int ts = snap_two_S(es.eigenvalues()[i], static_cast<int>(N));
             REQUIRE(ts >= 0);  // every eigenvalue snaps
             ++mult[ts];
         }
         std::uint64_t total = 0;
         for (const auto& [ts, count] : mult) {
-            const std::uint64_t expected =
-                (ts + 1) * multiplet_count_ref(N, ts);  // (2S+1) * M(N,S)
+            const std::uint64_t expected = (ts + 1) * multiplet_count_ref(N, ts);  // (2S+1) * M(N,S)
             REQUIRE(count == expected);
             total += count;
         }
         REQUIRE(total == (1ULL << N));
     }
 }
-

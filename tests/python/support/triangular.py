@@ -11,17 +11,18 @@ Bonds are a MULTISET: on a small torus two offsets can wrap onto the same site p
 (the 12-site cluster's second shell does), and the torus Hamiltonian carries that
 bond twice. De-duplicating by pair would silently halve the coupling there.
 """
+
 from __future__ import annotations
 
-NN_OFFSETS = ((1, 0), (0, 1), (-1, 1))        # along a1, a2, a2 - a1
+NN_OFFSETS = ((1, 0), (0, 1), (-1, 1))  # along a1, a2, a2 - a1
 NNN_OFFSETS = ((1, 1), (-1, 2), (2, -1))
 
 # Named clusters: superlattice rows. All carry the full C6v point group.
 CLUSTERS = {
     "9": ((3, 0), (0, 3)),
-    "12": ((2, 2), (-2, 4)),      # 2sqrt3 x 2sqrt3; momenta: Gamma, 3 M, 2 K, 6 X
+    "12": ((2, 2), (-2, 4)),  # 2sqrt3 x 2sqrt3; momenta: Gamma, 3 M, 2 K, 6 X
     "16": ((4, 0), (0, 4)),
-    "36": ((6, 0), (0, 6)),       # 6 x 6 (Wietek, Capponi, Lauchli, PRX 14, 021010)
+    "36": ((6, 0), (0, 6)),  # 6 x 6 (Wietek, Capponi, Lauchli, PRX 14, 021010)
 }
 
 
@@ -81,8 +82,7 @@ class TriangularTorus:
 
     def translation_group(self):
         """The closed translation group as sorted permutation lists (the engine's order)."""
-        return [list(p) for p in sorted({tuple(self.translation(t1, t2))
-                                         for (t1, t2) in self.sites})]
+        return [list(p) for p in sorted({tuple(self.translation(t1, t2)) for (t1, t2) in self.sites})]
 
     def momentum_generators(self):
         """Translations by a1 and a2."""
@@ -93,8 +93,10 @@ class TriangularTorus:
         bijections of the torus and preserve both bond shells. Labels: 'C6^r' and
         's_r' = (mirror n1<->n2) followed by C6^r. With nematic=True only the elements
         that map the a1 bond direction onto itself are kept (C2 and two mirrors)."""
+
         def c6(n1, n2):
             return (-n2, n1 + n2)
+
         shells = [self._shell(NN_OFFSETS), self._shell(NNN_OFFSETS)]
         a1_bonds = {frozenset((i, j)) for (i, j, d) in self.bonds(NN_OFFSETS) if d == 0}
         ops = []
@@ -109,6 +111,7 @@ class TriangularTorus:
                     for _ in range(r):
                         n1, n2 = c6(n1, n2)
                     return n1, n2
+
                 p = self._perm(fn)
                 if p is None or any(self._image(s, p) != s for s in shells):
                     continue

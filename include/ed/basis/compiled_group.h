@@ -51,23 +51,16 @@ public:
 
     /// Compile pure site permutations (no flips). ``perms[g]`` maps output
     /// bit i to input bit perms[g][i], matching ``applyPermutation``.
-    [[nodiscard]] static CompiledGroup
-    from_permutations(const std::vector<std::vector<int>>& perms, int n_sites)
-    {
-        return build_(perms, std::vector<std::uint64_t>(perms.size(), 0ULL),
-                      n_sites);
+    [[nodiscard]] static CompiledGroup from_permutations(const std::vector<std::vector<int>>& perms, int n_sites) {
+        return build_(perms, std::vector<std::uint64_t>(perms.size(), 0ULL), n_sites);
     }
 
     /// Compile permutation + XOR-flip elements (spin-flip Z2 and sublattice
     /// flips ride the same table).
-    [[nodiscard]] static CompiledGroup
-    from_elements(const std::vector<std::vector<int>>& perms,
-                  const std::vector<std::uint64_t>&    flip_masks,
-                  int                                  n_sites)
-    {
+    [[nodiscard]] static CompiledGroup from_elements(const std::vector<std::vector<int>>& perms,
+                                                     const std::vector<std::uint64_t>& flip_masks, int n_sites) {
         if (flip_masks.size() != perms.size()) {
-            throw std::invalid_argument(
-                "CompiledGroup: perms/flip_masks size mismatch");
+            throw std::invalid_argument("CompiledGroup: perms/flip_masks size mismatch");
         }
         return build_(perms, flip_masks, n_sites);
     }
@@ -77,14 +70,10 @@ public:
     [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
 
     /// Action of element ``g`` on state ``s``. BPW table loads + one XOR.
-    [[nodiscard]] inline std::uint64_t
-    apply(std::uint64_t s, std::size_t g) const noexcept {
+    [[nodiscard]] inline std::uint64_t apply(std::uint64_t s, std::size_t g) const noexcept {
         const std::uint64_t* lut_g = lut_.data() + g * stride_;
         std::uint64_t out = 0;
-        for (int b = 0; b < bpw_; ++b) {
-            out |= lut_g[(static_cast<std::size_t>(b) << 8)
-                         + ((s >> (8 * b)) & 0xFFu)];
-        }
+        for (int b = 0; b < bpw_; ++b) { out |= lut_g[(static_cast<std::size_t>(b) << 8) + ((s >> (8 * b)) & 0xFFu)]; }
         return out ^ flips_[g];
     }
 
@@ -113,22 +102,16 @@ public:
     }
 
 private:
-    [[nodiscard]] static CompiledGroup
-    build_(const std::vector<std::vector<int>>& perms,
-           const std::vector<std::uint64_t>&    flip_masks,
-           int                                  n_sites)
-    {
-        if (n_sites <= 0 || n_sites > 64) {
-            throw std::invalid_argument(
-                "CompiledGroup: n_sites must be in [1, 64]");
-        }
+    [[nodiscard]] static CompiledGroup build_(const std::vector<std::vector<int>>& perms,
+                                              const std::vector<std::uint64_t>& flip_masks, int n_sites) {
+        if (n_sites <= 0 || n_sites > 64) { throw std::invalid_argument("CompiledGroup: n_sites must be in [1, 64]"); }
         CompiledGroup cg;
         cg.n_sites_ = n_sites;
-        cg.size_    = perms.size();
-        cg.bpw_     = (n_sites + 7) / 8;
-        cg.stride_  = static_cast<std::size_t>(cg.bpw_) * 256;
+        cg.size_ = perms.size();
+        cg.bpw_ = (n_sites + 7) / 8;
+        cg.stride_ = static_cast<std::size_t>(cg.bpw_) * 256;
         cg.lut_.assign(cg.size_ * cg.stride_, 0ULL);
-        cg.flips_   = flip_masks;
+        cg.flips_ = flip_masks;
 
         std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
         auto mix = [&h](std::uint64_t v) {
@@ -143,16 +126,14 @@ private:
         for (std::size_t g = 0; g < cg.size_; ++g) {
             const std::vector<int>& p = perms[g];
             if (static_cast<int>(p.size()) != n_sites) {
-                throw std::invalid_argument(
-                    "CompiledGroup: permutation size != n_sites");
+                throw std::invalid_argument("CompiledGroup: permutation size != n_sites");
             }
             // Invert: output bit i reads input bit p[i]  =>  input bit j
             // scatters to output bit p_inv[j].
             int p_inv[64];
             for (int i = 0; i < n_sites; ++i) {
                 if (p[i] < 0 || p[i] >= n_sites) {
-                    throw std::invalid_argument(
-                        "CompiledGroup: permutation entry out of range");
+                    throw std::invalid_argument("CompiledGroup: permutation entry out of range");
                 }
                 p_inv[p[i]] = i;
                 mix(static_cast<std::uint64_t>(p[i]));
@@ -165,12 +146,9 @@ private:
                 for (int byte_val = 0; byte_val < 256; ++byte_val) {
                     std::uint64_t out = 0;
                     for (int b = 0; b < 8 && bit_base + b < n_sites; ++b) {
-                        if ((byte_val >> b) & 1) {
-                            out |= (1ULL << p_inv[bit_base + b]);
-                        }
+                        if ((byte_val >> b) & 1) { out |= (1ULL << p_inv[bit_base + b]); }
                     }
-                    lut_g[(static_cast<std::size_t>(byte_idx) << 8)
-                          + static_cast<std::size_t>(byte_val)] = out;
+                    lut_g[(static_cast<std::size_t>(byte_idx) << 8) + static_cast<std::size_t>(byte_val)] = out;
                 }
             }
         }
@@ -186,11 +164,11 @@ private:
     std::vector<std::uint64_t> lut_;       // size_ * stride_ entries
     std::vector<std::uint64_t> flips_;     // per element XOR mask
     std::shared_ptr<const SublatticeCode> slc_;   // null: the plain order
-    std::size_t                size_    = 0;
-    std::size_t                stride_  = 0;  // bpw_ * 256
-    int                        bpw_     = 0;
-    int                        n_sites_ = 0;
-    std::uint64_t              hash_    = 0;
+    std::size_t size_ = 0;
+    std::size_t stride_ = 0;  // bpw_ * 256
+    int bpw_ = 0;
+    int n_sites_ = 0;
+    std::uint64_t hash_ = 0;
 };
 
 }  // namespace ed::symmetry

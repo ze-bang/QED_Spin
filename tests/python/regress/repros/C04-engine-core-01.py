@@ -14,6 +14,7 @@ Symmetries-like object (abelian = Tx, Ty; residues = coset representatives, kept
 list order by split_nonabelian), once with pure point operations about site 0 ('good') and
 once with the C4 coset represented by Tx*C4 ('bad'). Compare the M-point levels of
 qed.spectrum and a select(momentum=M, irrep_character={C2: +1}) query."""
+
 import signal
 from types import SimpleNamespace
 
@@ -43,7 +44,7 @@ SX = perm(lambda x, y: (-x, y))
 SY = perm(lambda x, y: (x, -y))
 SD = perm(lambda x, y: (y, x))
 SD2 = perm(lambda x, y: (-y, -x))
-TxC4 = perm(lambda x, y: (-y + 1, x))   # C4 followed by a unit translation: same A-coset as C4
+TxC4 = perm(lambda x, y: (-y + 1, x))  # C4 followed by a unit translation: same A-coset as C4
 
 nn, nnn = [], []
 for x in range(L):
@@ -89,10 +90,10 @@ try:
             nsel = len(e.levels)
         except Exception as ex:
             nsel = f"raised {type(ex).__name__}: {str(ex)[:80]}"
-        summary[name] = dict(E=np.sort(np.asarray(sp.energies, float)), irreps=irreps,
-                             maxdim=maxdim, nM=len(ml), nsel=nsel)
-        print(f"{name}: M levels={len(ml)} irreps={irreps} max M block dim={maxdim} "
-              f"select(M, C2:+1) levels={nsel}")
+        summary[name] = dict(
+            E=np.sort(np.asarray(sp.energies, float)), irreps=irreps, maxdim=maxdim, nM=len(ml), nsel=nsel
+        )
+        print(f"{name}: M levels={len(ml)} irreps={irreps} max M block dim={maxdim} " f"select(M, C2:+1) levels={nsel}")
 except Exception as ex:
     print(f"REPRO: INCONCLUSIVE setup raised {type(ex).__name__}: {str(ex)[:160]}")
     raise SystemExit(0)
@@ -103,9 +104,11 @@ print(f"spectra good vs bad: n={g['E'].size}/{bd['E'].size} max|dE|={dE:.2e}")
 good_ok = g["irreps"] and min(g["irreps"]) >= 0 and isinstance(g["nsel"], int) and g["nsel"] > 0
 bad_lost = bd["irreps"] == [-1] or (isinstance(bd["nsel"], int) and bd["nsel"] == 0)
 if good_ok and bad_lost:
-    print(f"REPRO: CONFIRMED M star projected with C4 rep (irreps {g['irreps']}, max dim {g['maxdim']}, "
-          f"select -> {g['nsel']}) but NOT with Tx*C4 rep (irreps {bd['irreps']}, max dim {bd['maxdim']}, "
-          f"select -> {bd['nsel']}); spectra agree to {dE:.1e}")
+    print(
+        f"REPRO: CONFIRMED M star projected with C4 rep (irreps {g['irreps']}, max dim {g['maxdim']}, "
+        f"select -> {g['nsel']}) but NOT with Tx*C4 rep (irreps {bd['irreps']}, max dim {bd['maxdim']}, "
+        f"select -> {bd['nsel']}); spectra agree to {dE:.1e}"
+    )
 elif good_ok:
     print(f"REPRO: NOT_REPRODUCED Tx*C4 rep still projects M (irreps {bd['irreps']}, select -> {bd['nsel']})")
 else:

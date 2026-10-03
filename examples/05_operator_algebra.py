@@ -3,10 +3,11 @@ and measure an observable built the same way.
 
     python examples/05_operator_algebra.py
 """
+
 import qed
 
 N = 12
-P = qed.Operator.product   # P(N, ops, sites, c) = c * O_0(sites[0]) O_1(sites[1]) ..., the last acting first
+P = qed.Operator.product  # P(N, ops, sites, c) = c * O_0(sites[0]) O_1(sites[1]) ..., the last acting first
 ZERO = qed.Operator(N)
 
 
@@ -28,11 +29,13 @@ H = H + K * sum((bond(i, (i + 1) % N) @ bond((i + 2) % N, (i + 3) % N) for i in 
 
 # Symmetry checks on the operator itself, exact in its canonical terms.
 Sz = sum((P(N, "z", [i]) for i in range(N)), ZERO)
-T = [(i + 1) % N for i in range(N)]                       # site i of the image carries site i + 1
+T = [(i + 1) % N for i in range(N)]  # site i of the image carries site i + 1
 print(f"{len(H.terms())} canonical terms; Hermitian: {H.is_hermitian()}")
 print(f"|[H, Sz]| = {largest(H @ Sz - Sz @ H):.1e}")
-print(f"translation invariant: {H.image(T).equals(H)}, "
-      f"spin-flip invariant: {H.image(list(range(N)), flip=True).equals(H)}")
+print(
+    f"translation invariant: {H.image(T).equals(H)}, "
+    f"spin-flip invariant: {H.image(list(range(N)), flip=True).equals(H)}"
+)
 
 # The lowest levels, and the dimer order parameter D = sum_i (-1)^i S_i . S_i+1 / N in them.
 D = sum(((-1) ** i / N * bond(i, (i + 1) % N) for i in range(N)), ZERO)

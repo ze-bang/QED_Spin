@@ -19,8 +19,8 @@ using namespace ed::solvers;
 using namespace ed::solvers::lg_detail;
 
 
-std::vector<std::vector<Complex>>
-expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>& ops) {
+std::vector<std::vector<Complex>> expect(const EigsResult& r, const Spec& s,
+                                         const std::vector<const ::Operator*>& ops) {
     const int n_sites = r.n_sites;
     detail::validate_environment("expect");
     for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], n_sites, "expect", i);
@@ -34,15 +34,17 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
     std::vector<std::vector<Complex>> out(r.levels.size(), std::vector<Complex>(n_ops));
     // A level paired by an antiunitary map A (a time-reversal-folded star, a Theta mirror) also
     // averages <A v|O|A v> = conj(<v|A^-1 O A|v>); one basis has one such map.
-    struct Group { std::vector<std::size_t> levels; Antiunitary image = Antiunitary::None; };
+    struct Group {
+        std::vector<std::size_t> levels;
+        Antiunitary image = Antiunitary::None;
+    };
     std::map<std::tuple<const void*, bool, int>, Group> groups;
     using detail::Keep;
     for (std::size_t li = 0; li < r.levels.size(); ++li) {
         const Level& L = r.levels[li];
         if (L.vector < 0) throw std::invalid_argument("expect: a level has no vector (solve with vectors)");
         const BlockVector& v = r.vectors[static_cast<std::size_t>(L.vector)];
-        const bool flip = (L.mirror == 2 && !detail::theta_mirror(L)) || L.tag.flip_parity >= 0
-                          || v.basis->has_flips();
+        const bool flip = (L.mirror == 2 && !detail::theta_mirror(L)) || L.tag.flip_parity >= 0 || v.basis->has_flips();
         const Keep keep = v.basis->n_up >= 0 ? Keep::Zero : (L.tag.sz_parity >= 0 ? Keep::Even : Keep::All);
         Group& g = groups[{v.basis.get(), flip, static_cast<int>(keep)}];
         g.levels.push_back(li);
@@ -96,7 +98,8 @@ expect(const EigsResult& r, const Spec& s, const std::vector<const ::Operator*>&
             const Level& L = r.levels[g.levels[i]];
             for (std::size_t o = 0; o < n_ops; ++o) {
                 const Complex a = me[i * width + o];
-                out[g.levels[i]][o] = L.fold != Antiunitary::None ? 0.5 * (a + std::conj(me[i * width + n_ops + o])) : a;
+                out[g.levels[i]][o] =
+                    L.fold != Antiunitary::None ? 0.5 * (a + std::conj(me[i * width + n_ops + o])) : a;
             }
         }
     }

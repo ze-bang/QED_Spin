@@ -13,10 +13,8 @@ namespace lg_detail {
 
 // Extended-irrep characters chi'_{k,s}(a + f|A|) = chi_k(a) * (s ? -1 : +1)^f.
 // Without flip this is just the raw character vector.
-[[nodiscard]] std::vector<Complex>
-characters_for(const EngineContext& cx, int k_ext) {
-    const auto& base =
-        cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
+[[nodiscard]] std::vector<Complex> characters_for(const EngineContext& cx, int k_ext) {
+    const auto& base = cx.giA.irreps[static_cast<std::size_t>(k_ext % cx.n_irr_raw)].character;
     std::vector<Complex> chi(base.begin(), base.end());
     if (cx.flip_half) {
         const double s = (k_ext / cx.n_irr_raw == 0) ? 1.0 : -1.0;
@@ -30,30 +28,24 @@ characters_for(const EngineContext& cx, int k_ext) {
 // the active subspace is flip-invariant (n_up = N/2; parity half with N even;
 // full space unconditionally). Require throws loudly on either failure --
 // silently-different physics is worse than an error.
-[[nodiscard]] FlipEngagement
-resolve_flip_engagement(const ed::ops::MaskedOperator& h,
-                        const LittleGroupOptions& opt, int n_sites)
-{
+[[nodiscard]] FlipEngagement resolve_flip_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions& opt,
+                                                     int n_sites) {
     FlipEngagement fe;
     if (opt.spin_flip == 0) return fe;
     fe.symmetric = ed::ops::flip_invariant(h);
-    const bool admissible = ed::symmetry::flip_subspace_admissible(
-        opt.n_up, opt.sz_parity, n_sites);
+    const bool admissible = ed::symmetry::flip_subspace_admissible(opt.n_up, opt.sz_parity, n_sites);
     if (opt.spin_flip == 1) {
         if (!fe.symmetric)
-            throw std::runtime_error(
-                "little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
-                "(e.g. a Zeeman term breaks the flip).");
+            throw std::runtime_error("little_group: spin_flip='require' but [H, prod sigma^x] != 0 "
+                                     "(e.g. a Zeeman term breaks the flip).");
         if (!admissible)
-            throw std::runtime_error(
-                "little_group: spin_flip='require' but the subspace is not "
-                "flip-invariant (needs n_up = N/2, an Sz-parity half with N "
-                "even, or the full space).");
+            throw std::runtime_error("little_group: spin_flip='require' but the subspace is not "
+                                     "flip-invariant (needs n_up = N/2, an Sz-parity half with N "
+                                     "even, or the full space).");
     }
     if (!fe.symmetric || !admissible) return fe;
     fe.engaged = true;
-    fe.mask = (n_sites >= 64) ? ~0ULL
-                              : ((std::uint64_t{1} << n_sites) - 1ULL);
+    fe.mask = (n_sites >= 64) ? ~0ULL : ((std::uint64_t{1} << n_sites) - 1ULL);
     return fe;
 }
 
@@ -63,17 +55,14 @@ resolve_flip_engagement(const ed::ops::MaskedOperator& h,
 // basis. Otherwise time reversal Theta, which maps Sz to -Sz: it folds stars only in a subspace it
 // maps to itself (Sz = 0, a parity half for even N, the full space) and not beside the flip half
 // (Theta F Theta^-1 = (-1)^N F); elsewhere subspaces() pairs Sz with -Sz by it.
-[[nodiscard]] Antiunitary
-resolve_tr_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions& opt, int n_sites,
-                      bool flip_half)
-{
+[[nodiscard]] Antiunitary resolve_tr_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions& opt,
+                                                int n_sites, bool flip_half) {
     if (opt.time_reversal == 0) return Antiunitary::None;
     if (ed::ops::conjugation_invariant(h)) return Antiunitary::K;
     const bool theta = ed::ops::theta_invariant(h);
     if (opt.time_reversal == 1 && !theta)
-        throw ed::InvalidRequest(
-            "little_group: time_reversal='require', but H is invariant under neither complex "
-            "conjugation K in the S^z basis nor time reversal Theta = prod_i (i sigma^y_i) K.");
+        throw ed::InvalidRequest("little_group: time_reversal='require', but H is invariant under neither complex "
+                                 "conjugation K in the S^z basis nor time reversal Theta = prod_i (i sigma^y_i) K.");
     const bool closed = opt.n_up >= 0 ? 2 * opt.n_up == n_sites : (opt.sz_parity < 0 || n_sites % 2 == 0);
     return theta && closed && !flip_half ? Antiunitary::Theta : Antiunitary::None;
 }
@@ -81,16 +70,14 @@ resolve_tr_engagement(const ed::ops::MaskedOperator& h, const LittleGroupOptions
 // chi_k -> chi_{k*} with chi_{k*}(a) == conj(chi_k(a)) for all a, on the
 // EXTENDED irrep indices (the flip characters are real, so conjugation is
 // parity-diagonal). -1 when unmatched (that irrep is never folded).
-[[nodiscard]] std::vector<int>
-conjugate_irrep_map(const EngineContext& cx) {
+[[nodiscard]] std::vector<int> conjugate_irrep_map(const EngineContext& cx) {
     const int n_raw = cx.n_irr_raw;
     std::vector<int> raw(static_cast<std::size_t>(n_raw), -1);
     const std::size_t nA = cx.A.size();
     for (int k = 0; k < n_raw; ++k) {
         const auto& chi_k = cx.giA.irreps[static_cast<std::size_t>(k)].character;
         for (int k2 = 0; k2 < n_raw; ++k2) {
-            const auto& chi_k2 =
-                cx.giA.irreps[static_cast<std::size_t>(k2)].character;
+            const auto& chi_k2 = cx.giA.irreps[static_cast<std::size_t>(k2)].character;
             bool match = true;
             for (std::size_t a = 0; a < nA; ++a) {
                 // scale-free: unit-modulus characters / phases (group data, not energies)
@@ -99,7 +86,10 @@ conjugate_irrep_map(const EngineContext& cx) {
                     break;
                 }
             }
-            if (match) { raw[static_cast<std::size_t>(k)] = k2; break; }
+            if (match) {
+                raw[static_cast<std::size_t>(k)] = k2;
+                break;
+            }
         }
     }
     if (!cx.flip_half) return raw;
@@ -107,8 +97,7 @@ conjugate_irrep_map(const EngineContext& cx) {
     for (int k = 0; k < n_raw; ++k) {
         if (raw[static_cast<std::size_t>(k)] < 0) continue;
         ext[static_cast<std::size_t>(k)] = raw[static_cast<std::size_t>(k)];
-        ext[static_cast<std::size_t>(k) + static_cast<std::size_t>(n_raw)] =
-            raw[static_cast<std::size_t>(k)] + n_raw;
+        ext[static_cast<std::size_t>(k) + static_cast<std::size_t>(n_raw)] = raw[static_cast<std::size_t>(k)] + n_raw;
     }
     return ext;
 }
@@ -119,8 +108,7 @@ conjugate_irrep_map(const EngineContext& cx) {
 // stars, multiplets and labels would all be wrong (qed.Symmetry always passes a
 // normal A). Each kept residue remembers its index in the caller's list, which
 // is what the published little-co-group elements name.
-void build_residue_maps(EngineContext& cx,
-                        const std::vector<std::vector<int>>& residue_perms) {
+void build_residue_maps(EngineContext& cx, const std::vector<std::vector<int>>& residue_perms) {
     const int nA = static_cast<int>(cx.A.size());
     std::map<std::vector<int>, int> aidx;
     for (int a = 0; a < nA; ++a) aidx[cx.A[static_cast<std::size_t>(a)]] = a;
@@ -130,7 +118,11 @@ void build_residue_maps(EngineContext& cx,
         const auto& p = residue_perms[ip];
         if (aidx.count(p)) continue;                       // p in A: no new info
         bool dup = false;
-        for (const auto& q : cx.residues) if (q == p) { dup = true; break; }
+        for (const auto& q : cx.residues)
+            if (q == p) {
+                dup = true;
+                break;
+            }
         if (dup) continue;
         const auto p_inv = inverse_perm(p);
         // conj_by_pinv[a'] = index of p^{-1} · a' · p
@@ -139,10 +131,10 @@ void build_residue_maps(EngineContext& cx,
             const auto e = compose(compose(p_inv, cx.A[static_cast<std::size_t>(a)]), p);
             const auto it = aidx.find(e);
             if (it == aidx.end())
-                throw ed::InvalidRequest(
-                    "sectors: residue " + std::to_string(ip) + " does not normalise the abelian "
-                    "group; the abelian part must be a normal subgroup of the spatial group "
-                    "(qed.Symmetry chooses one when given the permutations as a list)");
+                throw ed::InvalidRequest("sectors: residue " + std::to_string(ip)
+                                         + " does not normalise the abelian "
+                                           "group; the abelian part must be a normal subgroup of the spatial group "
+                                           "(qed.Symmetry chooses one when given the permutations as a list)");
             conj[static_cast<std::size_t>(a)] = it->second;
         }
 
@@ -159,16 +151,22 @@ void build_residue_maps(EngineContext& cx,
                     if (std::abs(chi_k2[static_cast<std::size_t>(a)]
                                  - chi_k[static_cast<std::size_t>(conj[static_cast<std::size_t>(a)])])
                         // scale-free: unit-modulus characters / phases (group data, not energies)
-                        > 1e-8) { match = false; break; }
+                        > 1e-8) {
+                        match = false;
+                        break;
+                    }
                 }
                 if (match) hit = k2;
             }
-            if (hit < 0) ok = false;
-            else mp[static_cast<std::size_t>(k)] = hit;
+            if (hit < 0)
+                ok = false;
+            else
+                mp[static_cast<std::size_t>(k)] = hit;
         }
-        if (!ok)                                           // conjugation permutes the irreps of A
-            throw std::logic_error("little_group: residue " + std::to_string(ip) + " normalises A, "
-                                   "but its conjugation matches no permutation of A's irreps");
+        if (!ok) // conjugation permutes the irreps of A
+            throw std::logic_error("little_group: residue " + std::to_string(ip)
+                                   + " normalises A, "
+                                     "but its conjugation matches no permutation of A's irreps");
         // Lift to extended irrep indices. A spatial residue
         // commutes with the global flip (p^-1 (a F) p = (p^-1 a p) F), so the
         // conjugation action is parity-diagonal: (k, s) -> (mp[k], s).
@@ -188,23 +186,19 @@ void build_residue_maps(EngineContext& cx,
 }
 
 // Build the k0-sector RepSectorData (surviving orbit reps + closed-form norms).
-[[nodiscard]] ed::symmetry::RepSectorData
-build_k_sector(const EngineContext& cx, int k, int n_up) {
+[[nodiscard]] ed::symmetry::RepSectorData build_k_sector(const EngineContext& cx, int k, int n_up) {
     ed::symmetry::RepSectorData rd;
-    rd.n_sites    = cx.n_sites;
+    rd.n_sites = cx.n_sites;
     rd.group_size = static_cast<int>(cx.nA_ext());
-    rd.n_up       = n_up;
+    rd.n_up = n_up;
     rd.characters = characters_for(cx, k);
     rd.perms_flat.reserve(cx.nA_ext() * static_cast<std::size_t>(cx.n_sites));
-    for (const auto& p : cx.A)
-        rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
+    for (const auto& p : cx.A) rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
     if (cx.flip_half) {
         // Flip half: the permutation part repeats, the XOR mask flips on.
-        for (const auto& p : cx.A)
-            rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
+        for (const auto& p : cx.A) rd.perms_flat.insert(rd.perms_flat.end(), p.begin(), p.end());
         rd.flip_masks.assign(cx.nA_ext(), 0ULL);
-        for (std::size_t g = cx.A.size(); g < cx.nA_ext(); ++g)
-            rd.flip_masks[g] = cx.flip_mask;
+        for (std::size_t g = cx.A.size(); g < cx.nA_ext(); ++g) rd.flip_masks[g] = cx.flip_mask;
     }
     const auto& kt = k_sector_table(cx);
     if (kt.srl) rd.shared_rank = kt.srl;
@@ -223,7 +217,7 @@ const EngineContext::KTable& k_sector_table(const EngineContext& cx) {
             // sector built from it: O(1) index lookups on the host, and one device copy on the GPU.
             ed::core::combinadic::BinomialTable b(cx.n_sites);
             if (ed::symmetry::rep_rank_table_enabled(b.at(cx.n_sites, cx.n_up)))
-                t.srl = ed::symmetry::rank_lookup_of(*t.otab, cx.n_sites, cx.n_up);   // kept with the table
+                t.srl = ed::symmetry::rank_lookup_of(*t.otab, cx.n_sites, cx.n_up); // kept with the table
         } else if (cx.sz_parity >= 0) {
             t.otab = ed::symmetry::acquire_orbit_table_parity_compiled(n, cx.sz_parity, cx.cg);
         } else {
@@ -237,25 +231,18 @@ const EngineContext::KTable& k_sector_table(const EngineContext& cx) {
 // Shared context setup: decompose A, resolve flip/TR engagement, acquire
 // the orbit table, map the residues. Used by the star walk (walk.h) and
 // the streamed k-sector factory (ground_state.cpp).
-void make_engine_context(const ::Operator&                    op,
-                         const std::vector<std::vector<int>>& abelian_group,
-                         const std::vector<std::vector<int>>& residue_perms,
-                         int                                  n_sites,
-                         const LittleGroupOptions&            opt,
-                         EngineContext&                       cx,
-                         bool&                                tr_on)
-{
+void make_engine_context(const ::Operator& op, const std::vector<std::vector<int>>& abelian_group,
+                         const std::vector<std::vector<int>>& residue_perms, int n_sites, const LittleGroupOptions& opt,
+                         EngineContext& cx, bool& tr_on) {
     if (opt.n_up >= 0 && opt.sz_parity >= 0)
-        throw std::invalid_argument(
-            "little_group: n_up and sz_parity are mutually exclusive.");
+        throw std::invalid_argument("little_group: n_up and sz_parity are mutually exclusive.");
 
-    cx.A       = abelian_group;
+    cx.A = abelian_group;
     cx.n_sites = n_sites;
-    cx.giA     = ed::symmetry::decompose_irreps(cx.A, n_sites);  // throws if not closed
+    cx.giA = ed::symmetry::decompose_irreps(cx.A, n_sites); // throws if not closed
     if (!cx.giA.is_abelian())
-        throw std::invalid_argument(
-            "little_group: `abelian_group` is not abelian -- pass the clique "
-            "group; residues go in `residue_perms`.");
+        throw std::invalid_argument("little_group: `abelian_group` is not abelian -- pass the clique "
+                                    "group; residues go in `residue_perms`.");
     cx.n_irr_raw = static_cast<int>(cx.giA.irreps.size());
 
     cx.terms = &op.canonical();
@@ -271,12 +258,10 @@ void make_engine_context(const ::Operator&                    op,
     cx.tr = resolve_tr_engagement(h, opt, n_sites, cx.flip_half);
     tr_on = cx.tr != Antiunitary::None;
 
-    cx.cg = cx.flip_half
-        ? ed::symmetry::make_flip_extended_group_from_perms(
-              cx.A, static_cast<std::uint64_t>(n_sites))
-        : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
+    cx.cg = cx.flip_half ? ed::symmetry::make_flip_extended_group_from_perms(cx.A, static_cast<std::uint64_t>(n_sites))
+                         : ed::symmetry::CompiledGroup::from_permutations(cx.A, n_sites);
     // The orbit table of the subspace waits for the first star that needs its momentum sector.
-    cx.n_up      = opt.n_up;
+    cx.n_up = opt.n_up;
     cx.sz_parity = opt.sz_parity;
     build_residue_maps(cx, residue_perms);
 }
@@ -287,16 +272,13 @@ void make_engine_context(const ::Operator&                    op,
 // an exact isospectral copy (surviving reps and norms are conjugation-
 // invariant through |sum chi|^2); idempotent when a residue already maps
 // k -> -k (D_N reflections).
-[[nodiscard]] std::map<int, std::vector<int>>
-star_partition(const EngineContext& cx, bool tr_on)
-{
+[[nodiscard]] std::map<int, std::vector<int>> star_partition(const EngineContext& cx, bool tr_on) {
     const int n_irr = cx.n_irr_ext();
     std::vector<int> parent(static_cast<std::size_t>(n_irr));
     std::iota(parent.begin(), parent.end(), 0);
     std::function<int(int)> find = [&](int x) {
         while (parent[static_cast<std::size_t>(x)] != x) {
-            parent[static_cast<std::size_t>(x)] =
-                parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
+            parent[static_cast<std::size_t>(x)] = parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(x)])];
             x = parent[static_cast<std::size_t>(x)];
         }
         return x;
@@ -320,6 +302,6 @@ star_partition(const EngineContext& cx, bool tr_on)
     return stars;
 }
 
-}  // namespace lg_detail
+} // namespace lg_detail
 
-}  // namespace ed::solvers
+} // namespace ed::solvers

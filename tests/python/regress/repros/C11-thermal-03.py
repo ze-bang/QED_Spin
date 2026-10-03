@@ -5,6 +5,7 @@
 full spin-S multiplets, all Sz = -S..S), yet returns M = S and chi = 0 at every temperature, for
 exact, ftlm and mtpq. In that ensemble M = 0 and chi = beta * S(S+1) / (3N).
 Reference: independent dense numpy ED of the 8-site Heisenberg ring restricted to the S = 1 subspace."""
+
 import numpy as np
 import qed
 
@@ -12,29 +13,43 @@ N, S2 = 8, 1.0
 Ts = np.array([0.5, 1.0, 2.0])
 
 # dense reference
-sp = np.array([[0, 1], [0, 0]], complex); sm = sp.T.copy(); sz = np.diag([0.5, -0.5]).astype(complex)
+sp = np.array([[0, 1], [0, 0]], complex)
+sm = sp.T.copy()
+sz = np.diag([0.5, -0.5]).astype(complex)
 I2 = np.eye(2)
+
+
 def site(op, i):
     m = np.array([[1.0 + 0j]])
     for j in range(N):
         m = np.kron(m, op if j == i else I2)
     return m
-SP = [site(sp, i) for i in range(N)]; SM = [site(sm, i) for i in range(N)]; SZ = [site(sz, i) for i in range(N)]
+
+
+SP = [site(sp, i) for i in range(N)]
+SM = [site(sm, i) for i in range(N)]
+SZ = [site(sz, i) for i in range(N)]
 Hd = sum(0.5 * (SP[i] @ SM[(i + 1) % N] + SM[i] @ SP[(i + 1) % N]) + SZ[i] @ SZ[(i + 1) % N] for i in range(N))
-Sxyz_p = sum(SP); Sxyz_m = sum(SM); Szt = sum(SZ)
+Sxyz_p = sum(SP)
+Sxyz_m = sum(SM)
+Szt = sum(SZ)
 S2op = Sxyz_m @ Sxyz_p + Szt @ Szt + Szt
 w, V = np.linalg.eigh(S2op)
 P = V[:, np.abs(w - S2 * (S2 + 1)) < 1e-8]
-Hp = P.conj().T @ Hd @ P; Szp = P.conj().T @ Szt @ P
+Hp = P.conj().T @ Hd @ P
+Szp = P.conj().T @ Szt @ P
 e, U = np.linalg.eigh(Hp)
 sz_diag = np.real(np.einsum("ia,ij,ja->a", U.conj(), Szp, U))
 sz2_diag = np.real(np.einsum("ia,ij,ja->a", U.conj(), Szp @ Szp, U))
 ref = {}
 for T in Ts:
-    p = np.exp(-(e - e.min()) / T); z = p.sum()
+    p = np.exp(-(e - e.min()) / T)
+    z = p.sum()
     ref.setdefault("E", []).append((p * e).sum() / z)
-    m = (p * sz_diag).sum() / z; m2 = (p * sz2_diag).sum() / z
-    ref.setdefault("M", []).append(m); ref.setdefault("chi", []).append((m2 - m * m) / (T * N))
+    m = (p * sz_diag).sum() / z
+    m2 = (p * sz2_diag).sum() / z
+    ref.setdefault("M", []).append(m)
+    ref.setdefault("chi", []).append((m2 - m * m) / (T * N))
 ref = {k: np.array(v) for k, v in ref.items()}
 
 b = qed.input.HamiltonianBuilder(N)
@@ -59,6 +74,8 @@ for method in ("exact", "ftlm", "mtpq"):
             lines.append(f"{method}:M={M},chi={chi}")
 print("reference M", np.round(ref["M"], 6).tolist(), "chi", np.round(ref["chi"], 6).tolist())
 if bad:
-    print(f"REPRO: CONFIRMED {'; '.join(lines)} vs ref M={np.round(ref['M'],6).tolist()} chi={np.round(ref['chi'],6).tolist()}")
+    print(
+        f"REPRO: CONFIRMED {'; '.join(lines)} vs ref M={np.round(ref['M'],6).tolist()} chi={np.round(ref['chi'],6).tolist()}"
+    )
 else:
     print("REPRO: NOT_REPRODUCED M and chi match the S=1 ensemble (or are not returned)")

@@ -68,8 +68,7 @@ inline void add_rich_real_terms(Operator& op) {
 
 // Run op.apply() on the CSR or the walk. ``build`` must return a freshly constructed
 // operator, so its lane (and the ED_CSR_FORCE it reads) is built inside this scope.
-template <class Build>
-inline ComplexVector apply_under_lane(bool csr, Build&& build, const ComplexVector& v) {
+template <class Build> inline ComplexVector apply_under_lane(bool csr, Build&& build, const ComplexVector& v) {
     ::setenv("ED_CSR_FORCE", csr ? "1" : "0", 1);
     auto op = build();
     ComplexVector out(v.size(), Complex(0.0, 0.0));
@@ -91,9 +90,8 @@ inline std::vector<double> apply_to_real_under_lane(bool csr, Build&& build, con
 
 }  // namespace
 
-TEST_CASE("Operator::apply: the walk equals the CSR (complex, 1/2/3-body)",
-          "[operator_apply][equivalence]") {
-    constexpr uint64_t N   = 10;
+TEST_CASE("Operator::apply: the walk equals the CSR (complex, 1/2/3-body)", "[operator_apply][equivalence]") {
+    constexpr uint64_t N = 10;
     constexpr uint64_t dim = 1ULL << N;
     auto build = [] {
         auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
@@ -102,7 +100,7 @@ TEST_CASE("Operator::apply: the walk equals the CSR (complex, 1/2/3-body)",
     };
     for (uint64_t seed : {1u, 42u, 90210u}) {
         auto v = random_unit_vector(dim, seed);
-        auto y_csr  = apply_under_lane(/*csr=*/true,  build, v);
+        auto y_csr = apply_under_lane(/*csr=*/true, build, v);
         auto y_walk = apply_under_lane(/*csr=*/false, build, v);
         INFO("seed=" << seed << "  ||walk - csr|| = " << l2_diff(y_walk, y_csr));
         REQUIRE(l2_diff(y_walk, y_csr) < 1e-12);
@@ -112,7 +110,7 @@ TEST_CASE("Operator::apply: the walk equals the CSR (complex, 1/2/3-body)",
 TEST_CASE("Operator::apply: the walk equals the CSR on real input (Full)",
           "[operator_apply][equivalence][real_input]") {
     SECTION("Full basis") {
-        constexpr uint64_t N   = 10;
+        constexpr uint64_t N = 10;
         constexpr uint64_t dim = 1ULL << N;
         auto build = [] {
             auto op = build_heisenberg_chain(N, 1.0, /*periodic=*/true);
@@ -123,7 +121,7 @@ TEST_CASE("Operator::apply: the walk equals the CSR on real input (Full)",
         std::mt19937_64 g(2024);
         std::normal_distribution<double> nd(0, 1);
         for (auto& x : v) x = nd(g);
-        auto y_csr  = apply_to_real_under_lane(true,  build, v);
+        auto y_csr = apply_to_real_under_lane(true, build, v);
         auto y_walk = apply_to_real_under_lane(false, build, v);
         double s = 0.0;
         for (uint64_t i = 0; i < dim; ++i) {
@@ -134,20 +132,17 @@ TEST_CASE("Operator::apply: the walk equals the CSR on real input (Full)",
     }
 }
 
-TEST_CASE("Operator::apply: N=2 Heisenberg dimer matches analytic spectrum",
-          "[operator_apply][analytic]") {
+TEST_CASE("Operator::apply: N=2 Heisenberg dimer matches analytic spectrum", "[operator_apply][analytic]") {
     auto op = build_heisenberg_chain(/*N=*/2, /*J=*/1.0);
     const uint64_t dim = 1ULL << 2;
     auto ref = reference_from_operator(*op, dim);
 
     // Singlet at -3/4, triplet at +1/4 (three-fold).
     std::vector<double> expected = {-0.75, 0.25, 0.25, 0.25};
-    require_eigs_close(ref.eigs, expected, expected.size(), 1e-12,
-                       "N=2 dimer spectrum");
+    require_eigs_close(ref.eigs, expected, expected.size(), 1e-12, "N=2 dimer spectrum");
 }
 
-TEST_CASE("Operator::apply: N=4 OBC dense reference is consistent",
-          "[operator_apply][dense]") {
+TEST_CASE("Operator::apply: N=4 OBC dense reference is consistent", "[operator_apply][dense]") {
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     const uint64_t dim = 1ULL << 4;
     auto ref = reference_from_operator(*op, dim);
@@ -175,25 +170,22 @@ TEST_CASE("Operator::apply: N=4 OBC dense reference is consistent",
             Eigen::VectorXcd outref = ref.H * vref;
             ComplexVector outref_v(dim);
             for (uint64_t i = 0; i < dim; ++i) outref_v[i] = outref[i];
-            INFO("seed=" << seed
-                 << "  ||apply - Hdense*v|| = " << l2_diff(out, outref_v));
+            INFO("seed=" << seed << "  ||apply - Hdense*v|| = " << l2_diff(out, outref_v));
             REQUIRE(l2_diff(out, outref_v) < 1e-10);
         }
     }
 }
 
-TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
-          "[operator_apply][pbc]") {
+TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state", "[operator_apply][pbc]") {
     auto op_open = build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
                                           /*periodic=*/false);
-    auto op_pbc  = build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
-                                          /*periodic=*/true);
+    auto op_pbc = build_heisenberg_chain(/*N=*/4, /*J=*/1.0,
+                                         /*periodic=*/true);
     const uint64_t dim = 1ULL << 4;
     auto ref_open = reference_from_operator(*op_open, dim);
-    auto ref_pbc  = reference_from_operator(*op_pbc,  dim);
+    auto ref_pbc = reference_from_operator(*op_pbc, dim);
 
-    INFO("open=" << ref_open.eigs.front()
-         << " pbc=" << ref_pbc.eigs.front());
+    INFO("open=" << ref_open.eigs.front() << " pbc=" << ref_pbc.eigs.front());
     REQUIRE(ref_open.eigs.front() > ref_pbc.eigs.front() - 1e-12);
 
     double gap = ref_pbc.eigs[1] - ref_pbc.eigs[0];
@@ -201,16 +193,13 @@ TEST_CASE("Operator::apply: N=4 PBC ground state below OBC ground state",
     REQUIRE(gap > 1e-10);
 }
 
-TEST_CASE("Operator::apply: a real H keeps real vectors real",
-          "[operator_apply][real_input][audit-2.1-phase-1]") {
+TEST_CASE("Operator::apply: a real H keeps real vectors real", "[operator_apply][real_input][audit-2.1-phase-1]") {
     // For real H, H(v + iu) = Hv + iHu, and Hv has no imaginary part at all.
     constexpr int N = 10;
     constexpr uint64_t dim = 1ULL << N;
     auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
 
-    SECTION("isReal classifies a real Heisenberg chain as real") {
-        REQUIRE(op->isReal());
-    }
+    SECTION("isReal classifies a real Heisenberg chain as real") { REQUIRE(op->isReal()); }
 
     SECTION("H(v + iu) == Hv + i Hu") {
         for (uint64_t seed : {1u, 31415u, 2718281u}) {
@@ -249,10 +238,10 @@ TEST_CASE("Operator: isReal() cache invalidates when a complex coefficient "
     REQUIRE(op->isReal());
 
     Operator::TransformData t;
-    t.op_type      = 2;
-    t.site_index   = 0;
-    t.coefficient  = Complex(0.0, 0.5);  // pure imaginary
-    t.is_two_body  = false;
+    t.op_type = 2;
+    t.site_index = 0;
+    t.coefficient = Complex(0.0, 0.5);  // pure imaginary
+    t.is_two_body = false;
     op->add_record(t);
     op->invalidateMatrixCaches();
 
@@ -260,18 +249,20 @@ TEST_CASE("Operator: isReal() cache invalidates when a complex coefficient "
     REQUIRE_FALSE(op->isReal());
 }
 
-TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
-          "[operator_apply][regression]") {
+TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum", "[operator_apply][regression]") {
     auto base = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     auto modified = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     Operator::TransformData t;
-    t.op_type = 2; t.site_index = 0; t.op_type_2 = 2;
-    t.site_index_2 = 1; t.coefficient = Complex(0.0, 0.0);
+    t.op_type = 2;
+    t.site_index = 0;
+    t.op_type_2 = 2;
+    t.site_index_2 = 1;
+    t.coefficient = Complex(0.0, 0.0);
     t.is_two_body = true;
     modified->add_record(t);
 
     const uint64_t dim = 1ULL << 4;
-    auto eb = reference_from_operator(*base,     dim).eigs;
+    auto eb = reference_from_operator(*base, dim).eigs;
     auto em = reference_from_operator(*modified, dim).eigs;
     require_eigs_close(em, eb, eb.size(), 1e-12, "zero-coeff term invariance");
 }
@@ -280,8 +271,7 @@ TEST_CASE("Operator::apply: zero-coefficient term does not change spectrum",
 // Cache invalidation: a record added between two applies (the first one built the SoA
 // cache) must take part in the second.
 // =============================================================================
-TEST_CASE("Operator: a record added between applies is honoured",
-          "[operator_apply][regression][s0]") {
+TEST_CASE("Operator: a record added between applies is honoured", "[operator_apply][regression][s0]") {
     auto op = build_heisenberg_chain(/*N=*/4, /*J=*/1.0);
     const uint64_t dim = 1ULL << 4;
 
@@ -293,10 +283,10 @@ TEST_CASE("Operator: a record added between applies is honoured",
     // Add a non-trivial diagonal term on site 0; |1111> picks up
     // +spin * coeff under Sz_0.
     Operator::TransformData t;
-    t.op_type      = 2;     // Sz
-    t.site_index   = 0;
-    t.coefficient  = Complex(3.14159, 0.0);
-    t.is_two_body  = false;
+    t.op_type = 2;     // Sz
+    t.site_index = 0;
+    t.coefficient = Complex(3.14159, 0.0);
+    t.is_two_body = false;
     op->add_record(t);
 
     std::vector<Complex> y_after(dim, Complex(0.0, 0.0));
@@ -305,7 +295,7 @@ TEST_CASE("Operator: a record added between applies is honoured",
     // The contributions on the diagonal entry y[|1111>] must differ by
     // exactly +spin * 3.14159 = +0.5 * 3.14159 = +1.57080 (spin-1/2).
     const double expected_delta = 0.5 * 3.14159;
-    const double actual_delta   = std::real(y_after[dim - 1] - y_before[dim - 1]);
+    const double actual_delta = std::real(y_after[dim - 1] - y_before[dim - 1]);
     INFO("expected delta " << expected_delta << ", got " << actual_delta);
     REQUIRE(std::abs(actual_delta - expected_delta) < 1e-12);
 }
@@ -316,7 +306,7 @@ TEST_CASE("Operator: a record added between applies is honoured",
 // =============================================================================
 TEST_CASE("Operator::apply: a three-body term keeps its complex coefficient",
           "[matvec][kernel][regression][s0][three_body]") {
-    constexpr std::uint64_t N   = 3;
+    constexpr std::uint64_t N = 3;
     constexpr std::uint64_t dim = 1ULL << N;
     auto build = [] {
         auto op = std::make_unique<Operator>(std::uint64_t{N}, /*spin_l=*/0.5f);
@@ -329,7 +319,7 @@ TEST_CASE("Operator::apply: a three-body term keeps its complex coefficient",
     ComplexVector v(dim);
     for (auto& z : v) z = Complex(dist(gen), dist(gen));
 
-    const auto y_csr  = apply_under_lane(/*csr=*/true,  build, v);
+    const auto y_csr = apply_under_lane(/*csr=*/true, build, v);
     const auto y_gather = apply_under_lane(/*csr=*/false, build, v);
     INFO("||walk - csr||_2 = " << l2_diff(y_gather, y_csr));
     REQUIRE(l2_diff(y_gather, y_csr) < 1e-12);

@@ -7,6 +7,7 @@ translations) plus 35 residues (python/qed/_groups.py greedy_maximal_abelian, 'a
 valid'). Test whether the spectrum is still correct when the explicit-list split picks an abelian
 subgroup that is not the (normal) translation group, against dense ED per Sz sector, on small
 triangular tori with full C6v; also report the split chosen by the explicit-list and auto paths."""
+
 import numpy as np
 import qed
 from qed._groups import close_group
@@ -16,7 +17,7 @@ from support.triangular import TriangularTorus
 def normal(A, G):
     Aset = {tuple(a) for a in A}
     inv = lambda p: tuple(np.argsort(p))
-    comp = lambda p, q: tuple(p[i] for i in q)          # (p o q)[i] = p[q[i]]
+    comp = lambda p, q: tuple(p[i] for i in q)  # (p o q)[i] = p[q[i]]
     return all(comp(comp(g, a), inv(g)) in Aset for g in G for a in Aset)
 
 

@@ -32,8 +32,9 @@ if not core_dir and os.environ.get("ED_BUILD_DIR"):
 
 if core_dir:
     core_path = Path(core_dir).resolve()
-    assert core_path.is_dir() and _has_built_core(core_path), (
-        f"{core_path} holds no _core extension; build one with scripts/build.sh")
+    assert core_path.is_dir() and _has_built_core(
+        core_path
+    ), f"{core_path} holds no _core extension; build one with scripts/build.sh"
     os.environ["QED_CORE_DIR"] = str(core_path)
     py_root = str(SOURCE_PKG.parent)
     # Force FRONT position: the path may already be present at a LOSING position
@@ -45,10 +46,7 @@ if core_dir:
     # of a sibling checkout) outranks sys.path and silently redirects `import qed` to
     # a stale site-packages build -- resolution has been observed to flip-flop between
     # runs. Strip it whenever a source-tree build was selected, then assert the pin.
-    sys.meta_path = [
-        f for f in sys.meta_path
-        if "editable" not in type(f).__module__.lower()
-    ]
+    sys.meta_path = [f for f in sys.meta_path if "editable" not in type(f).__module__.lower()]
     import qed  # noqa: E402  (resolve NOW, under the pinned path)
 
     _pkg = Path(qed.__file__).resolve().parent

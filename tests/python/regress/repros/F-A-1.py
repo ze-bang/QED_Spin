@@ -17,6 +17,7 @@ the k=0 and k=pi stars survive).
 Test B: 7-site open chain, spatial=[reflection], n_up=3. The reflection is put in the abelian part,
 so no residues and every block is plain (claim: the union is empty instead of 35 levels).
 The unselected spectrum is checked against the same dense reference to show the base is correct."""
+
 import signal
 
 import numpy as np
@@ -115,18 +116,23 @@ except Exception as ex:
     raise SystemExit(0)
 
 for name, base_ok, _part_ok, ng, nr, per, nA, nres in out:
-    print(f"{name}: |A|={nA} residues={nres} unselected spectrum matches dense: {base_ok}; "
-          f"partition union {ng} vs dense {nr}; per dimension {per}")
+    print(
+        f"{name}: |A|={nA} residues={nres} unselected spectrum matches dense: {base_ok}; "
+        f"partition union {ng} vs dense {nr}; per dimension {per}"
+    )
 if not all(o[1] for o in out):
-    print("REPRO: INCONCLUSIVE the unselected spectrum already disagrees with the dense reference "
-          f"({[(o[0], o[1]) for o in out]})")
+    print(
+        "REPRO: INCONCLUSIVE the unselected spectrum already disagrees with the dense reference "
+        f"({[(o[0], o[1]) for o in out]})"
+    )
 elif any(not o[2] and o[3] < o[4] for o in out):
     lost = "; ".join(f"{o[0]}: {o[3]} of {o[4]} levels" for o in out if not o[2])
-    print(f"REPRO: CONFIRMED union over d of select(irrep_character={{identity: d}}) loses levels "
-          f"(plain irrep=-1 blocks dropped): {lost}")
+    print(
+        f"REPRO: CONFIRMED union over d of select(irrep_character={{identity: d}}) loses levels "
+        f"(plain irrep=-1 blocks dropped): {lost}"
+    )
 elif all(o[2] for o in out):
     print("REPRO: NOT_REPRODUCED the irrep-dimension partition reproduces the dense spectrum in both tests")
 else:
-    print(f"REPRO: INCONCLUSIVE partition differs but not by missing levels: "
-          f"{[(o[0], o[3], o[4]) for o in out]}")
+    print(f"REPRO: INCONCLUSIVE partition differs but not by missing levels: " f"{[(o[0], o[3], o[4]) for o in out]}")
 raise SystemExit(0)

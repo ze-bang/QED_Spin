@@ -39,23 +39,24 @@
 #include <utility>
 #include <vector>
 
-namespace ed::symmetry { struct RepSectorData; }
+namespace ed::symmetry {
+struct RepSectorData;
+}
 
 namespace ed::ops {
 
 /// Pointers into a program's arrays: what a row walk (row_walk.h) reads, on the host or, with
 /// the arrays copied to a device, in a kernel. C is the complex type of the reading side
 /// (std::complex<double> on the host); every array is laid out as in MaskedProgram.
-template <class C>
-struct ProgramView {
-    std::uint32_t        n_groups      = 0;
-    const std::uint64_t* group_flip    = nullptr;
-    const int*           group_setbits = nullptr;   ///< -1: the group's subgroups differ in popcount
-    const std::uint32_t* group_vbegin  = nullptr;
-    const std::uint64_t* vsub_val      = nullptr;
-    const std::uint32_t* vsub_tbegin   = nullptr;
-    const std::uint64_t* term_sign     = nullptr;
-    const C*             term_coeff    = nullptr;
+template <class C> struct ProgramView {
+    std::uint32_t n_groups = 0;
+    const std::uint64_t* group_flip = nullptr;
+    const int* group_setbits = nullptr;   ///< -1: the group's subgroups differ in popcount
+    const std::uint32_t* group_vbegin = nullptr;
+    const std::uint64_t* vsub_val = nullptr;
+    const std::uint32_t* vsub_tbegin = nullptr;
+    const std::uint64_t* term_sign = nullptr;
+    const C* term_coeff = nullptr;
 };
 
 /// Flat program over which the sector sweep runs. Terms are grouped by flip mask (one
@@ -66,14 +67,14 @@ struct MaskedProgram {
     int n_obs = 0;
     int delta_set_bits = 0;                        ///< n_set(bra) - n_set(ket)
     std::vector<std::uint64_t> group_flip;         ///< flip mask per group
-    std::vector<int>           group_setbits;      ///< popcount(v) of every subgroup, or -1 if they differ
+    std::vector<int> group_setbits;      ///< popcount(v) of every subgroup, or -1 if they differ
     std::vector<std::uint32_t> group_vbegin;       ///< n_groups + 1 offsets into vsub_*
     std::vector<std::uint64_t> vsub_val;           ///< required values, sorted within a group
     std::vector<std::uint32_t> vsub_tbegin;        ///< n_vsub + 1 offsets into term_*
     std::vector<std::uint64_t> term_sign;          ///< sign_mask per term
     std::vector<std::complex<double>> term_coeff;  ///< coefficient per term
     std::vector<std::uint32_t> term_obs;           ///< observable index per term
-    std::vector<std::size_t>   terms_per_obs;      ///< after projection (0: selection-rule zero)
+    std::vector<std::size_t> terms_per_obs;      ///< after projection (0: selection-rule zero)
     /// Characters the program was compiled for (checked by rep_matrix_elements).
     std::vector<std::complex<double>> src_characters, tgt_characters;
     int src_n_up = -1, tgt_n_up = -1;
@@ -81,8 +82,14 @@ struct MaskedProgram {
     [[nodiscard]] std::size_t n_groups() const noexcept { return group_flip.size(); }
     [[nodiscard]] std::size_t n_terms() const noexcept { return term_sign.size(); }
     [[nodiscard]] ProgramView<std::complex<double>> view() const noexcept {
-        return {static_cast<std::uint32_t>(group_flip.size()), group_flip.data(), group_setbits.data(),
-                group_vbegin.data(), vsub_val.data(), vsub_tbegin.data(), term_sign.data(), term_coeff.data()};
+        return {static_cast<std::uint32_t>(group_flip.size()),
+                group_flip.data(),
+                group_setbits.data(),
+                group_vbegin.data(),
+                vsub_val.data(),
+                vsub_tbegin.data(),
+                term_sign.data(),
+                term_coeff.data()};
     }
 };
 
@@ -103,9 +110,7 @@ struct CompileOptions {
 /// full or parity sectors (n_up = -1) keep every term.
 [[nodiscard]] MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
                                             const ed::symmetry::RepSectorData& src,
-                                            const ed::symmetry::RepSectorData& tgt,
-                                            const CompileOptions& opt = {});
-
+                                            const ed::symmetry::RepSectorData& tgt, const CompileOptions& opt = {});
 
 
 /// One operator's canonical terms in the flip-grouped layout, for the row walks (row_walk.h):
@@ -142,23 +147,17 @@ struct RepMEOptions {
 /// from (compile_program(ops, src, tgt)). Throws if the program was compiled for other
 /// sectors, a vector has the wrong length, or a pair index is out of range.
 [[nodiscard]] std::vector<std::complex<double>>
-rep_matrix_elements(const ed::symmetry::RepSectorData& src,
-                    const ed::symmetry::RepSectorData& tgt,
-                    const MaskedProgram& prog,
-                    const std::vector<RepVectorView>& kets,
-                    const std::vector<RepVectorView>& bras,
-                    const std::vector<std::pair<int, int>>& pairs,
+rep_matrix_elements(const ed::symmetry::RepSectorData& src, const ed::symmetry::RepSectorData& tgt,
+                    const MaskedProgram& prog, const std::vector<RepVectorView>& kets,
+                    const std::vector<RepVectorView>& bras, const std::vector<std::pair<int, int>>& pairs,
                     const RepMEOptions& opt = {});
 
 /// GPU implementation (rep_matrix_elements_gpu.cu). Arguments are validated by
 /// rep_matrix_elements(); call that instead.
 [[nodiscard]] std::vector<std::complex<double>>
-rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src,
-                        const ed::symmetry::RepSectorData& tgt,
-                        const MaskedProgram& prog,
-                        const std::vector<RepVectorView>& kets,
-                        const std::vector<RepVectorView>& bras,
-                        const std::vector<std::pair<int, int>>& pairs,
+rep_matrix_elements_gpu(const ed::symmetry::RepSectorData& src, const ed::symmetry::RepSectorData& tgt,
+                        const MaskedProgram& prog, const std::vector<RepVectorView>& kets,
+                        const std::vector<RepVectorView>& bras, const std::vector<std::pair<int, int>>& pairs,
                         const RepMEOptions& opt);
 
 /// <bra|O|ket> for a ket in sector `src` and a bra in sector `tgt` of ANY two groups (e.g. a

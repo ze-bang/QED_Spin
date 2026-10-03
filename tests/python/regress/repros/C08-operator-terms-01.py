@@ -7,6 +7,7 @@ read Q[0], Q[1], Q[2] unconditionally. A 2-component Q is accepted (out-of-bound
 an empty Q dereferences an empty vector and crashes the interpreter.
 Test: (a) Q=[pi, 0] with operator_type='sum' must raise; (b) Q=[] in a child process must
 raise a Python exception rather than kill the process."""
+
 import os
 import tempfile
 import subprocess
@@ -37,7 +38,8 @@ for typ in ("sum", "sublattice", "experimental"):
     except Exception as e:
         print(f"{typ}: 2-vector Q rejected: {type(e).__name__}: {e}")
 
-CHILD = r'''
+CHILD = (
+    r'''
 import qed
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sum"; s.basis = "ladder"; s.components = [2]
@@ -47,7 +49,9 @@ try:
     print("CHILD accepted")
 except Exception as e:
     print("CHILD raised", type(e).__name__, e)
-''' % pos
+'''
+    % pos
+)
 try:
     r = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, timeout=120)
     tail = (r.stdout.strip().splitlines() or [""])[-1]

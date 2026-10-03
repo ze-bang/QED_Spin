@@ -58,7 +58,10 @@ void require_permutation(const Perm& g, int n_sites) {
     std::vector<char> hit(static_cast<std::size_t>(n_sites), 0);
     bool perm = g.size() == static_cast<std::size_t>(n_sites);
     for (int x : g) {
-        if (!perm || x < 0 || x >= n_sites || hit[static_cast<std::size_t>(x)]) { perm = false; break; }
+        if (!perm || x < 0 || x >= n_sites || hit[static_cast<std::size_t>(x)]) {
+            perm = false;
+            break;
+        }
         hit[static_cast<std::size_t>(x)] = 1;
     }
     if (!perm)
@@ -90,26 +93,26 @@ void require_normal(const Spec& s, int n_sites) {
                         throw ed::InvalidRequest("sectors: the abelian group is not closed under composition");
                 }
             throw ed::InvalidRequest(
-                "sectors: residue " + std::to_string(i) + " does not normalise the abelian group; the "
-                "abelian part must be a normal subgroup of the spatial group (qed.Symmetry chooses one "
-                "when given the permutations as a list)");
+                "sectors: residue " + std::to_string(i)
+                + " does not normalise the abelian group; the "
+                  "abelian part must be a normal subgroup of the spatial group (qed.Symmetry chooses one "
+                  "when given the permutations as a list)");
         }
     }
 }
 
 // What place() needs to know about one eigs block: its size, whether the verb solves it densely,
 // the levels owed, and whether its operator has a device kernel (a refusal names the block).
-ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, bool dense,
-                              std::uint64_t want) {
+ed::BlockRequest eigs_request(const detail::BlockOp& bop, const BlockData& bi, bool dense, std::uint64_t want) {
     ed::BlockRequest r;
-    r.task  = ed::Task::Eigs;
-    r.dim   = bi.tag.dim;
+    r.task = ed::Task::Eigs;
+    r.dim = bi.tag.dim;
     r.dense = dense;
-    r.want  = want;
+    r.want = want;
     r.device_kernel = bop.op->has_device_kernel();
-    r.verb  = "eigs";
-    r.what  = [tag = bi.tag] { return detail::block_name(tag); };
-    r.why   = detail::no_kernel_reason(bi.tag.irrep_dim);
+    r.verb = "eigs";
+    r.what = [tag = bi.tag] { return detail::block_name(tag); };
+    r.why = detail::no_kernel_reason(bi.tag.irrep_dim);
     return r;
 }
 
@@ -148,36 +151,38 @@ double prune_estimate(const detail::BlockOp& bop, const BlockData& bi, Device de
 // The phase record of one solved block, logged at Info. `rep` is the block's H; its counters
 // before the solve are passed in.
 BlockStats block_stats(const LittleGroupBlockTag& tag, const char* kind, const RepSectorMatVec& rep,
-                       std::uint64_t applies0, double apply0, double build0, double solve_s,
-                       ed::Lane lane, std::uint64_t lane_applies, double context_orbit_s,
-                       const StarBuild& sb) {
+                       std::uint64_t applies0, double apply0, double build0, double solve_s, ed::Lane lane,
+                       std::uint64_t lane_applies, double context_orbit_s, const StarBuild& sb) {
     BlockStats st;
-    st.k0 = tag.k0; st.irrep = tag.irrep; st.flip_parity = tag.flip_parity; st.n_up = tag.n_up;
-    st.dim             = tag.dim;
-    st.kind            = kind;
+    st.k0 = tag.k0;
+    st.irrep = tag.irrep;
+    st.flip_parity = tag.flip_parity;
+    st.n_up = tag.n_up;
+    st.dim = tag.dim;
+    st.kind = kind;
     st.context_orbit_s = context_orbit_s;
-    st.star_orbit_s    = sb.t_orbit;
-    st.star_build_s    = sb.t_build;
-    st.build_s         = rep.build_seconds() - build0;
-    st.nnz             = rep.csr_nnz();
-    st.csr_bytes       = rep.csr_bytes();
-    st.applies         = rep.applies() - applies0;
-    st.apply_s         = rep.apply_seconds() - apply0;
-    st.solve_s         = solve_s;
+    st.star_orbit_s = sb.t_orbit;
+    st.star_build_s = sb.t_build;
+    st.build_s = rep.build_seconds() - build0;
+    st.nnz = rep.csr_nnz();
+    st.csr_bytes = rep.csr_bytes();
+    st.applies = rep.applies() - applies0;
+    st.apply_s = rep.apply_seconds() - apply0;
+    st.solve_s = solve_s;
     if (ed::on_device(lane)) {          // the whole solve ran on the device: the lane counted its applies
-        st.lane      = rep.device_lane();
-        st.applies   = lane_applies;
-        st.nnz       = rep.device_csr_nnz();
+        st.lane = rep.device_lane();
+        st.applies = lane_applies;
+        st.nnz = rep.device_csr_nnz();
         st.csr_bytes = rep.device_csr_bytes();
     } else {
         st.lane = st.applies == 0 ? "dense" : rep.lane();
     }
     st.other_s = std::max(0.0, solve_s - st.apply_s - st.build_s);
-    ED_LOG(Info, "[block] k0=%d irrep=%d flip=%d n_up=%d %s dim=%llu lane=%s | orbit %.3f+%.3f s, star %.3f s, "
+    ED_LOG(Info,
+           "[block] k0=%d irrep=%d flip=%d n_up=%d %s dim=%llu lane=%s | orbit %.3f+%.3f s, star %.3f s, "
            "build %.3f s, nnz=%llu (%.1f B/nnz) | applies=%llu, %.4g s/apply, other %.3f s, solve %.3f s",
-           st.k0, st.irrep, st.flip_parity, st.n_up, kind, static_cast<unsigned long long>(st.dim),
-           st.lane.c_str(), st.context_orbit_s, st.star_orbit_s, st.star_build_s, st.build_s,
-           static_cast<unsigned long long>(st.nnz),
+           st.k0, st.irrep, st.flip_parity, st.n_up, kind, static_cast<unsigned long long>(st.dim), st.lane.c_str(),
+           st.context_orbit_s, st.star_orbit_s, st.star_build_s, st.build_s, static_cast<unsigned long long>(st.nnz),
            st.nnz ? static_cast<double>(st.csr_bytes) / static_cast<double>(st.nnz) : 0.0,
            static_cast<unsigned long long>(st.applies), st.applies ? st.apply_s / static_cast<double>(st.applies) : 0.0,
            st.other_s, st.solve_s);
@@ -192,8 +197,7 @@ bool same_energy(double a, double b) {
 
 // Ascending energy; levels whose energies agree to roundoff in the order of their blocks'
 // quantum numbers, so neither the order nor the k-window depends on the last bits of a solve.
-template <class T, class Get>
-void order_levels(std::vector<T>& v, Get level) {
+template <class T, class Get> void order_levels(std::vector<T>& v, Get level) {
     std::stable_sort(v.begin(), v.end(), [&](const T& a, const T& b) { return level(a).energy < level(b).energy; });
     const auto key = [&](const T& x) {
         const Level& L = level(x);
@@ -242,9 +246,9 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
     // The Sz -> -Sz pairing of subspaces: the spin flip, or -- for an H that is not real, where K
     // does not fold inside a sector -- time reversal Theta, which also takes k to -k and sigma to
     // sigma*: not under a selection, whose ensemble it would not keep (walk() drops it there too).
-    const bool fold  = flip_sym && s.spin_flip != 0;
-    const bool theta = !fold && s.time_reversal != 0 && !detail::has_selection(s)
-                       && !ed::ops::conjugation_invariant(h) && ed::ops::theta_invariant(h);
+    const bool fold = flip_sym && s.spin_flip != 0;
+    const bool theta = !fold && s.time_reversal != 0 && !detail::has_selection(s) && !ed::ops::conjugation_invariant(h)
+                       && ed::ops::theta_invariant(h);
     const bool pairs = fold || theta;
 
     std::vector<Subspace> out;
@@ -257,22 +261,25 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
             throw std::invalid_argument("sectors: a total-spin restriction needs an SU(2)-symmetric H "
                                         "(a uniform field along z is allowed)");
         if (s.two_S > n_sites || (n_sites - s.two_S) % 2 != 0)
-            throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S) + "/2 does not exist for N = "
-                                        + std::to_string(n_sites));
+            throw std::invalid_argument("sectors: total spin S = " + std::to_string(s.two_S)
+                                        + "/2 does not exist for N = " + std::to_string(n_sites));
         const int n = ed::symmetry::n_up_of_highest_weight(n_sites, s.two_S);   // the Sz = S member
         if (!whole) {
             for (int m = n - s.two_S; m <= n; ++m)
-                if ((s.n_up < 0 || m == s.n_up) && (s.sz_parity < 0 || m % 2 == s.sz_parity)) out.push_back({m, -1, 1, 1});
+                if ((s.n_up < 0 || m == s.n_up) && (s.sz_parity < 0 || m % 2 == s.sz_parity))
+                    out.push_back({m, -1, 1, 1});
             if (out.empty())
                 throw ed::InvalidRequest("sectors: n_up / sz_parity name no Sz member of the spin-S tower "
-                                         "(n_up " + std::to_string(n - s.two_S) + ".." + std::to_string(n) + ")");
+                                         "(n_up "
+                                         + std::to_string(n - s.two_S) + ".." + std::to_string(n) + ")");
             return out;
         }
         if (s.n_up >= 0 && s.n_up != n)
             throw std::invalid_argument("sectors: n_up and the total-spin restriction disagree");
         if (s.sz_parity >= 0 && n % 2 != s.sz_parity)
             throw ed::InvalidRequest("sectors: sz_parity and the total-spin restriction name disjoint sectors "
-                                     "(the spin-S tower is solved at n_up = " + std::to_string(n) + ")");
+                                     "(the spin-S tower is solved at n_up = "
+                                     + std::to_string(n) + ")");
         out.push_back({n, -1, 1, s.two_S + 1});
         return out;
     }
@@ -312,8 +319,7 @@ std::vector<Subspace> subspaces(const ::Operator& H, const Spec& s) {
 std::vector<double> EigsResult::energies(int k) const {
     std::vector<double> e;
     for (const auto& l : levels)
-        for (std::uint64_t i = 0; i < l.multiplicity && static_cast<int>(e.size()) < k; ++i)
-            e.push_back(l.energy);
+        for (std::uint64_t i = 0; i < l.multiplicity && static_cast<int>(e.size()) < k; ++i) e.push_back(l.energy);
     return e;
 }
 
@@ -326,8 +332,14 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     detail::validate_eigs_options(o);
     detail::require_device(o.device, "eigs");
     ed::parallel::pin_omp_threads_once();
-    struct Row { Level level; bool owed_more; };   // owed_more: block stopped short of its request
-    struct BlockEnd { double last; bool short_; };
+    struct Row {
+        Level level;
+        bool owed_more;
+    };   // owed_more: block stopped short of its request
+    struct BlockEnd {
+        double last;
+        bool short_;
+    };
     EigsResult res;
     res.n_sites = n_sites;
     std::vector<Row> rows;
@@ -338,8 +350,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // two-pass ground state (about 6 vectors), more levels a Krylov-Schur cycle at the kernels'
     // floor of 2k + 20 (the cycle shrinks to the memory, never below k + 8).
     auto budget_for = [&](std::size_t dim) {
-        const std::size_t k = std::max<std::size_t>(o.per_block > 0 ? static_cast<std::size_t>(o.per_block)
-                                                                    : static_cast<std::size_t>(o.k), 1);
+        const std::size_t k = std::max<std::size_t>(
+            o.per_block > 0 ? static_cast<std::size_t>(o.per_block) : static_cast<std::size_t>(o.k), 1);
         return detail::block_budget(16ull * dim * (k == 1 ? 6u : 3u * k + 30u));
     };
     // Solve one block and append its rows.
@@ -347,86 +359,84 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // while no star needed it).
     auto solve_block = [&](const Subspace& sub, StarBuild& sb, const std::shared_ptr<BlockData>& bi,
                            Antiunitary star_tr, double context_orbit_s) {
-                const std::size_t dim = bi->tag.dim;
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
-                if (!bop.op) return;
-                const std::uint64_t mult = bop.multiplicity;
+        const std::size_t dim = bi->tag.dim;
+        const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
+        if (!bop.op) return;
+        const std::uint64_t mult = bop.multiplicity;
                 // Each row of this block counts `mult` times, so ceil(k / mult) rows cover it.
-                const std::uint64_t need = o.per_block > 0
-                    ? static_cast<std::uint64_t>(o.per_block)
-                    : (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
-                const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));   // narrow-ok: at most k
-                const ed::LinearOperator& mv = *bop.op;
-                bool converged = true;
-                std::vector<double> ev;
-                std::vector<std::vector<Complex>> vv;
+        const std::uint64_t need = o.per_block > 0 ? static_cast<std::uint64_t>(o.per_block)
+                                                   : (static_cast<std::uint64_t>(o.k) + mult - 1) / mult;
+        const int want = static_cast<int>(std::min<std::uint64_t>(need, dim));   // narrow-ok: at most k
+        const ed::LinearOperator& mv = *bop.op;
+        bool converged = true;
+        std::vector<double> ev;
+        std::vector<std::vector<Complex>> vv;
                 // H of this block (its counters are read as differences).
-                const RepSectorMatVec& rep = bi->gop ? *bi->gop : *sb.hk;
-                const std::uint64_t applies0 = rep.applies();
-                const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
-                const auto t0 = std::chrono::steady_clock::now();
+        const RepSectorMatVec& rep = bi->gop ? *bi->gop : *sb.hk;
+        const std::uint64_t applies0 = rep.applies();
+        const double apply0 = rep.apply_seconds(), build0 = rep.build_seconds();
+        const auto t0 = std::chrono::steady_clock::now();
                 // The same lanes on every device: dense below the crossover, else the certified
                 // Krylov lanes on the backend place() chooses. A block of one or two states is dense
                 // whatever the crossover (the Krylov lanes would solve it densely too) and counted so.
                 // A spin tower is told apart through its eigenvectors: a dense solve of one forms them.
-                const Tower* tower = bop.tower.get();
-                const bool dense = dim <= 2
-                    || dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors || tower);
-                const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
-                const std::size_t w = static_cast<std::size_t>(want);
-                BlockSolution sol = lane == ed::Lane::HostDense
-                    ? (tower ? solve_block_dense_tower(mv, *tower, w, o.vectors) : solve_block_dense(mv, w, o.vectors))
-                    : ed::with_backend(lane, mv, [&](auto& be) {
-                          if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors);
-                          return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
-                      });
-                ev = std::move(sol.values);
-                vv = std::move(sol.vectors);
-                converged = sol.converged;
-                res.placement.add(lane);
-                if (ed::on_device(lane)) ++res.device_blocks;
-                res.block_stats.push_back(block_stats(
-                    bi->tag, bi->gop ? "group" : "plain", rep, applies0, apply0,
-                    build0, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-                    lane, sol.applies, context_orbit_s, sb));
+        const Tower* tower = bop.tower.get();
+        const bool dense =
+            dim <= 2 || dim <= lowest_dense_floor(static_cast<std::size_t>(want), o.dense_max_dim, o.vectors || tower);
+        const ed::Lane lane = ed::place(o.device, eigs_request(bop, *bi, dense, static_cast<std::uint64_t>(want)));
+        const std::size_t w = static_cast<std::size_t>(want);
+        BlockSolution sol =
+            lane == ed::Lane::HostDense
+                ? (tower ? solve_block_dense_tower(mv, *tower, w, o.vectors) : solve_block_dense(mv, w, o.vectors))
+                : ed::with_backend(lane, mv, [&](auto& be) {
+                      if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors);
+                      return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
+                  });
+        ev = std::move(sol.values);
+        vv = std::move(sol.vectors);
+        converged = sol.converged;
+        res.placement.add(lane);
+        if (ed::on_device(lane)) ++res.device_blocks;
+        res.block_stats.push_back(
+            block_stats(bi->tag, bi->gop ? "group" : "plain", rep, applies0, apply0, build0,
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), lane, sol.applies,
+                        context_orbit_s, sb));
                 // A block that returned its whole spectrum (its whole spin-S tower) owes nothing, however
                 // many levels were wanted from it.
-                const bool whole_block = sol.whole || ev.size() >= dim;
-                const bool short_ = !whole_block
-                                    && (!converged || static_cast<int>(ev.size()) < want);
-                if (short_) ++res.partial_blocks;
+        const bool whole_block = sol.whole || ev.size() >= dim;
+        const bool short_ = !whole_block && (!converged || static_cast<int>(ev.size()) < want);
+        if (short_) ++res.partial_blocks;
                 // Where an incomplete block's owed levels may lie: above its last level when the returned
                 // ones are certified from the bottom, anywhere from its lowest one when they are not (a
                 // skipped copy of a degenerate level sits below the last).
-                ends.push_back({ev.empty() ? -std::numeric_limits<double>::infinity()
-                                           : (converged ? ev.back() : ev.front()),
-                                short_});
-                for (std::size_t i = 0; i < ev.size(); ++i) {
-                    Level L;
-                    L.energy       = ev[i];
-                    L.tag          = bi->tag;
-                    L.mirror       = sub.mirror;
-                    L.fold         = detail::fold_of(star_tr, sub, bi->tag);
-                    L.multiplicity = mult;
-                    detail::label(L, sb);
-                    if (o.vectors) {
-                        BlockVector bv;
-                        if (bi->gop) {                               // group sector: its own basis
-                            bv.basis      = bi->gsec;
-                            bv.amplitudes = std::move(vv[i]);
-                        } else {                                     // plain block: the k-sector basis
-                            bv.basis      = sb.hk->rep_data_ptr();
-                            bv.amplitudes = std::move(vv[i]);
-                        }
-                        double n2 = 0.0;
-                        for (const auto& c : bv.amplitudes) n2 += std::norm(c);
-                        const double inv = 1.0 / std::sqrt(n2);
-                        for (auto& c : bv.amplitudes) c *= inv;
-                        L.vector = static_cast<int>(res.vectors.size());
-                        res.vectors.push_back(std::move(bv));
-                    }
-                    rows.push_back({L, false});
+        ends.push_back(
+            {ev.empty() ? -std::numeric_limits<double>::infinity() : (converged ? ev.back() : ev.front()), short_});
+        for (std::size_t i = 0; i < ev.size(); ++i) {
+            Level L;
+            L.energy = ev[i];
+            L.tag = bi->tag;
+            L.mirror = sub.mirror;
+            L.fold = detail::fold_of(star_tr, sub, bi->tag);
+            L.multiplicity = mult;
+            detail::label(L, sb);
+            if (o.vectors) {
+                BlockVector bv;
+                if (bi->gop) {                               // group sector: its own basis
+                    bv.basis = bi->gsec;
+                    bv.amplitudes = std::move(vv[i]);
+                } else {                                     // plain block: the k-sector basis
+                    bv.basis = sb.hk->rep_data_ptr();
+                    bv.amplitudes = std::move(vv[i]);
                 }
+                double n2 = 0.0;
+                for (const auto& c : bv.amplitudes) n2 += std::norm(c);
+                const double inv = 1.0 / std::sqrt(n2);
+                for (auto& c : bv.amplitudes) c *= inv;
+                L.vector = static_cast<int>(res.vectors.size());
+                res.vectors.push_back(std::move(bv));
+            }
+            rows.push_back({L, false});
+        }
     };
 
     // Pruning (default): every block above the dense crossover gets a short Lanczos
@@ -439,8 +449,13 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     // A candidate holds its star while the stars kept fit `keep_cap` (a quarter of the RAM the job
     // may still allocate); a survivor without one walks its star again, once for all its survivors.
     struct Candidate {
-        std::size_t sub; int k0, irrep, flip; double estimate;
-        std::shared_ptr<StarBuild> star; std::shared_ptr<BlockData> bi; Antiunitary tr; double orbit_s;
+        std::size_t sub;
+        int k0, irrep, flip;
+        double estimate;
+        std::shared_ptr<StarBuild> star;
+        std::shared_ptr<BlockData> bi;
+        Antiunitary tr;
+        double orbit_s;
     };
     std::vector<Candidate> candidates;
     std::vector<std::size_t> fresh;   // the current star's candidates
@@ -457,14 +472,14 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
             for (const auto& bi : sb.blocks) {
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
-                if (s.two_S < 0)
-                    res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
+                if (s.two_S < 0) res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
                 if (!prune || dim <= std::max<std::size_t>(floor_, 2)) {
                     solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load());
                     continue;
                 }
-                const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
+                const detail::BlockOp bop =
+                    detail::block_operator(s, n_sites, sub, sb, bi, s2c, o.device, budget_for(dim));
                 if (!bop.op) continue;   // no state of the requested spin
                 candidates.push_back({si, bi->tag.k0, bi->tag.irrep, bi->tag.flip_parity,
                                       prune_estimate(bop, *bi, o.device), nullptr, bi, cx.tr, 0.0});
@@ -511,7 +526,10 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         std::uint64_t acc = 0;
         for (const Row* r : sorted) {
             acc += r->level.multiplicity;
-            if (acc >= static_cast<std::uint64_t>(o.k)) { kth = r->level.energy; break; }
+            if (acc >= static_cast<std::uint64_t>(o.k)) {
+                kth = r->level.energy;
+                break;
+            }
         }
         // The margin is relative: to |E_k|, floored at 5% of s_H (a scaled H keeps its decisions).
         const double margin_floor = 0.05 * ed::numerics::scale_or_one(H.norm_bound());
@@ -554,7 +572,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         // past the k-th level: the roundoff-equal copies of it among the rows (a multiplet is
         // never split by rounding) and, with a window, every row within it
         if (std::isfinite(cut) && !same_energy(r.level.energy, cut)
-            && !(o.window > 0.0 && r.level.energy <= cut + o.window)) break;
+            && !(o.window > 0.0 && r.level.energy <= cut + o.window))
+            break;
         res.levels.push_back(r.level);
         acc += r.level.multiplicity;
         if (o.cut && acc >= static_cast<std::uint64_t>(o.k) && !std::isfinite(cut)) cut = r.level.energy;
@@ -564,15 +583,16 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     for (const auto& e : ends)
         if (e.short_ && e.last <= cut + o.window) res.complete = false;
     if (!res.complete && !o.allow_partial)
-        throw std::runtime_error(
-            "eigs: " + std::to_string(res.partial_blocks) + " block(s) could not certify their "
-            "lowest levels, and the uncertified levels may lie inside the requested window of "
-            + std::to_string(o.k) + ". Raise the iteration budget or the dense crossover, or "
-            "allow a partial window.");
+        throw std::runtime_error("eigs: " + std::to_string(res.partial_blocks)
+                                 + " block(s) could not certify their "
+                                   "lowest levels, and the uncertified levels may lie inside the requested window of "
+                                 + std::to_string(o.k)
+                                 + ". Raise the iteration budget or the dense crossover, or "
+                                   "allow a partial window.");
     if (!res.complete)
-        res.diagnostics.emplace_back("partial_window",
-            std::to_string(res.partial_blocks) + " block(s) could not certify their lowest levels; "
-            "uncertified levels may lie inside the returned window");
+        res.diagnostics.emplace_back("partial_window", std::to_string(res.partial_blocks)
+                                                           + " block(s) could not certify their lowest levels; "
+                                                             "uncertified levels may lie inside the returned window");
     // Drop vectors of levels that fell outside the window.
     if (o.vectors) {
         std::vector<BlockVector> kept;
@@ -604,7 +624,10 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     SpectrumResult res;
     const auto s2c = detail::s2_carrier_for(s, n_sites);
     detail::DenseBatch batch(device, "spectrum");
-    struct Entry { std::size_t id; Level proto; };
+    struct Entry {
+        std::size_t id;
+        Level proto;
+    };
     std::vector<Entry> entries;
     std::size_t n_blocks = 0;
     const auto subs = subspaces(H, s);
@@ -618,7 +641,9 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
                 const detail::BlockOp bop = detail::block_operator(s, n_sites, sub, sb, bi, s2c);
                 if (!bop.op) continue;
                 Level L;
-                L.tag = bi->tag; L.mirror = sub.mirror; L.multiplicity = bop.multiplicity;
+                L.tag = bi->tag;
+                L.mirror = sub.mirror;
+                L.multiplicity = bop.multiplicity;
                 L.fold = detail::fold_of(cx.tr, sub, bi->tag);
                 detail::label(L, sb);
                 // A spin tower: H on its states (Q^dag H Q), every level of which is one.
@@ -636,7 +661,7 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     batch.solve();
     res.device_blocks = batch.device_blocks();
     res.placement.device_dense = batch.device_blocks();
-    res.placement.host_dense   = entries.size() - batch.device_blocks();
+    res.placement.host_dense = entries.size() - batch.device_blocks();
     for (const auto& en : entries)
         for (double e : batch.spectrum(en.id)) {
             Level L = en.proto;
@@ -648,21 +673,19 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     if (s.two_S >= 0 && !detail::has_selection(s)) {
         const std::uint64_t want = detail::tower_states(subs, n_sites, s.two_S);
         if (res.total_dim != want)
-            throw std::runtime_error("spectrum: the levels hold " + std::to_string(res.total_dim) + " states of total spin "
-                                     + std::to_string(s.two_S) + "/2, expected " + std::to_string(want));
+            throw std::runtime_error("spectrum: the levels hold " + std::to_string(res.total_dim)
+                                     + " states of total spin " + std::to_string(s.two_S) + "/2, expected "
+                                     + std::to_string(want));
     }
     detail::require_some_level(s, res.levels.empty(), "spectrum");
     order_levels(res.levels, [](const Level& L) -> const Level& { return L; });
     return res;
 }
 
-std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::vector<Complex>& u,
-                            int n_up) {
-    if (u.size() != rd.states())
-        throw std::invalid_argument("expand: vector length != number of basis states");
+std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::vector<Complex>& u, int n_up) {
+    if (u.size() != rd.states()) throw std::invalid_argument("expand: vector length != number of basis states");
     const int N = rd.n_sites;
-    if (n_up < 0 && N > 34)
-        throw std::invalid_argument("expand: the full 2^N space is limited to N <= 34");
+    if (n_up < 0 && N > 34) throw std::invalid_argument("expand: the full 2^N space is limited to N <= 34");
     const std::uint64_t dim = n_up < 0 ? (std::uint64_t{1} << N) : binomial(N, n_up);
     std::vector<Complex> psi(dim, Complex(0, 0));
     const auto pol = rd.make_policy();
@@ -691,10 +714,12 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
             if (n_up >= 0 && __builtin_popcountll(st) != n_up)
                 throw std::invalid_argument("expand: the sector is not inside Sz sector n_up");
             Complex c(0, 0);   // sum_j y_j conj(D(g)_{0j}); 1-dim: y conj(chi(g))
-            if (d == 1) c = y[0] * std::conj(rd.characters[static_cast<std::size_t>(g)]);
+            if (d == 1)
+                c = y[0] * std::conj(rd.characters[static_cast<std::size_t>(g)]);
             else
                 for (int j = 0; j < d; ++j)
-                    c += y[static_cast<std::size_t>(j)] * std::conj(rd.irrep_D[static_cast<std::size_t>(g) * dd + static_cast<std::size_t>(j)]);
+                    c += y[static_cast<std::size_t>(j)]
+                         * std::conj(rd.irrep_D[static_cast<std::size_t>(g) * dd + static_cast<std::size_t>(j)]);
             psi[state_index(st, n_up)] += c;
         }
     }
@@ -706,9 +731,8 @@ std::vector<Complex> expand(const ed::symmetry::RepSectorData& rd, const std::ve
     return psi;
 }
 
-std::vector<std::vector<Complex>>
-multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, int n_up,
-          std::size_t max_vectors) {
+std::vector<std::vector<Complex>> multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v,
+                                            int n_up, std::size_t max_vectors) {
     if (!v.basis) throw std::invalid_argument("multiplet: level has no vector");
     if (n_up < -1 || n_up > n_sites)
         throw ed::InvalidRequest("multiplet: the Sz sector n_up = " + std::to_string(n_up) + " is outside 0.."
@@ -719,15 +743,14 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
     // members at Sz = S - m follow by m applications of total S-. In a uniform field each member
     // is a level of its own.
     const bool whole = s.two_S > 0 && detail::members(level) > 1;
-    const bool lowered = whole && n_up >= 0 && sector_nup >= 0 && n_up < sector_nup
-                         && n_up >= sector_nup - s.two_S;
+    const bool lowered = whole && n_up >= 0 && sector_nup >= 0 && n_up < sector_nup && n_up >= sector_nup - s.two_S;
     const bool mirrored = !lowered && n_up >= 0 && sector_nup >= 0 && sector_nup != n_up;
     if (n_up >= 0 && sector_nup != n_up && !lowered && !(level.mirror == 2 && sector_nup == n_sites - n_up))
         throw ed::EmptySelection("multiplet: the level has no component in the Sz sector n_up = "
                                  + std::to_string(n_up));
     const std::uint64_t mask = (n_sites >= 64) ? ~std::uint64_t{0} : ((std::uint64_t{1} << n_sites) - 1);
     // Time reversal Theta = prod_i (i sigma^y_i) K: Theta (c |s>) = (-1)^{n_down(s)} conj(c) |s ^ mask>.
-    const bool theta_fold   = level.fold == Antiunitary::Theta;
+    const bool theta_fold = level.fold == Antiunitary::Theta;
     const bool theta_mirror = theta_fold && level.mirror == 2 && !level.tag.tr_folded;
     const auto theta_sign = [n_sites](std::uint64_t st) {
         return (n_sites - __builtin_popcountll(st)) % 2 == 0 ? 1.0 : -1.0;
@@ -760,12 +783,12 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
     const std::uint64_t dim = seed.size();
     // How many vectors: the level's multiplicity, or fewer when the caller wants fewer. They are
     // built in the target basis, checked against the RAM first (core/footprint.h).
-    const std::uint64_t cap = max_vectors > 0 ? std::min<std::uint64_t>(level.multiplicity, max_vectors)
-                                              : level.multiplicity;
+    const std::uint64_t cap =
+        max_vectors > 0 ? std::min<std::uint64_t>(level.multiplicity, max_vectors) : level.multiplicity;
     {
         ed::core::Shape shape;
         shape.dim = dim;
-        shape.k   = static_cast<std::size_t>(cap);
+        shape.k = static_cast<std::size_t>(cap);
         ed::core::guard_working_set(ed::core::footprint(ed::core::Path::Multiplet, shape).host, "multiplet");
     }
     // States of the basis, in index order, to apply the operations (the full space is its own
@@ -780,7 +803,7 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
     for (const auto& p : s.residues) {
         ops.push_back([&, p](const std::vector<Complex>& x) {
             std::vector<Complex> y(dim);
-            #pragma omp parallel for schedule(static) if(dim > 8192)
+#pragma omp parallel for schedule(static) if (dim > 8192)
             for (std::uint64_t i = 0; i < dim; ++i)    // a bijection: no two i write one y
                 y[state_index(applyPermutation(state_at(i), p), n_up)] = x[i];
             return y;
@@ -789,7 +812,7 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
     // Theta inside a basis it maps to itself (the full space, or Sz = 0).
     const Op theta_op = [&](const std::vector<Complex>& x) {
         std::vector<Complex> y(dim);
-        #pragma omp parallel for schedule(static) if(dim > 8192)
+#pragma omp parallel for schedule(static) if (dim > 8192)
         for (std::uint64_t i = 0; i < dim; ++i)
             y[state_index(state_at(i) ^ mask, n_up)] = theta_sign(state_at(i)) * std::conj(x[i]);
         return y;
@@ -818,7 +841,7 @@ multiplet(const Spec& s, int n_sites, const Level& level, const BlockVector& v, 
     } else if (flip_inside && (level.mirror == 2 || level.tag.flip_parity >= 0)) {
         ops.push_back([&](const std::vector<Complex>& x) {
             std::vector<Complex> y(dim);
-            #pragma omp parallel for schedule(static) if(dim > 8192)
+#pragma omp parallel for schedule(static) if (dim > 8192)
             for (std::uint64_t i = 0; i < dim; ++i) y[state_index(state_at(i) ^ mask, n_up)] = x[i];
             return y;
         });

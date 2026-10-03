@@ -4,6 +4,7 @@ nothing physical: forced on and forced off give the same levels, spectra, exact 
 T = 0 dynamics, expectation values and eigenvectors, on the host and on the device. A result
 keeps the rule it was computed with: it is queried, saved and loaded the same whatever the
 variable says later, and a file written before the codes existed loads in the plain order."""
+
 from __future__ import annotations
 
 import cmath
@@ -45,8 +46,9 @@ def _sz_q(N, q):
 
 
 def _bond(N):
-    return qed.Operator.product(N, "zz", [0, 1]) + 0.5 * (qed.Operator.product(N, "+-", [0, 1])
-                                                         + qed.Operator.product(N, "-+", [0, 1]))
+    return qed.Operator.product(N, "zz", [0, 1]) + 0.5 * (
+        qed.Operator.product(N, "+-", [0, 1]) + qed.Operator.product(N, "-+", [0, 1])
+    )
 
 
 def _observe(H, N, device):
@@ -68,8 +70,9 @@ def _observe(H, N, device):
         "spectrum": np.sort(qed.spectrum(H, sym=sym, device=device).energies),
         "thermal": np.concatenate([th.E, th.C]),
         "dynamics": qed.dynamics(H, _sz_q(N, 2 * math.pi / 3), w, eta=0.1, sym=sym, device=device).S,
-        "expect": np.real(qed.expect(H, [_bond(N)], 3, sym=sym, device=device, dense_max_dim=0,
-                                     prune=False).values[:, 0]),
+        "expect": np.real(
+            qed.expect(H, [_bond(N)], 3, sym=sym, device=device, dense_max_dim=0, prune=False).values[:, 0]
+        ),
     }
 
 
@@ -100,7 +103,7 @@ def test_a_result_keeps_its_rule_when_the_variable_changes():
     O = _bond(m.N)
     r = _under("1", lambda: qed.eigs(H, 2, vectors=True))
     want = _under("1", lambda: (r.expect([O]), r.matrix_element(O, 0, 0)))
-    for mode in ("0", None):   # forced off, and unset (the size rule leaves 12 sites in the plain order)
+    for mode in ("0", None):  # forced off, and unset (the size rule leaves 12 sites in the plain order)
         got = _under(mode, lambda: (r.expect([O]), r.matrix_element(O, 0, 0)))
         np.testing.assert_allclose(got[0], want[0], rtol=0, atol=1e-12)
         assert abs(got[1] - want[1]) < 1e-12
@@ -117,8 +120,9 @@ def test_saved_results_load_under_any_setting(tmp_path):
         want = np.asarray(r.expect([O]))
         for load_under in ("1", "0", None):
             loaded = _under(load_under, lambda: qed.load_eigs(path))
-            np.testing.assert_allclose(_under(load_under, lambda: np.asarray(loaded.expect([O]))), want,
-                                       rtol=0, atol=1e-12)
+            np.testing.assert_allclose(
+                _under(load_under, lambda: np.asarray(loaded.expect([O]))), want, rtol=0, atol=1e-12
+            )
 
 
 def test_a_file_without_the_rule_field_is_the_plain_order(tmp_path):
@@ -133,5 +137,6 @@ def test_a_file_without_the_rule_field_is_the_plain_order(tmp_path):
     old = tmp_path / "old.npz"
     np.savez_compressed(old, **arrays)
     loaded = _under("1", lambda: qed.load_eigs(old))
-    np.testing.assert_allclose(np.asarray(loaded.expect([_bond(m.N)])), np.asarray(r.expect([_bond(m.N)])),
-                               rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(loaded.expect([_bond(m.N)])), np.asarray(r.expect([_bond(m.N)])), rtol=0, atol=1e-12
+    )

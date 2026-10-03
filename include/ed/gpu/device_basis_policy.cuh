@@ -91,23 +91,23 @@ inline constexpr std::uint64_t kDeviceNotFound = static_cast<std::uint64_t>(-1);
 //   the single representative term, so it does NOT appear here.
 // ===========================================================================
 struct DeviceRepSymmetryBasisPolicy {
-    const std::uint64_t*    reps              = nullptr;  // length dim_
-    const double*           inv_norms         = nullptr;  // length dim_, 1/norm_i
-    const int*              perms             = nullptr;  // group_size * n_sites
-    const cuDoubleComplex*  characters        = nullptr;  // length group_size, chi_k(g)
-    const std::int32_t*     rep_index_of_rank = nullptr;  // length C(n_sites,n_up)
+    const std::uint64_t* reps = nullptr;  // length dim_
+    const double* inv_norms = nullptr;  // length dim_, 1/norm_i
+    const int* perms = nullptr;  // group_size * n_sites
+    const cuDoubleComplex* characters = nullptr;  // length group_size, chi_k(g)
+    const std::int32_t* rep_index_of_rank = nullptr;  // length C(n_sites,n_up)
     // Per-element XOR flip masks for flip-extended groups (element
     // action = perm THEN xor). nullptr = pure permutations. Mirrors the
     // host RepSymmetryBasisPolicy::flips field.
-    const std::uint64_t*    flips             = nullptr;  // length group_size
+    const std::uint64_t* flips = nullptr;  // length group_size
     // Two-level reverse lookup: ONE dense rank -> shared-rep-index table
     // per (N, n_up), shared across every irrep sector's mirror, plus this
     // sector's small local remap. When both are set they take precedence
     // over the per-sector ``rep_index_of_rank`` (which is then not even
     // uploaded). Mirrors the host
     // RepSymmetryBasisPolicy::{shared_rank_of, local_of_shared}.
-    const std::int32_t*     shared_rank_of    = nullptr;  // C(N,n_up), shared
-    const std::int32_t*     local_of_shared   = nullptr;  // per sector
+    const std::int32_t* shared_rank_of = nullptr;  // C(N,n_up), shared
+    const std::int32_t* local_of_shared = nullptr;  // per sector
     // Byte-decomposition permutation LUT (device twin of the host
     // RepSymmetryBasisPolicy fast path): out = OR_b lut[g][b][byte_b(s)].
     // Uses perm_lut_bpw = ceil(N/8) L2-resident gathers per image instead
@@ -115,62 +115,51 @@ struct DeviceRepSymmetryBasisPolicy {
     // image at N=36) -- the canonicalization walk is THE production hot
     // loop (dim x terms x |G| images per matvec; the bit walk measured
     // 26 s/matvec at the 126M-dim 36-site block).
-    const std::uint64_t*    perm_lut          = nullptr;
-    int                     perm_lut_bpw      = 0;
+    const std::uint64_t* perm_lut = nullptr;
+    int perm_lut_bpw = 0;
     // State buckets (P7.2): the reps whose state falls in each run of 2^bucket_shift states above
     // bucket_base, as offsets into `reps` (bucket_count + 1 of them). Keyed on the state itself, not
     // the combinadic rank the host buckets use: the rank reads a Pascal triangle with divergent
     // indices, which a warp serialises. A lookup reads one offset pair and searches a rep or a few
     // instead of all the reps. nullptr: the binary search below.
-    const std::uint32_t*    bucket_off        = nullptr;
-    std::uint64_t           bucket_base       = 0;
-    std::uint64_t           bucket_count      = 0;
-    int                     bucket_shift      = 0;
-    std::uint64_t           dim_              = 0;
-    int                     group_size        = 1;
-    int                     n_sites           = 0;
-    int                     n_up              = -1;
+    const std::uint32_t* bucket_off = nullptr;
+    std::uint64_t bucket_base = 0;
+    std::uint64_t bucket_count = 0;
+    int bucket_shift = 0;
+    std::uint64_t dim_ = 0;
+    int group_size = 1;
+    int n_sites = 0;
+    int n_up = -1;
     // The group's sublattice code on the device (the host policy's, uploaded by the mirror):
     // representatives are least in its key order, found from the candidates. Empty: every element.
     ed::symmetry::SublatticeView slc;
 
-    __host__ __device__ inline std::uint64_t dim() const noexcept {
-        return dim_;
-    }
+    __host__ __device__ inline std::uint64_t dim() const noexcept { return dim_; }
 
     // Apply the g'th site permutation to a computational state (same bit
     // convention as the host ``applyPermutation``: output bit i is sourced
     // from input bit perms[g*n_sites + i]).
     __device__ inline std::uint64_t apply_perm(std::uint64_t s, int g) const noexcept {
         if (perm_lut != nullptr) {
-            const std::uint64_t* lut_g = perm_lut
-                + static_cast<std::size_t>(g) * perm_lut_bpw * 256;
+            const std::uint64_t* lut_g = perm_lut + static_cast<std::size_t>(g) * perm_lut_bpw * 256;
             std::uint64_t r = 0;
-            #pragma unroll 5
-            for (int b = 0; b < perm_lut_bpw; ++b)
-                r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
+#pragma unroll 5
+            for (int b = 0; b < perm_lut_bpw; ++b) r |= lut_g[b * 256 + static_cast<int>((s >> (b * 8)) & 0xFF)];
             return (flips != nullptr) ? (r ^ flips[g]) : r;
         }
         const int* p = perms + static_cast<std::size_t>(g) * n_sites;
         std::uint64_t r = 0;
-        for (int i = 0; i < n_sites; ++i) {
-            r |= ((s >> p[i]) & 1ULL) << i;
-        }
+        for (int i = 0; i < n_sites; ++i) { r |= ((s >> p[i]) & 1ULL) << i; }
         return (flips != nullptr) ? (r ^ flips[g]) : r;
     }
 
-    __device__ inline std::uint64_t state_of(std::uint64_t idx) const noexcept {
-        return reps[idx];
-    }
+    __device__ inline std::uint64_t state_of(std::uint64_t idx) const noexcept { return reps[idx]; }
 
     // Full-space sectors (n_up < 0): no popcount filter, and the
     // "combinadic rank" of a state over the full 2^N space is the
     // state itself (identity), so the reverse table is indexed by rb.
     __device__ inline std::uint64_t rank_of_rep(std::uint64_t rb) const noexcept {
-        return (n_up >= 0)
-            ? static_cast<std::uint64_t>(
-                  ed::gpu::combinadic::rank_state(rb, n_sites, n_up))
-            : rb;
+        return (n_up >= 0) ? static_cast<std::uint64_t>(ed::gpu::combinadic::rank_state(rb, n_sites, n_up)) : rb;
     }
 
     // Reverse lookup rb -> orbit index (-1 sentinel folded to the caller's
@@ -186,9 +175,7 @@ struct DeviceRepSymmetryBasisPolicy {
             const std::int32_t g = shared_rank_of[rank_of_rep(rb)];
             return (g < 0) ? std::int32_t{-1} : local_of_shared[g];
         }
-        if (rep_index_of_rank != nullptr) {
-            return rep_index_of_rank[rank_of_rep(rb)];
-        }
+        if (rep_index_of_rank != nullptr) { return rep_index_of_rank[rank_of_rep(rb)]; }
         std::uint64_t lo = 0, hi = dim_;
         if (bucket_off != nullptr) {
             if (rb < bucket_base) return std::int32_t{-1};
@@ -199,17 +186,17 @@ struct DeviceRepSymmetryBasisPolicy {
         }
         while (lo < hi) {
             const std::uint64_t mid = lo + ((hi - lo) >> 1);
-            if (reps[mid] < rb) lo = mid + 1;
-            else                hi = mid;
+            if (reps[mid] < rb)
+                lo = mid + 1;
+            else
+                hi = mid;
         }
-        return (lo < dim_ && reps[lo] == rb)
-            ? static_cast<std::int32_t>(lo) : std::int32_t{-1};
+        return (lo < dim_ && reps[lo] == rb) ? static_cast<std::int32_t>(lo) : std::int32_t{-1};
     }
 
     // fn(g, image, key) for the elements that can map ``state`` to its representative, ascending,
     // with the key the images are compared by (the host policy's for_each_image).
-    template <class Fn>
-    __device__ inline void for_each_image(std::uint64_t state, Fn&& fn) const noexcept {
+    template <class Fn> __device__ inline void for_each_image(std::uint64_t state, Fn&& fn) const noexcept {
         if (slc.engaged()) {
             slc.for_each_candidate(slc.key(state), [&](int g) {
                 const std::uint64_t img = apply_perm(state, g);
@@ -227,7 +214,10 @@ struct DeviceRepSymmetryBasisPolicy {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
         std::uint64_t rb = state, best = ~std::uint64_t{0};
         for_each_image(state, [&](int, std::uint64_t img, std::uint64_t key) {
-            if (key < best) { best = key; rb = img; }
+            if (key < best) {
+                best = key;
+                rb = img;
+            }
         });
         const std::int32_t k = index_of_rep_dev(rb);
         return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
@@ -240,8 +230,8 @@ struct DeviceRepSymmetryBasisPolicy {
     // One pass over the group with a running minimum (as the host policy): the character sum
     // restarts whenever a smaller image appears and grows on ties. No per-thread image
     // buffer (it would live in local memory and cost occupancy), no bound on |G|.
-    __device__ inline std::uint64_t
-    index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
+    __device__ inline std::uint64_t index_and_projection(std::uint64_t state,
+                                                         cuDoubleComplex& proj_out) const noexcept {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
         std::uint64_t rb = ~std::uint64_t{0}, best = ~std::uint64_t{0};
         double acc_re = 0.0, acc_im = 0.0;
@@ -266,8 +256,8 @@ struct DeviceRepSymmetryBasisPolicy {
     // Compile-time traits: the rep-symmetry kernel applies H to the single
     // representative (no orbit walk) but still leaves the basis on
     // off-diagonal terms and needs the per-emit projection phase.
-    static constexpr bool may_leave_basis    = true;
-    static constexpr bool needs_orbit_walk   = false;
+    static constexpr bool may_leave_basis = true;
+    static constexpr bool needs_orbit_walk = false;
     static constexpr bool has_coeff_modifier = true;
 };
 }  // namespace ed::matvec::basis

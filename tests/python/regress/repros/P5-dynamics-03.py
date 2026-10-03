@@ -22,6 +22,7 @@ the sectors building at once (csr_policy.h concurrent_sector_builders): T>0 dyna
 small sectors in a pool of T threads, so a budget of three merged CSRs admits none of them when
 T > 3 -- which measures the sharing rule, not the claim (gate 62545019 failed both; at T = 4 they read
 ratios 1.7-2.3, jobs 62546238/62546239)."""
+
 import json
 import math
 import os
@@ -60,7 +61,7 @@ def run(budget):
     p = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, env=env, timeout=280)
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+            return json.loads(line[len("RESULT_JSON:") :])
     raise RuntimeError(f"child rc={p.returncode}: {p.stderr[-400:]}")
 
 
@@ -68,14 +69,17 @@ rows = math.comb(N, NUP) // N + N
 merged = rows * 2 * 20 + (rows + 1) * 8
 premerge = math.comb(N, NUP) // N * N * N * 24
 try:
-    a = run(None)                              # default 4 GiB
-    b = run(f"{3 * merged / 2**30:.3e}")       # three times the merged CSR
+    a = run(None)  # default 4 GiB
+    b = run(f"{3 * merged / 2**30:.3e}")  # three times the merged CSR
     import numpy as np
+
     Sa, Sb = np.array(a["S"]), np.array(b["S"])
     rel = float(np.max(np.abs(Sa - Sb)) / max(np.max(np.abs(Sa)), 1e-300))
     ratio = b["t"] / max(a["t"], 1e-9)
-    info = (f"t_default={a['t']:.3f}s t_budget={b['t']:.3f}s ratio={ratio:.2f} maxrel={rel:.1e} "
-            f"merged<={merged / 1024:.0f}KiB premerge={premerge / 1024:.0f}KiB budget={3 * merged / 1024:.0f}KiB")
+    info = (
+        f"t_default={a['t']:.3f}s t_budget={b['t']:.3f}s ratio={ratio:.2f} maxrel={rel:.1e} "
+        f"merged<={merged / 1024:.0f}KiB premerge={premerge / 1024:.0f}KiB budget={3 * merged / 1024:.0f}KiB"
+    )
     if ratio >= 2 and rel < 1e-6:
         print("REPRO: CONFIRMED " + info)
     elif rel < 1e-6:

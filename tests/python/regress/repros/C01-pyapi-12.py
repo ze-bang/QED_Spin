@@ -6,6 +6,7 @@ has (Level exposes momentum and irrep_characters), so the returned namer raises 
 every level.
 Restated after P2.1, which removed qed.lattice (owner-approved): the namer no longer exists, so the
 claim holds only while the package still ships it."""
+
 import qed
 
 try:

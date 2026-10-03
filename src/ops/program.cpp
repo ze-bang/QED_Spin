@@ -24,7 +24,11 @@ namespace {
 inline int popc(std::uint64_t x) { return __builtin_popcountll(x); }
 
 // flip -> value -> terms, packed into the program arrays
-struct T { std::uint64_t sign; std::complex<double> c; std::uint32_t obs; };
+struct T {
+    std::uint64_t sign;
+    std::complex<double> c;
+    std::uint32_t obs;
+};
 using Tree = std::map<std::uint64_t, std::map<std::uint64_t, std::vector<T>>>;
 
 void pack(const Tree& tree, MaskedProgram& P) {
@@ -53,10 +57,8 @@ void pack(const Tree& tree, MaskedProgram& P) {
 // -----------------------------------------------------------------------------
 // compile_program
 // -----------------------------------------------------------------------------
-MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
-                              const ed::symmetry::RepSectorData& src,
-                              const ed::symmetry::RepSectorData& tgt,
-                              const CompileOptions& opt) {
+MaskedProgram compile_program(const std::vector<MaskedOperator>& ops, const ed::symmetry::RepSectorData& src,
+                              const ed::symmetry::RepSectorData& tgt, const CompileOptions& opt) {
     const int G = src.group_size;
     const int n = src.n_sites;
     if (tgt.group_size != G || tgt.n_sites != n || tgt.perms_flat != src.perms_flat)
@@ -77,10 +79,9 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
     // weights conj(lambda(g)) / |G|, lambda = chi_bra * conj(chi_ket)
     std::vector<std::complex<double>> w(static_cast<std::size_t>(G));
     for (int g = 0; g < G; ++g)
-        w[static_cast<std::size_t>(g)] =
-            std::conj(tgt.characters[static_cast<std::size_t>(g)]
-                      * std::conj(src.characters[static_cast<std::size_t>(g)]))
-            / static_cast<double>(G);
+        w[static_cast<std::size_t>(g)] = std::conj(tgt.characters[static_cast<std::size_t>(g)]
+                                                   * std::conj(src.characters[static_cast<std::size_t>(g)]))
+                                         / static_cast<double>(G);
 
     Tree tree;
     MaskedProgram P;
@@ -102,8 +103,7 @@ MaskedProgram compile_program(const std::vector<MaskedOperator>& ops,
                 const auto wg = w[static_cast<std::size_t>(g)];
                 // scale-free: unit-modulus characters / phases (group data, not energies)
                 if (std::abs(wg) < 1e-15) continue;
-                Ol.add(O.image(src.perms_flat.data() + static_cast<std::size_t>(g) * n,
-                               flip_of(src, g)), wg);
+                Ol.add(O.image(src.perms_flat.data() + static_cast<std::size_t>(g) * n, flip_of(src, g)), wg);
             }
         } else {
             Ol = O;
@@ -151,7 +151,7 @@ bool same_group(const ed::symmetry::RepSectorData& a, const ed::symmetry::RepSec
         return f;
     };
     return a.group_size == b.group_size && a.n_sites == b.n_sites && a.perms_flat == b.perms_flat
-        && flips(a) == flips(b);
+           && flips(a) == flips(b);
 }
 
 namespace {
@@ -176,18 +176,22 @@ std::complex<double> orbit_matrix_element_any(const MaskedProgram& P, const ed::
     // z_j = C_j b_j per bra representative (dt entries each).
     std::vector<C> z(tgt.reps.size() * static_cast<std::size_t>(dt), C(0.0, 0.0));
     for (std::size_t j = 0; j < tgt.reps.size(); ++j) {
-        if (dt == 1) { z[j] = tgt.inv_norms[j] * bra[j]; continue; }
+        if (dt == 1) {
+            z[j] = tgt.inv_norms[j] * bra[j];
+            continue;
+        }
         const C* Cj = tpol.C_of(j);
         const std::uint64_t o = tpol.first_state_of(j);
         for (int i = 0; i < dt; ++i)
             for (int a = 0; a < tpol.rank_of(j); ++a)
-                z[j * static_cast<std::size_t>(dt) + static_cast<std::size_t>(i)] += Cj[i * dt + a] * bra[o + static_cast<std::size_t>(a)];
+                z[j * static_cast<std::size_t>(dt) + static_cast<std::size_t>(i)] +=
+                    Cj[i * dt + a] * bra[o + static_cast<std::size_t>(a)];
     }
     C total(0.0, 0.0);
-    #pragma omp parallel
+#pragma omp parallel
     {
         C acc(0.0, 0.0), y[kMax], A[kMax * kMax];
-        #pragma omp for schedule(static)
+#pragma omp for schedule(static)
         for (long long ri = 0; ri < static_cast<long long>(src.reps.size()); ++ri) {
             const std::size_t r = static_cast<std::size_t>(ri);
             if (ds == 1) {
@@ -197,12 +201,14 @@ std::complex<double> orbit_matrix_element_any(const MaskedProgram& P, const ed::
                 const std::uint64_t o = spol.first_state_of(r);
                 for (int i = 0; i < ds; ++i) {
                     y[i] = C(0.0, 0.0);
-                    for (int a = 0; a < spol.rank_of(r); ++a) y[i] += Cr[i * ds + a] * ket[o + static_cast<std::size_t>(a)];
+                    for (int a = 0; a < spol.rank_of(r); ++a)
+                        y[i] += Cr[i * ds + a] * ket[o + static_cast<std::size_t>(a)];
                 }
             }
             for (int g = 0; g < src.group_size; ++g) {
                 C coef(0.0, 0.0);
-                if (ds == 1) coef = y[0] * std::conj(src.characters[static_cast<std::size_t>(g)]);
+                if (ds == 1)
+                    coef = y[0] * std::conj(src.characters[static_cast<std::size_t>(g)]);
                 else {
                     const C* Dg = src.irrep_D.data() + static_cast<std::size_t>(g) * static_cast<std::size_t>(ds * ds);
                     for (int i = 0; i < ds; ++i) coef += y[i] * std::conj(Dg[i]);   // row 0 of D(g)
@@ -222,20 +228,20 @@ std::complex<double> orbit_matrix_element_any(const MaskedProgram& P, const ed::
                         const std::int64_t j = tpol.index_and_matrix(t, A);
                         if (j < 0) return;
                         const C* zj = z.data() + static_cast<std::size_t>(j) * static_cast<std::size_t>(dt);
-                        for (int i = 0; i < dt; ++i) amp += A[i] * zj[i];   // row 0 of A
+                        for (int i = 0; i < dt; ++i) amp += A[i] * zj[i]; // row 0 of A
                         amp *= wt;
                     }
                     acc += std::conj(amp) * h * coef;
                 });
             }
         }
-        #pragma omp critical(qed_orbit_me)
+#pragma omp critical(qed_orbit_me)
         total += acc;
     }
     return total;
 }
 
-}  // namespace
+} // namespace
 
 std::complex<double> orbit_matrix_element(const MaskedProgram& P, const ed::symmetry::RepSectorData& src,
                                           const ed::symmetry::RepSectorData& tgt,
@@ -317,16 +323,12 @@ void check_balanced_masks(const ed::symmetry::RepSectorData& rd, const std::vect
         }
 }
 
-std::vector<Complex>
-rep_matrix_elements(const ed::symmetry::RepSectorData& src,
-                    const ed::symmetry::RepSectorData& tgt,
-                    const MaskedProgram& prog,
-                    const std::vector<RepVectorView>& kets,
-                    const std::vector<RepVectorView>& bras,
-                    const std::vector<std::pair<int, int>>& pairs,
-                    const RepMEOptions& opt) {
-    if (prog.src_characters != src.characters || prog.tgt_characters != tgt.characters
-        || prog.src_n_up != src.n_up || prog.tgt_n_up != tgt.n_up)
+std::vector<Complex> rep_matrix_elements(const ed::symmetry::RepSectorData& src, const ed::symmetry::RepSectorData& tgt,
+                                         const MaskedProgram& prog, const std::vector<RepVectorView>& kets,
+                                         const std::vector<RepVectorView>& bras,
+                                         const std::vector<std::pair<int, int>>& pairs, const RepMEOptions& opt) {
+    if (prog.src_characters != src.characters || prog.tgt_characters != tgt.characters || prog.src_n_up != src.n_up
+        || prog.tgt_n_up != tgt.n_up)
         throw std::invalid_argument("rep_matrix_elements: program was compiled for other sectors");
     if (src.group_size != tgt.group_size || src.n_sites != tgt.n_sites)
         throw std::invalid_argument("rep_matrix_elements: the two sectors come from different groups");
@@ -338,8 +340,8 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
             throw std::invalid_argument("rep_matrix_elements: bra length != target sector dim");
     for (const auto& [b, k] : pairs)
         if (b < 0 || k < 0 || b >= static_cast<int>(bras.size()) || k >= static_cast<int>(kets.size()))
-            throw std::invalid_argument("rep_matrix_elements: pair (" + std::to_string(b) + ", "
-                                        + std::to_string(k) + ") out of range");
+            throw std::invalid_argument("rep_matrix_elements: pair (" + std::to_string(b) + ", " + std::to_string(k)
+                                        + ") out of range");
 
     const std::size_t n_obs = static_cast<std::size_t>(prog.n_obs);
     const std::size_t n_pairs = pairs.size();
@@ -387,7 +389,7 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
             }
             if (!any) continue;
             const std::uint64_t s = src.reps[r];
-            if (!is_balanced(s, opt.balanced_masks)) continue;       // P on the ket
+            if (!is_balanced(s, opt.balanced_masks)) continue; // P on the ket
             const double w = src.inv_norms[r];
             for (std::size_t gi = 0; gi < n_groups; ++gi) {
                 const std::uint64_t F = prog.group_flip[gi];
@@ -401,18 +403,17 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
 
                 Complex proj;
                 std::int64_t j = -1;
-                if (same_sector && F == 0) {        // diagonal term inside one sector
+                if (same_sector && F == 0) { // diagonal term inside one sector
                     j = static_cast<std::int64_t>(r);
                     proj = Complex(1.0 / w, 0.0);
                 } else {
-                    if (!is_balanced(s ^ F, opt.balanced_masks)) continue;   // P on the bra
+                    if (!is_balanced(s ^ F, opt.balanced_masks)) continue; // P on the bra
                     j = tpol.index_and_projection(s ^ F, proj);
-                    if (j < 0) continue;            // target orbit cancelled in this sector
+                    if (j < 0) continue; // target orbit cancelled in this sector
                 }
                 const Complex base = proj * w;
                 const std::size_t jj = static_cast<std::size_t>(j);
-                for (std::size_t p = 0; p < n_pairs; ++p)
-                    y[p] = base * bk[p] * std::conj(bra_of[p][jj]);
+                for (std::size_t p = 0; p < n_pairs; ++p) y[p] = base * bk[p] * std::conj(bra_of[p][jj]);
                 for (std::uint32_t k = prog.vsub_tbegin[vi]; k < prog.vsub_tbegin[vi + 1]; ++k) {
                     Complex c = prog.term_coeff[k];
                     if (masked_popcount(s & prog.term_sign[k]) & 1) c = -c;
@@ -430,18 +431,17 @@ rep_matrix_elements(const ed::symmetry::RepSectorData& src,
     return out;
 }
 
-}  // namespace ed::ops
+} // namespace ed::ops
 
 
 #ifndef WITH_CUDA
 namespace ed::ops {
-std::vector<Complex>
-rep_matrix_elements_gpu(const ed::symmetry::RepSectorData&, const ed::symmetry::RepSectorData&,
-                        const MaskedProgram&, const std::vector<RepVectorView>&,
-                        const std::vector<RepVectorView>&, const std::vector<std::pair<int, int>>&,
-                        const RepMEOptions&) {
+std::vector<Complex> rep_matrix_elements_gpu(const ed::symmetry::RepSectorData&, const ed::symmetry::RepSectorData&,
+                                             const MaskedProgram&, const std::vector<RepVectorView>&,
+                                             const std::vector<RepVectorView>&, const std::vector<std::pair<int, int>>&,
+                                             const RepMEOptions&) {
     throw std::runtime_error("rep_matrix_elements: use_gpu requires a WITH_CUDA build");
 }
 bool rep_matrix_elements_gpu_available() { return false; }
-}  // namespace ed::ops
+} // namespace ed::ops
 #endif

@@ -22,7 +22,7 @@ namespace ed::core {
 
 struct InterruptHook {
     std::function<void()> check;   ///< throws to interrupt; empty = none installed
-    std::thread::id       owner;   ///< the only thread that runs it
+    std::thread::id owner;   ///< the only thread that runs it
 };
 
 inline InterruptHook& interrupt_hook() {

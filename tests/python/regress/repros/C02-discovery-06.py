@@ -19,6 +19,7 @@ Test: K4 Heisenberg (complete graph on 4 sites), spatial=[(0123) 4-cycle, (01) s
 (The audit's first version asserted |<v|U_R|v>| = 1 for every irrep and a non-empty selection
 for every (residue, +-1); both fail for correct labels once A is the normal Klein group and
 the co-group S_3 has a two-dimensional irrep.)"""
+
 import signal
 
 import numpy as np
@@ -61,7 +62,7 @@ try:
         chars = e.irrep_characters(i)
         if not chars or L.vector < 0:
             continue
-        if abs(chars[ident] - 1) < 1e-9:                         # (a): one-dimensional irreps
+        if abs(chars[ident] - 1) < 1e-9:  # (a): one-dimensional irreps
             v = np.asarray(e._raw.multiplet(e._spec, i, NUP)[0], complex)
             for R, chi in chars.items():
                 if R == ident:
@@ -71,7 +72,7 @@ try:
                 print(f"level {i} E={L.energy:+.6f} key {R} chi={chi:.3f} <v|U_R|v>={ov:.6f}")
                 if min(abs(ov - chi), abs(ov - np.conj(chi))) > 1e-8:
                     problems.append(f"level {i}: character {chi:.3f} reported on {R} but <v|U_R|v>={ov:.4f}")
-        for R, chi in chars.items():                             # (b)
+        for R, chi in chars.items():  # (b)
             if R == ident:
                 continue
             sel = qed.spectrum(H, sym=sym.select(irrep_character={R: chi}))
@@ -85,10 +86,19 @@ try:
 
     def labels(s):
         r = qed._core.sectors.eigs(H, s, k=len(states))
-        return sorted((round(L.energy, 9),
-                       tuple(sorted((tuple(s.residues[k]) if k >= 0 else (), round(c.real, 9), round(c.imag, 9))
-                                    for k, c in L.irrep_characters)))
-                      for L in r.levels)
+        return sorted(
+            (
+                round(L.energy, 9),
+                tuple(
+                    sorted(
+                        (tuple(s.residues[k]) if k >= 0 else (), round(c.real, 9), round(c.imag, 9))
+                        for k, c in L.irrep_characters
+                    )
+                ),
+            )
+            for L in r.levels
+        )
+
     if labels(spec) != labels(shifted):
         problems.append("a residue skipped by the engine shifts the reported co-group elements")
 except Exception as ex:
@@ -99,5 +109,7 @@ if not checked or not selections:
 if problems:
     print("REPRO: CONFIRMED " + "; ".join(problems))
 else:
-    print(f"REPRO: NOT_REPRODUCED {checked} characters eigen-consistent, {selections} selections hit, "
-          "skipped residues shift nothing")
+    print(
+        f"REPRO: NOT_REPRODUCED {checked} characters eigen-consistent, {selections} selections hit, "
+        "skipped residues shift nothing"
+    )

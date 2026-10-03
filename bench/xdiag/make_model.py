@@ -7,6 +7,7 @@ of the twin (bench/cases.py) builds the same Hamiltonian and block itself.
 
     python bench/xdiag/make_model.py <model> <out.txt>
 """
+
 import sys
 from pathlib import Path
 

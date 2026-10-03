@@ -9,6 +9,7 @@ requested).  Test: random XXZ chain (nn+nnn, open) Sz=0 blocks with ED_LANCZOS_K
 times the convergence callback separately ('check' bucket): CPU eigs(k=1) on N=18 (dim 48620); GPU
 eigs(k=1, vectors=True, device='gpu') on N=20 (dim 184756).  CONFIRMED when the check bucket is >= 25% of
 a factorisation's wall time on either lane."""
+
 import json
 import os
 import re
@@ -16,7 +17,8 @@ import subprocess
 import sys
 
 SEED = 1234
-CHILD = r'''
+CHILD = (
+    r'''
 import json, sys, time, numpy as np, qed
 N, NUP, dev, vec = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
 rng = np.random.default_rng(%d)
@@ -31,21 +33,29 @@ t0 = time.time()
 r = qed.eigs(H, 1, sym=sym, vectors=vec, prune=False, allow_partial=True, device=dev)
 print("RESULT_JSON:" + json.dumps({"E": [float(x) for x in r.energies], "wall": time.time() - t0,
                                    "device_blocks": int(r.device_blocks)}), flush=True)
-''' % SEED
+'''
+    % SEED
+)
 
 PAT = re.compile(r"\[lanczos_kernel\] iters=(\d+) total=([\d.]+) ms = .*? check ([\d.]+)% \(([\d.]+) us/it\)")
 
 
 def run(N, nup, dev, vec):
-    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")   # the profile line is an Info record
-    p = subprocess.run([sys.executable, "-c", CHILD, str(N), str(nup), dev, "1" if vec else "0"],
-                       capture_output=True, text=True, env=env, timeout=250)
+    env = dict(os.environ, ED_LANCZOS_KERNEL_PROFILE="1", QED_LOG_LEVEL="info")  # the profile line is an Info record
+    p = subprocess.run(
+        [sys.executable, "-c", CHILD, str(N), str(nup), dev, "1" if vec else "0"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=250,
+    )
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
-    calls = [dict(iters=int(m.group(1)), ms=float(m.group(2)), check_pct=float(m.group(3)))
-             for m in PAT.finditer(p.stderr)]
+            res = json.loads(line[len("RESULT_JSON:") :])
+    calls = [
+        dict(iters=int(m.group(1)), ms=float(m.group(2)), check_pct=float(m.group(3))) for m in PAT.finditer(p.stderr)
+    ]
     if res is None:
         raise RuntimeError(f"child rc={p.returncode}: {p.stderr[-300:]}")
     return res, calls
@@ -66,6 +76,7 @@ except Exception as e:
 gpu_ok = False
 try:
     import qed
+
     gpu_ok = qed._core.cuda_device_count() > 0
 except Exception:
     gpu_ok = False
@@ -75,8 +86,10 @@ if gpu_ok:
         if res["device_blocks"] < 1:
             parts.append("GPU: block did not run on the device (device_blocks=0)")
         elif calls:
-            c = calls[0]   # pass 1 carries the convergence gate; pass 2 replays without it
-            parts.append(f"GPU vectors lane pass 1: {c['iters']} steps, check {c['check_pct']:.0f}% of {c['ms']:.0f} ms")
+            c = calls[0]  # pass 1 carries the convergence gate; pass 2 replays without it
+            parts.append(
+                f"GPU vectors lane pass 1: {c['iters']} steps, check {c['check_pct']:.0f}% of {c['ms']:.0f} ms"
+            )
             hit |= c["check_pct"] >= 25.0
         else:
             parts.append("GPU: no profile lines")

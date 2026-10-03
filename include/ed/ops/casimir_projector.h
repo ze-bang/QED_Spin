@@ -59,32 +59,22 @@ namespace ed::symmetry {
 ///   * flip_parity >= 0 (0 = +, 1 = -): flip-projected block; admissible
 ///     only where `flip_subspace_admissible` says so, and the surviving
 ///     towers obey ((N - 2S)/2) % 2 == flip_parity via the Sz = 0 member.
-[[nodiscard]] inline std::vector<int>
-allowed_two_S_in_block(int n_sites, int n_up = -1, int sz_parity = -1,
-                       int flip_parity = -1) {
+[[nodiscard]] inline std::vector<int> allowed_two_S_in_block(int n_sites, int n_up = -1, int sz_parity = -1,
+                                                             int flip_parity = -1) {
     if (n_sites <= 0 || n_sites >= 64) {
-        throw std::invalid_argument(
-            "allowed_two_S_in_block: n_sites must be in [1, 63]");
+        throw std::invalid_argument("allowed_two_S_in_block: n_sites must be in [1, 63]");
     }
-    if (flip_parity >= 0 &&
-        !flip_subspace_admissible(n_up, sz_parity, n_sites)) {
-        throw std::invalid_argument(
-            "allowed_two_S_in_block: flip parity requested in a block the "
-            "global spin flip does not preserve (n_up=" +
-            std::to_string(n_up) + ", sz_parity=" +
-            std::to_string(sz_parity) + ", N=" + std::to_string(n_sites) +
-            ")");
+    if (flip_parity >= 0 && !flip_subspace_admissible(n_up, sz_parity, n_sites)) {
+        throw std::invalid_argument("allowed_two_S_in_block: flip parity requested in a block the "
+                                    "global spin flip does not preserve (n_up="
+                                    + std::to_string(n_up) + ", sz_parity=" + std::to_string(sz_parity)
+                                    + ", N=" + std::to_string(n_sites) + ")");
     }
-    const int lo =
-        (n_up >= 0) ? std::abs(2 * n_up - n_sites) : (n_sites % 2);
+    const int lo = (n_up >= 0) ? std::abs(2 * n_up - n_sites) : (n_sites % 2);
     std::vector<int> out;
     for (int ts = lo; ts <= n_sites; ts += 2) {
-        if (flip_parity >= 0 &&
-            (((n_sites - ts) / 2) % 2) != flip_parity) {
-            continue;
-        }
-        if (ts == 0 && n_up < 0 && sz_parity >= 0 &&
-            ((n_sites / 2) % 2) != sz_parity) {
+        if (flip_parity >= 0 && (((n_sites - ts) / 2) % 2) != flip_parity) { continue; }
+        if (ts == 0 && n_up < 0 && sz_parity >= 0 && ((n_sites / 2) % 2) != sz_parity) {
             continue;  // lone S=0 member sits in the other parity half
         }
         out.push_back(ts);
@@ -101,12 +91,9 @@ public:
     /// live in (full, fixed-Sz, rep/orbit, flip-projected, ...).
     /// `two_S_present` is the block's tower content (allowed_two_S_in_block
     /// or the S-resolved-dims survey); the target must be a member.
-    LowdinS2Projector(std::shared_ptr<const ed::LinearOperator> s2,
-                      int two_S_target, std::vector<int> two_S_present)
+    LowdinS2Projector(std::shared_ptr<const ed::LinearOperator> s2, int two_S_target, std::vector<int> two_S_present)
         : s2_(std::move(s2)), two_S_(two_S_target) {
-        if (!s2_) {
-            throw std::invalid_argument("LowdinS2Projector: null S^2");
-        }
+        if (!s2_) { throw std::invalid_argument("LowdinS2Projector: null S^2"); }
         bool found = false;
         const double lam_t = 0.25 * two_S_ * (two_S_ + 2);
         for (int ts : two_S_present) {
@@ -117,21 +104,15 @@ public:
             excluded_.push_back(0.25 * ts * (ts + 2));
         }
         if (!found) {
-            throw std::invalid_argument(
-                "LowdinS2Projector: target two_S = " +
-                std::to_string(two_S_) +
-                " is not in the block's tower set");
+            throw std::invalid_argument("LowdinS2Projector: target two_S = " + std::to_string(two_S_)
+                                        + " is not in the block's tower set");
         }
         // Farthest-first: annihilate the dominant unwanted towers early.
         std::sort(excluded_.begin(), excluded_.end(),
-                  [lam_t](double a, double b) {
-                      return std::abs(a - lam_t) > std::abs(b - lam_t);
-                  });
+                  [lam_t](double a, double b) { return std::abs(a - lam_t) > std::abs(b - lam_t); });
     }
 
-    [[nodiscard]] int degree() const noexcept {
-        return static_cast<int>(excluded_.size());
-    }
+    [[nodiscard]] int degree() const noexcept { return static_cast<int>(excluded_.size()); }
     [[nodiscard]] int two_S() const noexcept { return two_S_; }
     [[nodiscard]] const std::shared_ptr<const ed::LinearOperator>& s2() const noexcept { return s2_; }
 
@@ -148,13 +129,9 @@ public:
     /// exact multiplier that `project` would have restored). A return of
     /// ~0 means v had (numerically) no weight in the target tower -- the
     /// caller should redraw its random seed.
-    double project_normalized(std::complex<double>* v,
-                              std::uint64_t dim) const {
+    double project_normalized(std::complex<double>* v, std::uint64_t dim) const {
         using Cx = std::complex<double>;
-        if (dim != s2_->dim()) {
-            throw std::invalid_argument(
-                "LowdinS2Projector: dim mismatch with the S^2 operator");
-        }
+        if (dim != s2_->dim()) { throw std::invalid_argument("LowdinS2Projector: dim mismatch with the S^2 operator"); }
         const double lam_t = 0.25 * two_S_ * (two_S_ + 2);
         double log_scale = 0.0;
         double sign = 1.0;
@@ -167,7 +144,7 @@ public:
         ed::core::NumaVector<Cx> w(dim);   // written whole by every S^2 apply
         for (const double lam : excluded_) {
             s2_->apply(v, w.data(), dim);
-            #pragma omp parallel for schedule(static) if(dim > 8192)
+#pragma omp parallel for schedule(static) if (dim > 8192)
             for (std::uint64_t i = 0; i < dim; ++i) v[i] = w[i] - lam * v[i];
             const double n = norm_of(v, dim);
             const double denom = lam_t - lam;
@@ -186,7 +163,7 @@ private:
         return ed::matvec::default_cpu_backend().nrm2(v, dim);
     }
     static void scale_by(std::complex<double>* v, std::uint64_t dim, double s) noexcept {
-        #pragma omp parallel for schedule(static) if(dim > 8192)
+#pragma omp parallel for schedule(static) if (dim > 8192)
         for (std::uint64_t i = 0; i < dim; ++i) v[i] *= s;
     }
 

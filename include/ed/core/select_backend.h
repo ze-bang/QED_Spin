@@ -29,8 +29,8 @@
 #include <ed/matvec/cpu_backend.h>
 
 #ifdef WITH_CUDA
-#  include <cuda_runtime.h>
-#  include <ed/gpu/cuda_backend.cuh>
+#include <cuda_runtime.h>
+#include <ed/gpu/cuda_backend.cuh>
 #endif
 
 namespace ed {
@@ -57,11 +57,11 @@ inline bool have_cuda() noexcept {
             cudaDriverGetVersion(&drv);
             cudaRuntimeGetVersion(&rt);
             ED_LOG(Warn,
-                "CUDA DISABLED: the NVIDIA driver on this machine is "
-                "too old for this build (driver API %d.%d < runtime %d.%d). "
-                "Every GPU lane falls back to CPU. Fix: update the driver, "
-                "or rebuild against this node's CUDA toolkit.",
-                drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
+                   "CUDA DISABLED: the NVIDIA driver on this machine is "
+                   "too old for this build (driver API %d.%d < runtime %d.%d). "
+                   "Every GPU lane falls back to CPU. Fix: update the driver, "
+                   "or rebuild against this node's CUDA toolkit.",
+                   drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
         }
         return false;
     }();
@@ -113,7 +113,8 @@ struct DeviceProbe {
         if (d == Device::Cpu) return Lane::HostDense;
         if (!probe.available()) {
             if (d == Device::Gpu)
-                throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
+                throw ed::DeviceUnavailable(std::string(r.verb)
+                                            + ": device='gpu', but no usable CUDA device is visible");
             return Lane::HostDense;
         }
         return d == Device::Auto && r.dim < kDeviceDenseMinDim ? Lane::HostDense : Lane::DeviceDense;
@@ -125,8 +126,7 @@ struct DeviceProbe {
     const std::uint64_t need = fit ? device_need(r) : 0;
     const bool small_eigs = r.task == Task::Eigs && (r.dim <= kDeviceDenseMaxDim || 2 * r.want >= r.dim);
     if (d == Device::Auto) {
-        if (!r.device_kernel || r.dim < row.floor || !probe.available())
-            return Lane::HostKrylov;
+        if (!r.device_kernel || r.dim < row.floor || !probe.available()) return Lane::HostKrylov;
         if (fit) {
             const std::optional<std::size_t> free = probe.free_bytes(false);
             if (!free || need > *free) return Lane::HostKrylov;
@@ -137,8 +137,8 @@ struct DeviceProbe {
         throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
     if (!r.device_kernel)
         throw ed::DeviceUnsupported(std::string(r.verb) + ": device='gpu', but "
-                                    + (r.what ? r.what() : "a block of dim " + std::to_string(r.dim)) + " "
-                                    + r.why + "; use device='auto' or 'cpu'");
+                                    + (r.what ? r.what() : "a block of dim " + std::to_string(r.dim)) + " " + r.why
+                                    + "; use device='auto' or 'cpu'");
     if (small_eigs) return Lane::HostDense;
     if (fit) {
         const std::optional<std::size_t> free = probe.free_bytes(true);
@@ -159,16 +159,14 @@ struct DeviceProbe {
 /// atexit handlers that tear the CUDA runtime down. It keeps no state between solves since P7.3,
 /// so every device block the thread runs shares it instead of creating a cuBLAS handle each.
 inline ed::matvec::CudaBackend& thread_cuda_backend() {
-    static thread_local const std::unique_ptr<ed::matvec::CudaBackend> be =
-        std::make_unique<ed::matvec::CudaBackend>();
+    static thread_local const std::unique_ptr<ed::matvec::CudaBackend> be = std::make_unique<ed::matvec::CudaBackend>();
     return *be;
 }
 #endif
 
 /// fn(backend) on a fresh CpuBackend for a host lane, or the thread's CudaBackend for a device
 /// lane. A device lane in a build without CUDA is a logic error (place() never returns one there).
-template <class Fn>
-auto with_backend(Lane lane, Fn&& fn) {
+template <class Fn> auto with_backend(Lane lane, Fn&& fn) {
     if (on_device(lane)) {
 #ifdef WITH_CUDA
         return fn(thread_cuda_backend());
@@ -183,8 +181,7 @@ auto with_backend(Lane lane, Fn&& fn) {
 /// with_backend for a solve of `op`: a host lane on an operator that is_real() runs on the real
 /// backend (BasicCpuBackend<double>: half the bytes per vector entry and per gathered element)
 /// unless ED_SYM_REAL=0; every other lane as above. fn must return one type for every backend.
-template <class Fn>
-auto with_backend(Lane lane, const ed::LinearOperator& op, Fn&& fn) {
+template <class Fn> auto with_backend(Lane lane, const ed::LinearOperator& op, Fn&& fn) {
     if (!on_device(lane) && ed::env::flag("ED_SYM_REAL", true) && op.is_real()) {
         ed::matvec::BasicCpuBackend<double> be;
         return fn(be);

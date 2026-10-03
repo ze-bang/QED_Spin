@@ -15,6 +15,7 @@ Restated (P4.7): multiplet() now takes max_vectors and vectors() passes what it 
 claim stands while the engine cannot build fewer than the whole multiplet, i.e. while
 multiplet(spec, 0, -1, 1) is refused or still returns all m vectors.
 """
+
 import signal
 import numpy as np
 import qed
@@ -40,7 +41,7 @@ def op_at(o, i):
     return out
 
 
-Hd = np.zeros((2 ** N, 2 ** N))
+Hd = np.zeros((2**N, 2**N))
 for i in range(N):
     j = (i + 1) % N
     Hd += op_at(sz, i) @ op_at(sz, j) + 0.5 * (op_at(sp, i) @ op_at(sm, j) + op_at(sm, i) @ op_at(sp, j))
@@ -54,7 +55,7 @@ try:
     try:
         raw1 = r._raw.multiplet(r._spec, 0, -1, 1)
     except TypeError:
-        raw1 = None                      # no 'how many' argument
+        raw1 = None  # no 'how many' argument
 except Exception as e:  # noqa: BLE001
     print(f"REPRO: INCONCLUSIVE eigs/vectors raised {type(e).__name__}: {str(e)[:200]}")
     raise SystemExit(0)
@@ -70,13 +71,19 @@ for v in raw:
     resid.append(float(np.linalg.norm(Hd @ v - rq * v)))
 ok_eig = max(resid) < 1e-8
 print(f"E0 engine {r.energies[0]:.12f}  dense {E0_ref:.12f}; level multiplicity {m}")
-print(f"vectors() returned {len(vs_api)}; engine multiplet() built {len(raw)} vectors of length {len(raw[0])}; "
-      f"max residual {max(resid):.2e}")
+print(
+    f"vectors() returned {len(vs_api)}; engine multiplet() built {len(raw)} vectors of length {len(raw[0])}; "
+    f"max residual {max(resid):.2e}"
+)
 n1 = None if raw1 is None else len(raw1)
 print(f"multiplet(max_vectors=1) built {n1}")
 if len(vs_api) == 1 and len(raw) == m and m > 1 and ok_eig and (raw1 is None or len(raw1) == m):
-    print(f"REPRO: CONFIRMED k=1 vectors() returns 1 vector but the engine builds all {len(raw)} "
-          f"multiplet vectors of dim 2^{N} (all eigenvectors, max resid {max(resid):.1e}); max_vectors=1 -> {n1}")
+    print(
+        f"REPRO: CONFIRMED k=1 vectors() returns 1 vector but the engine builds all {len(raw)} "
+        f"multiplet vectors of dim 2^{N} (all eigenvectors, max resid {max(resid):.1e}); max_vectors=1 -> {n1}"
+    )
 else:
-    print(f"REPRO: NOT_REPRODUCED api={len(vs_api)} raw={len(raw)} m={m} max_vectors=1 -> {n1} "
-          f"max_resid={max(resid):.1e}")
+    print(
+        f"REPRO: NOT_REPRODUCED api={len(vs_api)} raw={len(raw)} m={m} max_vectors=1 -> {n1} "
+        f"max_resid={max(resid):.1e}"
+    )

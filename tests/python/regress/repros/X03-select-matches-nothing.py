@@ -6,6 +6,7 @@ empty (or silently partial) results instead of raising. Cases on a 12-site Heise
 translations + reflection: (a) a momentum that does not exist on the ring (theta=0.3, not a multiple of
 1/12); (b) a reflection character at k=pi/2, where the reflection is not in the little group; (c) a
 non-existent irrep dimension (identity character 5)."""
+
 import qed
 
 N = 12

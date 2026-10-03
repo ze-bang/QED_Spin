@@ -66,21 +66,21 @@ public:
     explicit ThreadBudgetScope(int threads, int blas_threads = 1);
     ~ThreadBudgetScope();
 
-    ThreadBudgetScope(const ThreadBudgetScope&)            = delete;
+    ThreadBudgetScope(const ThreadBudgetScope&) = delete;
     ThreadBudgetScope& operator=(const ThreadBudgetScope&) = delete;
-    ThreadBudgetScope(ThreadBudgetScope&&)                 = delete;
-    ThreadBudgetScope& operator=(ThreadBudgetScope&&)      = delete;
+    ThreadBudgetScope(ThreadBudgetScope&&) = delete;
+    ThreadBudgetScope& operator=(ThreadBudgetScope&&) = delete;
 
     /// Threads we ended up requesting (after clamping). Zero means "scope
     /// was a no-op and the existing thread counts are unchanged".
     int requested() const { return requested_; }
 
 private:
-    int requested_       = 0;
-    int prev_omp_        = 0;
-    int prev_openblas_   = 0;
-    bool restore_omp_    = false;
-    bool restore_blas_   = false;
+    int requested_ = 0;
+    int prev_omp_ = 0;
+    int prev_openblas_ = 0;
+    bool restore_omp_ = false;
+    bool restore_blas_ = false;
 };
 
-}  // namespace ed::parallel
+} // namespace ed::parallel

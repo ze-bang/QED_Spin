@@ -6,6 +6,7 @@ relates them, the level's multiplicity is 2 but tag.tr_folded stays false, so (a
 build the K partner (too few vectors, later vectors misaligned with energies), (b) expect() returns
 <psi_k|O|psi_k> instead of the multiplet average for a TR-odd O, (c) thermal <O>(T) of a TR-odd O
 is nonzero although H is real. 8-site Heisenberg ring, translations only, one magnon."""
+
 import numpy as np
 import qed
 
@@ -17,6 +18,8 @@ H = b.to_operator()
 
 # dense reference (library convention: bit set = spin down, S+ clears a set bit)
 dim = 1 << N
+
+
 def op1(kind, i):
     M = np.zeros((dim, dim), complex)
     for s in range(dim):
@@ -28,7 +31,11 @@ def op1(kind, i):
         elif kind == "-" and bit == 0:
             M[s ^ (1 << i), s] = 1.0
     return M
-Sp = [op1("+", i) for i in range(N)]; Sm = [op1("-", i) for i in range(N)]; Sz = [op1("z", i) for i in range(N)]
+
+
+Sp = [op1("+", i) for i in range(N)]
+Sm = [op1("-", i) for i in range(N)]
+Sz = [op1("z", i) for i in range(N)]
 Hd = sum(0.5 * (Sp[i] @ Sm[(i + 1) % N] + Sm[i] @ Sp[(i + 1) % N]) + Sz[i] @ Sz[(i + 1) % N] for i in range(N))
 Jd = 0.5j * Sp[0] @ Sm[1] - 0.5j * Sm[0] @ Sp[1]
 J01 = qed.Operator(N)
@@ -47,11 +54,13 @@ try:
     print("vectors:", len(vs), "Rayleigh energies", np.round(ray, 6).tolist())
     mis = len(vs) < 5 or any(abs(ray[i] - r.energies[i]) > 1e-8 for i in range(min(5, len(vs))))
     if mis:
-        bad.append(f"vectors(): {len(vs)} vectors, Rayleigh {np.round(ray, 4).tolist()} vs {np.round(r.energies, 4).tolist()}")
+        bad.append(
+            f"vectors(): {len(vs)} vectors, Rayleigh {np.round(ray, 4).tolist()} vs {np.round(r.energies, 4).tolist()}"
+        )
     ex = qed.expect(H, [J01], 5, sym=sym)
     for e, m, v in zip(ex.energies, ex.multiplicities, ex.values[:, 0]):
         print(f"  expect E={e:.6f} mult={m} <J01>={v:.6g}")
-        if m == 2 and abs(v) > 1e-8:     # every 2-fold one-magnon level here is a +-k pair: Tr(P J01) = 0
+        if m == 2 and abs(v) > 1e-8:  # every 2-fold one-magnon level here is a +-k pair: Tr(P J01) = 0
             bad.append(f"expect E={e:.4f} mult 2 <J01>={abs(v):.4f} (exact 0)")
 except Exception as ex_:
     print(f"REPRO: INCONCLUSIVE eigs/expect raised {type(ex_).__name__}: {ex_}")

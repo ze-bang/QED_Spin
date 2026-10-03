@@ -4,6 +4,7 @@ The term vocabulary and the dense matrices are support.oracle's, the models supp
 (re-exported here: the regress repros and the bench import them from grid.models). Oracle
 answers every grid cell from the dense matrix of a model's term list.
 """
+
 from __future__ import annotations
 
 import cmath
@@ -13,14 +14,37 @@ import math
 
 import numpy as np
 
-from support.models import (MODELS, Model, chain, kagome_bq, square_ring,  # noqa: F401
-                            triangular, xyz_chain)
-from support.oracle import (Term, _apply, _expand, adjoint, apply_perm, compose, dense, dot,  # noqa: F401
-                            fourier, joint_eigenspace, ring, scale, sparse, state_map, triple)
+from support.models import (  # noqa: F401
+    MODELS,
+    Model,
+    chain,
+    kagome_bq,
+    square_ring,
+    triangular,
+    xyz_chain,
+)
+from support.oracle import (  # noqa: F401
+    Term,
+    _apply,
+    _expand,
+    adjoint,
+    apply_perm,
+    compose,
+    dense,
+    dot,
+    fourier,
+    joint_eigenspace,
+    ring,
+    scale,
+    sparse,
+    state_map,
+    triple,
+)
 
 # ---------------------------------------------------------------------------
 # Dense oracle
 # ---------------------------------------------------------------------------
+
 
 def _block_eigh(M, key, real):
     """eigh of a Hermitian M that is block diagonal in the labels ``key`` of the basis states
@@ -33,8 +57,8 @@ def _block_eigh(M, key, real):
         idx = np.flatnonzero(key == b)
         Mb = M[np.ix_(idx, idx)]
         e, v = np.linalg.eigh(Mb.real if real else Mb)
-        E[col:col + len(idx)] = e
-        V[idx, col:col + len(idx)] = v
+        E[col : col + len(idx)] = e
+        V[idx, col : col + len(idx)] = v
         col += len(idx)
     order = np.argsort(E, kind="stable")
     return E[order], V[:, order]
@@ -128,8 +152,10 @@ class Oracle:
 
     def _charvec(self, v, elems):
         """(<v|U_a|v>) over the elements, rounded (a momentum's label)."""
-        return tuple(complex(round(c.real, 6), round(c.imag, 6)) + 0j
-                     for c in (np.vdot(v, apply_perm(self._imgs(a), v)) for a in elems))
+        return tuple(
+            complex(round(c.real, 6), round(c.imag, 6)) + 0j
+            for c in (np.vdot(v, apply_perm(self._imgs(a), v)) for a in elems)
+        )
 
     def _momenta(self, gens, orders):
         """{q: basis} over every momentum of the generated group, with a nonempty space."""
@@ -176,8 +202,9 @@ class Oracle:
                 if t < w and ev[t] - ev[s] <= gtol:
                     continue
                 Zi = Z[:, s:t]
-                out.append((float(E[a:b].mean()), V @ Zi,
-                            {g: complex(np.trace(Zi.conj().T @ Mg @ Zi)) for g, Mg in M.items()}))
+                out.append(
+                    (float(E[a:b].mean()), V @ Zi, {g: complex(np.trace(Zi.conj().T @ Mg @ Zi)) for g, Mg in M.items()})
+                )
                 s = t
             a = b
         return out
@@ -200,7 +227,7 @@ class Oracle:
             want = set()
             for q in qs:
                 want |= {self._image_momentum(spaces[q], g, gens, orders) for g in group}
-            if tr:                              # time reversal closes each star under q -> -q
+            if tr:  # time reversal closes each star under q -> -q
                 want |= {tuple((-a) % L for a, L in zip(q, orders)) for q in want}
             for q in sorted(want):
                 B = spaces[q]
@@ -228,7 +255,7 @@ class Oracle:
             k = self._charvec(B[:, 0], elems)
             little = [g for g in group if self._charvec(apply_perm(self._imgs(g), B[:, 0]), elems) == k]
             to_star = {}
-            for g in group:                     # one group element per star member
+            for g in group:  # one group element per star member
                 to_star.setdefault(self._charvec(apply_perm(self._imgs(g), B[:, 0]), elems), g)
             for E, V, tr in self._irreducible_copies(B, little):
                 if all(R in tr and abs(tr[R] - c) < 1e-6 for R, c in chars):
@@ -250,7 +277,7 @@ class Oracle:
 
     @functools.lru_cache(maxsize=None)
     def s2_eig(self):
-        return _block_eigh(self.s2(), self.pop, real=True)   # S^2 is real and conserves n_up
+        return _block_eigh(self.s2(), self.pop, real=True)  # S^2 is real and conserves n_up
 
     @functools.lru_cache(maxsize=None)
     def s2(self):
@@ -289,9 +316,9 @@ class Oracle:
         pos, wt = self.lehmann_poles(obs_terms, T, deg_tol, init)
         om = np.asarray(omega)[:, None]
         S = np.zeros(len(omega))
-        for a in range(0, len(pos), 1 << 16):     # chunks: 161 x 2^16 doubles at a time
-            p, w = pos[None, a:a + (1 << 16)], wt[None, a:a + (1 << 16)]
-            S += (w * eta / math.pi / ((om - p) ** 2 + eta ** 2)).sum(axis=1)
+        for a in range(0, len(pos), 1 << 16):  # chunks: 161 x 2^16 doubles at a time
+            p, w = pos[None, a : a + (1 << 16)], wt[None, a : a + (1 << 16)]
+            S += (w * eta / math.pi / ((om - p) ** 2 + eta**2)).sum(axis=1)
         return S
 
     def lehmann_poles(self, obs_terms, T=None, deg_tol=1e-8, init=None):
@@ -300,12 +327,12 @@ class Oracle:
         O = dense(obs_terms, self.m.N)
         E, V = self.E, self.V
         Eb, Vi, p = self._initial(T, deg_tol, init)
-        W = np.abs(V.conj().T @ O @ Vi) ** 2      # |<n|O|m>|^2, m over initial states
+        W = np.abs(V.conj().T @ O @ Vi) ** 2  # |<n|O|m>|^2, m over initial states
         live = np.flatnonzero(p > 1e-14)
         ref = np.full(len(live), Eb[0]) if (T is None or T == 0) else Eb[live]
         pos = (E[:, None] - ref[None, :]).ravel()
         wt = (W[:, live] * p[None, live]).ravel()
-        keep = wt > 1e-15 * wt.sum()             # symmetry zeros (roundoff); negligible to the sum
+        keep = wt > 1e-15 * wt.sum()  # symmetry zeros (roundoff); negligible to the sum
         return pos[keep], wt[keep]
 
     def _initial(self, T, deg_tol, init):

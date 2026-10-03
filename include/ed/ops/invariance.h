@@ -42,8 +42,8 @@ inline constexpr double kInvarianceRtol = 1e-10;
 /// (S+, S-, S^z), sites ascending; the identity has no factors.
 struct ProductTerm {
     std::complex<double> coeff;
-    std::string          ops;
-    std::vector<int>     sites;
+    std::string ops;
+    std::vector<int> sites;
 };
 /// m's canonical terms in key order, each as a product of S+, S-, S^z (Z = 2 S^z folded in).
 [[nodiscard]] std::vector<ProductTerm> product_terms(const MaskedOperator& m);

@@ -34,13 +34,18 @@ ED_OPS_HD bool connection(const ProgramView<C>& P, std::uint64_t s, std::uint32_
     std::uint32_t lo = P.group_vbegin[g], hi = P.group_vbegin[g + 1];
     while (lo < hi) {
         const std::uint32_t mid = lo + (hi - lo) / 2;
-        if (P.vsub_val[mid] < v) lo = mid + 1; else hi = mid;
+        if (P.vsub_val[mid] < v)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
     if (lo == P.group_vbegin[g + 1] || P.vsub_val[lo] != v) return false;
     h = C(0);
     for (std::uint32_t k = P.vsub_tbegin[lo]; k < P.vsub_tbegin[lo + 1]; ++k) {
-        if (masked_popcount(s & P.term_sign[k]) & 1) h += -P.term_coeff[k];
-        else                                          h += P.term_coeff[k];
+        if (masked_popcount(s & P.term_sign[k]) & 1)
+            h += -P.term_coeff[k];
+        else
+            h += P.term_coeff[k];
     }
     t = s ^ F;
     return true;

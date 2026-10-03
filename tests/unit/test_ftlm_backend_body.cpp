@@ -40,9 +40,7 @@ namespace {
 
 struct MatvecCallable {
     const ed::LinearOperator* op;
-    void operator()(const Complex* in, Complex* out, std::size_t n) const {
-        op->apply(in, out, n);
-    }
+    void operator()(const Complex* in, Complex* out, std::size_t n) const { op->apply(in, out, n); }
 };
 
 double dense_ground_energy(const MatvecCallable& apply, std::size_t dim) {
@@ -54,8 +52,7 @@ double dense_ground_energy(const MatvecCallable& apply, std::size_t dim) {
         apply(e.data(), col.data(), dim);
         for (std::size_t i = 0; i < dim; ++i) Hd(i, j) = col[i];
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(
-        Hd, Eigen::EigenvaluesOnly);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es(Hd, Eigen::EigenvaluesOnly);
     return es.eigenvalues()(0);
 }
 
@@ -76,8 +73,8 @@ void require_finite(const ed::thermal::FtlmResult& r, std::size_t nb) {
 TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
           "estimate, thread scope",
           "[ftlm][thermal][wp10]") {
-    constexpr std::uint64_t N   = 8;
-    constexpr std::size_t   dim = std::size_t{1} << N;
+    constexpr std::uint64_t N = 8;
+    constexpr std::size_t dim = std::size_t{1} << N;
 
     auto H = ed_tests::build_heisenberg_chain(N, 1.0, /*periodic=*/true);
     ed::matvec::CpuBackend backend;
@@ -87,8 +84,8 @@ TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
 
     ed::thermal::FtlmOptions opts;
     opts.num_samples = 4;
-    opts.krylov_dim  = 60;
-    opts.betas       = {0.1, 0.5, 1.0, 2.0, 20.0};
+    opts.krylov_dim = 60;
+    opts.betas = {0.1, 0.5, 1.0, 2.0, 20.0};
     opts.random_seed = 12345;
 
 #ifdef _OPENMP
@@ -96,12 +93,10 @@ TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
 #endif
 
     opts.full_reorthogonalization = false;
-    const auto local = ed::thermal::ftlm_kernel(
-        backend, apply, dim, opts);
+    const auto local = ed::thermal::ftlm_kernel(backend, apply, dim, opts);
 
     opts.full_reorthogonalization = true;
-    const auto full = ed::thermal::ftlm_kernel(
-        backend, apply, dim, opts);
+    const auto full = ed::thermal::ftlm_kernel(backend, apply, dim, opts);
 
 #ifdef _OPENMP
     CHECK(omp_get_max_threads() == omp_before);
@@ -125,7 +120,6 @@ TEST_CASE("ftlm_kernel: full reorth on/off, ground-state "
     // Same random vectors, different reorth policy: the thermodynamics
     // agree to well within the stochastic error of the trace.
     for (std::size_t t = 0; t < nb; ++t) {
-        CHECK(std::abs(local.curves.E[t] - full.curves.E[t])
-              < 1e-6 * (1.0 + std::abs(full.curves.E[t])));
+        CHECK(std::abs(local.curves.E[t] - full.curves.E[t]) < 1e-6 * (1.0 + std::abs(full.curves.E[t])));
     }
 }

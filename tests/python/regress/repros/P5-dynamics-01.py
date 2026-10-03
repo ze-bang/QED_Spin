@@ -9,6 +9,7 @@ phase time.  Compare with the same two eigs passes (values k=1 window, then k=2 
 run (a) with the full folded symmetry (Symmetry auto: reflection + flip + TR) and (b) with the
 unfolded symmetry (translations only, flip/TR off).  CONFIRMED when the dynamics ground-manifold
 phase costs >= 2x the folded passes and is within ~2x of the unfolded ones."""
+
 import json
 import os
 import re
@@ -16,7 +17,8 @@ import subprocess
 import sys
 
 N = 24
-CHILD = r'''
+CHILD = (
+    r'''
 import cmath, json, math, sys, time
 import numpy as np, qed
 N = %d
@@ -44,7 +46,9 @@ t_f, e_f = two_pass(folded)
 t_u, e_u = two_pass(unfolded)
 print("RESULT_JSON:" + json.dumps({"t_dyn": t_dyn, "t_f": t_f, "t_u": t_u, "e0_dyn": float(d.e0),
                                    "e_f": e_f, "e_u": e_u, "gm": int(d.ground_manifold)}), flush=True)
-''' % N
+'''
+    % N
+)
 
 try:
     env = dict(os.environ, ED_SYM_PROFILE="1")
@@ -52,14 +56,16 @@ try:
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            res = json.loads(line[len("RESULT_JSON:"):])
+            res = json.loads(line[len("RESULT_JSON:") :])
     m = re.search(r"\[sym_profile\] dynamics ground manifold\s+([\d.]+) s", p.stderr)
     if res is None or m is None:
         print(f"REPRO: INCONCLUSIVE child rc={p.returncode} profile_found={m is not None} {p.stderr[-200:]!r}")
     else:
         gm = float(m.group(1))
-        info = (f"gm_phase={gm:.2f}s folded_2pass={res['t_f']:.2f}s unfolded_2pass={res['t_u']:.2f}s "
-                f"dyn_total={res['t_dyn']:.2f}s E0 dyn/folded/unfolded={res['e0_dyn']:.10f}/{res['e_f']:.10f}/{res['e_u']:.10f}")
+        info = (
+            f"gm_phase={gm:.2f}s folded_2pass={res['t_f']:.2f}s unfolded_2pass={res['t_u']:.2f}s "
+            f"dyn_total={res['t_dyn']:.2f}s E0 dyn/folded/unfolded={res['e0_dyn']:.10f}/{res['e_f']:.10f}/{res['e_u']:.10f}"
+        )
         if gm >= 2 * res["t_f"] and gm <= 2.5 * res["t_u"] and abs(res["e0_dyn"] - res["e_f"]) < 1e-8:
             print("REPRO: CONFIRMED " + info)
         else:

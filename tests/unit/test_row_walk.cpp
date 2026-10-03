@@ -75,7 +75,10 @@ struct EnvGuard {
     std::vector<std::pair<std::string, std::string>> saved;
     std::vector<std::string> unset;
     void set(const char* k, const char* v) {
-        if (const char* old = std::getenv(k)) saved.emplace_back(k, old); else unset.emplace_back(k);
+        if (const char* old = std::getenv(k))
+            saved.emplace_back(k, old);
+        else
+            unset.emplace_back(k);
         setenv(k, v, 1);
     }
     ~EnvGuard() {
@@ -125,11 +128,23 @@ std::vector<Model> zoo() {
         fill(*H);
         z.push_back({name, H, u1, flip, dih});
     };
-    built("j1j2", true, true, true, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::heisenberg(H, ring(2), 0.35); });
-    built("xxz+hx", false, true, true, [](Operator& H) { R::xxz(H, ring(1), 1.0, 0.6); R::zeeman(H, 0.4, 0.0, 0.0); });
+    built("j1j2", true, true, true, [](Operator& H) {
+        R::heisenberg(H, ring(1), 1.0);
+        R::heisenberg(H, ring(2), 0.35);
+    });
+    built("xxz+hx", false, true, true, [](Operator& H) {
+        R::xxz(H, ring(1), 1.0, 0.6);
+        R::zeeman(H, 0.4, 0.0, 0.0);
+    });
     built("xyz", false, true, true, [](Operator& H) { R::xyz(H, ring(1), 1.0, 0.7, 0.4); });
-    built("dm_z", true, false, false, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::dm(H, ring(1), 0.0, 0.0, 0.3); });
-    built("dm_x", false, false, false, [](Operator& H) { R::heisenberg(H, ring(1), 1.0); R::dm(H, ring(1), 0.3, 0.0, 0.0); });
+    built("dm_z", true, false, false, [](Operator& H) {
+        R::heisenberg(H, ring(1), 1.0);
+        R::dm(H, ring(1), 0.0, 0.0, 0.3);
+    });
+    built("dm_x", false, false, false, [](Operator& H) {
+        R::heisenberg(H, ring(1), 1.0);
+        R::dm(H, ring(1), 0.3, 0.0, 0.0);
+    });
     {   // the Cartesian Heisenberg ring: S+S+ / S-S- records that cancel
         auto H = std::make_shared<Operator>(N, 0.5f);
         const double q = 0.25;
@@ -137,7 +152,8 @@ std::vector<Model> zoo() {
         const double cs[8] = {q, q, q, q, -q, q, q, -q};
         for (const auto& [i, j] : ring(1)) {
             for (int r = 0; r < 8; ++r)
-                H->addTwoBodyTerm(static_cast<std::uint8_t>(recs[r][0]), i, static_cast<std::uint8_t>(recs[r][1]), j, cs[r]);
+                H->addTwoBodyTerm(static_cast<std::uint8_t>(recs[r][0]), i, static_cast<std::uint8_t>(recs[r][1]), j,
+                                  cs[r]);
             H->addTwoBodyTerm(2, i, 2, j, 1.0);
         }
         z.push_back({"heisenberg_cartesian", H, true, true, true});
@@ -149,7 +165,8 @@ std::vector<Model> zoo() {
         for (std::uint64_t a = 0; a < N; ++a) {
             const std::uint64_t s[3] = {a, (a + 1) % N, (a + 2) % N};
             for (int p = 0; p < 6; ++p)
-                H->addThreeBodyTerm(static_cast<std::uint8_t>(pattern[p][0]), s[0], static_cast<std::uint8_t>(pattern[p][1]), s[1],
+                H->addThreeBodyTerm(static_cast<std::uint8_t>(pattern[p][0]), s[0],
+                                    static_cast<std::uint8_t>(pattern[p][1]), s[1],
                                     static_cast<std::uint8_t>(pattern[p][2]), s[2], Cx(0.0, p < 3 ? 0.15 : -0.15));
         }
         z.push_back({"chirality", H, true, true, false});
@@ -166,7 +183,9 @@ std::vector<Model> zoo() {
     }
     {   // J1 + the four-site ring exchange K sum_i (P + P^dagger), P = P_{i,i+1} P_{i+1,i+2} P_{i+2,i+3}
         // with the transposition P_ij = 1/2 + 2 S_i.S_j: terms on four sites, no record holds them
-        auto Pij = [](int i, int j) { return P("I", {0}, 0.5) + P("zz", {i, j}, 2.0) + P("+-", {i, j}) + P("-+", {i, j}); };
+        auto Pij = [](int i, int j) {
+            return P("I", {0}, 0.5) + P("zz", {i, j}, 2.0) + P("+-", {i, j}) + P("-+", {i, j});
+        };
         MaskedOperator H(N);
         for (int i = 0; i < N; ++i) {
             const int a = i, b = (i + 1) % N, c = (i + 2) % N, d = (i + 3) % N;
@@ -182,8 +201,9 @@ std::vector<Model> zoo() {
         std::mt19937 rng(20261002);
         std::normal_distribution<double> g(0.0, 1.0);
         auto cx = [&] { return Cx(g(rng), g(rng)); };
-        const auto u1 = translation_symmetrised(P("+-", {0, 1}, cx()) + P("z+-", {0, 1, 3}, cx()) + P("zz", {0, 2}, cx())
-                                                + P("z", {0}, cx()) + P("+z-", {0, 1, 2}, cx()));
+        const auto u1 =
+            translation_symmetrised(P("+-", {0, 1}, cx()) + P("z+-", {0, 1, 3}, cx()) + P("zz", {0, 2}, cx())
+                                    + P("z", {0}, cx()) + P("+z-", {0, 1, 2}, cx()));
         z.push_back({"random_u1", from_terms(u1), true, false, false});
         const auto none = translation_symmetrised(P("+", {0}, cx()) + P("++", {0, 3}, cx()) + P("z-", {1, 2}, cx())
                                                   + P("x", {0}, cx()) + P("+-z", {0, 1, 2}, cx()));
@@ -194,7 +214,11 @@ std::vector<Model> zoo() {
 
 // ---- sectors -----------------------------------------------------------------------------
 
-struct Element { std::vector<int> perm; std::uint64_t flip; int rot, refl, par; };
+struct Element {
+    std::vector<int> perm;
+    std::uint64_t flip;
+    int rot, refl, par;
+};
 
 // D_N (or Z_N without reflections) on the ring, times the flip when asked.
 std::vector<Element> ring_group(bool dihedral, bool with_flip) {
@@ -204,9 +228,12 @@ std::vector<Element> ring_group(bool dihedral, bool with_flip) {
             for (int a = 0; a < N; ++a) {
                 Element e;
                 e.perm.resize(N);
-                for (int i = 0; i < N; ++i) e.perm[static_cast<std::size_t>(i)] = s ? ((a - i) % N + N) % N : (i + a) % N;
+                for (int i = 0; i < N; ++i)
+                    e.perm[static_cast<std::size_t>(i)] = s ? ((a - i) % N + N) % N : (i + a) % N;
                 e.flip = f ? kAll : 0ULL;
-                e.rot = a; e.refl = s; e.par = f;
+                e.rot = a;
+                e.refl = s;
+                e.par = f;
                 G.push_back(std::move(e));
             }
     return G;
@@ -222,7 +249,8 @@ std::vector<std::vector<Cx>> characters(const std::vector<Element>& G, bool dihe
             std::vector<Cx> chi;
             for (const auto& e : G) {
                 Cx c;
-                if (!dihedral) c = std::polar(1.0, 2.0 * kPi * k * e.rot / N);
+                if (!dihedral)
+                    c = std::polar(1.0, 2.0 * kPi * k * e.rot / N);
                 else {
                     const double rs = (k >= 2 && (e.rot % 2)) ? -1.0 : 1.0;   // B: (-1)^a
                     const double fs = (e.refl && (k % 2)) ? -1.0 : 1.0;      // A2, B2: reflections -1
@@ -260,7 +288,10 @@ RepSectorData make_sector(const std::vector<Element>& G, const std::vector<Cx>& 
         for (int g = 0; g < rd.group_size && is_rep; ++g) {
             const std::uint64_t img = pol.apply_perm(s, g);
             if (img < s) is_rep = false;
-            if (img == s) { sum += rd.characters[static_cast<std::size_t>(g)]; ++stab; }
+            if (img == s) {
+                sum += rd.characters[static_cast<std::size_t>(g)];
+                ++stab;
+            }
         }
         if (!is_rep) continue;
         const double nsq = std::norm(sum) / stab;
@@ -344,7 +375,8 @@ TEST_CASE("full space: the walk and the CSR, on real and complex inputs, are H",
             CHECK(std::string(H.full_space_lane()) == lane);
             for (bool imag : {false, true}) {
                 INFO("imaginary input " << imag);
-                const Mat M = columns(D, [&](const Cx* in, Cx* out) { H.apply(in, out, D); }, imag);
+                const Mat M = columns(
+                    D, [&](const Cx* in, Cx* out) { H.apply(in, out, D); }, imag);
                 CHECK(max_diff(M, ref) <= tol);
             }
         }
@@ -376,8 +408,8 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
                         const std::size_t d = rd.reps.size();
                         if (d == 0) continue;
                         ++sectors;
-                        INFO("model " << m.name << " dihedral " << dihedral << " flip " << with_flip
-                             << " n_up " << n_up << " dim " << d << " chi[1] " << chi[1]);
+                        INFO("model " << m.name << " dihedral " << dihedral << " flip " << with_flip << " n_up " << n_up
+                                      << " dim " << d << " chi[1] " << chi[1]);
                         const Mat ref = reference_block(Hd, rd);
                         auto rds = std::make_shared<const RepSectorData>(std::move(rd));
                         {   // default: the reduced CSR
@@ -407,14 +439,14 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
                                 CHECK(std::string(op.lane()) == "csr-real");
                             }
                         }
-                        {   // the walk: no CSR fits a budget of 0
+                        { // the walk: no CSR fits a budget of 0
                             EnvGuard env;
                             env.set("ED_SYM_SECTOR_CSR_BUDGET_GIB", "0");
                             RepSectorMatVec op(*m.H, rds);
                             const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
                             CHECK(std::string(op.lane()) == "walk");
                             CHECK(max_diff(M, ref) <= tol);
-                            if (n_up >= 0) {   // the same walk through an O(1) rank table, and two-level
+                            if (n_up >= 0) { // the same walk through an O(1) rank table, and two-level
                                 RepSectorData ranked = *rds;
                                 ranked.build_rank_table();
                                 RepSectorMatVec op2(*m.H, std::make_shared<const RepSectorData>(std::move(ranked)));
@@ -450,7 +482,8 @@ TEST_CASE("rep sectors: CSR, walk and device gather are the block of H", "[row_w
 
 // The sector CSR as it was built before P6.1 step 3: every row computed twice (count, then fill).
 template <class Policy>
-ed::matvec::ReducedSymmetryCsr<Cx> two_pass_csr(const ed::ops::ProgramView<Cx>& P, const Policy& pol, std::uint64_t dim) {
+ed::matvec::ReducedSymmetryCsr<Cx> two_pass_csr(const ed::ops::ProgramView<Cx>& P, const Policy& pol,
+                                                std::uint64_t dim) {
     ed::matvec::ReducedSymmetryCsr<Cx> csr;
     csr.dim = dim;
     csr.row_ptr.assign(dim + 1, 0);
@@ -463,7 +496,11 @@ ed::matvec::ReducedSymmetryCsr<Cx> two_pass_csr(const ed::ops::ProgramView<Cx>& 
     for (std::uint64_t r = 0; r < dim; ++r) {
         ed::matvec::detail::cross_row(P, pol, pol, true, r, row);
         std::uint64_t e = csr.row_ptr[r];
-        for (const auto& [j, v] : row) { csr.col_idx[e] = static_cast<std::uint32_t>(j); csr.val[e] = v; ++e; }
+        for (const auto& [j, v] : row) {
+            csr.col_idx[e] = static_cast<std::uint32_t>(j);
+            csr.val[e] = v;
+            ++e;
+        }
     }
     return csr;
 }
@@ -500,9 +537,11 @@ TEST_CASE("rep sectors: the one-pass CSR is the two-pass CSR bit for bit", "[row
                         omp_set_num_threads(before);
 #endif
                         INFO("threads " << threads);
-                        CHECK(std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
-                        CHECK(std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
-                        if (ref.nnz() >= 64) CHECK(csr.dictionary());   // a tiny one stores its values
+                        CHECK(
+                            std::equal(csr.row_ptr.begin(), csr.row_ptr.end(), ref.row_ptr.begin(), ref.row_ptr.end()));
+                        CHECK(
+                            std::equal(csr.col_idx.begin(), csr.col_idx.end(), ref.col_idx.begin(), ref.col_idx.end()));
+                        if (ref.nnz() >= 64) CHECK(csr.dictionary()); // a tiny one stores its values
                         bool same_bits = true;
                         for (std::uint64_t e = 0; e < ref.nnz() && same_bits; ++e) {
                             const Cx a = csr.value(e), b = ref.val[e];
@@ -532,7 +571,7 @@ TEST_CASE("rep sectors: too many distinct values fall back to full values, bit f
         h.add(MaskedOperator::product(n, "-+", {i, j}, Cx(0.5 * jxy, 0.0)));
         h.add(MaskedOperator::product(n, "zz", {i, j}, Cx(jz, 0.0)));
     }
-    RepSectorData rd;                       // the plain Sz sector: the trivial group
+    RepSectorData rd; // the plain Sz sector: the trivial group
     rd.n_sites = n;
     rd.group_size = 1;
     rd.n_up = n / 2;
@@ -587,7 +626,7 @@ TEST_CASE("rep sectors: the bucket lookup finds what the binary search finds", "
     RepSectorData with_table = make_sector(ring_group(false, false), std::vector<Cx>(N, Cx(1.0, 0.0)), N / 2);
     with_table.build_rank_table();
     with_table.build_buckets();
-    CHECK(with_table.bucket_off.empty());   // the rank table answers in O(1)
+    CHECK(with_table.bucket_off.empty()); // the rank table answers in O(1)
 }
 
 TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly", "[row_walk]") {
@@ -598,7 +637,7 @@ TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly",
     std::uniform_int_distribution<int> pick_op(0, static_cast<int>(alphabet.size()) - 1), pick_site(0, N - 1);
     std::uniform_int_distribution<int> pick_len(1, 4);
     std::normal_distribution<double> gauss(0.0, 1.0);
-    for (int trial = 0; trial < 20; ++trial) {   // non-Hermitian, up to four sites
+    for (int trial = 0; trial < 20; ++trial) { // non-Hermitian, up to four sites
         MaskedOperator O(N);
         for (int t = 0; t < 8; ++t) {
             std::string o;
@@ -650,47 +689,50 @@ TEST_CASE("compile_operator keeps every term; the row walk is to_dense exactly",
 TEST_CASE("device: the multi-vector walk and CSR equal single applies bit for bit", "[row_walk][cuda]") {
     if (!ed::have_cuda()) SKIP("no CUDA device");
     for (const auto& m : zoo())
-    for (const bool walk : {true, false}) {
-        if (m.name != "chirality" && m.name != "random_none") continue;
-        INFO("model " << m.name << " walk " << walk);
-        EnvGuard env;
-        if (walk) env.set("ED_GPU_CSR_BUDGET_GIB", "0");   // no device CSR fits: the device walk
-        const auto G = ring_group(false, false);
-        const int n_up = m.u1 ? N / 2 : -1;
-        auto rds = std::make_shared<const RepSectorData>(make_sector(G, characters(G, false, false)[1], n_up));
-        const std::size_t d = rds->reps.size();
-        RepSectorMatVec op(*m.H, rds);
-        op.enable_device(true);
-        const auto single = op.bind_cuda();
-        const auto multi = op.bind_cuda_multi();
-        REQUIRE(multi);
-        CHECK(std::string(op.device_lane()) == (walk ? "device-gather" : "device-csr"));
-        constexpr std::size_t K = 15;              // launches of 8, 4, 2 and 1 vectors
-        std::mt19937 rng(7);
-        std::normal_distribution<double> g(0.0, 1.0);
-        std::vector<std::vector<Cx>> x(K, std::vector<Cx>(d));
-        for (auto& v : x) for (auto& z : v) z = Cx(g(rng), g(rng));
-        std::vector<Cx*> din(K), dout_m(K), dout_s(K);
-        for (std::size_t i = 0; i < K; ++i) {
-            REQUIRE(cudaMalloc(&din[i], d * sizeof(Cx)) == cudaSuccess);
-            REQUIRE(cudaMalloc(&dout_m[i], d * sizeof(Cx)) == cudaSuccess);
-            REQUIRE(cudaMalloc(&dout_s[i], d * sizeof(Cx)) == cudaSuccess);
-            REQUIRE(cudaMemcpy(din[i], x[i].data(), d * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
+        for (const bool walk : {true, false}) {
+            if (m.name != "chirality" && m.name != "random_none") continue;
+            INFO("model " << m.name << " walk " << walk);
+            EnvGuard env;
+            if (walk) env.set("ED_GPU_CSR_BUDGET_GIB", "0"); // no device CSR fits: the device walk
+            const auto G = ring_group(false, false);
+            const int n_up = m.u1 ? N / 2 : -1;
+            auto rds = std::make_shared<const RepSectorData>(make_sector(G, characters(G, false, false)[1], n_up));
+            const std::size_t d = rds->reps.size();
+            RepSectorMatVec op(*m.H, rds);
+            op.enable_device(true);
+            const auto single = op.bind_cuda();
+            const auto multi = op.bind_cuda_multi();
+            REQUIRE(multi);
+            CHECK(std::string(op.device_lane()) == (walk ? "device-gather" : "device-csr"));
+            constexpr std::size_t K = 15; // launches of 8, 4, 2 and 1 vectors
+            std::mt19937 rng(7);
+            std::normal_distribution<double> g(0.0, 1.0);
+            std::vector<std::vector<Cx>> x(K, std::vector<Cx>(d));
+            for (auto& v : x)
+                for (auto& z : v) z = Cx(g(rng), g(rng));
+            std::vector<Cx*> din(K), dout_m(K), dout_s(K);
+            for (std::size_t i = 0; i < K; ++i) {
+                REQUIRE(cudaMalloc(&din[i], d * sizeof(Cx)) == cudaSuccess);
+                REQUIRE(cudaMalloc(&dout_m[i], d * sizeof(Cx)) == cudaSuccess);
+                REQUIRE(cudaMalloc(&dout_s[i], d * sizeof(Cx)) == cudaSuccess);
+                REQUIRE(cudaMemcpy(din[i], x[i].data(), d * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
+            }
+            std::vector<const Cx*> cin(din.begin(), din.end());
+            multi(cin.data(), dout_m.data(), d, K);
+            for (std::size_t i = 0; i < K; ++i) single(din[i], dout_s[i], d);
+            REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+            for (std::size_t i = 0; i < K; ++i) {
+                std::vector<Cx> ym(d), ys(d), yh(d);
+                REQUIRE(cudaMemcpy(ym.data(), dout_m[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+                REQUIRE(cudaMemcpy(ys.data(), dout_s[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
+                op.apply(x[i].data(), yh.data(), d); // the host lane
+                CHECK(max_diff(ym, ys) == 0.0);
+                CHECK(max_diff(ys, yh) <= 1e-12 * std::max(1.0, max_abs(yh)));
+                cudaFree(din[i]);
+                cudaFree(dout_m[i]);
+                cudaFree(dout_s[i]);
+            }
         }
-        std::vector<const Cx*> cin(din.begin(), din.end());
-        multi(cin.data(), dout_m.data(), d, K);
-        for (std::size_t i = 0; i < K; ++i) single(din[i], dout_s[i], d);
-        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
-        for (std::size_t i = 0; i < K; ++i) {
-            std::vector<Cx> ym(d), ys(d), yh(d);
-            REQUIRE(cudaMemcpy(ym.data(), dout_m[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
-            REQUIRE(cudaMemcpy(ys.data(), dout_s[i], d * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
-            op.apply(x[i].data(), yh.data(), d);   // the host lane
-            CHECK(max_diff(ym, ys) == 0.0);
-            CHECK(max_diff(ys, yh) <= 1e-12 * std::max(1.0, max_abs(yh)));
-            cudaFree(din[i]); cudaFree(dout_m[i]); cudaFree(dout_s[i]);
-        }
-    }
 }
 
 // A device apply on host vectors.
@@ -739,12 +781,14 @@ TEST_CASE("device: the CSR built on the device is the host's, and applies as the
                         const std::size_t d = rd.reps.size();
                         if (d == 0) continue;
                         ++sectors;
-                        INFO("model " << m.name << " dihedral " << dihedral << " flip " << with_flip
-                             << " n_up " << n_up << " dim " << d << " chi[1] " << chi[1]);
+                        INFO("model " << m.name << " dihedral " << dihedral << " flip " << with_flip << " n_up " << n_up
+                                      << " dim " << d << " chi[1] " << chi[1]);
                         auto rds = std::make_shared<const RepSectorData>(std::move(rd));
-                        const auto dc = ed::symmetry::build_sector_csr_gpu(*rds, *m.H->row_program(), ~std::uint64_t{0});
+                        const auto dc =
+                            ed::symmetry::build_sector_csr_gpu(*rds, *m.H->row_program(), ~std::uint64_t{0});
                         REQUIRE(dc);
-                        check_same_entries(ed::symmetry::download_csr(*dc), RepSectorMatVec(*m.H, rds).reduced_csr(), tol);
+                        check_same_entries(ed::symmetry::download_csr(*dc), RepSectorMatVec(*m.H, rds).reduced_csr(),
+                                           tol);
                         const auto f = ed::symmetry::csr_matvec_gpu(dc);
                         const Mat M = columns(d, [&](const Cx* in, Cx* out) { on_device(f, in, out, d); });
                         CHECK(max_diff(M, reference_block(Hd, *rds)) <= tol);
@@ -768,10 +812,13 @@ TEST_CASE("device: the warp merge at every lane width, and its limit", "[row_wal
             std::string ops;
             std::vector<int> sites;
             for (int i = 0; i < n; ++i)
-                if ((m >> i) & 1u) { ops += 'x'; sites.push_back(i); }
+                if ((m >> i) & 1u) {
+                    ops += 'x';
+                    sites.push_back(i);
+                }
             h.add(MaskedOperator::product(n, ops, sites, Cx(g(rng), 0.0)));
         }
-        h.add(MaskedOperator::product(n, "z", {0}, Cx(0.3, 0.0)));   // a diagonal
+        h.add(MaskedOperator::product(n, "z", {0}, Cx(0.3, 0.0))); // a diagonal
         return h;
     };
     auto full_space = [](int n) {
@@ -923,9 +970,12 @@ TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one g
         }
         return M;
     };
-    struct Pair { bool flip; int kR, nR, kC, nC; };
-    const Pair pairs[] = {{false, 0, 4, 0, 4}, {false, 1, 4, 3, 4}, {false, 1, 3, 1, 4}, {false, 2, 4, 5, 3},
-                          {false, 3, -1, 0, -1}, {false, 6, -1, 6, -1}, {true, 0, 4, 1, 4}, {true, 5, -1, 2, -1}};
+    struct Pair {
+        bool flip;
+        int kR, nR, kC, nC;
+    };
+    const Pair pairs[] = {{false, 0, 4, 0, 4},   {false, 1, 4, 3, 4},   {false, 1, 3, 1, 4}, {false, 2, 4, 5, 3},
+                          {false, 3, -1, 0, -1}, {false, 6, -1, 6, -1}, {true, 0, 4, 1, 4},  {true, 5, -1, 2, -1}};
     int checked = 0;
     for (int trial = 0; trial < 4; ++trial) {
         const MaskedOperator O = random_op();
@@ -937,9 +987,9 @@ TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one g
             const RepSectorData R = make_sector(G, chis[static_cast<std::size_t>(pr.kR)], pr.nR);
             const RepSectorData C = make_sector(G, chis[static_cast<std::size_t>(pr.kC)], pr.nC);
             if (R.reps.empty() || C.reps.empty()) continue;
-            INFO("trial " << trial << " flip " << pr.flip << " rows (" << pr.kR << ", " << pr.nR << ") cols ("
-                 << pr.kC << ", " << pr.nC << ")");
-            const auto P = ed::ops::compile_program({O.dagger()}, R, C);   // (O_lambda)^dagger, ket R, bra C
+            INFO("trial " << trial << " flip " << pr.flip << " rows (" << pr.kR << ", " << pr.nR << ") cols (" << pr.kC
+                          << ", " << pr.nC << ")");
+            const auto P = ed::ops::compile_program({O.dagger()}, R, C); // (O_lambda)^dagger, ket R, bra C
             const auto polR = R.make_policy(), polC = C.make_policy();
             const std::size_t dr = R.reps.size(), dc = C.reps.size();
             const Mat ref = reference(Od, R, C);
@@ -958,7 +1008,8 @@ TEST_CASE("cross-sector rows: <R;j|O|C;r> for any O between two sectors of one g
         const auto P = ed::ops::compile_program({O.dagger()}, S, S);
         const auto pol = S.make_policy();
         const std::size_t d = S.reps.size();
-        const Mat M = by_columns(d, d, [&](const Cx* in, Cx* out) { ed::matvec::cross_gather(P.view(), pol, pol, true, d, in, out); });
+        const Mat M = by_columns(
+            d, d, [&](const Cx* in, Cx* out) { ed::matvec::cross_gather(P.view(), pol, pol, true, d, in, out); });
         CHECK(max_diff(M, reference(Od, S, S)) <= tol);
     }
     CHECK(checked >= 24);
@@ -969,12 +1020,15 @@ TEST_CASE("device: the cross-sector walk is the host's", "[row_walk][cuda]") {
     if (!ed::have_cuda()) SKIP("no CUDA device");
     std::mt19937 rng(20261007);
     std::normal_distribution<double> gauss(0.0, 1.0);
-    MaskedOperator O(N);   // three-body, four-site and Sz-changing terms
+    MaskedOperator O(N); // three-body, four-site and Sz-changing terms
     O.add(P("z+z", {0, 1, 2}, Cx(0.7, 0.2)));
     O.add(P("+-zz", {1, 3, 4, 6}, Cx(-0.4, 0.9)));
     O.add(P("x", {5}, Cx(0.3, 0.0)));
     O.add(P("-", {7}, Cx(0.0, 1.1)));
-    struct Pair { bool flip; int kR, nR, kC, nC; };
+    struct Pair {
+        bool flip;
+        int kR, nR, kC, nC;
+    };
     const Pair pairs[] = {{false, 1, 4, 3, 4}, {false, 1, 3, 1, 4}, {false, 3, -1, 0, -1}, {true, 5, -1, 2, -1}};
     for (const Pair& pr : pairs) {
         const auto G = ring_group(false, pr.flip);
@@ -995,7 +1049,8 @@ TEST_CASE("device: the cross-sector walk is the host's", "[row_walk][cuda]") {
         REQUIRE(cudaMemcpy(din, x.data(), dc * sizeof(Cx), cudaMemcpyHostToDevice) == cudaSuccess);
         fn(din, dout, dr);
         REQUIRE(cudaMemcpy(yd.data(), dout, dr * sizeof(Cx), cudaMemcpyDeviceToHost) == cudaSuccess);
-        cudaFree(din); cudaFree(dout);
+        cudaFree(din);
+        cudaFree(dout);
         CHECK(max_abs(yh) > 0.0);
         CHECK(max_diff(yd, yh) <= 1e-12 * std::max(1.0, max_abs(yh)));
     }
@@ -1009,21 +1064,29 @@ TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups
     std::uniform_int_distribution<int> pick_len(1, 4);
     std::normal_distribution<double> gauss(0.0, 1.0);
     const std::size_t D = kAll + 1;
-    auto rnd_vec = [&](std::size_t d) {   // unit norm: expand() returns a normalised vector
+    auto rnd_vec = [&](std::size_t d) { // unit norm: expand() returns a normalised vector
         std::vector<Cx> v(d);
         double n2 = 0.0;
-        for (auto& x : v) { x = Cx(gauss(rng), gauss(rng)); n2 += std::norm(x); }
+        for (auto& x : v) {
+            x = Cx(gauss(rng), gauss(rng));
+            n2 += std::norm(x);
+        }
         for (auto& x : v) x /= std::sqrt(n2);
         return v;
     };
-    struct Side { bool dihedral, flip; int irrep, n_up; };
-    struct Pair { Side ket, bra; };
+    struct Side {
+        bool dihedral, flip;
+        int irrep, n_up;
+    };
+    struct Pair {
+        Side ket, bra;
+    };
     const Pair pairs[] = {
-        {{false, false, 1, 4}, {true, false, 1, 4}},      // Z_8 k = 1  vs  D_8 A2
-        {{true, false, 2, 4}, {false, false, 0, 3}},      // D_8 B1 (n_up 4)  vs  Z_8 k = 0 (n_up 3)
-        {{false, true, 3, 4}, {false, false, 1, 4}},      // Z_8 x flip  vs  Z_8
-        {{true, true, 5, -1}, {false, false, 2, -1}},     // D_8 x flip  vs  Z_8, full space
-        {{false, false, 2, 4}, {false, false, 6, 4}},     // one group: compare with rep_matrix_elements
+        {{false, false, 1, 4}, {true, false, 1, 4}}, // Z_8 k = 1  vs  D_8 A2
+        {{true, false, 2, 4}, {false, false, 0, 3}}, // D_8 B1 (n_up 4)  vs  Z_8 k = 0 (n_up 3)
+        {{false, true, 3, 4}, {false, false, 1, 4}}, // Z_8 x flip  vs  Z_8
+        {{true, true, 5, -1}, {false, false, 2, -1}}, // D_8 x flip  vs  Z_8, full space
+        {{false, false, 2, 4}, {false, false, 6, 4}}, // one group: compare with rep_matrix_elements
     };
     for (int trial = 0; trial < 3; ++trial) {
         MaskedOperator O(N);
@@ -1046,7 +1109,7 @@ TEST_CASE("orbit_matrix_element: <bra|O|ket> between sectors of different groups
             const RepSectorData S = sector(pr.ket), T = sector(pr.bra);
             if (S.reps.empty() || T.reps.empty()) continue;
             INFO("trial " << trial << " ket dihedral " << pr.ket.dihedral << " flip " << pr.ket.flip << " bra dihedral "
-                 << pr.bra.dihedral << " flip " << pr.bra.flip);
+                          << pr.bra.dihedral << " flip " << pr.bra.flip);
             const auto ket = rnd_vec(S.reps.size()), bra = rnd_vec(T.reps.size());
             const auto ek = ed::sectors::expand(S, ket, -1), eb = ed::sectors::expand(T, bra, -1);
             Cx ref(0.0, 0.0);
@@ -1137,7 +1200,7 @@ std::vector<std::vector<Cx>> partner0_vectors(const RepSectorData& rd, const Rep
     return vecs;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("rep sectors: every irrep of D_N gives orthonormal partner-0 states that tile the space",
           "[row_walk][irrep]") {
@@ -1152,7 +1215,10 @@ TEST_CASE("rep sectors: every irrep of D_N gives orthonormal partner-0 states th
                 ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir));
             INFO("n_up " << n_up << " irrep dim " << ir.dim << " states " << rd.states());
             tiled += static_cast<std::uint64_t>(ir.dim) * rd.states();
-            if (ir.dim == 1) { REQUIRE(rd.states() == rd.reps.size()); continue; }
+            if (ir.dim == 1) {
+                REQUIRE(rd.states() == rd.reps.size());
+                continue;
+            }
             REQUIRE(rd.irrep_dim == ir.dim);
             REQUIRE(rd.state_offset.size() == rd.reps.size() + 1);
             const auto vecs = partner0_vectors(rd, G.probe);
@@ -1181,14 +1247,14 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
             const auto tab = ring_table(G.probe, n_up);
             for (const auto& ir : G.gi.irreps) {
                 if (ir.dim == 1) continue;
-                RepSectorData rd =
-                    ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false, ir.dim, G.D(ir));
+                RepSectorData rd = ed::solvers::lg_detail::group_sector_irrep_from_table(tab, G.perms, N, n_up, false,
+                                                                                         ir.dim, G.D(ir));
                 const std::size_t d = rd.states();
                 if (d == 0) continue;
                 ++sectors;
                 INFO("model " << m.name << " n_up " << n_up << " states " << d);
                 const auto V = partner0_vectors(rd, G.probe);
-                Mat ref(d * d, Cx(0.0, 0.0));            // V^dag H V
+                Mat ref(d * d, Cx(0.0, 0.0)); // V^dag H V
                 for (std::size_t b = 0; b < d; ++b) {
                     std::vector<Cx> hv(Dall, Cx(0.0, 0.0));
                     for (std::size_t r = 0; r < Dall; ++r)
@@ -1197,7 +1263,7 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
                         for (std::size_t r = 0; r < Dall; ++r) ref[a * d + b] += std::conj(V[a][r]) * hv[r];
                 }
                 auto rds = std::make_shared<const RepSectorData>(std::move(rd));
-                {   // the reduced CSR
+                { // the reduced CSR
                     RepSectorMatVec op(*m.H, *rds);
                     REQUIRE(op.dim() == d);
                     const Mat M = columns(d, [&](const Cx* in, Cx* out) { op.apply(in, out, d); });
@@ -1205,7 +1271,7 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
                     CHECK(max_diff(M, ref) <= tol);
                     CHECK_FALSE(op.has_device_kernel());
                 }
-                {   // the walk
+                { // the walk
                     EnvGuard env;
                     env.set("ED_SYM_SECTOR_CSR_BUDGET_GIB", "0");
                     RepSectorMatVec op(*m.H, *rds);
@@ -1214,7 +1280,7 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
                     CHECK(max_diff(M, ref) <= tol);
                 }
 #ifdef WITH_CUDA
-                if (ed::have_cuda()) {   // the device: the host CSR uploaded (P7.5)
+                if (ed::have_cuda()) { // the device: the host CSR uploaded (P7.5)
                     RepSectorMatVec op(*m.H, *rds);
                     op.enable_device(true);
                     REQUIRE(op.has_device_kernel());
@@ -1226,7 +1292,7 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
                     env.set("ED_GPU_CSR_BUDGET_GIB", "0");
                     RepSectorMatVec none(*m.H, *rds);
                     none.enable_device(true);
-                    CHECK_FALSE(none.has_device_kernel());   // no room for a device CSR: no device kernel
+                    CHECK_FALSE(none.has_device_kernel()); // no room for a device CSR: no device kernel
                 }
 #endif
             }
@@ -1266,11 +1332,12 @@ namespace {
 Eigen::MatrixXcd eigen_of(const Mat& A, std::size_t d) {
     Eigen::MatrixXcd M(static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(d));
     for (std::size_t r = 0; r < d; ++r)
-        for (std::size_t c = 0; c < d; ++c) M(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = A[r * d + c];
+        for (std::size_t c = 0; c < d; ++c)
+            M(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(c)) = A[r * d + c];
     return M;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penalty give the spin-S spectrum",
           "[row_walk][irrep][su2]") {
@@ -1278,7 +1345,7 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
     using namespace ed::solvers::lg_detail;
     const Dihedral G;
     int checked = 0, empty = 0, krylov = 0;
-    for (double J : {1.0, -1.0}) {   // an antiferromagnet, and a ferromagnet: its off-tower states lie below
+    for (double J : {1.0, -1.0}) { // an antiferromagnet, and a ferromagnet: its off-tower states lie below
         auto H = std::make_shared<Operator>(N, 0.5f);
         R::heisenberg(*H, ring(1), J);
         R::heisenberg(*H, ring(2), 0.3 * J);
@@ -1294,18 +1361,21 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
                     if (d == 0) continue;
                     rd->build_perm_lut();
                     rd->build_buckets();
-                    INFO("J " << J << " 2S " << two_S << " n_up " << n_up << " irrep dim " << ir.dim << " states " << d);
+                    INFO("J " << J << " 2S " << two_S << " n_up " << n_up << " irrep dim " << ir.dim << " states "
+                              << d);
                     auto ladder = std::make_shared<LadderS2>(rd);
                     Tower t;
                     t.sector = rd;
-                    t.s2     = ladder;
-                    t.two_S  = two_S;
+                    t.s2 = ladder;
+                    t.two_S = two_S;
                     t.towers = towers;
                     const double lam = t.lambda();
                     // The reference: H's block on the eigenvectors of S^2 at S(S + 1).
                     const RepSectorMatVec Hs(*H, std::shared_ptr<const RepSectorData>(rd));
-                    const Eigen::MatrixXcd Hd = eigen_of(columns(d, [&](const Cx* in, Cx* out) { Hs.apply(in, out, d); }), d);
-                    const Eigen::MatrixXcd S2 = eigen_of(columns(d, [&](const Cx* in, Cx* out) { ladder->apply(in, out, d); }), d);
+                    const Eigen::MatrixXcd Hd =
+                        eigen_of(columns(d, [&](const Cx* in, Cx* out) { Hs.apply(in, out, d); }), d);
+                    const Eigen::MatrixXcd S2 =
+                        eigen_of(columns(d, [&](const Cx* in, Cx* out) { ladder->apply(in, out, d); }), d);
                     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> es2(S2);
                     std::vector<Eigen::Index> in_tower;
                     for (Eigen::Index i = 0; i < es2.eigenvalues().size(); ++i)
@@ -1313,21 +1383,27 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
                     std::vector<double> ref;
                     if (!in_tower.empty()) {
                         Eigen::MatrixXcd Q(static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(in_tower.size()));
-                        for (std::size_t c = 0; c < in_tower.size(); ++c) Q.col(static_cast<Eigen::Index>(c)) = es2.eigenvectors().col(in_tower[c]);
+                        for (std::size_t c = 0; c < in_tower.size(); ++c)
+                            Q.col(static_cast<Eigen::Index>(c)) = es2.eigenvectors().col(in_tower[c]);
                         const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> eh(Q.adjoint() * Hd * Q);
                         for (Eigen::Index i = 0; i < eh.eigenvalues().size(); ++i) ref.push_back(eh.eigenvalues()(i));
                     }
-                    if (t.highest_weight())
-                        CHECK(d - ladder->raised_states() == ref.size());
+                    if (t.highest_weight()) CHECK(d - ladder->raised_states() == ref.size());
                     CHECK(tower_dimension(*rd, two_S) == static_cast<std::int64_t>(ref.size()));
                     // The start: empty exactly when the block holds no spin-S state, else a unit spin-S vector.
                     const std::vector<Cx> v = t.seed(11);
                     REQUIRE(v.empty() == ref.empty());
-                    if (v.empty()) { ++empty; continue; }
+                    if (v.empty()) {
+                        ++empty;
+                        continue;
+                    }
                     std::vector<Cx> w(d);
                     ladder->apply(v.data(), w.data(), d);
                     double leak = 0.0, norm = 0.0;
-                    for (std::size_t i = 0; i < d; ++i) { leak += std::norm(w[i] - lam * v[i]); norm += std::norm(v[i]); }
+                    for (std::size_t i = 0; i < d; ++i) {
+                        leak += std::norm(w[i] - lam * v[i]);
+                        norm += std::norm(v[i]);
+                    }
                     CHECK(std::sqrt(leak) <= 1e-12 * std::max(1.0, lam));
                     CHECK(std::abs(norm - 1.0) <= 1e-12);
                     // The dense tower solve filters H's eigenpairs down to exactly the reference.
@@ -1352,7 +1428,8 @@ TEST_CASE("tower: valence-bond starts are spin S; the tower solves and the penal
                     // The Krylov tower lanes (one level, then three) on the bare H.
                     if (d >= 3) {
                         for (std::size_t k : {std::size_t{1}, std::size_t{3}}) {
-                            const BlockSolution kr = solve_block_tower(ed::matvec::default_cpu_backend(), Hs, t, k, true);
+                            const BlockSolution kr =
+                                solve_block_tower(ed::matvec::default_cpu_backend(), Hs, t, k, true);
                             const std::size_t want = std::min(k, ref.size());
                             REQUIRE(kr.values.size() == want);
                             CHECK(kr.converged);
@@ -1392,7 +1469,8 @@ TEST_CASE("tower: Burnside dimensions on spin-flip sectors match S^2's spectrum"
         for (int two_S = 0; two_S <= N; two_S += 2) {
             const double lam = 0.25 * two_S * (two_S + 2);
             std::int64_t count = 0;
-            for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i) count += std::abs(es.eigenvalues()(i) - lam) < 1e-8;
+            for (Eigen::Index i = 0; i < es.eigenvalues().size(); ++i)
+                count += std::abs(es.eigenvalues()(i) - lam) < 1e-8;
             INFO("states " << d << " 2S " << two_S);
             CHECK(tower_dimension(*rd, two_S) == count);
             ++checked;

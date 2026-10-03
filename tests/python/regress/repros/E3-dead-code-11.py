@@ -5,6 +5,7 @@
 python/qed/__init__.py:75 treats any value other than "" or "0" as true. So with an unknown
 ED_* variable present, ED_ENV_STRICT=false (or off/no) makes `import qed` raise RuntimeError
 instead of warning. Control: ED_ENV_STRICT=0 must only warn."""
+
 import os
 import subprocess
 import sys
@@ -20,16 +21,17 @@ def try_import(strict_value):
         env.pop("ED_ENV_STRICT", None)
     else:
         env["ED_ENV_STRICT"] = strict_value
-    code = ("import warnings\n"
-            "warnings.simplefilter('ignore')\n"
-            "try:\n"
-            "    import qed\n"
-            "    print('IMPORTED')\n"
-            "except RuntimeError as e:\n"
-            "    print('RAISED', str(e)[:120])\n")
+    code = (
+        "import warnings\n"
+        "warnings.simplefilter('ignore')\n"
+        "try:\n"
+        "    import qed\n"
+        "    print('IMPORTED')\n"
+        "except RuntimeError as e:\n"
+        "    print('RAISED', str(e)[:120])\n"
+    )
     try:
-        p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
-                           text=True, timeout=120)
+        p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         return "TIMEOUT"
     out = (p.stdout or "").strip().splitlines()

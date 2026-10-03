@@ -5,6 +5,7 @@
 non-empty plaquette list (hamiltonian_builder.cpp:370-375) although the header documents it as
 emitting four-body terms, and K == 0 returns silently before that check. qed.Operator has no
 four-body insertion method."""
+
 import qed
 
 N = 8

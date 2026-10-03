@@ -10,6 +10,7 @@ dense.  Time qed.eigs(H,1,vectors=True) vs qed.eigs(H,1) and compare with numpy.
 vectors) on 16 random complex Hermitian 804x804 matrices.  Energies are checked against an independent scipy
 reference of the Sz=0 sector.  CONFIRMED when the extra cost of vectors=True exceeds 2x the numpy
 eigh-with-vectors time for the same block sizes."""
+
 import time
 import numpy as np
 import qed
@@ -28,6 +29,7 @@ states = allst[pc == NUP]
 D = states.size
 import scipy.sparse as sp
 from scipy.sparse.linalg import eigsh
+
 rows, cols, vals = [], [], []
 diag = np.zeros(D)
 for i in range(N):
@@ -37,14 +39,20 @@ for i in range(N):
     diag += (bi - 0.5) * (bj - 0.5)
     m = np.nonzero(bi != bj)[0]
     dst = np.searchsorted(states, states[m] ^ ((1 << i) | (1 << j)))
-    rows.append(dst); cols.append(m); vals.append(np.full(m.size, 0.5))
+    rows.append(dst)
+    cols.append(m)
+    vals.append(np.full(m.size, 0.5))
 Hs = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(D, D)) + sp.diags(diag)
 E0_ref = float(eigsh(Hs, k=1, which="SA", tol=1e-13, return_eigenvectors=False)[0])
 
 try:
-    qed.eigs(H, 1, sym=sym)                       # warm-up (symmetry tables, libraries)
-    t0 = time.perf_counter(); rv = qed.eigs(H, 1, sym=sym); t_val = time.perf_counter() - t0
-    t0 = time.perf_counter(); rw = qed.eigs(H, 1, sym=sym, vectors=True); t_vec = time.perf_counter() - t0
+    qed.eigs(H, 1, sym=sym)  # warm-up (symmetry tables, libraries)
+    t0 = time.perf_counter()
+    rv = qed.eigs(H, 1, sym=sym)
+    t_val = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    rw = qed.eigs(H, 1, sym=sym, vectors=True)
+    t_vec = time.perf_counter() - t0
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE {type(e).__name__}: {str(e)[:200]}")
     raise SystemExit(0)
@@ -55,10 +63,14 @@ t_np = 0.0
 for _ in range(N):
     A = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
     A = A + A.conj().T
-    t0 = time.perf_counter(); np.linalg.eigh(A); t_np += time.perf_counter() - t0
+    t0 = time.perf_counter()
+    np.linalg.eigh(A)
+    t_np += time.perf_counter() - t0
 extra = t_vec - t_val
-msg = (f"16 blocks of ~{n}: eigs values {t_val:.2f}s, vectors {t_vec:.2f}s (extra {extra:.2f}s); numpy eigh "
-       f"with vectors on the same sizes {t_np:.2f}s; |E0-ref| {dE:.1e}")
+msg = (
+    f"16 blocks of ~{n}: eigs values {t_val:.2f}s, vectors {t_vec:.2f}s (extra {extra:.2f}s); numpy eigh "
+    f"with vectors on the same sizes {t_np:.2f}s; |E0-ref| {dE:.1e}"
+)
 if dE > 1e-8:
     print("REPRO: INCONCLUSIVE energy mismatch: " + msg)
 elif extra > 2.0 * t_np:

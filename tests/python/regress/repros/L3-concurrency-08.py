@@ -10,6 +10,7 @@ progress updates on stdout, interleaved lines, and the fixed/1-digit format pers
 ... GB' lines read '0.0' while the first one is printed in default format).
 
 Test: J1-J2 ring N=16, translations + flip, FTLM. Child process stdout is captured and analysed."""
+
 import re
 import subprocess
 import sys
@@ -41,17 +42,28 @@ req = re.findall(r"Matrix requires ([^ ]+) GB", out)
 fixed = [x for x in req if re.fullmatch(r"\d+\.\d", x)]
 nonfixed = [x for x in req if not re.fullmatch(r"\d+\.\d", x)]
 lines = out.replace("\r", "\n").splitlines()
-interleaved = sum(1 for ln in lines if ln.count("Progress:") > 1 or ("Starting full" in ln and not ln.startswith("Starting full"))
-                  or ("Matrix requires" in ln and not ln.startswith("Matrix requires")))
-print(f"stdout bytes={len(out)} dense-fallback calls={n_start} progress updates={n_progress} "
-      f"interleaved lines={interleaved}")
+interleaved = sum(
+    1
+    for ln in lines
+    if ln.count("Progress:") > 1
+    or ("Starting full" in ln and not ln.startswith("Starting full"))
+    or ("Matrix requires" in ln and not ln.startswith("Matrix requires"))
+)
+print(
+    f"stdout bytes={len(out)} dense-fallback calls={n_start} progress updates={n_progress} "
+    f"interleaved lines={interleaved}"
+)
 print(f"'Matrix requires' values: first={req[:2]} default-format={len(nonfixed)} fixed-1-digit={len(fixed)}")
 if n_start > 10 and n_progress > 100 and fixed and nonfixed:
-    print(f"REPRO: CONFIRMED one thermal(ftlm) call printed {n_progress} progress updates from {n_start} dense "
-          f"fallbacks ({interleaved} interleaved lines); std::cout format left at fixed/1 digit "
-          f"({len(nonfixed)} default-format vs {len(fixed)} '0.0'-style memory lines)")
+    print(
+        f"REPRO: CONFIRMED one thermal(ftlm) call printed {n_progress} progress updates from {n_start} dense "
+        f"fallbacks ({interleaved} interleaved lines); std::cout format left at fixed/1 digit "
+        f"({len(nonfixed)} default-format vs {len(fixed)} '0.0'-style memory lines)"
+    )
 elif n_start > 10 and n_progress > 100:
-    print(f"REPRO: CONFIRMED {n_progress} progress updates from {n_start} parallel dense fallbacks "
-          f"({interleaved} interleaved lines); format persistence not observed in this output")
+    print(
+        f"REPRO: CONFIRMED {n_progress} progress updates from {n_start} parallel dense fallbacks "
+        f"({interleaved} interleaved lines); format persistence not observed in this output"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED dense fallbacks={n_start} progress updates={n_progress}")

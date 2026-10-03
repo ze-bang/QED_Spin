@@ -5,6 +5,7 @@
 ignores the Cartesian basis: index 0 builds a pure S+ operator (add_sublattice is ladder-only)
 while the emitted name says 'Sx'. With unit_cell_size=1 the sublattice operator must equal the
 'sum' operator, which does honour basis='xyz' (S+/2 + S-/2 per site)."""
+
 import os
 import tempfile
 import qed
@@ -46,6 +47,8 @@ keys = set(t_sub) | set(t_sum)
 diff = max(abs(t_sub.get(k, 0) - t_sum.get(k, 0)) for k in keys)
 ops_sub = sorted({k[0] for k in t_sub})
 if diff > 1e-12 and n_sub.startswith("Sx"):
-    print(f"REPRO: CONFIRMED sublattice name={n_sub!r} but op types {ops_sub} (sum xyz has both S+ and S-); max coeff diff={diff:.3f}")
+    print(
+        f"REPRO: CONFIRMED sublattice name={n_sub!r} but op types {ops_sub} (sum xyz has both S+ and S-); max coeff diff={diff:.3f}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED sublattice matches sum (diff={diff:.2e}, name={n_sub!r}, ops={ops_sub})")

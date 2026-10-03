@@ -4,6 +4,7 @@ A permutation p of the n sites is a tuple of images: site i goes to p[i]. Compos
 function composition, ``compose(a, b)[i] = a[b[i]]`` (b first), as in ``ed::sym`` and
 :mod:`qed.symmetry`.
 """
+
 from __future__ import annotations
 
 import math
@@ -11,7 +12,7 @@ from typing import Iterable, Optional, Sequence
 
 Perm = tuple[int, ...]
 
-CLOSURE_CAP = 4096      # a group the package enumerates stays at most this large
+CLOSURE_CAP = 4096  # a group the package enumerates stays at most this large
 
 
 def as_perm(p: Iterable[int]) -> Perm:

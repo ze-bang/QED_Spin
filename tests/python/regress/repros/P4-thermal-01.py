@@ -7,6 +7,7 @@ the energy scale of H. The same dimensionless problem (H -> c H, T -> c T) costs
 steps. Test: 14-site Heisenberg ring, Sz sectors only, mTPQ at the same seed for (J=1, T in
 [0.2, 4]) and (J=0.04, T in [0.008, 0.16]); compare wall time, and check both against an
 independent dense reference (per-Sz-sector numpy ED) in units of J. Predicted step ratio ~23."""
+
 import time
 import numpy as np
 import qed
@@ -58,8 +59,10 @@ for c in (1.0, 0.04):
 ratio = res[0.04][0] / max(res[1.0][0], 1e-9)
 print(f"time ratio (J=0.04 / J=1) = {ratio:.1f}  (step-count model predicts ~23)")
 if ratio > 5.0:
-    print(f"REPRO: CONFIRMED same dimensionless mTPQ problem costs {ratio:.1f}x more at J=0.04 "
-          f"(t={res[1.0][0]:.2f}s vs {res[0.04][0]:.2f}s; err/NJ {res[1.0][1]:.2e} vs {res[0.04][1]:.2e})")
+    print(
+        f"REPRO: CONFIRMED same dimensionless mTPQ problem costs {ratio:.1f}x more at J=0.04 "
+        f"(t={res[1.0][0]:.2f}s vs {res[0.04][0]:.2f}s; err/NJ {res[1.0][1]:.2e} vs {res[0.04][1]:.2e})"
+    )
 elif ratio < 2.0:
     print(f"REPRO: NOT_REPRODUCED time ratio {ratio:.1f} (t={res[1.0][0]:.2f}s vs {res[0.04][0]:.2f}s)")
 else:

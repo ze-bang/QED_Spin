@@ -86,8 +86,11 @@ def _check_environment() -> None:
 
     malformed = list(_core.env_malformed())
     if malformed:
-        msg = ("qed: environment variable(s) whose value does not parse: " + ", ".join(malformed)
-               + ". Every verb refuses to run until they are fixed; see qed.debug_env().")
+        msg = (
+            "qed: environment variable(s) whose value does not parse: "
+            + ", ".join(malformed)
+            + ". Every verb refuses to run until they are fixed; see qed.debug_env()."
+        )
         if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
             raise RuntimeError(msg)
         warnings.warn(msg, RuntimeWarning, stacklevel=3)
@@ -102,8 +105,11 @@ def _check_environment() -> None:
             parts.append(f"{n} (removed: {_REMOVED_ENV[n]})")
         else:
             parts.append(f"{n} (did you mean {near[0]}?)" if near else n)
-    msg = ("qed: environment variable(s) not read by anything: " + ", ".join(parts)
-           + ". See qed.debug_env() for the variables that exist.")
+    msg = (
+        "qed: environment variable(s) not read by anything: "
+        + ", ".join(parts)
+        + ". See qed.debug_env() for the variables that exist."
+    )
     if _os.environ.get("ED_ENV_STRICT", "") not in _FALSE_WORDS:
         raise RuntimeError(msg)
     warnings.warn(msg, RuntimeWarning, stacklevel=3)
@@ -111,17 +117,50 @@ def _check_environment() -> None:
 
 _check_environment()
 
-from ._verbs import (DynamicsResult, EigResult, ExpectResult, SpectrumResult, Symmetry,  # noqa: E402
-                  ThermalResult, dynamics, eigs, expect, load_eigs, spectrum, thermal)
+from ._verbs import (  # noqa: E402
+    DynamicsResult,
+    EigResult,
+    ExpectResult,
+    SpectrumResult,
+    Symmetry,
+    ThermalResult,
+    dynamics,
+    eigs,
+    expect,
+    load_eigs,
+    spectrum,
+    thermal,
+)
 
-__version__: Final[str] = _core.__version__   # pyproject.toml's version, compiled into _core
+__version__: Final[str] = _core.__version__  # pyproject.toml's version, compiled into _core
 
 __all__ = [
-    "Operator", "OP_SPLUS", "OP_SMINUS", "OP_SZ",
-    "Symmetry", "eigs", "EigResult", "load_eigs", "spectrum", "SpectrumResult", "thermal", "ThermalResult",
-    "dynamics", "DynamicsResult", "expect", "ExpectResult",
-    "find_symmetries", "Symmetries",
-    "has_cuda_build", "debug_env", "env_snapshot", "set_log_level", "get_log_level", "errors",
-    "dssf", "input", "symmetry",
+    "Operator",
+    "OP_SPLUS",
+    "OP_SMINUS",
+    "OP_SZ",
+    "Symmetry",
+    "eigs",
+    "EigResult",
+    "load_eigs",
+    "spectrum",
+    "SpectrumResult",
+    "thermal",
+    "ThermalResult",
+    "dynamics",
+    "DynamicsResult",
+    "expect",
+    "ExpectResult",
+    "find_symmetries",
+    "Symmetries",
+    "has_cuda_build",
+    "debug_env",
+    "env_snapshot",
+    "set_log_level",
+    "get_log_level",
+    "errors",
+    "dssf",
+    "input",
+    "symmetry",
     "__version__",
 ]

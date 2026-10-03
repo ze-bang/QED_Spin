@@ -20,6 +20,7 @@ lattice = qinput.lattice
 # Lattice generators
 # ----------------------------------------------------------------------
 
+
 def test_chain_obc_bond_count():
     L = lattice.chain(8, pbc=False)
     assert L.num_sites == 8
@@ -80,13 +81,17 @@ _RADII = {
 
 _CASES = [("chain", (n,), pbc) for n in (2, 3, 4, 5, 8) for pbc in (False, True)] + [
     (name, dims, pbc)
-    for name, sizes in (("square", ((2, 2), (3, 4), (4, 4), (4, 1))),
-                        ("triangular", ((2, 2), (3, 3), (4, 3), (4, 1))),
-                        ("honeycomb", ((2, 2), (2, 3), (3, 3))),
-                        ("kagome", ((2, 2), (2, 3), (3, 3))),
-                        ("pyrochlore", ((1, 1, 1), (2, 2, 2), (2, 2, 3))))
-    for dims in sizes for pbc in (False, True)
-    if not (pbc and 1 in dims and name in ("honeycomb", "kagome", "pyrochlore"))]
+    for name, sizes in (
+        ("square", ((2, 2), (3, 4), (4, 4), (4, 1))),
+        ("triangular", ((2, 2), (3, 3), (4, 3), (4, 1))),
+        ("honeycomb", ((2, 2), (2, 3), (3, 3))),
+        ("kagome", ((2, 2), (2, 3), (3, 3))),
+        ("pyrochlore", ((1, 1, 1), (2, 2, 2), (2, 2, 3))),
+    )
+    for dims in sizes
+    for pbc in (False, True)
+    if not (pbc and 1 in dims and name in ("honeycomb", "kagome", "pyrochlore"))
+]
 
 
 def _images(lat, dims):
@@ -135,9 +140,17 @@ def _translation(lat, dims, k):
     return hit.argmax(axis=1)
 
 
-@pytest.mark.parametrize("name,dims", [("chain", (6,)), ("square", (3, 4)), ("triangular", (3, 3)),
-                                       ("honeycomb", (3, 2)), ("kagome", (3, 3)),
-                                       ("pyrochlore", (2, 2, 3))])
+@pytest.mark.parametrize(
+    "name,dims",
+    [
+        ("chain", (6,)),
+        ("square", (3, 4)),
+        ("triangular", (3, 3)),
+        ("honeycomb", (3, 2)),
+        ("kagome", (3, 3)),
+        ("pyrochlore", (2, 2, 3)),
+    ],
+)
 def test_bond_orientation_is_translation_invariant(name, dims):
     """A uniform DM vector over nn_pairs() is translation invariant only if every translation maps
     the oriented bonds onto themselves (the chain's wrap bond used to run 0 -> N-1)."""
@@ -161,8 +174,8 @@ def test_kagome_triangles_run_counter_clockwise_and_honeycomb_a_to_b():
     for i, j in lat.nn_pairs():
         common = nbrs[i] & nbrs[j]
         if not common:
-            continue                                        # an edge bond whose triangle is cut
-        (k,) = common                                       # the bond's triangle
+            continue  # an edge bond whose triangle is cut
+        (k,) = common  # the bond's triangle
         u, v = pos[j] - pos[i], pos[k] - pos[i]
         assert u[0] * v[1] - u[1] * v[0] > 0
         checked += 1
@@ -172,8 +185,12 @@ def test_kagome_triangles_run_counter_clockwise_and_honeycomb_a_to_b():
 
 
 def test_a_periodic_length_of_one_is_refused_where_bonds_would_merge():
-    for build in (lambda: lattice.honeycomb(1, 4, pbc=True), lambda: lattice.kagome(3, 1, pbc=True),
-                  lambda: lattice.pyrochlore(2, 1, 2, pbc=True), lambda: lattice.square(0, 3, pbc=False)):
+    for build in (
+        lambda: lattice.honeycomb(1, 4, pbc=True),
+        lambda: lattice.kagome(3, 1, pbc=True),
+        lambda: lattice.pyrochlore(2, 1, 2, pbc=True),
+        lambda: lattice.square(0, 3, pbc=False),
+    ):
         with pytest.raises(qed.errors.InvalidRequest):
             build()
     h = lattice.honeycomb(2, 4, pbc=True)
@@ -185,7 +202,7 @@ def test_bond_keeps_its_orientation():
     b = qinput.Bond(5, 2)
     assert (b.i, b.j) == (5, 2)
     L = lattice.from_neighbor_lists([(0.0, 0.0, 0.0)] * 3, [(2, 0), (0, 2), (1, 2)])
-    assert L.nn_pairs() == [(2, 0), (1, 2)]                 # a pair listed twice is one bond
+    assert L.nn_pairs() == [(2, 0), (1, 2)]  # a pair listed twice is one bond
     with pytest.raises(qed.errors.InvalidRequest, match="itself"):
         lattice.from_neighbor_lists([(0.0, 0.0, 0.0)] * 2, [(1, 1)])
 
@@ -198,7 +215,7 @@ def test_adjacency_lists_know_no_shells():
         L.nnnn_pairs()
     L.nnn_bonds = [qinput.Bond(0, 2)]
     assert L.nnn_pairs() == [(0, 2)]
-    assert lattice.chain(2, pbc=False).nnn_pairs() == []     # a generator's empty shell is known
+    assert lattice.chain(2, pbc=False).nnn_pairs() == []  # a generator's empty shell is known
 
 
 # ----------------------------------------------------------------------
@@ -215,12 +232,15 @@ def _cluster(tmp_path, lines):
     return lattice.from_cluster_file(str(p))
 
 
-@pytest.mark.parametrize("lines", [
-    ["positions", "4"] + _SQUARE + ["edges"] + _EDGES,
-    ["# a comment", "Positions: 4"] + _SQUARE + ["BONDS", "4"] + _EDGES,
-    ["positions"] + [f"{k} {s}" for k, s in enumerate(_SQUARE)] + ["edges:"] + _EDGES,
-    ["positions"] + [s[:-2] for s in _SQUARE] + ["Edges"] + _EDGES,
-])
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["positions", "4"] + _SQUARE + ["edges"] + _EDGES,
+        ["# a comment", "Positions: 4"] + _SQUARE + ["BONDS", "4"] + _EDGES,
+        ["positions"] + [f"{k} {s}" for k, s in enumerate(_SQUARE)] + ["edges:"] + _EDGES,
+        ["positions"] + [s[:-2] for s in _SQUARE] + ["Edges"] + _EDGES,
+    ],
+)
 def test_cluster_file_forms(tmp_path, lines):
     L = _cluster(tmp_path, lines)
     assert L.num_sites == 4 and L.nn_pairs() == [(0, 1), (1, 2), (2, 3), (3, 0)]
@@ -232,20 +252,23 @@ def test_cluster_file_id_x_y_z(tmp_path):
     assert [tuple(p) for p in L.positions] == [(0.0, 0.1, 0.2), (1.0, 0.1, 0.2)]
 
 
-@pytest.mark.parametrize("lines,line,what", [
-    (["0 0 0", "positions"] + _SQUARE, 1, "before a 'positions'"),
-    (["positions", "4"] + _SQUARE[:3] + ["edges"] + _EDGES[:2], 2, "states 4 lines and holds 3"),
-    (["positions"] + _SQUARE + ["0 1 2 3 4", "edges"] + _EDGES, 6, "a position is"),
-    (["positions"] + _SQUARE + ["1"], 6, "a position is"),
-    (["positions", "0 x 0"], 2, "not a number"),
-    (["positions", "1 0.0 0.0 0.0"], 2, "the id must be"),
-    (["positions"] + _SQUARE + ["edges", "0 4"], 7, "past the 4 positions"),
-    (["positions"] + _SQUARE + ["edges", "0 1 1"], 7, "an edge is"),
-    (["positions"] + _SQUARE + ["edges", "2 2"], 7, "to itself"),
-    (["positions"] + _SQUARE + ["positions"], 6, "a second"),
-    (["positions extra words"], 1, "a header is"),
-    (["edges", "0 1"], None, "lists no positions"),
-])
+@pytest.mark.parametrize(
+    "lines,line,what",
+    [
+        (["0 0 0", "positions"] + _SQUARE, 1, "before a 'positions'"),
+        (["positions", "4"] + _SQUARE[:3] + ["edges"] + _EDGES[:2], 2, "states 4 lines and holds 3"),
+        (["positions"] + _SQUARE + ["0 1 2 3 4", "edges"] + _EDGES, 6, "a position is"),
+        (["positions"] + _SQUARE + ["1"], 6, "a position is"),
+        (["positions", "0 x 0"], 2, "not a number"),
+        (["positions", "1 0.0 0.0 0.0"], 2, "the id must be"),
+        (["positions"] + _SQUARE + ["edges", "0 4"], 7, "past the 4 positions"),
+        (["positions"] + _SQUARE + ["edges", "0 1 1"], 7, "an edge is"),
+        (["positions"] + _SQUARE + ["edges", "2 2"], 7, "to itself"),
+        (["positions"] + _SQUARE + ["positions"], 6, "a second"),
+        (["positions extra words"], 1, "a header is"),
+        (["edges", "0 1"], None, "lists no positions"),
+    ],
+)
 def test_cluster_file_refuses_what_it_cannot_read(tmp_path, lines, line, what):
     with pytest.raises(qed.errors.InvalidRequest, match=what) as err:
         _cluster(tmp_path, lines)
@@ -257,34 +280,27 @@ def test_cluster_file_refuses_what_it_cannot_read(tmp_path, lines, line, what):
 # HamiltonianBuilder against exact values
 # ----------------------------------------------------------------------
 
+
 def _ground_state(op):
     return float(np.min(qed.spectrum(op, sym=qed.Symmetry.none()).energies))
 
 
 def test_heisenberg_open_chain_4_ground_state():
     bonds = [(0, 1), (1, 2), (2, 3)]
-    H = (qinput.HamiltonianBuilder(4)
-              .heisenberg(bonds, 1.0)
-              .to_operator())
-    assert np.isclose(_ground_state(H), -0.75 - np.sqrt(3.0) / 2.0, atol=1e-12)   # exact, open S=1/2 chain
+    H = qinput.HamiltonianBuilder(4).heisenberg(bonds, 1.0).to_operator()
+    assert np.isclose(_ground_state(H), -0.75 - np.sqrt(3.0) / 2.0, atol=1e-12)  # exact, open S=1/2 chain
 
 
 def test_xxz_collapses_to_heisenberg_when_jxy_eq_jz():
     bonds = [(0, 1), (1, 2), (2, 3)]
-    H1 = (qinput.HamiltonianBuilder(4)
-                .heisenberg(bonds, 0.7)
-                .to_operator())
-    H2 = (qinput.HamiltonianBuilder(4)
-                .xxz(bonds, 0.7, 0.7)
-                .to_operator())
+    H1 = qinput.HamiltonianBuilder(4).heisenberg(bonds, 0.7).to_operator()
+    H2 = qinput.HamiltonianBuilder(4).xxz(bonds, 0.7, 0.7).to_operator()
     assert np.isclose(_ground_state(H1), _ground_state(H2), atol=1e-12)
 
 
 def test_pyrochlore_non_kramers_runs_without_error():
     lat = lattice.pyrochlore(1, 1, 1, pbc=False)
-    H = (qinput.HamiltonianBuilder(lat.num_sites)
-               .pyrochlore_non_kramers(lat, Jxx=1.0, Jyy=0.5, Jzz=0.7)
-               .to_operator())
+    H = qinput.HamiltonianBuilder(lat.num_sites).pyrochlore_non_kramers(lat, Jxx=1.0, Jyy=0.5, Jzz=0.7).to_operator()
     e = _ground_state(H)
     # Spectrum must be finite real number.
     assert np.isfinite(e)
@@ -305,8 +321,15 @@ def test_pyrochlore_non_kramers_needs_the_pyrochlore_labels():
         qinput.HamiltonianBuilder(4).pyrochlore_non_kramers(short, 1.0, 0.5, 0.7)
     with pytest.raises(qed.errors.InvalidRequest, match="Jzz"):
         qinput.HamiltonianBuilder(4).pyrochlore_non_kramers(ref, 1.0, 0.5, 0.7, include_isotropic=False)
-    e = [np.sort(qed.spectrum(qinput.HamiltonianBuilder(4).pyrochlore_non_kramers(lat, 1.0, 0.5, 0.7)
-                              .to_operator(), sym=qed.Symmetry.none()).energies) for lat in (ref, tagged)]
+    e = [
+        np.sort(
+            qed.spectrum(
+                qinput.HamiltonianBuilder(4).pyrochlore_non_kramers(lat, 1.0, 0.5, 0.7).to_operator(),
+                sym=qed.Symmetry.none(),
+            ).energies
+        )
+        for lat in (ref, tagged)
+    ]
     np.testing.assert_allclose(e[0], e[1], atol=1e-12)
     only = qinput.HamiltonianBuilder(4).pyrochlore_non_kramers(ref, 1.0, 0.5, 0.0, include_isotropic=False)
     assert np.isfinite(_ground_state(only.to_operator()))
@@ -315,6 +338,7 @@ def test_pyrochlore_non_kramers_needs_the_pyrochlore_labels():
 # ----------------------------------------------------------------------
 # Op enum + Bond record
 # ----------------------------------------------------------------------
+
 
 def test_op_enum_values():
     assert int(qinput.Op.Sp) == 0
@@ -332,11 +356,9 @@ def test_bond_repr_includes_endpoints():
 # Low-level add_*_body still callable
 # ----------------------------------------------------------------------
 
+
 def test_low_level_add_one_body():
-    H = (qinput.HamiltonianBuilder(2)
-               .add_one_body(qinput.Op.Sz, 0, 1.0)
-               .add_one_body(qinput.Op.Sz, 1, 1.0)
-               .to_operator())
+    H = qinput.HamiltonianBuilder(2).add_one_body(qinput.Op.Sz, 0, 1.0).add_one_body(qinput.Op.Sz, 1, 1.0).to_operator()
     eigs = sorted(qed.spectrum(H, sym=qed.Symmetry.none()).energies)
     # Sz_0 + Sz_1 has eigenvalues -1, 0, 0, 1.
     assert np.allclose(eigs, [-1.0, 0.0, 0.0, 1.0], atol=1e-12)
@@ -345,6 +367,7 @@ def test_low_level_add_one_body():
 # ----------------------------------------------------------------------
 # Four-site terms, emit_into, all-or-nothing bond methods (the Python builder)
 # ----------------------------------------------------------------------
+
 
 def _dot(n, i, j, c=1.0):
     P = qed.Operator.product
@@ -388,9 +411,11 @@ def test_emit_into_appends_four_site_terms_in_place():
 def test_a_refused_bond_call_adds_nothing():
     # Audit C15-input-08: a bond out of range used to leave the bonds before it in the builder.
     b = qinput.HamiltonianBuilder(4).heisenberg([(0, 1)])
-    for call in (lambda: b.heisenberg([(0, 1), (1, 2), (2, 9)]),
-                 lambda: b.kitaev([(0, 1), (1, 2)], [0, 5]),
-                 lambda: b.dm([(0, 1), (1, 7)], [(0.1, 0, 0), (0, 0.2, 0)])):
+    for call in (
+        lambda: b.heisenberg([(0, 1), (1, 2), (2, 9)]),
+        lambda: b.kitaev([(0, 1), (1, 2)], [0, 5]),
+        lambda: b.dm([(0, 1), (1, 7)], [(0.1, 0, 0), (0, 0.2, 0)]),
+    ):
         with pytest.raises((IndexError, ValueError)):
             call()
         assert len(b) == 3

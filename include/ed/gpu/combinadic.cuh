@@ -33,14 +33,12 @@ namespace ed::gpu::combinadic {
 
 // Shared Pascal table. Definition lives in ``src/gpu/combinadic.cu``.
 // Downstream TUs reference this symbol via device linking.
-extern __device__ __constant__
-unsigned long long d_pascal_shared[65][65];
+extern __device__ __constant__ unsigned long long d_pascal_shared[65][65];
 
 // Host-callable uploader. Idempotent. Implemented in combinadic.cu.
 void upload_pascal_shared();
 
-__device__ __forceinline__
-unsigned long long binomial(int n, int k) {
+__device__ __forceinline__ unsigned long long binomial(int n, int k) {
     if (k < 0 || k > n || n < 0 || n > 64) return 0ULL;
     return d_pascal_shared[n][k];
 }
@@ -59,11 +57,10 @@ unsigned long long binomial(int n, int k) {
 // Returns 0 (which IS a valid rank) when ``popcount(state) != k``;
 // callers must guard with their own popcount check if the input
 // state might have escaped the fixed-Sz sector.
-__device__ __forceinline__
-std::int64_t rank_state(std::uint64_t state, int n_bits, int k) {
+__device__ __forceinline__ std::int64_t rank_state(std::uint64_t state, int n_bits, int k) {
     std::int64_t rank = 0;
     int seen = 0;
-    #pragma unroll
+#pragma unroll
     for (int bit = 0; bit < 64; ++bit) {
         if (bit >= n_bits) break;
         if (seen >= k) break;
@@ -76,8 +73,7 @@ std::int64_t rank_state(std::uint64_t state, int n_bits, int k) {
 }
 
 // Combinadic UNRANK: same colex convention as ``rank_state``.
-__device__ __forceinline__
-std::uint64_t unrank_to_state(std::uint64_t rank, int n_bits, int k) {
+__device__ __forceinline__ std::uint64_t unrank_to_state(std::uint64_t rank, int n_bits, int k) {
     std::uint64_t state = 0ULL;
     for (int i = k - 1; i >= 0; --i) {
         int p = i;

@@ -11,12 +11,14 @@ Test (10 GB MIG slice): Heisenberg ring N=26, Sz=0, k=0 block (D ~ 4.0e5, 6.4 MB
 thermal(method='ftlm', krylov=150, observables=[S0.S1], device='gpu'). One sample needs about
 (2*150+6) x 6.4 MB = 2.0 GB; eight batched samples about 15.7 GB. Each run in its own child process.
 CONFIRMED when samples=1 succeeds on the device and samples=8 raises an out-of-memory error."""
+
 import json
 import subprocess
 import sys
 
 try:
     import qed
+
     ndev = qed._core.cuda_device_count()
 except Exception as e:
     print(f"REPRO: INCONCLUSIVE cannot query devices: {e}")
@@ -56,13 +58,12 @@ print("RESULT_JSON:" + json.dumps(res), flush=True)
 
 def run(samples):
     try:
-        p = subprocess.run([sys.executable, "-c", CHILD, str(samples)], capture_output=True,
-                           text=True, timeout=130)
+        p = subprocess.run([sys.executable, "-c", CHILD, str(samples)], capture_output=True, text=True, timeout=130)
     except subprocess.TimeoutExpired:
         return {"ok": False, "err": "timeout", "crash": True}
     for line in p.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+            return json.loads(line[len("RESULT_JSON:") :])
     return {"ok": False, "crash": True, "err": f"rc={p.returncode} stderr_tail={p.stderr[-300:]!r}"}
 
 
@@ -71,8 +72,10 @@ if not one.get("ok") or one.get("device_blocks", 0) < 1:
     print(f"REPRO: INCONCLUSIVE samples=1 did not run on the device: {one}")
     sys.exit(0)
 eight = run(8)
-msg = (f"D~4.0e5 krylov=150 samples=1: ok device_blocks={one['device_blocks']} wall={one['wall']:.1f}s; "
-       f"samples=8: ok={eight.get('ok')} err={str(eight.get('err'))[:200]!r}")
+msg = (
+    f"D~4.0e5 krylov=150 samples=1: ok device_blocks={one['device_blocks']} wall={one['wall']:.1f}s; "
+    f"samples=8: ok={eight.get('ok')} err={str(eight.get('err'))[:200]!r}"
+)
 if not eight.get("ok") and not eight.get("crash") and "out of memory" in str(eight.get("err", "")).lower():
     print("REPRO: CONFIRMED " + msg)
 elif not eight.get("ok"):

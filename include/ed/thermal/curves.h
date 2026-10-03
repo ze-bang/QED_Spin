@@ -30,8 +30,7 @@ struct Curves {
 /// The exact curves of a block from its eigenvalues; with `diag_obs` (diag_obs[o][n] =
 /// <n|O_o|n> for each eigenvalue n) also <O>. Boltzmann weights are taken about the lowest
 /// eigenvalue, and V in a second pass about <E>, free of cancellation.
-[[nodiscard]] inline Curves exact_curves(const std::vector<double>& eigenvalues,
-                                         const std::vector<double>& betas,
+[[nodiscard]] inline Curves exact_curves(const std::vector<double>& eigenvalues, const std::vector<double>& betas,
                                          const std::vector<std::vector<std::complex<double>>>* diag_obs = nullptr) {
     Curves c;
     const std::vector<double>& ev = eigenvalues;
@@ -42,7 +41,8 @@ struct Curves {
         std::vector<std::complex<double>> o(diag_obs ? diag_obs->size() : 0, std::complex<double>(0, 0));
         for (std::size_t n = 0; n < ev.size(); ++n) {
             const double x = ev[n], w = std::exp(-bt * (x - e0));
-            z += w; e += w * (x - e0);
+            z += w;
+            e += w * (x - e0);
             for (std::size_t k = 0; k < o.size(); ++k) o[k] += w * (*diag_obs)[k][n];
         }
         c.lnZ.push_back(std::log(z) - bt * e0);

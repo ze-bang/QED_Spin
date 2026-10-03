@@ -3,6 +3,7 @@ low-lying states) and mTPQ.
 
     python examples/02_thermal.py
 """
+
 import numpy as np
 
 import qed
@@ -10,8 +11,9 @@ import qed
 L1, L2 = 4, 3
 N = L1 * L2
 site = lambda x, y: (x % L1) + L1 * (y % L2)
-bonds = [(site(x, y), site(x + dx, y + dy)) for x in range(L1) for y in range(L2)
-         for dx, dy in ((1, 0), (0, 1), (1, -1))]
+bonds = [
+    (site(x, y), site(x + dx, y + dy)) for x in range(L1) for y in range(L2) for dx, dy in ((1, 0), (0, 1), (1, -1))
+]
 b = qed.input.HamiltonianBuilder(N)
 b.heisenberg(bonds, J=1.0)
 H = b.to_operator()
@@ -23,8 +25,7 @@ oftlm = qed.thermal(H, T, method="ftlm", samples=30, exact_states=8, seed=1)
 mtpq = qed.thermal(H, T, method="mtpq", samples=8, seed=1)
 print("   T      C exact    C ftlm    C oftlm    C mtpq     chi")
 for i in range(0, len(T), 3):
-    print(f"{T[i]:5.2f}  {exact.C[i]:9.5f} {ftlm.C[i]:9.5f} {oftlm.C[i]:9.5f} {mtpq.C[i]:9.5f} "
-          f"{exact.chi[i]:9.5f}")
+    print(f"{T[i]:5.2f}  {exact.C[i]:9.5f} {ftlm.C[i]:9.5f} {oftlm.C[i]:9.5f} {mtpq.C[i]:9.5f} " f"{exact.chi[i]:9.5f}")
 # method="exact" diagonalises every symmetry block; the sampled methods scale to far
 # larger blocks. device="gpu" runs the blocks that have a device kernel on the GPU.
 

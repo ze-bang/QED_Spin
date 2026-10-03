@@ -12,6 +12,7 @@ spatial symmetry (one 924-state block). Three subprocesses:
   (b) dense_max_dim=0 (Krylov on the reduced CSR),
   (c) dense_max_dim=0 and ED_SYM_REDUCED_CSR=0 (Krylov on the rep walk).
 Claim holds if (a)/(b) return energies while (c) raises the Hermiticity error."""
+
 import os
 import subprocess
 import sys
@@ -45,10 +46,11 @@ for name, (dmd, extra) in cases.items():
     env = dict(os.environ)
     env.update(extra)
     try:
-        p = subprocess.run([sys.executable, "-c", CODE, dmd], env=env, capture_output=True, text=True,
-                           timeout=150)
-        line = next((l for l in p.stdout.splitlines() if l.startswith("RESULT")),
-                    f"RESULT NONE rc={p.returncode} err={p.stderr[-200:]!r}")
+        p = subprocess.run([sys.executable, "-c", CODE, dmd], env=env, capture_output=True, text=True, timeout=150)
+        line = next(
+            (l for l in p.stdout.splitlines() if l.startswith("RESULT")),
+            f"RESULT NONE rc={p.returncode} err={p.stderr[-200:]!r}",
+        )
     except subprocess.TimeoutExpired:
         line = "RESULT TIMEOUT"
     out[name] = line
@@ -58,12 +60,15 @@ ok_a = out["a_default"].startswith("RESULT OK")
 ok_b = out["b_krylov_csr"].startswith("RESULT OK")
 raised_c = out["c_krylov_walk"].startswith("RESULT RAISED") and "ermitian" in out["c_krylov_walk"]
 if (ok_a or ok_b) and raised_c:
-    print(f"REPRO: CONFIRMED non-Hermitian H solved silently on default/CSR lanes "
-          f"(a: {out['a_default'][10:70]}; b: {out['b_krylov_csr'][10:70]}) but refused on the walk "
-          f"lane ({out['c_krylov_walk'][14:110]})")
+    print(
+        f"REPRO: CONFIRMED non-Hermitian H solved silently on default/CSR lanes "
+        f"(a: {out['a_default'][10:70]}; b: {out['b_krylov_csr'][10:70]}) but refused on the walk "
+        f"lane ({out['c_krylov_walk'][14:110]})"
+    )
 elif ok_a and ok_b and not raised_c:
     print(f"REPRO: NOT_REPRODUCED walk lane did not raise: {out['c_krylov_walk'][:120]}")
 else:
-    print(f"REPRO: INCONCLUSIVE a={out['a_default'][:60]} b={out['b_krylov_csr'][:60]} "
-          f"c={out['c_krylov_walk'][:60]}")
+    print(
+        f"REPRO: INCONCLUSIVE a={out['a_default'][:60]} b={out['b_krylov_csr'][:60]} " f"c={out['c_krylov_walk'][:60]}"
+    )
 sys.exit(0)

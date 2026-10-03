@@ -47,8 +47,7 @@ using ComplexVector = std::vector<Complex>;
 //
 // The TransformData records go in through Operator::add_record; the SoA ``terms_`` cache is
 // rebuilt from them on the next apply().
-inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
-                                                       bool periodic = false) {
+inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J, bool periodic = false) {
     auto op = std::make_unique<Operator>(N, 0.5f);
     const Complex J_real(J, 0.0);
     const Complex J_half(0.5 * J, 0.0);
@@ -97,8 +96,7 @@ inline std::unique_ptr<Operator> build_heisenberg_chain(uint64_t N, double J,
 // Sz sectors are rep sectors of the little-group engine.
 class SzSectorOperator final : public ed::LinearOperator {
 public:
-    SzSectorOperator(std::shared_ptr<const Operator> full, int64_t n_up)
-        : full_(std::move(full)) {
+    SzSectorOperator(std::shared_ptr<const Operator> full, int64_t n_up) : full_(std::move(full)) {
         const uint64_t N = full_->getNumBits();
         for (uint64_t s = 0; s < (1ULL << N); ++s)
             if (__builtin_popcountll(s) == n_up) states_.push_back(s);
@@ -116,16 +114,15 @@ public:
 
 private:
     std::shared_ptr<const Operator> full_;
-    std::vector<uint64_t>           states_;
-    mutable std::vector<Complex>    xin_, xout_;
+    std::vector<uint64_t> states_;
+    mutable std::vector<Complex> xin_, xout_;
 };
 
 // Same chain as above, restricted to the fixed-Sz sector with n_up up spins.
-inline std::unique_ptr<SzSectorOperator>
-build_heisenberg_chain_fixed_sz(uint64_t N, double J, int64_t n_up,
-                                bool periodic = false) {
-    return std::make_unique<SzSectorOperator>(
-        std::shared_ptr<const Operator>(build_heisenberg_chain(N, J, periodic)), n_up);
+inline std::unique_ptr<SzSectorOperator> build_heisenberg_chain_fixed_sz(uint64_t N, double J, int64_t n_up,
+                                                                         bool periodic = false) {
+    return std::make_unique<SzSectorOperator>(std::shared_ptr<const Operator>(build_heisenberg_chain(N, J, periodic)),
+                                              n_up);
 }
 
 // -----------------------------------------------------------------------------
@@ -135,8 +132,7 @@ build_heisenberg_chain_fixed_sz(uint64_t N, double J, int64_t n_up,
 // Turn the matrix-vector action `Hv` on a Hilbert space of dimension `dim`
 // into an explicit `dim x dim` dense matrix by applying H to each canonical
 // basis vector. Only viable for tiny dim (we use it for dim <= 64).
-template <class Apply>
-inline Eigen::MatrixXcd apply_to_dense(Apply&& Hv, uint64_t dim) {
+template <class Apply> inline Eigen::MatrixXcd apply_to_dense(Apply&& Hv, uint64_t dim) {
     Eigen::MatrixXcd H = Eigen::MatrixXcd::Zero(dim, dim);
     std::vector<Complex> in(dim), out(dim);
     for (uint64_t j = 0; j < dim; ++j) {
@@ -167,9 +163,7 @@ struct DenseReference {
 
 inline DenseReference reference_from_operator(const Operator& op, uint64_t dim) {
     DenseReference r;
-    auto Hv = [&](const Complex* in, Complex* out, int n) {
-        op.apply(in, out, static_cast<size_t>(n));
-    };
+    auto Hv = [&](const Complex* in, Complex* out, int n) { op.apply(in, out, static_cast<size_t>(n)); };
     r.H = apply_to_dense(Hv, dim);
     r.eigs = dense_eigenvalues(r.H);
     return r;
@@ -184,7 +178,10 @@ inline ComplexVector random_unit_vector(uint64_t dim, uint64_t seed) {
     std::normal_distribution<double> nd(0.0, 1.0);
     ComplexVector v(dim);
     double n2 = 0.0;
-    for (auto& c : v) { c = Complex(nd(gen), nd(gen)); n2 += std::norm(c); }
+    for (auto& c : v) {
+        c = Complex(nd(gen), nd(gen));
+        n2 += std::norm(c);
+    }
     double s = 1.0 / std::sqrt(n2);
     for (auto& c : v) c *= s;
     return v;

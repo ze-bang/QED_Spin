@@ -6,6 +6,7 @@ S_tot^2 written as the full double sum sum_{i,j} S_i.S_j (including i == j, a co
 by EigResult.expect under total_spin, although it is SU(2) invariant. (HamiltonianBuilder.heisenberg skips
 i == j, so the records are written with qed.Operator.add_two_body.) Control: the same operator under
 Sz-only symmetry must give <S^2> = 0 for the singlet ground state of an N=8 Heisenberg ring."""
+
 import qed
 
 N = 8
@@ -36,4 +37,6 @@ try:
     v = complex(r.expect([S2])[0, 0])
     print(f"REPRO: NOT_REPRODUCED total_spin expect returned {v}")
 except Exception as ex:
-    print(f"REPRO: CONFIRMED expect under total_spin=0 raised {type(ex).__name__}: {str(ex)[:160]} (control value {ctrl.real:.2e})")
+    print(
+        f"REPRO: CONFIRMED expect under total_spin=0 raised {type(ex).__name__}: {str(ex)[:160]} (control value {ctrl.real:.2e})"
+    )

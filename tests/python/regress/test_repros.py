@@ -20,6 +20,7 @@ Sharding: QED_REGRESS_SHARD="k/n" keeps bin k (0-based) of n. The bins come from
 longest-processing-time packing of the ``# SECONDS`` caps, done separately for each device
 class and for each of the groups gate (open, fixed), perf and info.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,7 +35,7 @@ import pytest
 import qed
 
 ROOT = Path(__file__).resolve().parents[3]
-REGRESS = Path(__file__).resolve().parent             # manifest.json and repros/ beside this file
+REGRESS = Path(__file__).resolve().parent  # manifest.json and repros/ beside this file
 RUN_ONE = REGRESS / "run_one.py"
 MANIFEST = json.loads((REGRESS / "manifest.json").read_text())
 STATUSES = ("open", "fixed", "perf", "info")
@@ -94,8 +95,9 @@ def _params():
         if e["status"] in ("perf", "info"):
             marks.append(getattr(pytest.mark, e["status"]))
         if e["status"] == "open":
-            marks.append(pytest.mark.xfail(raises=ReproConfirmed, strict=True,
-                                           reason=f"open audit bug {e['rep']} ({e['sev']})"))
+            marks.append(
+                pytest.mark.xfail(raises=ReproConfirmed, strict=True, reason=f"open audit bug {e['rep']} ({e['sev']})")
+            )
         yield pytest.param(e, dev, id=f"{e['id']}-{dev}", marks=marks)
 
 
@@ -133,8 +135,14 @@ def test_repro(entry, dev, tmp_path, record_property):
     out.mkdir()
     t0 = time.monotonic()
     try:
-        p = subprocess.run([sys.executable, str(RUN_ONE), str(script)], cwd=tmp_path,
-                           env=_env(dev, out), capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(
+            [sys.executable, str(RUN_ONE), str(script)],
+            cwd=tmp_path,
+            env=_env(dev, out),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         pytest.fail(f"{entry['id']} ({dev}): no verdict within {timeout} s")
     elapsed = time.monotonic() - t0

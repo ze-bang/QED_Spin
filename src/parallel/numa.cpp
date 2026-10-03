@@ -33,19 +33,15 @@ namespace {
 
 // Pinning is applied at most once per process: pthread_setaffinity_np is irreversible from the
 // application side (the inherited masks would have to be remembered to restore them).
-std::mutex       g_pin_mutex;
-bool             g_pin_done = false;   // guarded by g_pin_mutex
+std::mutex g_pin_mutex;
+bool g_pin_done = false;   // guarded by g_pin_mutex
 std::atomic<int> g_pin_application_count{0};
 
 }  // anonymous namespace
 
-bool numa_pin_threads_enabled() {
-    return ed::env::flag("ED_NUMA_PIN_THREADS", false);
-}
+bool numa_pin_threads_enabled() { return ed::env::flag("ED_NUMA_PIN_THREADS", false); }
 
-int pin_omp_threads_application_count() {
-    return g_pin_application_count.load(std::memory_order_relaxed);
-}
+int pin_omp_threads_application_count() { return g_pin_application_count.load(std::memory_order_relaxed); }
 
 void pin_omp_threads_once() {
     if (!numa_pin_threads_enabled()) return;
@@ -75,7 +71,7 @@ void pin_omp_threads_once() {
         if (CPU_ISSET(c, &allowed)) cpus.push_back(c);
     if (cpus.empty()) return;
     std::atomic<int> failed{0};
-    #pragma omp parallel
+#pragma omp parallel
     {
         const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
         cpu_set_t mask;

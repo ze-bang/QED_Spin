@@ -12,6 +12,7 @@ Test: J1-J2 ring N=26, n_up=13, translations, k0=0 block (~4e5 states). Run qed.
 write ~1.3x the job's memory.max to a scratch file ($SLURM_TMPDIR, else the temp dir; fsync'd, so the pages are
 clean and reclaimable) so page cache fills the job cgroup, report memory.current / memory.stat file, and run
 the same eigs again (with ED_MEM_GUARD_OFF=1 set, to show the override does not help)."""
+
 import atexit
 import os
 import tempfile
@@ -58,8 +59,10 @@ def cg_state():
 def fmt(st):
     room, mx, cur, fil, inact, d = st
     G = 1 << 30
-    return (f"memory.max={mx / G:.2f}G current={cur / G:.2f}G file={fil / G:.2f}G inactive_file={inact / G:.2f}G "
-            f"headroom={room / (1 << 20):.0f}MiB ({d})")
+    return (
+        f"memory.max={mx / G:.2f}G current={cur / G:.2f}G file={fil / G:.2f}G inactive_file={inact / G:.2f}G "
+        f"headroom={room / (1 << 20):.0f}MiB ({d})"
+    )
 
 
 st0 = cg_state()
@@ -89,7 +92,7 @@ done = 0
 t = time.time()
 scratch = os.environ.get("SLURM_TMPDIR") or tempfile.gettempdir()
 fd, path = tempfile.mkstemp(prefix="qed_pagecache_", dir=scratch)
-atexit.register(os.unlink, path)     # at exit: unlinking drops the cached pages the test needs
+atexit.register(os.unlink, path)  # at exit: unlinking drops the cached pages the test needs
 try:
     while done < target and time.time() - t < 150:
         done += os.write(fd, buf)
@@ -103,20 +106,26 @@ st1 = cg_state()
 print("after write:", fmt(st1))
 
 nb_est = 10400600 // 26
-need = (4 + 16) * nb_est * 16 * 2   # cap check: 0.5 * room must hold (k+8) + 8 reserve vectors
+need = (4 + 16) * nb_est * 16 * 2  # cap check: 0.5 * room must hold (k+8) + 8 reserve vectors
 if st1[0] > need:
-    print(f"REPRO: INCONCLUSIVE page cache did not fill the cgroup (headroom {st1[0] >> 20} MiB > ~{need >> 20} MiB "
-          f"needed; file={st1[3] >> 20} MiB)")
+    print(
+        f"REPRO: INCONCLUSIVE page cache did not fill the cgroup (headroom {st1[0] >> 20} MiB > ~{need >> 20} MiB "
+        f"needed; file={st1[3] >> 20} MiB)"
+    )
     raise SystemExit(0)
 
 try:
     r1 = qed.eigs(H, 4, sym=sym)
-    print(f"REPRO: NOT_REPRODUCED eigs(k=4) succeeded with cgroup headroom {st1[0] >> 20} MiB "
-          f"(file cache {st1[3] >> 20} MiB), E0={r1.energies[0]:.10f}")
+    print(
+        f"REPRO: NOT_REPRODUCED eigs(k=4) succeeded with cgroup headroom {st1[0] >> 20} MiB "
+        f"(file cache {st1[3] >> 20} MiB), E0={r1.energies[0]:.10f}"
+    )
 except Exception as e:
     msg = str(e)
     if "fit in the memory" in msg or "available RAM" in msg:
-        print(f"REPRO: CONFIRMED eigs(k=4) refused after clean page cache filled the cgroup "
-              f"(headroom {st1[0] >> 20} MiB, file cache {st1[3] >> 20} MiB, ED_MEM_GUARD_OFF=1 set): {msg[:220]}")
+        print(
+            f"REPRO: CONFIRMED eigs(k=4) refused after clean page cache filled the cgroup "
+            f"(headroom {st1[0] >> 20} MiB, file cache {st1[3] >> 20} MiB, ED_MEM_GUARD_OFF=1 set): {msg[:220]}"
+        )
     else:
         print(f"REPRO: INCONCLUSIVE eigs raised something else: {type(e).__name__}: {msg[:220]}")

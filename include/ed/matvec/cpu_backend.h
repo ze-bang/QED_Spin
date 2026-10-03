@@ -28,7 +28,7 @@
 #include <vector>
 
 #ifdef _OPENMP
-#  include <omp.h>
+#include <omp.h>
 #endif
 
 #include <ed/core/errors.h>
@@ -42,13 +42,12 @@ namespace ed::matvec {
 /// its own contiguous chunk and the partials are added in thread order (an OpenMP reduction
 /// combines them in arrival order, so repeated runs differed in the last bits). Serial below
 /// 8193 terms. f may write element i (the fused Lanczos primitives update y in the same pass).
-template <class T, class F>
-[[nodiscard]] inline T ordered_sum(std::size_t n, F&& f) {
+template <class T, class F> [[nodiscard]] inline T ordered_sum(std::size_t n, F&& f) {
     T total{};
 #ifdef _OPENMP
     if (n > 8192) {
         std::vector<T> part(static_cast<std::size_t>(omp_get_max_threads()), T{});
-        #pragma omp parallel
+#pragma omp parallel
         {
             const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
             const std::size_t nt = static_cast<std::size_t>(omp_get_num_threads());
@@ -67,16 +66,13 @@ template <class T, class F>
 // The host backend for vectors of Scalar: std::complex<double>, and double for real blocks (P6.4).
 // One body; the complex arithmetic is written out on (re, im) pairs so the compiler vectorises it
 // and the real instantiation is the same loops without the imaginary parts.
-template <class Scalar>
-class BasicCpuBackend : public BasicBackend<Scalar> {
+template <class Scalar> class BasicCpuBackend : public BasicBackend<Scalar> {
     static_assert(std::is_same_v<Scalar, double> || std::is_same_v<Scalar, Complex>,
                   "BasicCpuBackend: Scalar is double or std::complex<double>");
     static constexpr bool kComplex = std::is_same_v<Scalar, Complex>;
 
 public:
-    [[nodiscard]] MemorySpace memory_space() const override {
-        return MemorySpace::Host;
-    }
+    [[nodiscard]] MemorySpace memory_space() const override { return MemorySpace::Host; }
     [[nodiscard]] std::string description() const override {
         return kComplex ? "CpuBackend(OpenMP)" : "CpuBackend<double>(OpenMP)";
     }
@@ -86,27 +82,22 @@ public:
         if (n == 0) return nullptr;
         void* p = nullptr;
 #if defined(_ISOC11_SOURCE) || defined(__APPLE__) || defined(_WIN32)
-        p = std::aligned_alloc(
-            64, ((n * sizeof(Scalar) + 63) / 64) * 64);
+        p = std::aligned_alloc(64, ((n * sizeof(Scalar) + 63) / 64) * 64);
 #else
         if (posix_memalign(&p, 64, n * sizeof(Scalar)) != 0) p = nullptr;
 #endif
         if (!p) throw std::bad_alloc{};
         return static_cast<Scalar*>(p);
     }
-    void deallocate(Scalar* p) const noexcept override {
-        std::free(p);
-    }
+    void deallocate(Scalar* p) const noexcept override { std::free(p); }
     void fill_zero(Scalar* p, std::size_t n) const override {
         if (n == 0 || !p) return;
         // Parallel first touch so Krylov vectors are distributed
         // across NUMA nodes with the same static chunking the BLAS-1 and
         // matvec kernels use (a serial memset places every page on the
         // calling thread's node).
-        #pragma omp parallel for schedule(static) if(n > 65536)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            p[i] = Scalar{};
-        }
+#pragma omp parallel for schedule(static) if (n > 65536)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) { p[i] = Scalar{}; }
     }
     void copy(const Scalar* src, Scalar* dst, std::size_t n) const override {
         if (n == 0) return;
@@ -116,7 +107,7 @@ public:
         }
         // In parallel, with the static split the kernels use (a serial memcpy of a 3e7-state
         // vector takes ~50 ms, against ~5 ms on the team).
-        #pragma omp parallel
+#pragma omp parallel
         {
 #ifdef _OPENMP
             const std::size_t t = static_cast<std::size_t>(omp_get_thread_num());
@@ -128,42 +119,30 @@ public:
             if (i1 > i0) std::memcpy(dst + i0, src + i0, (i1 - i0) * sizeof(Scalar));
         }
     }
-    void copy_from_host(const Scalar* host_src, Scalar* dst,
-                        std::size_t n) const override {
-        copy(host_src, dst, n);
-    }
-    void copy_to_host(const Scalar* src, Scalar* host_dst,
-                      std::size_t n) const override {
-        copy(src, host_dst, n);
-    }
+    void copy_from_host(const Scalar* host_src, Scalar* dst, std::size_t n) const override { copy(host_src, dst, n); }
+    void copy_to_host(const Scalar* src, Scalar* host_dst, std::size_t n) const override { copy(src, host_dst, n); }
 
     // -----------------------------------------------------------------
     // Level-1 BLAS as OpenMP loops rather than cblas_zaxpy / cblas_zdotc.
     // These kernels stream at memory bandwidth, which BLAS would not
     // improve, and their static chunking matches fill_zero's first touch.
     // -----------------------------------------------------------------
-    void axpy(Scalar alpha, const Scalar* x, Scalar* y,
-              std::size_t n) const override {
+    void axpy(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const override {
         if (n == 0) return;
-        #pragma omp parallel for schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            y[i] += alpha * x[i];
-        }
+#pragma omp parallel for schedule(static) if (n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) { y[i] += alpha * x[i]; }
     }
     void scale(Scalar alpha, Scalar* x, std::size_t n) const override {
         if (n == 0) return;
-        #pragma omp parallel for schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            x[i] *= alpha;
-        }
+#pragma omp parallel for schedule(static) if (n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) { x[i] *= alpha; }
     }
-    [[nodiscard]] Scalar dot(const Scalar* x, const Scalar* y,
-                             std::size_t n) const override {
+    [[nodiscard]] Scalar dot(const Scalar* x, const Scalar* y, std::size_t n) const override {
         if (n == 0) return Scalar{};
         return ordered_sum<Scalar>(n, [&](std::size_t i) -> Scalar {
             if constexpr (kComplex) {
                 const Complex xc = std::conj(x[i]);
-                const Complex y_  = y[i];
+                const Complex y_ = y[i];
                 return Complex(xc.real() * y_.real() - xc.imag() * y_.imag(),
                                xc.real() * y_.imag() + xc.imag() * y_.real());
             } else {
@@ -182,21 +161,18 @@ public:
             }
         }));
     }
-    void axpby(Scalar alpha, const Scalar* x,
-               Scalar beta,  Scalar* y, std::size_t n) const override {
+    void axpby(Scalar alpha, const Scalar* x, Scalar beta, Scalar* y, std::size_t n) const override {
         if (n == 0) return;
-        #pragma omp parallel for schedule(static) if(n > 8192)
-        for (long long i = 0; i < static_cast<long long>(n); ++i) {
-            y[i] = alpha * x[i] + beta * y[i];
-        }
+#pragma omp parallel for schedule(static) if (n > 8192)
+        for (long long i = 0; i < static_cast<long long>(n); ++i) { y[i] = alpha * x[i] + beta * y[i]; }
     }
 
     // ----------------------------------------------------------------
     // Fused Lanczos primitives: single streaming pass.
     // `axpy_dot_local` / `axpy_nrm2sq_local` are the local pieces.
     // ----------------------------------------------------------------
-    [[nodiscard]] Scalar axpy_dot_local(Scalar alpha, const Scalar* x, Scalar* y,
-                                        const Scalar* z, std::size_t n) const {
+    [[nodiscard]] Scalar axpy_dot_local(Scalar alpha, const Scalar* x, Scalar* y, const Scalar* z,
+                                        std::size_t n) const {
         if (n == 0) return Scalar{};
         return ordered_sum<Scalar>(n, [&](std::size_t i) -> Scalar {
             if constexpr (kComplex) {
@@ -213,8 +189,7 @@ public:
             }
         });
     }
-    [[nodiscard]] double axpy_nrm2sq_local(Scalar alpha, const Scalar* x, Scalar* y,
-                                           std::size_t n) const {
+    [[nodiscard]] double axpy_nrm2sq_local(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const {
         if (n == 0) return 0.0;
         return ordered_sum<double>(n, [&](std::size_t i) {
             if constexpr (kComplex) {
@@ -230,12 +205,11 @@ public:
             }
         });
     }
-    [[nodiscard]] Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y,
-                                  const Scalar* z, std::size_t n) const override {
+    [[nodiscard]] Scalar axpy_dot(Scalar alpha, const Scalar* x, Scalar* y, const Scalar* z,
+                                  std::size_t n) const override {
         return axpy_dot_local(alpha, x, y, z, n);
     }
-    [[nodiscard]] double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y,
-                                   std::size_t n) const override {
+    [[nodiscard]] double axpy_nrm2(Scalar alpha, const Scalar* x, Scalar* y, std::size_t n) const override {
         return std::sqrt(axpy_nrm2sq_local(alpha, x, y, n));
     }
 
@@ -253,11 +227,8 @@ public:
     // ----------------------------------------------------------------
     static constexpr std::size_t kManyChunk = 2048;   // 32 KiB of complex v
 
-    void dot_many(const Scalar* const* basis,
-                  std::size_t          num_basis,
-                  const Scalar*        v,
-                  std::size_t          n,
-                  Scalar*              coeffs_out) const override {
+    void dot_many(const Scalar* const* basis, std::size_t num_basis, const Scalar* v, std::size_t n,
+                  Scalar* coeffs_out) const override {
         if (num_basis == 0) return;
         if (n == 0) {
             for (std::size_t k = 0; k < num_basis; ++k) coeffs_out[k] = Scalar{};
@@ -286,7 +257,7 @@ public:
         double* const partial_im = scratch_partial_im_.data();
         const long long chunks = static_cast<long long>((n + kManyChunk - 1) / kManyChunk);
 
-        #pragma omp parallel if(n > 8192)
+#pragma omp parallel if (n > 8192)
         {
 #ifdef _OPENMP
             const int tid = omp_get_thread_num();
@@ -296,9 +267,9 @@ public:
             double* re = &partial_re[tid * num_basis];
             double* im = &partial_im[tid * num_basis];
 
-            #pragma omp for schedule(static) nowait
+#pragma omp for schedule(static) nowait
             for (long long c = 0; c < chunks; ++c) {
-                const std::size_t i0  = static_cast<std::size_t>(c) * kManyChunk;
+                const std::size_t i0 = static_cast<std::size_t>(c) * kManyChunk;
                 const std::size_t len = std::min(kManyChunk, n - i0);
                 const double* x = reinterpret_cast<const double*>(v + i0);
                 for (std::size_t k = 0; k < num_basis; ++k) {
@@ -306,7 +277,7 @@ public:
                     if constexpr (kComplex) {
                         // <b, v> = sum_i conj(b_i) v_i = sum_i (br vr + bi vi) + i (br vi - bi vr)
                         double sr = 0.0, si = 0.0;
-                        #pragma omp simd reduction(+ : sr, si)
+#pragma omp simd reduction(+ : sr, si)
                         for (std::size_t i = 0; i < len; ++i) {
                             const double br = b[2 * i], bi = b[2 * i + 1], vr = x[2 * i], vi = x[2 * i + 1];
                             sr += br * vr + bi * vi;
@@ -316,7 +287,7 @@ public:
                         im[k] += si;
                     } else {
                         double s = 0.0;
-                        #pragma omp simd reduction(+ : s)
+#pragma omp simd reduction(+ : s)
                         for (std::size_t i = 0; i < len; ++i) s += b[i] * x[i];
                         re[k] += s;
                     }
@@ -330,36 +301,35 @@ public:
                 r += partial_re[t * num_basis + k];
                 i += partial_im[t * num_basis + k];
             }
-            if constexpr (kComplex) coeffs_out[k] = Complex(r, i);
-            else                    coeffs_out[k] = r;
+            if constexpr (kComplex)
+                coeffs_out[k] = Complex(r, i);
+            else
+                coeffs_out[k] = r;
         }
     }
 
-    void axpy_many(const Scalar*        alphas,
-                   const Scalar* const* basis,
-                   std::size_t          num_basis,
-                   Scalar*              v,
-                   std::size_t          n) const override {
+    void axpy_many(const Scalar* alphas, const Scalar* const* basis, std::size_t num_basis, Scalar* v,
+                   std::size_t n) const override {
         if (num_basis == 0 || n == 0) return;
         const long long chunks = static_cast<long long>((n + kManyChunk - 1) / kManyChunk);
-        #pragma omp parallel for schedule(static) if(n > 8192)
+#pragma omp parallel for schedule(static) if (n > 8192)
         for (long long c = 0; c < chunks; ++c) {
-            const std::size_t i0  = static_cast<std::size_t>(c) * kManyChunk;
+            const std::size_t i0 = static_cast<std::size_t>(c) * kManyChunk;
             const std::size_t len = std::min(kManyChunk, n - i0);
             double* y = reinterpret_cast<double*>(v + i0);
             for (std::size_t k = 0; k < num_basis; ++k) {
                 const double* b = reinterpret_cast<const double*>(basis[k] + i0);
                 if constexpr (kComplex) {
                     const double ar = alphas[k].real(), ai = alphas[k].imag();
-                    #pragma omp simd
+#pragma omp simd
                     for (std::size_t i = 0; i < len; ++i) {
                         const double br = b[2 * i], bi = b[2 * i + 1];
-                        y[2 * i]     += ar * br - ai * bi;
+                        y[2 * i] += ar * br - ai * bi;
                         y[2 * i + 1] += ar * bi + ai * br;
                     }
                 } else {
                     const double a = alphas[k];
-                    #pragma omp simd
+#pragma omp simd
                     for (std::size_t i = 0; i < len; ++i) y[i] += a * b[i];
                 }
             }
@@ -369,13 +339,9 @@ public:
     // -----------------------------------------------------------------
     // Level-3 BLAS via cBLAS. All matrix arguments column-major.
     // -----------------------------------------------------------------
-    void gemm(char opA, char opB,
-              std::size_t m, std::size_t n, std::size_t k,
-              Scalar alpha,
-              const Scalar* A, std::size_t lda,
-              const Scalar* B, std::size_t ldb,
-              Scalar beta,
-              Scalar* C, std::size_t ldc) const override {
+    void gemm(char opA, char opB, std::size_t m, std::size_t n, std::size_t k, Scalar alpha, const Scalar* A,
+              std::size_t lda, const Scalar* B, std::size_t ldb, Scalar beta, Scalar* C,
+              std::size_t ldc) const override {
         if (m == 0 || n == 0) return;
         // cblas takes int: a dimension past it would wrap into a call BLAS skips or misreads.
         for (const std::size_t d : {m, n, k, lda, ldb, ldc})
@@ -385,29 +351,28 @@ public:
         const CBLAS_TRANSPOSE tA = trans_(opA);
         const CBLAS_TRANSPOSE tB = trans_(opB);
         if constexpr (kComplex) {
-            cblas_zgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
-                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                        &alpha, A, static_cast<int>(lda),
-                                B, static_cast<int>(ldb),
-                        &beta,  C, static_cast<int>(ldc));
+            cblas_zgemm(CblasColMajor, tA, tB, // narrow-ok: every dimension checked above
+                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), &alpha, A, static_cast<int>(lda),
+                        B, static_cast<int>(ldb), &beta, C, static_cast<int>(ldc));
         } else {
-            cblas_dgemm(CblasColMajor, tA, tB,   // narrow-ok: every dimension checked above
-                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
-                        alpha, A, static_cast<int>(lda),
-                               B, static_cast<int>(ldb),
-                        beta,  C, static_cast<int>(ldc));
+            cblas_dgemm(CblasColMajor, tA, tB, // narrow-ok: every dimension checked above
+                        static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), alpha, A, static_cast<int>(lda),
+                        B, static_cast<int>(ldb), beta, C, static_cast<int>(ldc));
         }
     }
 
 private:
     static CBLAS_TRANSPOSE trans_(char op) {
         switch (op) {
-            case 'N': case 'n': return CblasNoTrans;
-            case 'T': case 't': return CblasTrans;
-            case 'C': case 'c': case 'H': case 'h': return CblasConjTrans;   // dgemm: the transpose
-            default:
-                throw std::invalid_argument(
-                    std::string("CpuBackend: invalid trans op '") + op + "'");
+        case 'N':
+        case 'n': return CblasNoTrans;
+        case 'T':
+        case 't': return CblasTrans;
+        case 'C':
+        case 'c':
+        case 'H':
+        case 'h': return CblasConjTrans; // dgemm: the transpose
+        default: throw std::invalid_argument(std::string("CpuBackend: invalid trans op '") + op + "'");
         }
     }
 
@@ -422,10 +387,8 @@ using CpuBackend = BasicCpuBackend<Complex>;
 
 // Whether B is a host backend (of any Scalar): the lanes copy to and from host memory only
 // for the others.
-template <class B>
-inline constexpr bool is_cpu_backend_v = false;
-template <class Scalar>
-inline constexpr bool is_cpu_backend_v<BasicCpuBackend<Scalar>> = true;
+template <class B> inline constexpr bool is_cpu_backend_v = false;
+template <class Scalar> inline constexpr bool is_cpu_backend_v<BasicCpuBackend<Scalar>> = true;
 
 // Thread-local accessor. CpuBackend holds mutable scratch buffers in
 // dot_many() that are not safe to share across concurrent callers. Using

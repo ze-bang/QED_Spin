@@ -7,6 +7,7 @@ the two-state engine scales Sz by spin_l (SzSz by spin_l^2) but keeps the spin-1
 total_spin restriction is also accepted (or not) without any spin check.
 Restated after P2.1 removed the spin parameter (owner-approved): Operator(N, 1.0),
 HamiltonianBuilder(N, spin=1.0) and OperatorSpec.spin_length must all be gone."""
+
 import numpy as np
 import qed
 
@@ -29,7 +30,8 @@ def dense_heis(S, jz):
         for j in range(N):
             out = np.kron(out, op if j == i else I)
         return out
-    H = np.zeros((d ** N, d ** N))
+
+    H = np.zeros((d**N, d**N))
     for i, j in bonds:
         H += 0.5 * (site(Sp, i) @ site(Sm, j) + site(Sm, i) @ site(Sp, j)) + jz * site(Sz, i) @ site(Sz, j)
     return np.linalg.eigvalsh(H)[0]
@@ -62,10 +64,14 @@ try:
     su2 = f"total_spin=0 accepted, E0={e_su2:.10f}"
 except Exception as ex:
     su2 = f"total_spin=0 raised {type(ex).__name__}: {ex}"
-print(f"lib E0={e_lib:.10f}; dense spin-1 Heisenberg {e_spin1:.10f}; "
-      f"spin-1/2 Heisenberg {e_half_heis:.10f}; spin-1/2 XXZ Jz=4 {e_half_xxz4:.10f}; {su2}")
+print(
+    f"lib E0={e_lib:.10f}; dense spin-1 Heisenberg {e_spin1:.10f}; "
+    f"spin-1/2 Heisenberg {e_half_heis:.10f}; spin-1/2 XXZ Jz=4 {e_half_xxz4:.10f}; {su2}"
+)
 if abs(e_lib - e_spin1) > 1e-6:
-    print(f"REPRO: CONFIRMED spin=1.0 accepted silently; E0_lib={e_lib:.8f} != spin-1 {e_spin1:.8f} "
-          f"(|lib - XXZ4|={abs(e_lib - e_half_xxz4):.2e}); {su2}")
+    print(
+        f"REPRO: CONFIRMED spin=1.0 accepted silently; E0_lib={e_lib:.8f} != spin-1 {e_spin1:.8f} "
+        f"(|lib - XXZ4|={abs(e_lib - e_half_xxz4):.2e}); {su2}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED E0_lib matches spin-1 ({e_lib:.8f})")

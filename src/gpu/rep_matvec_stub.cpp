@@ -24,34 +24,31 @@
 #include <stdexcept>
 #include <string>
 
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
-    throw std::logic_error(
-        "ed::symmetry::make_sector_matvec_gpu_rep: built without WITH_CUDA. "
-        "Rebuild with -DWITH_CUDA=ON to enable the on-the-fly representative "
-        "GPU matvec, or route the workload through CpuBackend (device='cpu').");
+ed::LinearOperator::MatvecFn ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*rep*/,
+                                                                      const ed::ops::MaskedProgram& /*rows*/) {
+    throw std::logic_error("ed::symmetry::make_sector_matvec_gpu_rep: built without WITH_CUDA. "
+                           "Rebuild with -DWITH_CUDA=ON to enable the on-the-fly representative "
+                           "GPU matvec, or route the workload through CpuBackend (device='cpu').");
 }
 
 ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
-    const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
-    throw std::logic_error(
-        "ed::symmetry::make_sector_matvec_gpu_rep_hostptr: built without "
-        "WITH_CUDA. Rebuild with -DWITH_CUDA=ON, or route the workload "
-        "through CpuBackend (device='cpu').");
+ed::symmetry::make_sector_matvec_gpu_rep_hostptr(const ed::symmetry::RepSectorData& /*rep*/,
+                                                 const ed::ops::MaskedProgram& /*rows*/) {
+    throw std::logic_error("ed::symmetry::make_sector_matvec_gpu_rep_hostptr: built without "
+                           "WITH_CUDA. Rebuild with -DWITH_CUDA=ON, or route the workload "
+                           "through CpuBackend (device='cpu').");
 }
 
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*src*/,
-                                        const ed::symmetry::RepSectorData& /*tgt*/,
-                                        const ed::ops::MaskedProgram& /*rows*/) {
+ed::LinearOperator::MatvecFn ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& /*src*/,
+                                                                     const ed::symmetry::RepSectorData& /*tgt*/,
+                                                                     const ed::ops::MaskedProgram& /*rows*/) {
     throw std::logic_error("ed::symmetry::make_cross_matvec_gpu_rep: built without WITH_CUDA.");
 }
 
 ed::LinearOperator::MultiMatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/, const ed::ops::MaskedProgram& /*rows*/) {
-    throw std::logic_error(
-        "ed::symmetry::make_sector_matvec_gpu_rep_multi: built without WITH_CUDA.");
+ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& /*rep*/,
+                                               const ed::ops::MaskedProgram& /*rows*/) {
+    throw std::logic_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: built without WITH_CUDA.");
 }
 
 std::shared_ptr<const ed::symmetry::DeviceCsr>
@@ -82,7 +79,8 @@ ed::symmetry::DeviceCsrInfo ed::symmetry::device_csr_info(const ed::symmetry::De
     throw std::logic_error("ed::symmetry::device_csr_info: built without WITH_CUDA.");
 }
 
-ed::matvec::ReducedSymmetryCsr<std::complex<double>> ed::symmetry::download_csr(const ed::symmetry::DeviceCsr& /*csr*/) {
+ed::matvec::ReducedSymmetryCsr<std::complex<double>>
+ed::symmetry::download_csr(const ed::symmetry::DeviceCsr& /*csr*/) {
     throw std::logic_error("ed::symmetry::download_csr: built without WITH_CUDA.");
 }
 

@@ -1,4 +1,5 @@
 """``qed.spectrum``: the complete spectrum of H, block by block."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -37,10 +38,15 @@ def spectrum(H, *, sym: Optional[Symmetry] = None, device: str = "cpu") -> Spect
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
-    raw = _core.sectors.spectrum(H, spec,
-                                 device=_device.resolve(device))
-    return SpectrumResult(energies=np.asarray(raw.expanded()), levels=list(raw.levels),
-                          device_blocks=int(raw.device_blocks), symmetry=sym,
-                          _spec=spec, _n_sites=int(H.num_sites),
-                          diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
-                          placement=dict(raw.placement), time_reversal=raw.time_reversal)
+    raw = _core.sectors.spectrum(H, spec, device=_device.resolve(device))
+    return SpectrumResult(
+        energies=np.asarray(raw.expanded()),
+        levels=list(raw.levels),
+        device_blocks=int(raw.device_blocks),
+        symmetry=sym,
+        _spec=spec,
+        _n_sites=int(H.num_sites),
+        diagnostics=diagnostics + [tuple(x) for x in raw.diagnostics],
+        placement=dict(raw.placement),
+        time_reversal=raw.time_reversal,
+    )

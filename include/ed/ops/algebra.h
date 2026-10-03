@@ -25,8 +25,8 @@ public:
     /// coeff * prod_k O_k(site_k), applied right to left (the LAST factor acts first).
     /// ops[k] in {'+', '-', 'z', 'x', 'y', 'u', 'd', 'I'}: S+, S-, S^z, S^x, S^y,
     /// |up><up|, |dn><dn|, identity. Sites may repeat (spin-1/2 algebra is exact).
-    static MaskedOperator product(int n_sites, const std::string& ops,
-                                  const std::vector<int>& sites, Complex coeff = 1.0);
+    static MaskedOperator product(int n_sites, const std::string& ops, const std::vector<int>& sites,
+                                  Complex coeff = 1.0);
 
     [[nodiscard]] int n_sites() const noexcept { return n_; }
     [[nodiscard]] std::size_t size() const noexcept { return t_.size(); }

@@ -48,9 +48,7 @@ public:
     using MatvecFn = std::function<void(const Complex*, Complex*, std::size_t)>;
 
     [[nodiscard]] virtual MatvecFn bind_cpu() const {
-        return [this](const Complex* in, Complex* out, std::size_t n) {
-            this->apply(in, out, n);
-        };
+        return [this](const Complex* in, Complex* out, std::size_t n) { this->apply(in, out, n); };
     }
     [[nodiscard]] virtual MatvecFn bind_cuda() const {
         throw ed::DeviceUnsupported(description() + " has no device kernel");
@@ -61,24 +59,21 @@ public:
     /// operator's representation (it answers from it).
     [[nodiscard]] virtual bool is_real() const { return false; }
     using RealMatvecFn = std::function<void(const double*, double*, std::size_t)>;
-    [[nodiscard]] virtual RealMatvecFn bind_cpu_real() const {
-        throw ed::Unsupported(description() + " is not real");
-    }
+    [[nodiscard]] virtual RealMatvecFn bind_cpu_real() const { throw ed::Unsupported(description() + " is not real"); }
 
     /// k vectors per call on the device: outs[i] = A ins[i] (device pointers, each of dim()).
     /// Operators whose device kernel can serve several vectors in one pass return it; the
     /// default (empty) means callers apply the vectors one at a time.
-    using MultiMatvecFn = std::function<void(const Complex* const* ins, Complex* const* outs,
-                                             std::size_t n, std::size_t k)>;
+    using MultiMatvecFn =
+        std::function<void(const Complex* const* ins, Complex* const* outs, std::size_t n, std::size_t k)>;
     [[nodiscard]] virtual MultiMatvecFn bind_cuda_multi() const { return {}; }
 
     /// The apply on vectors of a Backend: bind<CpuBackend>() is bind_cpu(), bind<CudaBackend>()
     /// bind_cuda(), bind<BasicCpuBackend<double>>() bind_cpu_real().
     template <typename Backend>
-    using BoundFn = std::function<void(const typename Backend::scalar_type*, typename Backend::scalar_type*,
-                                       std::size_t)>;
-    template <typename Backend>
-    [[nodiscard]] BoundFn<Backend> bind() const;
+    using BoundFn =
+        std::function<void(const typename Backend::scalar_type*, typename Backend::scalar_type*, std::size_t)>;
+    template <typename Backend> [[nodiscard]] BoundFn<Backend> bind() const;
 };
 
 }  // namespace ed
@@ -93,19 +88,14 @@ public:
 
 namespace ed {
 
-template <>
-inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CpuBackend>() const {
-    return bind_cpu();
-}
+template <> inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CpuBackend>() const { return bind_cpu(); }
 
-template <>
-inline LinearOperator::RealMatvecFn LinearOperator::bind<ed::matvec::BasicCpuBackend<double>>() const {
+template <> inline LinearOperator::RealMatvecFn LinearOperator::bind<ed::matvec::BasicCpuBackend<double>>() const {
     return bind_cpu_real();
 }
 
 #ifdef WITH_CUDA
-template <>
-inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CudaBackend>() const {
+template <> inline LinearOperator::MatvecFn LinearOperator::bind<ed::matvec::CudaBackend>() const {
     return bind_cuda();
 }
 #endif

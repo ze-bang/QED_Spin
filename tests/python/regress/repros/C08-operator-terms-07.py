@@ -5,6 +5,7 @@
 field is std::vector<std::pair<int,int>>, so the documented recipe raises TypeError.
 Test: run every `spec.<field> = <value>` assignment of the docstring's example on an OperatorSpec
 (restated after P2.1 replaced the pair fields; the check is that the documented recipe runs)."""
+
 import re
 
 import qed

@@ -9,6 +9,7 @@ the qed.* path (block operators hard-code is_hermitian() == true).
 Model: N=6 Heisenberg ring plus a 'DM term with a sign error': 0.3i S+_i S-_j + 0.3i S-_i S+_j
 (the h.c. of the first term should carry -0.3i). The dense numpy matrix is non-Hermitian with
 complex eigenvalues."""
+
 import numpy as np
 import qed
 
@@ -20,18 +21,22 @@ H = qed.Operator(N)
 for i, j in bonds:
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, J)
     H.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 * J + 1j * D)
-    H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * J + 1j * D)   # wrong: should be 0.5J - iD
+    H.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 * J + 1j * D)  # wrong: should be 0.5J - iD
 
 # Independent dense reference (Kronecker products, basis up=0, down=1).
 sz = np.diag([0.5, -0.5]).astype(complex)
 sp = np.array([[0, 1], [0, 0]], complex)
 sm = sp.T.copy()
+
+
 def site(op, k):
     m = np.array([[1.0 + 0j]])
     for s in range(N):
         m = np.kron(m, op if s == k else np.eye(2))
     return m
-Hd = np.zeros((2 ** N, 2 ** N), complex)
+
+
+Hd = np.zeros((2**N, 2**N), complex)
 for i, j in bonds:
     Hd += J * site(sz, i) @ site(sz, j)
     Hd += (0.5 * J + 1j * D) * site(sp, i) @ site(sm, j)
@@ -71,7 +76,10 @@ if ("none", "spectrum") in results and ("auto", "spectrum") in results:
 if max_imag < 1e-6:
     print("REPRO: INCONCLUSIVE dense H has no complex eigenvalues; test model is not decisive")
 elif silent:
-    print(f"REPRO: CONFIRMED non-Hermitian H (max|Im eig|={max_imag:.3g}) accepted silently by: "
-          + ", ".join(silent) + (f"; none-vs-auto spectrum differ by {diff:.3g}" if diff is not None else ""))
+    print(
+        f"REPRO: CONFIRMED non-Hermitian H (max|Im eig|={max_imag:.3g}) accepted silently by: "
+        + ", ".join(silent)
+        + (f"; none-vs-auto spectrum differ by {diff:.3g}" if diff is not None else "")
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED every verb refused the non-Hermitian H (max|Im eig|={max_imag:.3g})")

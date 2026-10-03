@@ -10,6 +10,7 @@ spin up / down) and go in through ``Operator.product`` after them.
 Every bond method checks the whole call before it adds anything, so a refused call leaves the
 builder unchanged.
 """
+
 from __future__ import annotations
 
 import cmath
@@ -38,7 +39,7 @@ def _entries(items, n: int, what: str) -> list:
     """A list of length-n sequences (tuples or lists) from an iterable."""
     out = []
     for e in items:
-        t = tuple(e)          # TypeError for an entry that is not a sequence
+        t = tuple(e)  # TypeError for an entry that is not a sequence
         if len(t) != n:
             raise ValueError(f"{what} entries must be length-{n} tuples")
         out.append(t)
@@ -85,13 +86,15 @@ class HamiltonianBuilder:
         if n <= 0:
             raise ValueError("HamiltonianBuilder: num_sites must be > 0")
         if n >= 64:
-            raise ValueError("HamiltonianBuilder: num_sites >= 64 is not supported by the "
-                             "underlying matrix-free Operator (1ULL << num_sites overflow)")
+            raise ValueError(
+                "HamiltonianBuilder: num_sites >= 64 is not supported by the "
+                "underlying matrix-free Operator (1ULL << num_sites overflow)"
+            )
         self._n = n
-        self._one: list = []     # (op, site, coeff)
-        self._two: list = []     # (op_i, site_i, op_j, site_j, coeff)
-        self._three: list = []   # (op_i, site_i, op_j, site_j, op_k, site_k, coeff)
-        self._long: list = []    # (ops string over +-zud, sites, coeff): four-site products
+        self._one: list = []  # (op, site, coeff)
+        self._two: list = []  # (op_i, site_i, op_j, site_j, coeff)
+        self._three: list = []  # (op_i, site_i, op_j, site_j, op_k, site_k, coeff)
+        self._long: list = []  # (ops string over +-zud, sites, coeff): four-site products
 
     # -- low-level records ----------------------------------------------------------------------
     @staticmethod
@@ -214,10 +217,10 @@ class HamiltonianBuilder:
         for (i, j), a in zip(pairs, axes):
             if i == j:
                 continue
-            if a == 0:     # K Sx Sx = K/4 (S+S+ + S+S- + S-S+ + S-S-)
+            if a == 0:  # K Sx Sx = K/4 (S+S+ + S+S- + S-S+ + S-S-)
                 for oi, oj in ((_SP, _SP), (_SP, _SM), (_SM, _SP), (_SM, _SM)):
                     self._two_raw(oi, i, oj, j, kq)
-            elif a == 1:   # K Sy Sy = -K/4 (S+S+ - S+S- - S-S+ + S-S-)
+            elif a == 1:  # K Sy Sy = -K/4 (S+S+ - S+S- - S-S+ + S-S-)
                 self._two_raw(_SP, i, _SP, j, kqn)
                 self._two_raw(_SP, i, _SM, j, kq)
                 self._two_raw(_SM, i, _SP, j, kq)
@@ -237,17 +240,17 @@ class HamiltonianBuilder:
         for (i, j), (Dx, Dy, Dz) in zip(pairs, Ds):
             if i == j or (Dx == 0.0 and Dy == 0.0 and Dz == 0.0):
                 continue
-            if Dx != 0.0:      # Dx (Sy_i Sz_j - Sz_i Sy_j)
+            if Dx != 0.0:  # Dx (Sy_i Sz_j - Sz_i Sy_j)
                 self._two_raw(_SP, i, _SZ, j, _scale(Dx, inv_2i))
                 self._two_raw(_SM, i, _SZ, j, _scale(-Dx, inv_2i))
                 self._two_raw(_SZ, i, _SP, j, _scale(-Dx, inv_2i))
                 self._two_raw(_SZ, i, _SM, j, _scale(Dx, inv_2i))
-            if Dy != 0.0:      # Dy (Sz_i Sx_j - Sx_i Sz_j)
+            if Dy != 0.0:  # Dy (Sz_i Sx_j - Sx_i Sz_j)
                 self._two_raw(_SZ, i, _SP, j, complex(Dy * 0.5, 0.0))
                 self._two_raw(_SZ, i, _SM, j, complex(Dy * 0.5, 0.0))
                 self._two_raw(_SP, i, _SZ, j, complex(-Dy * 0.5, 0.0))
                 self._two_raw(_SM, i, _SZ, j, complex(-Dy * 0.5, 0.0))
-            if Dz != 0.0:      # Dz (Sx_i Sy_j - Sy_i Sx_j)
+            if Dz != 0.0:  # Dz (Sx_i Sy_j - Sy_i Sx_j)
                 self._two_raw(_SP, i, _SP, j, _scale(Dz, inv_4i))
                 self._two_raw(_SP, i, _SM, j, _scale(-Dz, inv_4i))
                 self._two_raw(_SM, i, _SP, j, _scale(Dz, inv_4i))
@@ -316,11 +319,11 @@ class HamiltonianBuilder:
             self._check("ring_exchange", *p)
             if len(set(p)) != 4:
                 raise ValueError(f"HamiltonianBuilder::ring_exchange: plaquette {p} repeats a site")
-        one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}   # (new, old), 1 = up
+        one = {(1, 1): "u", (0, 0): "d", (1, 0): "+", (0, 1): "-"}  # (new, old), 1 = up
         for p in plaqs:
             for s in range(16):
                 old = [(s >> k) & 1 for k in range(4)]
-                new = [old[(k - 1) % 4] for k in range(4)]    # site k takes the spin of site k - 1
+                new = [old[(k - 1) % 4] for k in range(4)]  # site k takes the spin of site k - 1
                 self._long.append(("".join(one[(n, o)] for n, o in zip(new, old)), p, complex(K, 0.0)))
                 self._long.append(("".join(one[(o, n)] for n, o in zip(new, old)), p, complex(K, 0.0)))
         return self
@@ -362,12 +365,17 @@ class HamiltonianBuilder:
             return complex(0.0, 0.0)
         gamma = cmath.exp(complex(0.0, 2.0 * math.pi / 3.0))
         g2 = gamma * gamma
-        rows = {0: (complex(1, 0), gamma, g2), 1: (complex(1, 0), g2, gamma),
-                2: (gamma, g2, complex(1, 0)), 3: (g2, gamma, complex(1, 0))}
+        rows = {
+            0: (complex(1, 0), gamma, g2),
+            1: (complex(1, 0), g2, gamma),
+            2: (gamma, g2, complex(1, 0)),
+            3: (g2, gamma, complex(1, 0)),
+        }
         return rows[a][b - 1 if b > a else b]
 
-    def pyrochlore_non_kramers(self, lattice, Jxx: float, Jyy: float, Jzz: float,
-                               include_isotropic: bool = True) -> "HamiltonianBuilder":
+    def pyrochlore_non_kramers(
+        self, lattice, Jxx: float, Jyy: float, Jzz: float, include_isotropic: bool = True
+    ) -> "HamiltonianBuilder":
         """The non-Kramers pyrochlore model on ``lattice``'s nearest-neighbour bonds: the XXZ part
         (Jxx + Jyy)/2, Jzz (when ``include_isotropic``) plus J_pmpm = (Jxx - Jyy)/4 times the
         sublattice phases on S-S- and their conjugates on S+S+."""
@@ -378,12 +386,15 @@ class HamiltonianBuilder:
             raise ValueError("pyrochlore_non_kramers: lattice/builder num_sites mismatch")
         sub = list(lattice.sublattice)
         if len(sub) != lattice.num_sites:
-            raise InvalidRequest(f"pyrochlore_non_kramers: the lattice has {len(sub)} sublattice labels "
-                                 f"for {lattice.num_sites} sites")
+            raise InvalidRequest(
+                f"pyrochlore_non_kramers: the lattice has {len(sub)} sublattice labels "
+                f"for {lattice.num_sites} sites"
+            )
         for u in sub:
             if u < 0 or u > 3:
-                raise InvalidRequest(f"pyrochlore_non_kramers: sublattice label {u} is not one of the "
-                                     "pyrochlore's 0..3")
+                raise InvalidRequest(
+                    f"pyrochlore_non_kramers: sublattice label {u} is not one of the " "pyrochlore's 0..3"
+                )
         nn = [(int(i), int(j)) for i, j in lattice.nn_pairs()]
         for i, j in nn:
             if i >= lattice.num_sites or j >= lattice.num_sites:
@@ -392,10 +403,13 @@ class HamiltonianBuilder:
                 raise InvalidRequest(
                     f"pyrochlore_non_kramers: bond ({i}, {j}) joins two sites of sublattice {sub[i]}; the "
                     "bond phases need the pyrochlore labels (lattice.pyrochlore sets them, "
-                    "from_neighbor_lists takes them as sublattice=)")
+                    "from_neighbor_lists takes them as sublattice=)"
+                )
         if not include_isotropic and Jzz != 0.0:
-            raise InvalidRequest("pyrochlore_non_kramers: Jzz enters only the XXZ part, which "
-                                 "include_isotropic=False leaves out; pass Jzz=0")
+            raise InvalidRequest(
+                "pyrochlore_non_kramers: Jzz enters only the XXZ part, which "
+                "include_isotropic=False leaves out; pass Jzz=0"
+            )
         if include_isotropic:
             self.xxz(nn, (Jxx + Jyy) / 2.0, Jzz)
         jpmpm = (Jxx - Jyy) / 4.0
@@ -457,4 +471,3 @@ class HamiltonianBuilder:
 
     def __len__(self) -> int:
         return len(self._one) + len(self._two) + len(self._three) + len(self._long)
-

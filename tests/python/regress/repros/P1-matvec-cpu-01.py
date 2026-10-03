@@ -26,6 +26,7 @@ CONFIRMED when tE > 2.5 tA; NOT_REPRODUCED when tE <= 2.5 tA.
 RESTATED 2026-10-02 (P6.7 gate 39d45991, cpu variant 62612918): the blocks take a few seconds, so one
 call's hiccup read 9.4x where reruns read 0.4-1.3x. tA and tE are each the fastest of three calls.
 """
+
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ L, N_UP = 5, 12
 def worker(cfg):
     import qed
     from support.triangular import TriangularTorus
+
     lat = TriangularTorus(((L, 0), (0, L)))
     N = lat.N
     b = qed.input.HamiltonianBuilder(N)
@@ -52,21 +54,38 @@ def worker(cfg):
     spec.only_momentum = [[(idx[tuple(t1)], 1 + 0j), (idx[tuple(t2)], 1 + 0j)]]
     spec.only_irrep = list(cfg["irreps"])
     from qed._verbs import _device
+
     t0 = time.perf_counter()
-    raw = qed._core.sectors.eigs(H, spec, k=1, vectors=False, dense_max_dim=64,
-                                 allow_partial=True, device=_device.resolve("cpu"), prune=False,
-                                 window=float(cfg["window"]))
+    raw = qed._core.sectors.eigs(
+        H,
+        spec,
+        k=1,
+        vectors=False,
+        dense_max_dim=64,
+        allow_partial=True,
+        device=_device.resolve("cpu"),
+        prune=False,
+        window=float(cfg["window"]),
+    )
     dt = time.perf_counter() - t0
-    levels = [dict(E=float(l.energy), k0=int(l.k0), irrep=int(l.irrep), irrep_dim=int(l.irrep_dim),
-                   block_dim=int(l.block_dim)) for l in raw.levels]
+    levels = [
+        dict(
+            E=float(l.energy), k0=int(l.k0), irrep=int(l.irrep), irrep_dim=int(l.irrep_dim), block_dim=int(l.block_dim)
+        )
+        for l in raw.levels
+    ]
     print("RESULT " + json.dumps(dict(t=dt, levels=levels)), flush=True)
 
 
 def run(irreps, window):
     env = dict(os.environ, ED_SYM_PROFILE="1")
-    p = subprocess.run([sys.executable, os.path.abspath(__file__), "--worker",
-                        json.dumps(dict(irreps=irreps, window=window))],
-                       env=env, capture_output=True, text=True, timeout=280)
+    p = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "--worker", json.dumps(dict(irreps=irreps, window=window))],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=280,
+    )
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT "):
@@ -97,8 +116,10 @@ def main():
     print("discovery levels:", disc["levels"])
     print(f"tA={rA['t']:.2f}s tE={rE['t']:.2f}s tAE={rAE['t']:.2f}s")
     ratio = rE["t"] / max(rA["t"], 1e-9)
-    key = (f"A block dim {a['block_dim']} E block dim {e['block_dim']} tE/tA = {ratio:.1f}x (target <= 2.5x) "
-           f"declined_all_irreps={declined} |dE_A|={abs(eA_1 - eA_2):.1e}")
+    key = (
+        f"A block dim {a['block_dim']} E block dim {e['block_dim']} tE/tA = {ratio:.1f}x (target <= 2.5x) "
+        f"declined_all_irreps={declined} |dE_A|={abs(eA_1 - eA_2):.1e}"
+    )
     if abs(eA_1 - eA_2) > 1e-8:
         print(f"REPRO: INCONCLUSIVE the A energy differs between runs {key}")
     elif ratio > 2.5:

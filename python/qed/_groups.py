@@ -14,6 +14,7 @@ field-only H) uses a maximal abelian subgroup A and its normaliser G' = N_G(A) i
 
 Permutations follow :mod:`qed._perm` (images; compose(a, b)[i] = a[b[i]]).
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -23,10 +24,18 @@ import numpy as np
 from ._perm import CLOSURE_CAP, close_group, compose, inverse, order
 from .errors import InvalidRequest
 
-__all__ = ["close_group", "normal_abelian_split", "spatial_split", "split_generator_set",
-           "split_nonabelian", "abelian_generators", "maximal_abelian_subgroup", "normaliser_split"]
+__all__ = [
+    "close_group",
+    "normal_abelian_split",
+    "spatial_split",
+    "split_generator_set",
+    "split_nonabelian",
+    "abelian_generators",
+    "maximal_abelian_subgroup",
+    "normaliser_split",
+]
 
-_CO_GROUP_CAP = 128         # |G'/A|: Oh (48) fits, and so do the accidental groups of small tori
+_CO_GROUP_CAP = 128  # |G'/A|: Oh (48) fits, and so do the accidental groups of small tori
 
 
 def _rows(perms) -> list[tuple[int, ...]]:
@@ -81,8 +90,7 @@ class _Enumerated:
 
     def key(self, members: np.ndarray) -> tuple:
         """Preference among subgroups: larger, then more fixed-point-free elements, then higher orders."""
-        return (len(members), int(self.fpf[members].sum()),
-                tuple(sorted(self.orders[members].tolist(), reverse=True)))
+        return (len(members), int(self.fpf[members].sum()), tuple(sorted(self.orders[members].tolist(), reverse=True)))
 
 
 def _closure(E: _Enumerated, gens: list[int]) -> np.ndarray:
@@ -145,7 +153,7 @@ def _normal_abelian(E: _Enumerated) -> np.ndarray:
     m = len(E)
     gens = _generating_set(E)
     if all(E.commute(a, b) for a in gens for b in gens):
-        return np.arange(m)                                # E is abelian
+        return np.arange(m)  # E is abelian
     label, classes = _conjugacy_classes(E, gens)
     nC = len(classes)
     # K[C, D]: every element of class C commutes with every element of class D. It suffices that one
@@ -159,8 +167,7 @@ def _normal_abelian(E: _Enumerated) -> np.ndarray:
         K[C] = np.logical_and.reduceat(commutes[by_class], starts)
     self_commuting = np.diag(K).copy()
     rep = [int(c[0]) for c in classes]
-    priority = sorted(range(nC), key=lambda C: (not E.fpf[rep[C]], -int(E.orders[rep[C]]),
-                                               -len(classes[C]), C))
+    priority = sorted(range(nC), key=lambda C: (not E.fpf[rep[C]], -int(E.orders[rep[C]]), -len(classes[C]), C))
     id_class = int(label[0])
     # One greedy pass per seed class. The union U of the classes it keeps is a group: for a, b in U
     # the class of ab consists of products of elements of U, so it commutes with all of U and with
@@ -191,7 +198,7 @@ def _maximal_abelian(E: _Enumerated, seed: Optional[int] = None) -> np.ndarray:
     gens: list[int] = []
     inside = np.zeros(len(E), dtype=bool)
     inside[0] = True
-    commuting = np.ones(len(E), dtype=bool)          # commutes with every generator so far
+    commuting = np.ones(len(E), dtype=bool)  # commutes with every generator so far
     for c in ([seed] if seed is not None else []) + order:
         if inside[c] or not commuting[c]:
             continue
@@ -210,7 +217,7 @@ def _normalizer(E: _Enumerated, A: np.ndarray) -> np.ndarray:
     inverses = np.argsort(E.P, axis=1)
     for g in _generating_set(sub):
         a = sub.P[g]
-        rows = np.take_along_axis(E.P, a[inverses], axis=1)       # g o a o g^-1, one row per g
+        rows = np.take_along_axis(E.P, a[inverses], axis=1)  # g o a o g^-1, one row per g
         keep &= in_a[E.lookup(rows)]
     return np.flatnonzero(keep)
 
@@ -227,7 +234,7 @@ def _cosets(E: _Enumerated, A: np.ndarray, within: np.ndarray) -> list[int]:
         if covered[i]:
             continue
         reps.append(int(i))
-        covered[E.lookup(E.P[i][A_rows])] = True              # the coset A . g_i
+        covered[E.lookup(E.P[i][A_rows])] = True  # the coset A . g_i
     return reps
 
 
@@ -240,8 +247,9 @@ def _checked(E: _Enumerated, A: np.ndarray, within: np.ndarray, residues: list[i
     for r in residues:
         s = E.P[r]
         assert in_a[E.lookup(s[A_rows[:, np.argsort(s)]])].all(), "group split: A is not normal"
-    assert len(within) % len(A) == 0 and len(residues) == len(within) // len(A) - 1, \
-        "group split: the cosets do not tile the group"
+    assert (
+        len(within) % len(A) == 0 and len(residues) == len(within) // len(A) - 1
+    ), "group split: the cosets do not tile the group"
     return [list(E.elems[i]) for i in A], [list(E.elems[i]) for i in residues]
 
 
@@ -280,9 +288,11 @@ def spatial_split(G, cap: int = _CO_GROUP_CAP):
         within = N if len(N) // len(A_c) <= cap else A_c
         options.append(((len(within), E.key(A_c)), A_c, within))
     _, A_use, within = max(options, key=lambda o: o[0])
-    msg = (f"the spatial group has {len(E)} elements, but its largest normal abelian subgroup only "
-           f"{len(A)}: a co-group of {len(E) // len(A)} exceeds {cap}. Using a subgroup of "
-           f"{len(within)} elements (abelian part {len(A_use)}).")
+    msg = (
+        f"the spatial group has {len(E)} elements, but its largest normal abelian subgroup only "
+        f"{len(A)}: a co-group of {len(E) // len(A)} exceeds {cap}. Using a subgroup of "
+        f"{len(within)} elements (abelian part {len(A_use)})."
+    )
     return (*_checked(E, A_use, within, _cosets(E, A_use, within)), [("co_group_capped", msg)])
 
 
@@ -339,9 +349,11 @@ def split_generator_set(generators, star_perms, n_sites=None) -> tuple[list[list
             continue
         p_inv = inverse(p)
         if any(compose(p, compose(a, p_inv)) not in a_set for a in gens):
-            raise InvalidRequest(f"the residue {list(p)} does not normalise the abelian part: the abelian "
-                                 "part must be a normal subgroup (pass the permutations as one list and "
-                                 "qed.Symmetry chooses one)")
+            raise InvalidRequest(
+                f"the residue {list(p)} does not normalise the abelian part: the abelian "
+                "part must be a normal subgroup (pass the permutations as one list and "
+                "qed.Symmetry chooses one)"
+            )
         residues.append(list(p))
         covered.update(compose(p, a) for a in A)
     return [list(a) for a in A], residues

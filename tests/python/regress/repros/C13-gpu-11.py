@@ -11,6 +11,7 @@ Model: triangular Heisenberg tori with 12 and 16 sites, translations + full C6v 
 irrep selected (so the Gamma star takes the group-sector path, |G| = 2*12*12 = 288 or
 2*16*12 = 384). <v|H|v> via matrix_element is compared with the level energy and, for 12 sites,
 with an independent dense Sz = 0 spectrum."""
+
 import types
 import numpy as np
 import qed
@@ -46,8 +47,7 @@ for name in ("12", "16"):
     bonds = sorted({(min(i, j), max(i, j)) for (i, j, _) in lat.bonds()})
     H = build_H(N, bonds)
     pg = [list(p) for _, p in lat.point_group()]
-    spatial = types.SimpleNamespace(abelian=[list(lat.translation(1, 0)), list(lat.translation(0, 1))],
-                                    residues=pg)
+    spatial = types.SimpleNamespace(abelian=[list(lat.translation(1, 0)), list(lat.translation(0, 1))], residues=pg)
     base = qed.Symmetry(spatial=spatial, sz=N // 2, spin_flip="auto", time_reversal="off")
     A, res = base.groups(H)
     if len(res) == 0:

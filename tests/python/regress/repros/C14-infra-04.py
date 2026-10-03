@@ -5,6 +5,7 @@
 'on' for any value other than '' and '0', so ED_ENV_STRICT=false (a false word for every
 typed ed::env flag) switches strict mode ON and an undeclared ED_* variable makes
 `import qed` raise RuntimeError. Control: ED_ENV_STRICT=0 only warns."""
+
 import os
 import subprocess
 import sys
@@ -23,7 +24,9 @@ def imp(strict):
 r0 = imp("0")
 rf = imp("false")
 print("strict=0    rc", r0.returncode, "imported" in r0.stdout)
-print("strict=false rc", rf.returncode, "imported" in rf.stdout, rf.stderr.strip().splitlines()[-1:] if rf.stderr else "")
+print(
+    "strict=false rc", rf.returncode, "imported" in rf.stdout, rf.stderr.strip().splitlines()[-1:] if rf.stderr else ""
+)
 if r0.returncode != 0:
     print(f"REPRO: INCONCLUSIVE control import with ED_ENV_STRICT=0 failed rc={r0.returncode}")
 elif rf.returncode != 0 and "RuntimeError" in rf.stderr:

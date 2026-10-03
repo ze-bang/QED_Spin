@@ -1,5 +1,6 @@
 """Group closure and the split of a spatial group into a normal abelian part and its cosets,
 behind Symmetry(spatial=...), and what the engine does with that split."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -17,8 +18,9 @@ from qed._perm import inverse as _inverse
 
 from grid.models import dense, triangular
 
-needs_pynauty = pytest.mark.skipif(importlib.util.find_spec("pynauty") is None,
-                                   reason="the automorphism search needs pynauty")
+needs_pynauty = pytest.mark.skipif(
+    importlib.util.find_spec("pynauty") is None, reason="the automorphism search needs pynauty"
+)
 
 
 def _check_split(G, A, residues):
@@ -62,7 +64,7 @@ def _heisenberg(n, bonds):
 def test_close_group_is_the_generated_group():
     t, r = _ring_generators()
     assert len(qed.symmetry.close_group([t])) == 6
-    assert len(qed.symmetry.close_group([t, r])) == 12          # D6
+    assert len(qed.symmetry.close_group([t, r])) == 12  # D6
 
 
 def test_close_group_declines_above_the_cap():
@@ -86,7 +88,7 @@ def test_split_nonabelian_keeps_its_contract():
     split = qed.symmetry.split_nonabelian([t, r])
     assert not isinstance(split, str), split
     _check_split(close_group([t, r]), *split)
-    assert isinstance(qed.symmetry.split_nonabelian([t]), str)          # abelian: nothing to project
+    assert isinstance(qed.symmetry.split_nonabelian([t]), str)  # abelian: nothing to project
 
 
 def test_triangular_space_group_keeps_the_translations():
@@ -161,7 +163,7 @@ def test_explicit_split_must_be_normal():
     with pytest.raises(qed.errors.InvalidRequest, match="does not normalise"):
         split_generator_set([t], [swap])
     A, residues = split_generator_set([t], [r, _compose(tuple(t), tuple(r))])
-    assert len(A) == 4 and len(residues) == 1                    # one coset representative kept
+    assert len(A) == 4 and len(residues) == 1  # one coset representative kept
 
 
 def test_engine_refuses_a_residue_that_does_not_normalise():
@@ -177,9 +179,10 @@ def test_normaliser_split_keeps_what_normalises_the_translations():
     # The 3x3 triangular torus is K_{3,3,3} (parts: x - y mod 3), with 1296 automorphisms in
     # which the translations are not normal. Their normaliser is the 108-element space group.
     from qed._groups import normaliser_split
+
     T1, T2, C6, sigma = _triangular_space_group(3)
     swap = lambda a, b: [b if i == a else a if i == b else i for i in range(9)]  # noqa: E731
-    G = close_group([T1, T2, C6, sigma, swap(0, 4), swap(4, 8)])           # sites 0, 4, 8: part 0
+    G = close_group([T1, T2, C6, sigma, swap(0, 4), swap(4, 8)])  # sites 0, 4, 8: part 0
     assert len(G) == 1296
     T = close_group([T1, T2])
     A, residues = normaliser_split(G, T)
@@ -192,15 +195,16 @@ def test_permutations_may_come_as_numpy_arrays():
     t, r = _ring_generators()
     assert qed.symmetry.split_nonabelian(np.array([t, r])) == qed.symmetry.split_nonabelian([t, r])
     from types import SimpleNamespace
+
     H = _heisenberg(6, [(i, (i + 1) % 6) for i in range(6)])
-    A, residues = qed.Symmetry(spatial=SimpleNamespace(abelian=np.array([t]),
-                                                       residues=np.array([r]))).groups(H)
+    A, residues = qed.Symmetry(spatial=SimpleNamespace(abelian=np.array([t]), residues=np.array([r]))).groups(H)
     assert len(A) == 6 and len(residues) == 1
 
 
 def test_without_the_point_group_residues_are_not_checked():
     # The residue does not normalise the translations; without the point group it is not used.
     from types import SimpleNamespace
+
     t, _ = _ring_generators(4)
     H = _heisenberg(4, [(i, (i + 1) % 4) for i in range(4)])
     gs = SimpleNamespace(abelian=[t], residues=[[1, 0, 2, 3]])
@@ -213,6 +217,7 @@ def test_without_the_point_group_residues_are_not_checked():
 # ---------------------------------------------------------------------------
 # What the engine does with the split (audit C01-pyapi-03, F-C-2, C02-discovery-06)
 # ---------------------------------------------------------------------------
+
 
 def _basis_states(n, n_up):
     return [s for s in range(1 << n) if n_up is None or bin(s).count("1") == n_up]
@@ -270,8 +275,11 @@ def test_k4_vectors_and_labels_under_the_full_permutation_group():
     _check_vectors(r, Hd, n_up)
     assert _check_labels(r, n, n_up) > 0
     # selecting by a character a level reports returns that level
-    i = next(i for i, L in enumerate(r.levels) if len(r.irrep_characters(i)) > 1
-             and abs(r.irrep_characters(i)[tuple(range(n))] - 1) < 1e-9)
+    i = next(
+        i
+        for i, L in enumerate(r.levels)
+        if len(r.irrep_characters(i)) > 1 and abs(r.irrep_characters(i)[tuple(range(n))] - 1) < 1e-9
+    )
     R, chi = next((R, c) for R, c in r.irrep_characters(i).items() if R != tuple(range(n)))
     sel = qed.spectrum(H, sym=sym.select(irrep_character={R: chi}))
     assert np.abs(np.asarray(sel.energies) - r.levels[i].energy).min() < 1e-9
@@ -279,6 +287,7 @@ def test_k4_vectors_and_labels_under_the_full_permutation_group():
 
 def _k4_terms(bonds):
     from grid.models import dot
+
     return [t for i, j in bonds for t in dot(i, j)]
 
 
@@ -286,7 +295,7 @@ def _k4_terms(bonds):
 def test_tri9_default_symmetry_vectors_and_labels():
     m = triangular(3)
     H = m.operator()
-    r = qed.eigs(H, 8, vectors=True)            # Symmetry.auto(): the 1296-element group
+    r = qed.eigs(H, 8, vectors=True)  # Symmetry.auto(): the 1296-element group
     _check_vectors(r, dense(m.terms, m.N))
     assert _check_labels(r, m.N) > 0
 
@@ -316,8 +325,17 @@ def test_labels_name_the_callers_residues_when_the_engine_skips_one():
     b = qed._core.sectors.eigs(H, shifted, k=6)
 
     def labels(res, s):
-        return sorted((round(L.energy, 9),
-                       tuple(sorted((tuple(s.residues[e]) if e >= 0 else (), round(c.real, 9), round(c.imag, 9))
-                                    for e, c in L.irrep_characters)))
-                      for L in res.levels)
+        return sorted(
+            (
+                round(L.energy, 9),
+                tuple(
+                    sorted(
+                        (tuple(s.residues[e]) if e >= 0 else (), round(c.real, 9), round(c.imag, 9))
+                        for e, c in L.irrep_characters
+                    )
+                ),
+            )
+            for L in res.levels
+        )
+
     assert labels(a, spec) == labels(b, shifted)

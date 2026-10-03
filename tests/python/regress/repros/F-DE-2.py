@@ -9,6 +9,7 @@ the conjugate partner only when tr_folded is set, so a TR-odd observable (scalar
 current) returns <psi_k|O|psi_k> != 0 for a level whose multiplet trace Tr(P_E O) is exactly 0.
 Shape of fuzzer cases 204-47 / 112-54 / 116-22: 6-site Heisenberg ring, translations only,
 total_spin=0, three-body scalar chirality S_5.(S_0 x S_1)."""
+
 import signal
 import sys
 
@@ -34,7 +35,7 @@ T_perm = [(i + 1) % N for i in range(N)]
 dim = 1 << N
 
 
-def op1(kind, i):   # library convention: bit set = spin down, S+ clears a set bit
+def op1(kind, i):  # library convention: bit set = spin down, S+ clears a set bit
     M = np.zeros((dim, dim), complex)
     for s in range(dim):
         bit = (s >> i) & 1
@@ -63,8 +64,14 @@ a, b, c = 5, 0, 1
 comp = {"x": {"+": 0.5, "-": 0.5}, "y": {"+": -0.5j, "-": 0.5j}, "z": {"z": 1.0}}
 code = {"+": qed.OP_SPLUS, "-": qed.OP_SMINUS, "z": qed.OP_SZ}
 dense1 = {"+": Sp, "-": Sm, "z": Sz}
-eps = {("x", "y", "z"): 1, ("y", "z", "x"): 1, ("z", "x", "y"): 1,
-       ("x", "z", "y"): -1, ("z", "y", "x"): -1, ("y", "x", "z"): -1}
+eps = {
+    ("x", "y", "z"): 1,
+    ("y", "z", "x"): 1,
+    ("z", "x", "y"): 1,
+    ("x", "z", "y"): -1,
+    ("z", "y", "x"): -1,
+    ("y", "x", "z"): -1,
+}
 terms = {}
 for (p, q, r), sgn in eps.items():
     for o1, c1 in comp[p].items():
@@ -106,13 +113,17 @@ for Ec in sorted(set(np.round(r.energies, 8))):
     ref = complex(dvals[sel].sum())
     star = [getattr(L, "star_size", "?") for L in r.levels if abs(L.energy - Ec) < 1e-6]
     tr = [getattr(L, "tr_folded", "?") for L in r.levels if abs(L.energy - Ec) < 1e-6]
-    print(f"E={Ec:.6f} mult={[m for m, _ in rows]} star={star} tr_folded={tr} sum mult*<chi>={got:.6g} "
-          f"Tr(P_E chi)={ref:.3g}")
+    print(
+        f"E={Ec:.6f} mult={[m for m, _ in rows]} star={star} tr_folded={tr} sum mult*<chi>={got:.6g} "
+        f"Tr(P_E chi)={ref:.3g}"
+    )
     if abs(got - ref) > 1e-8:
         bad.append(f"E={Ec:.4f}: {abs(got):.4g} vs {abs(ref):.1g}")
 if bad:
-    print("REPRO: CONFIRMED TR-folded stars: expect() of the TR-odd chirality misses the conjugate partner; "
-          + "; ".join(bad))
+    print(
+        "REPRO: CONFIRMED TR-folded stars: expect() of the TR-odd chirality misses the conjugate partner; "
+        + "; ".join(bad)
+    )
 else:
     print("REPRO: NOT_REPRODUCED every complete cluster's sum mult*<chi> equals Tr(P_E chi)")
 sys.exit(0)

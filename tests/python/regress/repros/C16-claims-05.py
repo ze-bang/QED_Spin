@@ -8,6 +8,7 @@ nothing in ThermalResult marking the restriction.
 
 Model: N=8 Heisenberg ring (conserves Sz), method='exact'. Reference numbers are the exact
 combinatorial limits ln C(8,4) and 8 ln 2."""
+
 import math
 
 import numpy as np
@@ -42,8 +43,12 @@ doc_promises = "present when H conserves Sz." in doc
 flagged = "restricted_ensemble" in [c for c, _ in one.diagnostics]
 print(f"doc promises M/chi whenever H conserves Sz: {doc_promises}; sz=4 diagnostics flag the restriction: {flagged}")
 if (none_missing and doc_promises) or (one_trivial and not flagged):
-    print(f"REPRO: CONFIRMED none_missing={none_missing} doc_promises={doc_promises} one_trivial={one_trivial} "
-          f"flagged={flagged}")
+    print(
+        f"REPRO: CONFIRMED none_missing={none_missing} doc_promises={doc_promises} one_trivial={one_trivial} "
+        f"flagged={flagged}"
+    )
 else:
-    print(f"REPRO: NOT_REPRODUCED documented (none gives M=None by the docs: {none_missing}); "
-          f"the one-sector run is flagged restricted_ensemble ({flagged})")
+    print(
+        f"REPRO: NOT_REPRODUCED documented (none gives M=None by the docs: {none_missing}); "
+        f"the one-sector run is flagged restricted_ensemble ({flagged})"
+    )

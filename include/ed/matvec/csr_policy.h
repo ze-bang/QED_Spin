@@ -22,7 +22,7 @@
 #include <ed/core/memory.h>
 
 #ifdef _OPENMP
-#  include <omp.h>
+#include <omp.h>
 #endif
 
 namespace ed::planner {
@@ -35,9 +35,9 @@ namespace ed::planner {
 ///                          then plain O(1)/nnz SpMV. Fast tier; +O(dim*nnz) mem.
 ///   * Auto              -- no override -> the default (reduced-CSR).
 enum class SymMatvecRepr : int {
-    Auto              = -1,
-    RepStream         =  0,
-    RepReducedCsr     =  1,
+    Auto = -1,
+    RepStream = 0,
+    RepReducedCsr = 1,
 };
 
 /// Resolve the EFFECTIVE strategy: the env knob is the manual escape hatch
@@ -47,8 +47,7 @@ enum class SymMatvecRepr : int {
 [[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
     static const int env_override = [] {
         if (const std::optional<bool> on = ed::env::tristate("ED_SYM_REDUCED_CSR"))
-            return static_cast<int>(*on ? SymMatvecRepr::RepReducedCsr
-                                        : SymMatvecRepr::RepStream);  // CSR-free rep walk
+            return static_cast<int>(*on ? SymMatvecRepr::RepReducedCsr : SymMatvecRepr::RepStream); // CSR-free rep walk
         return static_cast<int>(SymMatvecRepr::Auto);
     }();
     if (env_override != static_cast<int>(SymMatvecRepr::Auto)) return env_override;
@@ -114,8 +113,7 @@ enum class SymMatvecRepr : int {
 /// shared by every lane. The estimate is an UPPER BOUND: each off-diagonal term contributes at most
 /// one entry per source row. An over-budget sector falls back to the CSR-free walk on its own --
 /// frontier sectors (N=36 half filling: hundreds of GB) need no env var.
-[[nodiscard]] inline bool sector_csr_within_budget(
-        std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
+[[nodiscard]] inline bool sector_csr_within_budget(std::uint64_t dim, std::uint64_t terms_per_row) noexcept {
     // The CSR stores 32-bit column indices: a sector of 2^32 or more states takes the walk.
     if (dim >= (std::uint64_t{1} << 32)) return false;
     return csr_estimate_bytes(dim, terms_per_row) <= block_csr_budget_bytes();
@@ -143,4 +141,4 @@ private:
     std::atomic<std::uint64_t> left_;
 };
 
-}  // namespace ed::planner
+} // namespace ed::planner

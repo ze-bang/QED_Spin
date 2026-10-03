@@ -54,9 +54,8 @@ namespace ed::symmetry::gpu_mirror {
 namespace detail {
 inline void cuda_check(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("StreamingSymmetry GPU mirror: ") + what +
-            " failed: " + cudaGetErrorString(err));
+        throw std::runtime_error(std::string("StreamingSymmetry GPU mirror: ") + what
+                                 + " failed: " + cudaGetErrorString(err));
     }
 }
 }  // namespace detail
@@ -86,14 +85,16 @@ struct GpuSharedRankTable {
     const double set = ed::env::real("ED_GPU_SYM_CACHE_GIB", -1.0);   // -1: not set
     if (set >= 0.0) return set * GiB;
     std::size_t free_b = 0, total_b = 0;
-    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) { cudaGetLastError(); return cap_gib * GiB; }
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+        cudaGetLastError();
+        return cap_gib * GiB;
+    }
     return std::min(cap_gib * GiB, share * static_cast<double>(total_b));
 }
 
 // Build `make()`; when the device is out of memory, release the strong cache `keep` (what no
 // live operator holds is freed with it) and build once more.
-template <class Keep, class Make>
-auto build_or_evict(Keep& keep, Make&& make) {
+template <class Keep, class Make> auto build_or_evict(Keep& keep, Make&& make) {
     try {
         return make();
     } catch (const std::bad_alloc&) {                  // thrust::system::detail::bad_alloc
@@ -104,17 +105,14 @@ auto build_or_evict(Keep& keep, Make&& make) {
 }
 
 [[nodiscard]] inline std::shared_ptr<GpuSharedRankTable>
-acquire_gpu_shared_rank(
-    const std::shared_ptr<const ed::symmetry::SharedRankLookup>& srl)
-{
+acquire_gpu_shared_rank(const std::shared_ptr<const ed::symmetry::SharedRankLookup>& srl) {
     static std::mutex mtx;
     static std::map<std::uint64_t, std::weak_ptr<GpuSharedRankTable>> registry;
     // Keep-alive FIFO: per-sector GPU mirrors are transient (rebuilt per
     // solve), so a pure weak registry would re-upload the table between
     // consecutive sector solves. A run touches at most a couple of
     // (N, n_up) subspaces, so a tiny strong cache pins the recent tables.
-    static std::vector<std::pair<std::uint64_t,
-                                 std::shared_ptr<GpuSharedRankTable>>> keep;
+    static std::vector<std::pair<std::uint64_t, std::shared_ptr<GpuSharedRankTable>>> keep;
     // BYTE-aware eviction: a count cap would pin up to 4 x 36 GB at N >= 34
     // half filling -- device OOM the moment a job touches two subspaces.
     // ED_GPU_SYM_CACHE_GIB, else a quarter of the device's memory (at most 24 GiB), bounds
@@ -133,15 +131,14 @@ acquire_gpu_shared_rank(
     });
     if (ed::env::flag("ED_SYM_PROFILE", false)) {
         ED_LOG(Info,
-                     "[sym_profile] GPU shared rank table uploaded: "
-                     "%zu entries (N=%d, n_up=%d), co-owned by mirrors",
-                     srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
+               "[sym_profile] GPU shared rank table uploaded: "
+               "%zu entries (N=%d, n_up=%d), co-owned by mirrors",
+               srl->shared_of_rank.size(), srl->n_sites, srl->n_up);
     }
     slot = sp;
     keep.emplace_back(srl->uid, sp);
     auto bytes_of = [](const std::shared_ptr<GpuSharedRankTable>& t) {
-        return static_cast<double>(t->d_shared_of_rank.size())
-             * sizeof(std::int32_t);
+        return static_cast<double>(t->d_shared_of_rank.size()) * sizeof(std::int32_t);
     };
     double total = 0.0;
     for (const auto& kv : keep) total += bytes_of(kv.second);
@@ -155,117 +152,110 @@ acquire_gpu_shared_rank(
 // The device snapshot of one sector (no operator). Its policy (basis_view) is the row basis
 // of an operator acting into the sector and the column basis of one acting out of it.
 struct GpuSectorMirror {
-    thrust::device_vector<std::uint64_t>   d_reps;
-    thrust::device_vector<double>          d_inv_norms;
-    thrust::device_vector<int>             d_perms;
+    thrust::device_vector<std::uint64_t> d_reps;
+    thrust::device_vector<double> d_inv_norms;
+    thrust::device_vector<int> d_perms;
     thrust::device_vector<cuDoubleComplex> d_characters;
-    thrust::device_vector<std::uint64_t>   d_flips;   // flip masks
-    thrust::device_vector<std::uint64_t>   d_perm_lut; // byte-LUT fast path
-    int                                     perm_lut_bpw = 0;
+    thrust::device_vector<std::uint64_t> d_flips;   // flip masks
+    thrust::device_vector<std::uint64_t> d_perm_lut; // byte-LUT fast path
+    int perm_lut_bpw = 0;
     // Two-level lookup: shared table (co-owned) + per-sector remap.
-    std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
-    thrust::device_vector<std::int32_t>    d_local_of_shared;
+    std::shared_ptr<GpuSharedRankTable> shared_rank_tab;
+    thrust::device_vector<std::int32_t> d_local_of_shared;
     // State buckets over the sorted reps (DeviceRepSymmetryBasisPolicy::bucket_off), when neither
     // rank lookup is resident.
-    thrust::device_vector<std::uint32_t>   d_bucket_off;
-    std::uint64_t                          bucket_base  = 0;
-    std::uint64_t                          bucket_count = 0;
-    int                                    bucket_shift = 0;
+    thrust::device_vector<std::uint32_t> d_bucket_off;
+    std::uint64_t bucket_base = 0;
+    std::uint64_t bucket_count = 0;
+    int bucket_shift = 0;
     // The group's sublattice code (DeviceRepSymmetryBasisPolicy::slc), when it has one.
-    thrust::device_vector<std::uint64_t>   d_slc_to_key;
-    thrust::device_vector<std::uint16_t>   d_slc_lead;
-    thrust::device_vector<std::uint32_t>   d_slc_cand_off;
-    thrust::device_vector<std::uint16_t>   d_slc_cand;
-    int                                    slc_L = 0, slc_m = 0, slc_bpw = 0;
+    thrust::device_vector<std::uint64_t> d_slc_to_key;
+    thrust::device_vector<std::uint16_t> d_slc_lead;
+    thrust::device_vector<std::uint32_t> d_slc_cand_off;
+    thrust::device_vector<std::uint16_t> d_slc_cand;
+    int slc_L = 0, slc_m = 0, slc_bpw = 0;
 
-    int           group_size = 1;
-    int           n_sites    = 0;
-    int           n_up       = -1;
-    std::uint64_t dim        = 0;
+    int group_size = 1;
+    int n_sites = 0;
+    int n_up = -1;
+    std::uint64_t dim = 0;
 
     ed::matvec::basis::DeviceRepSymmetryBasisPolicy basis_view() const noexcept {
         ed::matvec::basis::DeviceRepSymmetryBasisPolicy v;
-        v.reps              = thrust::raw_pointer_cast(d_reps.data());
-        v.inv_norms         = thrust::raw_pointer_cast(d_inv_norms.data());
-        v.perms             = thrust::raw_pointer_cast(d_perms.data());
-        v.characters        = thrust::raw_pointer_cast(d_characters.data());
-        v.flips             = d_flips.empty()
-            ? nullptr : thrust::raw_pointer_cast(d_flips.data());
-        v.perm_lut          = d_perm_lut.empty()
-            ? nullptr : thrust::raw_pointer_cast(d_perm_lut.data());
-        v.perm_lut_bpw      = perm_lut_bpw;
+        v.reps = thrust::raw_pointer_cast(d_reps.data());
+        v.inv_norms = thrust::raw_pointer_cast(d_inv_norms.data());
+        v.perms = thrust::raw_pointer_cast(d_perms.data());
+        v.characters = thrust::raw_pointer_cast(d_characters.data());
+        v.flips = d_flips.empty() ? nullptr : thrust::raw_pointer_cast(d_flips.data());
+        v.perm_lut = d_perm_lut.empty() ? nullptr : thrust::raw_pointer_cast(d_perm_lut.data());
+        v.perm_lut_bpw = perm_lut_bpw;
         if (!d_bucket_off.empty()) {
-            v.bucket_off   = thrust::raw_pointer_cast(d_bucket_off.data());
-            v.bucket_base  = bucket_base;
+            v.bucket_off = thrust::raw_pointer_cast(d_bucket_off.data());
+            v.bucket_base = bucket_base;
             v.bucket_count = bucket_count;
             v.bucket_shift = bucket_shift;
         }
         if (!d_slc_to_key.empty())
-            v.slc = {thrust::raw_pointer_cast(d_slc_to_key.data()), thrust::raw_pointer_cast(d_slc_lead.data()),
-                     thrust::raw_pointer_cast(d_slc_cand_off.data()), thrust::raw_pointer_cast(d_slc_cand.data()),
-                     n_sites, slc_bpw, slc_L, slc_m};
+            v.slc = {thrust::raw_pointer_cast(d_slc_to_key.data()),
+                     thrust::raw_pointer_cast(d_slc_lead.data()),
+                     thrust::raw_pointer_cast(d_slc_cand_off.data()),
+                     thrust::raw_pointer_cast(d_slc_cand.data()),
+                     n_sites,
+                     slc_bpw,
+                     slc_L,
+                     slc_m};
         if (shared_rank_tab && !d_local_of_shared.empty()) {
-            v.shared_rank_of  = thrust::raw_pointer_cast(
-                shared_rank_tab->d_shared_of_rank.data());
-            v.local_of_shared = thrust::raw_pointer_cast(
-                d_local_of_shared.data());
+            v.shared_rank_of = thrust::raw_pointer_cast(shared_rank_tab->d_shared_of_rank.data());
+            v.local_of_shared = thrust::raw_pointer_cast(d_local_of_shared.data());
         }
-        v.dim_              = dim;
-        v.group_size        = group_size;
-        v.n_sites           = n_sites;
-        v.n_up              = n_up;
+        v.dim_ = dim;
+        v.group_size = group_size;
+        v.n_sites = n_sites;
+        v.n_up = n_up;
         return v;
     }
 };
 
 // An operator's row program on the device.
 struct GpuProgram {
-    thrust::device_vector<std::uint64_t>           d_group_flip, d_vsub_val, d_term_sign;
-    thrust::device_vector<int>                     d_group_setbits;
-    thrust::device_vector<std::uint32_t>           d_group_vbegin, d_vsub_tbegin;
+    thrust::device_vector<std::uint64_t> d_group_flip, d_vsub_val, d_term_sign;
+    thrust::device_vector<int> d_group_setbits;
+    thrust::device_vector<std::uint32_t> d_group_vbegin, d_vsub_tbegin;
     thrust::device_vector<thrust::complex<double>> d_term_coeff;
 
     explicit GpuProgram(const ed::ops::MaskedProgram& rows)
         : d_group_flip(rows.group_flip), d_vsub_val(rows.vsub_val), d_term_sign(rows.term_sign),
-          d_group_setbits(rows.group_setbits), d_group_vbegin(rows.group_vbegin),
-          d_vsub_tbegin(rows.vsub_tbegin) {
+          d_group_setbits(rows.group_setbits), d_group_vbegin(rows.group_vbegin), d_vsub_tbegin(rows.vsub_tbegin) {
         // std::complex<double> and thrust::complex<double> share their layout
         const auto* c = reinterpret_cast<const thrust::complex<double>*>(rows.term_coeff.data());
         d_term_coeff.assign(c, c + rows.term_coeff.size());
     }
 
     ed::ops::ProgramView<thrust::complex<double>> view() const noexcept {
-        return {static_cast<std::uint32_t>(d_group_flip.size()),
-                thrust::raw_pointer_cast(d_group_flip.data()),
-                thrust::raw_pointer_cast(d_group_setbits.data()),
-                thrust::raw_pointer_cast(d_group_vbegin.data()),
-                thrust::raw_pointer_cast(d_vsub_val.data()),
-                thrust::raw_pointer_cast(d_vsub_tbegin.data()),
-                thrust::raw_pointer_cast(d_term_sign.data()),
-                thrust::raw_pointer_cast(d_term_coeff.data())};
+        return {static_cast<std::uint32_t>(d_group_flip.size()),  thrust::raw_pointer_cast(d_group_flip.data()),
+                thrust::raw_pointer_cast(d_group_setbits.data()), thrust::raw_pointer_cast(d_group_vbegin.data()),
+                thrust::raw_pointer_cast(d_vsub_val.data()),      thrust::raw_pointer_cast(d_vsub_tbegin.data()),
+                thrust::raw_pointer_cast(d_term_sign.data()),     thrust::raw_pointer_cast(d_term_coeff.data())};
     }
 };
 
 // O from a column sector to a row sector (the same mirror for an operator on one sector).
 struct GpuRows {
     std::shared_ptr<const GpuSectorMirror> row, col;
-    bool                                   same;   // one sector: the diagonal needs no lookup
-    GpuProgram                             program;
+    bool same;   // one sector: the diagonal needs no lookup
+    GpuProgram program;
 };
 
 namespace detail {
 
 // Build a GpuSectorMirror from a CSR-free RepSectorData (no orbit walk).
-inline std::shared_ptr<GpuSectorMirror>
-build_sector_mirror(const ed::symmetry::RepSectorData& data)
-{
+inline std::shared_ptr<GpuSectorMirror> build_sector_mirror(const ed::symmetry::RepSectorData& data) {
     if (!data.usable()) {
-        throw std::runtime_error(
-            "build_sector_mirror: RepSectorData is not usable (need n_up >= -1, "
-            "non-empty reps, and matching characters / perms sizes)");
+        throw std::runtime_error("build_sector_mirror: RepSectorData is not usable (need n_up >= -1, "
+                                 "non-empty reps, and matching characters / perms sizes)");
     }
     const int n_sites = data.n_sites;
-    const int n_up    = data.n_up;
+    const int n_up = data.n_up;
     if (n_sites <= 0 || n_sites > 64 || n_up < -1 || n_up > n_sites) {
         throw std::runtime_error("build_sector_mirror: invalid n_sites / n_up");
     }
@@ -274,9 +264,9 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
 
     auto mirror = std::make_shared<GpuSectorMirror>();
     mirror->group_size = data.group_size;
-    mirror->n_sites    = n_sites;
-    mirror->n_up       = n_up;
-    mirror->dim        = data.dim();
+    mirror->n_sites = n_sites;
+    mirror->n_up = n_up;
+    mirror->dim = data.dim();
 
     // C(n_sites, n_up), capped at INT32_MAX (the rank-table value type).
     // Full-space sectors (n_up < 0): the rank space is the whole 2^N
@@ -296,11 +286,9 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
     const std::uint64_t dim_full_sz =                       // logged only; 2^64 does not fit
         dv >= 18446744073709551615.0L ? std::numeric_limits<std::uint64_t>::max()
                                       : static_cast<std::uint64_t>(dv + 0.5L);
-    if (data.reps.size() > static_cast<std::size_t>(
-            std::numeric_limits<std::int32_t>::max())) {
-        throw std::runtime_error(
-            "build_sector_mirror: sector has more than INT32_MAX representatives; "
-            "the reverse-lookup value type would overflow");
+    if (data.reps.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::runtime_error("build_sector_mirror: sector has more than INT32_MAX representatives; "
+                                 "the reverse-lookup value type would overflow");
     }
 
     // Device combinadic rank() reads a Pascal triangle from constant memory.
@@ -337,7 +325,7 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
         for (std::uint64_t c = bucket(data.reps.back()) + 1; c <= nb; ++c)
             off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(data.reps.size());
         mirror->d_bucket_off = off;
-        mirror->bucket_base  = lo;
+        mirror->bucket_base = lo;
         mirror->bucket_count = nb;
         mirror->bucket_shift = shift;
         if (ed::env::flag("ED_SYM_PROFILE", false))
@@ -347,45 +335,45 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
 
     std::vector<cuDoubleComplex> h_characters(data.characters.size());
     for (std::size_t g = 0; g < data.characters.size(); ++g) {
-        h_characters[g] = make_cuDoubleComplex(data.characters[g].real(),
-                                               data.characters[g].imag());
+        h_characters[g] = make_cuDoubleComplex(data.characters[g].real(), data.characters[g].imag());
     }
 
-    mirror->d_reps              = data.reps;
-    mirror->d_inv_norms         = data.inv_norms;
-    mirror->d_perms             = data.perms_flat;
-    mirror->d_characters        = h_characters;
+    mirror->d_reps = data.reps;
+    mirror->d_inv_norms = data.inv_norms;
+    mirror->d_perms = data.perms_flat;
+    mirror->d_characters = h_characters;
     if (data.has_flips()) {   // flip-extended sector
-        mirror->d_flips         = data.flip_masks;
+        mirror->d_flips = data.flip_masks;
     }
     // Byte-LUT permutation fast path: reuse the host-built table
     // when the caller carries one, else build it here from perms_flat --
     // the ~740 KB (N=36, |G|=72) upload avoids a serial n_sites-loop
     // walk in the device canonicalization hot path.
     if (!data.perm_lut_data.empty()) {
-        mirror->d_perm_lut   = data.perm_lut_data;
+        mirror->d_perm_lut = data.perm_lut_data;
         mirror->perm_lut_bpw = data.perm_lut_bpw;
     } else if (n_sites > 0 && n_sites <= 64 && !data.perms_flat.empty()) {
         ed::symmetry::RepSectorData tmp;
-        tmp.n_sites    = n_sites;
+        tmp.n_sites = n_sites;
         tmp.group_size = data.group_size;
         tmp.perms_flat = data.perms_flat;
         tmp.build_perm_lut();
-        mirror->d_perm_lut   = tmp.perm_lut_data;
+        mirror->d_perm_lut = tmp.perm_lut_data;
         mirror->perm_lut_bpw = tmp.perm_lut_bpw;
     }
     // The group's sublattice code, the host policy's (the same element list gives the same cached
     // code): the device finds the representatives the host tables hold.
     if (const auto code = data.sublattice()) {
-        mirror->d_slc_to_key   = code->to_key();
-        mirror->d_slc_lead     = code->lead();
+        mirror->d_slc_to_key = code->to_key();
+        mirror->d_slc_lead = code->lead();
         mirror->d_slc_cand_off = code->cand_off();
-        mirror->d_slc_cand     = code->cand();
-        mirror->slc_L          = code->block_size();
-        mirror->slc_m          = code->blocks();
-        mirror->slc_bpw        = (n_sites + 7) / 8;
+        mirror->d_slc_cand = code->cand();
+        mirror->slc_L = code->block_size();
+        mirror->slc_m = code->blocks();
+        mirror->slc_bpw = (n_sites + 7) / 8;
         if (ed::env::flag("ED_SYM_PROFILE", false))
-            ED_LOG(Info, "[sym_profile] GPU rep mirror: sublattice code, %d blocks of %d sites, %.2f candidates an entry",
+            ED_LOG(Info,
+                   "[sym_profile] GPU rep mirror: sublattice code, %d blocks of %d sites, %.2f candidates an entry",
                    code->blocks(), code->block_size(), code->mean_candidates());
     }
 
@@ -408,10 +396,9 @@ namespace {
 
 using DC = thrust::complex<double>;
 
-template <int NV>
-struct WalkPointers {
+template <int NV> struct WalkPointers {
     const DC* in[NV];
-    DC*       out[NV];
+    DC* out[NV];
 };
 
 // The warp's rows advance in lockstep over their own connections (P2-gpu-04): each lane steps its
@@ -421,8 +408,8 @@ struct WalkPointers {
 // still sums in group order. Lanes past the last row stay in the loop (the vote needs the warp).
 template <int NV, bool Same>
 __global__ void walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy row,
-                            ed::matvec::basis::DeviceRepSymmetryBasisPolicy col,
-                            ed::ops::ProgramView<DC> P, WalkPointers<NV> p) {
+                            ed::matvec::basis::DeviceRepSymmetryBasisPolicy col, ed::ops::ProgramView<DC> P,
+                            WalkPointers<NV> p) {
     const std::uint64_t r = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const bool live = r < row.dim();
     const std::uint64_t s = live ? row.state_of(r) : 0;
@@ -460,30 +447,43 @@ __global__ void walk_gather(ed::matvec::basis::DeviceRepSymmetryBasisPolicy row,
 }  // namespace
 
 // out[i] = O in[i] for i < k (device pointers), in launches of up to 8 vectors.
-void launch_walk(const GpuRows& op, const DC* const* ins, DC* const* outs, std::size_t k)
-{
+void launch_walk(const GpuRows& op, const DC* const* ins, DC* const* outs, std::size_t k) {
     using detail::cuda_check;
     const std::uint64_t dim = op.row->dim;
     if (dim == 0 || k == 0) return;
-    const auto row  = op.row->basis_view();
-    const auto col  = op.col->basis_view();
+    const auto row = op.row->basis_view();
+    const auto col = op.col->basis_view();
     const auto prog = op.program.view();
     constexpr unsigned kThreads = 256;
     const auto blocks = static_cast<unsigned>((dim + kThreads - 1) / kThreads);
     auto launch = [&](auto nv_tag, std::size_t off) {
         constexpr int NV = decltype(nv_tag)::value;
         WalkPointers<NV> p;
-        for (int v = 0; v < NV; ++v) { p.in[v] = ins[off + v]; p.out[v] = outs[off + v]; }
-        if (op.same) walk_gather<NV, true><<<blocks, kThreads>>>(row, col, prog, p);
-        else         walk_gather<NV, false><<<blocks, kThreads>>>(row, col, prog, p);
+        for (int v = 0; v < NV; ++v) {
+            p.in[v] = ins[off + v];
+            p.out[v] = outs[off + v];
+        }
+        if (op.same)
+            walk_gather<NV, true><<<blocks, kThreads>>>(row, col, prog, p);
+        else
+            walk_gather<NV, false><<<blocks, kThreads>>>(row, col, prog, p);
     };
     std::size_t off = 0;
     while (off < k) {
         const std::size_t left = k - off;
-        if (left >= 8)      { launch(std::integral_constant<int, 8>{}, off); off += 8; }
-        else if (left >= 4) { launch(std::integral_constant<int, 4>{}, off); off += 4; }
-        else if (left >= 2) { launch(std::integral_constant<int, 2>{}, off); off += 2; }
-        else                { launch(std::integral_constant<int, 1>{}, off); off += 1; }
+        if (left >= 8) {
+            launch(std::integral_constant<int, 8>{}, off);
+            off += 8;
+        } else if (left >= 4) {
+            launch(std::integral_constant<int, 4>{}, off);
+            off += 4;
+        } else if (left >= 2) {
+            launch(std::integral_constant<int, 2>{}, off);
+            off += 2;
+        } else {
+            launch(std::integral_constant<int, 1>{}, off);
+            off += 1;
+        }
         cuda_check(cudaGetLastError(), "walk kernel launch");
     }
 }
@@ -497,8 +497,7 @@ void launch_walk(const GpuRows& op, const DC* const* ins, DC* const* outs, std::
 namespace ed::symmetry::gpu_mirror::detail {
 
 // The resident device mirror of a sector, shared by every operator bound on it.
-std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry::RepSectorData& rep)
-{
+std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry::RepSectorData& rep) {
     // Sector operators are transient, so a destroyed sector's address is reused by the next
     // one: the cache is keyed on the sector's own content -- the per-sector characters (unique
     // per irrep), the rep-list signature (n_up / size / samples), the group action -- and
@@ -539,15 +538,15 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     // The reps list is determined by (n_up window, group action, characters) and
     // cross-checked by its (size, front, mid, back) signature.
     struct MirrorSlot {
-        int                                     n_up;
-        std::uint64_t                           reps_sig[4];
-        std::vector<std::complex<double>>       chi;
-        std::vector<int>                        perms;
-        std::vector<std::uint64_t>              flips;
-        std::uint64_t                           slc_fp;   // the sublattice code's key order (0: none)
-        std::weak_ptr<const GpuSectorMirror>    mirror;
+        int n_up;
+        std::uint64_t reps_sig[4];
+        std::vector<std::complex<double>> chi;
+        std::vector<int> perms;
+        std::vector<std::uint64_t> flips;
+        std::uint64_t slc_fp;   // the sublattice code's key order (0: none)
+        std::weak_ptr<const GpuSectorMirror> mirror;
     };
-    auto signature = [](const ed::symmetry::RepSectorData& r, std::uint64_t (&sig)[4]) {
+    auto signature = [](const ed::symmetry::RepSectorData& r, std::uint64_t(&sig)[4]) {
         sig[0] = r.reps.size();
         sig[1] = r.reps.empty() ? 0 : r.reps.front();
         sig[2] = r.reps.empty() ? 0 : r.reps[r.reps.size() / 2];
@@ -555,10 +554,13 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     };
     std::uint64_t sig[4];
     signature(rep, sig);
-    const std::uint64_t slc_fp = [&rep] { const auto c = rep.sublattice(); return c ? c->fingerprint() : 0; }();
+    const std::uint64_t slc_fp = [&rep] {
+        const auto c = rep.sublattice();
+        return c ? c->fingerprint() : 0;
+    }();
     auto matches = [&](const MirrorSlot& s) {
         return s.n_up == rep.n_up && std::equal(sig, sig + 4, s.reps_sig) && s.chi == rep.characters
-            && s.perms == rep.perms_flat && s.flips == rep.flip_masks && s.slc_fp == slc_fp;
+               && s.perms == rep.perms_flat && s.flips == rep.flip_masks && s.slc_fp == slc_fp;
     };
 
     static std::mutex mtx;
@@ -571,26 +573,29 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     auto& bucket = registry[content_key(rep)];
     for (auto it = bucket.begin(); it != bucket.end();) {
         auto locked = it->mirror.lock();
-        if (!locked) { it = bucket.erase(it); continue; }   // expired
+        if (!locked) {
+            it = bucket.erase(it);
+            continue;
+        }   // expired
         if (matches(*it)) return locked;
         ++it;
     }
     std::shared_ptr<const GpuSectorMirror> mirror = build_or_evict(keep, [&] { return build_sector_mirror(rep); });
     MirrorSlot s;
-    s.n_up   = rep.n_up;
+    s.n_up = rep.n_up;
     std::copy(sig, sig + 4, s.reps_sig);
-    s.chi    = rep.characters;
-    s.perms  = rep.perms_flat;
-    s.flips  = rep.flip_masks;
+    s.chi = rep.characters;
+    s.perms = rep.perms_flat;
+    s.flips = rep.flip_masks;
     s.slc_fp = slc_fp;
     s.mirror = mirror;
     bucket.push_back(std::move(s));
     keep.push_back(mirror);
     auto bytes_of = [](const std::shared_ptr<const GpuSectorMirror>& mm) {
-        return static_cast<double>(mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8 + mm->d_perm_lut.size() * 8
-                                   + mm->d_perms.size() * 4 + mm->d_local_of_shared.size() * 4
-                                   + mm->d_bucket_off.size() * 4 + mm->d_slc_to_key.size() * 8
-                                   + mm->d_slc_lead.size() * 2 + mm->d_slc_cand_off.size() * 4 + mm->d_slc_cand.size() * 2);
+        return static_cast<double>(
+            mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8 + mm->d_perm_lut.size() * 8 + mm->d_perms.size() * 4
+            + mm->d_local_of_shared.size() * 4 + mm->d_bucket_off.size() * 4 + mm->d_slc_to_key.size() * 8
+            + mm->d_slc_lead.size() * 2 + mm->d_slc_cand_off.size() * 4 + mm->d_slc_cand.size() * 2);
     };
     double total = 0.0;
     for (const auto& mm : keep) total += bytes_of(mm);
@@ -602,13 +607,13 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
 }
 
 // O from the column sector to the row sector on the device.
-std::shared_ptr<const GpuRows> make_rows(const ed::symmetry::RepSectorData& row,
-                                         const ed::symmetry::RepSectorData& col,
+std::shared_ptr<const GpuRows> make_rows(const ed::symmetry::RepSectorData& row, const ed::symmetry::RepSectorData& col,
                                          const ed::ops::MaskedProgram& rows) {
     const bool same = &row == &col;
     auto r_mirror = acquire_sector_mirror(row);
     auto c_mirror = same ? r_mirror : acquire_sector_mirror(col);
-    auto out = std::make_shared<const GpuRows>(GpuRows{std::move(r_mirror), std::move(c_mirror), same, GpuProgram(rows)});
+    auto out =
+        std::make_shared<const GpuRows>(GpuRows{std::move(r_mirror), std::move(c_mirror), same, GpuProgram(rows)});
     cuda_check(cudaDeviceSynchronize(), "synchronize after program upload");
     return out;
 }
@@ -627,35 +632,28 @@ ed::LinearOperator::MatvecFn single(std::shared_ptr<const GpuRows> op, const cha
 
 }  // namespace ed::symmetry::gpu_mirror::detail
 
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
-                                         const ed::ops::MaskedProgram&      rows)
-{
+ed::LinearOperator::MatvecFn ed::symmetry::make_sector_matvec_gpu_rep(const ed::symmetry::RepSectorData& rep,
+                                                                      const ed::ops::MaskedProgram& rows) {
     namespace gd = ed::symmetry::gpu_mirror::detail;
     return gd::single(gd::make_rows(rep, rep, rows), "make_sector_matvec_gpu_rep");
 }
 
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& src,
-                                        const ed::symmetry::RepSectorData& tgt,
-                                        const ed::ops::MaskedProgram&      rows)
-{
+ed::LinearOperator::MatvecFn ed::symmetry::make_cross_matvec_gpu_rep(const ed::symmetry::RepSectorData& src,
+                                                                     const ed::symmetry::RepSectorData& tgt,
+                                                                     const ed::ops::MaskedProgram& rows) {
     namespace gd = ed::symmetry::gpu_mirror::detail;
     return gd::single(gd::make_rows(tgt, src, rows), "make_cross_matvec_gpu_rep");
 }
 
 // k vectors per call through the multi-vector gather (one row walk serves up to 8 of them).
-ed::LinearOperator::MultiMatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& rep,
-                                               const ed::ops::MaskedProgram&      rows)
-{
+ed::LinearOperator::MultiMatvecFn ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData& rep,
+                                                                                 const ed::ops::MaskedProgram& rows) {
     using DC = thrust::complex<double>;
     const auto op = ed::symmetry::gpu_mirror::detail::make_rows(rep, rep, rows);
-    return [op](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs,
-                std::size_t n, std::size_t k) {
+    return [op](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs, std::size_t n, std::size_t k) {
         if (n != op->row->dim)
-            throw std::runtime_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: size mismatch (" +
-                                     std::to_string(n) + " vs " + std::to_string(op->row->dim) + ")");
+            throw std::runtime_error("ed::symmetry::make_sector_matvec_gpu_rep_multi: size mismatch ("
+                                     + std::to_string(n) + " vs " + std::to_string(op->row->dim) + ")");
         ed::symmetry::gpu_mirror::launch_walk(*op, reinterpret_cast<const DC* const*>(ins),
                                               reinterpret_cast<DC* const*>(outs), k);
     };
@@ -686,15 +684,15 @@ ed::symmetry::make_sector_matvec_gpu_rep_multi(const ed::symmetry::RepSectorData
 namespace ed::symmetry {
 
 struct DeviceCsr {
-    thrust::device_vector<std::uint64_t>           row_ptr;   // dim + 1
-    thrust::device_vector<std::uint32_t>           col;       // nnz
-    thrust::device_vector<std::uint8_t>            id8;       // nnz, or empty
-    thrust::device_vector<std::uint16_t>           id16;      // nnz, or empty
+    thrust::device_vector<std::uint64_t> row_ptr;   // dim + 1
+    thrust::device_vector<std::uint32_t> col;       // nnz
+    thrust::device_vector<std::uint8_t> id8;       // nnz, or empty
+    thrust::device_vector<std::uint16_t> id16;      // nnz, or empty
     thrust::device_vector<thrust::complex<double>> val;       // nnz, or empty: the values whole
     thrust::device_vector<thrust::complex<double>> dict;
     std::uint64_t dim = 0, nnz = 0;
-    int           lanes = 2;
-    double        build_s = 0.0;
+    int lanes = 2;
+    double build_s = 0.0;
 
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return row_ptr.size() * 8 + col.size() * 4 + id8.size() + id16.size() * 2 + (val.size() + dict.size()) * 16;
@@ -717,9 +715,9 @@ constexpr int kMaxLaneEntries = 8;   // a row's merge holds 32 x 8 = 256 program
 struct ValueSet {
     unsigned long long* re;
     unsigned long long* im;
-    int*                state;
-    unsigned int*       count;
-    int*                overflow;   // more than kCsrDictMax distinct values (or no free slot)
+    int* state;
+    unsigned int* count;
+    int* overflow;   // more than kCsrDictMax distinct values (or no free slot)
 };
 
 // splitmix64's finalizer: every input bit reaches every output bit. A product alone carries bits
@@ -743,7 +741,10 @@ __device__ inline int nth_set_bit(unsigned m, int k) {
 #pragma unroll
     for (int w = 16; w >= 1; w >>= 1) {
         const int c = __popc((m >> p) & ((1u << w) - 1u));
-        if (k >= c) { k -= c; p += w; }
+        if (k >= c) {
+            k -= c;
+            p += w;
+        }
     }
     return p;
 }
@@ -801,8 +802,8 @@ __device__ std::uint32_t set_find(const ValueSet& s, const DC& v) {
 // order -- sector_rows.h merge_row's sums. Kept: heads with a nonzero sum. Returns the row's
 // length; cols/vals/keep/at give lane l's entries, kept ones at position at[e] (columns ascending).
 template <bool Same, int E>
-__device__ int warp_row(const DevPolicy& row, const DevPolicy& col, const ed::ops::ProgramView<DC>& P,
-                        std::uint64_t r, std::uint32_t (&cols)[E], DC (&vals)[E], bool (&keep)[E], int (&at)[E]) {
+__device__ int warp_row(const DevPolicy& row, const DevPolicy& col, const ed::ops::ProgramView<DC>& P, std::uint64_t r,
+                        std::uint32_t (&cols)[E], DC (&vals)[E], bool (&keep)[E], int (&at)[E]) {
     constexpr std::uint64_t kNone = ~std::uint64_t{0};
     constexpr unsigned kAll = 0xffffffffu;
     const unsigned lane = threadIdx.x & (kWarp - 1);
@@ -918,20 +919,18 @@ __device__ int warp_row(const DevPolicy& row, const DevPolicy& col, const ed::op
 __device__ inline std::uint64_t warp_id() {
     return (static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x) / kWarp;
 }
-__device__ inline std::uint64_t warp_count() {
-    return static_cast<std::uint64_t>(gridDim.x) * blockDim.x / kWarp;
-}
+__device__ inline std::uint64_t warp_count() { return static_cast<std::uint64_t>(gridDim.x) * blockDim.x / kWarp; }
 
 // The build kernels run 256-thread blocks. Their compaction (warp_row) holds a row's targets in
 // registers; left alone the compiler takes ~96 a thread at E = 4, two blocks an SM, which slows
 // the build of cheap groups (small |G|) more than the compaction saves. Three blocks (<= 85).
-template <int E>
-inline constexpr int kBuildMinBlocks = E <= 4 ? 3 : 2;
+template <int E> inline constexpr int kBuildMinBlocks = E <= 4 ? 3 : 2;
 
 // Pass 1: len[r] = row r's merged length; its values enter the set (until it overflows). A value
 // equal to the one this lane put in last skips the set.
 template <bool Same, int E>
-__global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint64_t* len, ValueSet set) {
+__global__ void __launch_bounds__(256, kBuildMinBlocks<E>)
+    csr_count(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, std::uint64_t* len, ValueSet set) {
     DC last(0.0, 0.0);   // never inserted: zeros are dropped
     for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
         std::uint32_t cols[E];
@@ -954,9 +953,9 @@ __global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_count(DevPolicy r
 
 // Pass 2: the rows again, written at row_ptr. Mode 0: the values whole; 1: uint8 ids; 2: uint16 ids.
 template <bool Same, int E, int Mode>
-__global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, const std::uint64_t* row_ptr,
-                         std::uint32_t* out_col, void* out_val, ValueSet set, const std::uint16_t* id_of_slot,
-                         int* missing) {
+__global__ void __launch_bounds__(256, kBuildMinBlocks<E>)
+    csr_fill(DevPolicy row, DevPolicy col, ed::ops::ProgramView<DC> P, const std::uint64_t* row_ptr,
+             std::uint32_t* out_col, void* out_val, ValueSet set, const std::uint16_t* id_of_slot, int* missing) {
     for (std::uint64_t r = warp_id(); r < row.dim(); r += warp_count()) {
         std::uint32_t cols[E];
         DC vals[E];
@@ -974,21 +973,27 @@ __global__ void __launch_bounds__(256, kBuildMinBlocks<E>) csr_fill(DevPolicy ro
             } else {
                 const std::uint32_t h = set_find(set, vals[e]);
                 std::uint16_t id = 0;
-                if (h == kSetSlots) atomicExch(missing, 1);
-                else id = id_of_slot[h];
-                if constexpr (Mode == 1) static_cast<std::uint8_t*>(out_val)[k] = static_cast<std::uint8_t>(id);
-                else static_cast<std::uint16_t*>(out_val)[k] = id;
+                if (h == kSetSlots)
+                    atomicExch(missing, 1);
+                else
+                    id = id_of_slot[h];
+                if constexpr (Mode == 1)
+                    static_cast<std::uint8_t*>(out_val)[k] = static_cast<std::uint8_t>(id);
+                else
+                    static_cast<std::uint16_t*>(out_val)[k] = id;
             }
         }
     }
 }
 
 
-template <int Mode>
-__device__ inline DC csr_entry(const void* vals, const DC* dict, std::uint64_t e) {
-    if constexpr (Mode == 0) return static_cast<const DC*>(vals)[e];
-    else if constexpr (Mode == 1) return dict[static_cast<const std::uint8_t*>(vals)[e]];
-    else return dict[static_cast<const std::uint16_t*>(vals)[e]];
+template <int Mode> __device__ inline DC csr_entry(const void* vals, const DC* dict, std::uint64_t e) {
+    if constexpr (Mode == 0)
+        return static_cast<const DC*>(vals)[e];
+    else if constexpr (Mode == 1)
+        return dict[static_cast<const std::uint8_t*>(vals)[e]];
+    else
+        return dict[static_cast<const std::uint16_t*>(vals)[e]];
 }
 
 // out[v] = A in[v] for NV vectors: L threads a row, each summing every L-th entry, then a fixed
@@ -1029,18 +1034,16 @@ __global__ void csr_spmv(const std::uint64_t* __restrict__ row_ptr, const std::u
 }
 
 // Threads a row for a mean row length: a row's share of entries per thread stays above ~1.5.
-int lanes_for(double mean) {
-    return mean > 24.0 ? 32 : mean > 12.0 ? 16 : mean > 6.0 ? 8 : mean > 3.0 ? 4 : 2;
-}
+int lanes_for(double mean) { return mean > 24.0 ? 32 : mean > 12.0 ? 16 : mean > 6.0 ? 8 : mean > 3.0 ? 4 : 2; }
 
 // out[i] = A in[i] for i < k (device pointers), in launches of up to 8 vectors.
 void launch_csr(const ed::symmetry::DeviceCsr& c, const DC* const* ins, DC* const* outs, std::size_t k) {
     using detail::cuda_check;
     if (c.dim == 0 || k == 0) return;
     const int mode = !c.id8.empty() ? 1 : !c.id16.empty() ? 2 : 0;
-    const void* vals = mode == 1 ? static_cast<const void*>(thrust::raw_pointer_cast(c.id8.data()))
-                     : mode == 2 ? static_cast<const void*>(thrust::raw_pointer_cast(c.id16.data()))
-                                 : static_cast<const void*>(thrust::raw_pointer_cast(c.val.data()));
+    const void* vals = mode == 1   ? static_cast<const void*>(thrust::raw_pointer_cast(c.id8.data()))
+                       : mode == 2 ? static_cast<const void*>(thrust::raw_pointer_cast(c.id16.data()))
+                                   : static_cast<const void*>(thrust::raw_pointer_cast(c.val.data()));
     const DC* dict = thrust::raw_pointer_cast(c.dict.data());
     const std::uint64_t* row_ptr = thrust::raw_pointer_cast(c.row_ptr.data());
     const std::uint32_t* col = thrust::raw_pointer_cast(c.col.data());
@@ -1049,28 +1052,43 @@ void launch_csr(const ed::symmetry::DeviceCsr& c, const DC* const* ins, DC* cons
     auto launch = [&](auto nv_tag, std::size_t off) {
         constexpr int NV = decltype(nv_tag)::value;
         WalkPointers<NV> p;
-        for (int v = 0; v < NV; ++v) { p.in[v] = ins[off + v]; p.out[v] = outs[off + v]; }
+        for (int v = 0; v < NV; ++v) {
+            p.in[v] = ins[off + v];
+            p.out[v] = outs[off + v];
+        }
         auto go = [&](auto lanes_tag) {
             constexpr int L = decltype(lanes_tag)::value;
-            if (mode == 1)      csr_spmv<L, NV, 1><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
-            else if (mode == 2) csr_spmv<L, NV, 2><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
-            else                csr_spmv<L, NV, 0><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
+            if (mode == 1)
+                csr_spmv<L, NV, 1><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
+            else if (mode == 2)
+                csr_spmv<L, NV, 2><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
+            else
+                csr_spmv<L, NV, 0><<<blocks, kThreads>>>(row_ptr, col, vals, dict, c.dim, p);
         };
         switch (c.lanes) {
-            case 2:  go(std::integral_constant<int, 2>{});  break;
-            case 4:  go(std::integral_constant<int, 4>{});  break;
-            case 8:  go(std::integral_constant<int, 8>{});  break;
-            case 16: go(std::integral_constant<int, 16>{}); break;
-            default: go(std::integral_constant<int, 32>{}); break;
+        case 2: go(std::integral_constant<int, 2>{}); break;
+        case 4: go(std::integral_constant<int, 4>{}); break;
+        case 8: go(std::integral_constant<int, 8>{}); break;
+        case 16: go(std::integral_constant<int, 16>{}); break;
+        default: go(std::integral_constant<int, 32>{}); break;
         }
     };
     std::size_t off = 0;
     while (off < k) {
         const std::size_t left = k - off;
-        if (left >= 8)      { launch(std::integral_constant<int, 8>{}, off); off += 8; }
-        else if (left >= 4) { launch(std::integral_constant<int, 4>{}, off); off += 4; }
-        else if (left >= 2) { launch(std::integral_constant<int, 2>{}, off); off += 2; }
-        else                { launch(std::integral_constant<int, 1>{}, off); off += 1; }
+        if (left >= 8) {
+            launch(std::integral_constant<int, 8>{}, off);
+            off += 8;
+        } else if (left >= 4) {
+            launch(std::integral_constant<int, 4>{}, off);
+            off += 4;
+        } else if (left >= 2) {
+            launch(std::integral_constant<int, 2>{}, off);
+            off += 2;
+        } else {
+            launch(std::integral_constant<int, 1>{}, off);
+            off += 1;
+        }
         cuda_check(cudaGetLastError(), "device CSR SpMV launch");
     }
 }
@@ -1080,8 +1098,7 @@ void launch_csr(const ed::symmetry::DeviceCsr& c, const DC* const* ins, DC* cons
 
 std::shared_ptr<const ed::symmetry::DeviceCsr>
 ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const ed::ops::MaskedProgram& rows,
-                                   std::uint64_t max_bytes)
-{
+                                   std::uint64_t max_bytes) {
     namespace gm = ed::symmetry::gpu_mirror;
     using gm::detail::cuda_check;
     using DC = thrust::complex<double>;
@@ -1102,9 +1119,10 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         const bool profile = ed::env::flag("ED_SYM_PROFILE", false);
         if (groups > static_cast<std::size_t>(gm::kWarp * gm::kMaxLaneEntries)) {
             if (profile)
-                ED_LOG(Info, "[sym_profile] device CSR dim=%llu: %zu program groups, more than a warp's merge "
-                             "holds (%d); the device walk serves", static_cast<unsigned long long>(dim), groups,
-                       gm::kWarp * gm::kMaxLaneEntries);
+                ED_LOG(Info,
+                       "[sym_profile] device CSR dim=%llu: %zu program groups, more than a warp's merge "
+                       "holds (%d); the device walk serves",
+                       static_cast<unsigned long long>(dim), groups, gm::kWarp * gm::kMaxLaneEntries);
             return nullptr;
         }
         const int lane_entries = groups <= 32 ? 1 : groups <= 64 ? 2 : groups <= 128 ? 4 : 8;
@@ -1116,10 +1134,10 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         const auto blocks = static_cast<unsigned>((warps * gm::kWarp + kThreads - 1) / kThreads);
         const auto with_entries = [lane_entries](auto&& f) {
             switch (lane_entries) {
-                case 1:  f(std::integral_constant<int, 1>{}); break;
-                case 2:  f(std::integral_constant<int, 2>{}); break;
-                case 4:  f(std::integral_constant<int, 4>{}); break;
-                default: f(std::integral_constant<int, 8>{}); break;
+            case 1: f(std::integral_constant<int, 1>{}); break;
+            case 2: f(std::integral_constant<int, 2>{}); break;
+            case 4: f(std::integral_constant<int, 4>{}); break;
+            default: f(std::integral_constant<int, 8>{}); break;
             }
         };
         thrust::device_vector<unsigned long long> set_re(gm::kSetSlots, 0), set_im(gm::kSetSlots, 0);
@@ -1134,7 +1152,8 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         c->row_ptr.assign(dim + 1, 0);
         with_entries([&](auto e_tag) {
             constexpr int E = decltype(e_tag)::value;
-            gm::csr_count<true, E><<<blocks, kThreads>>>(basis, basis, prog, raw_pointer_cast(c->row_ptr.data()) + 1, set);
+            gm::csr_count<true, E>
+                <<<blocks, kThreads>>>(basis, basis, prog, raw_pointer_cast(c->row_ptr.data()) + 1, set);
         });
         cuda_check(cudaGetLastError(), "device CSR count launch");
         thrust::inclusive_scan(c->row_ptr.begin() + 1, c->row_ptr.end(), c->row_ptr.begin() + 1);
@@ -1201,18 +1220,25 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
         cuda_check(cudaDeviceSynchronize(), "device CSR build");
         const auto t_fill = std::chrono::steady_clock::now();
         if (flags[1] != 0) {   // the two passes disagree: never seen; the gather is still right
-            ED_LOG(Warn, "[device_csr] the fill pass met a value the count pass did not record "
-                         "(dim=%llu); using the device gather", static_cast<unsigned long long>(dim));
+            ED_LOG(Warn,
+                   "[device_csr] the fill pass met a value the count pass did not record "
+                   "(dim=%llu); using the device gather",
+                   static_cast<unsigned long long>(dim));
             return nullptr;
         }
         c->lanes = gm::lanes_for(static_cast<double>(nnz) / static_cast<double>(dim));
         c->build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (profile) {
             const auto s = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
-            ED_LOG(Info, "[sym_profile] device CSR dim=%llu nnz=%llu dict=%llu (%s) %.1f B/nnz, %d SpMV lanes; merge of "
-                   "%zu groups on %llu warps (%d a lane): build %.3f s (mirror %.3f, count %.3f, dictionary %.3f, fill %.3f)",
+            ED_LOG(Info,
+                   "[sym_profile] device CSR dim=%llu nnz=%llu dict=%llu (%s) %.1f B/nnz, %d SpMV lanes; merge of "
+                   "%zu groups on %llu warps (%d a lane): build %.3f s (mirror %.3f, count %.3f, dictionary %.3f, fill "
+                   "%.3f)",
                    static_cast<unsigned long long>(dim), static_cast<unsigned long long>(nnz),
-                   static_cast<unsigned long long>(whole ? 0 : n_dict), whole ? "whole" : narrow ? "u8" : "u16",
+                   static_cast<unsigned long long>(whole ? 0 : n_dict),
+                   whole    ? "whole"
+                   : narrow ? "u8"
+                            : "u16",
                    nnz ? static_cast<double>(c->bytes()) / static_cast<double>(nnz) : 0.0, c->lanes, groups,
                    static_cast<unsigned long long>(blocks) * kThreads / gm::kWarp, lane_entries, c->build_s,
                    s(t0, t_mirror), s(t_mirror, t_count), s(t_count, t_dict), s(t_dict, t_fill));
@@ -1225,8 +1251,7 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
 }
 
 std::shared_ptr<const ed::symmetry::DeviceCsr>
-ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& h, std::uint64_t max_bytes)
-{
+ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& h, std::uint64_t max_bytes) {
     using DC = thrust::complex<double>;
     if (!h.built() || h.bytes() > max_bytes) return nullptr;
     const auto t0 = std::chrono::steady_clock::now();
@@ -1243,8 +1268,8 @@ ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<d
         c->val.assign(val, val + h.val.size());
         const auto* dict = reinterpret_cast<const DC*>(h.dict.data());
         c->dict.assign(dict, dict + h.dict.size());
-        c->lanes = ed::symmetry::gpu_mirror::lanes_for(h.dim ? static_cast<double>(c->nnz) / static_cast<double>(h.dim)
-                                                             : 0.0);
+        c->lanes =
+            ed::symmetry::gpu_mirror::lanes_for(h.dim ? static_cast<double>(c->nnz) / static_cast<double>(h.dim) : 0.0);
         c->build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         return c;
     } catch (const std::bad_alloc&) {   // thrust's bad_alloc: out of device memory
@@ -1268,14 +1293,14 @@ ed::LinearOperator::MatvecFn ed::symmetry::csr_matvec_gpu(std::shared_ptr<const 
 ed::LinearOperator::MultiMatvecFn
 ed::symmetry::csr_matvec_gpu_multi(std::shared_ptr<const ed::symmetry::DeviceCsr> csr) {
     using DC = thrust::complex<double>;
-    return [csr](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs, std::size_t n,
-                 std::size_t k) {
-        if (n != csr->dim)
-            throw std::runtime_error("ed::symmetry::csr_matvec_gpu_multi: length " + std::to_string(n) + " != rows "
-                                     + std::to_string(csr->dim));
-        ed::symmetry::gpu_mirror::launch_csr(*csr, reinterpret_cast<const DC* const*>(ins),
-                                             reinterpret_cast<DC* const*>(outs), k);
-    };
+    return
+        [csr](const ed::matvec::Complex* const* ins, ed::matvec::Complex* const* outs, std::size_t n, std::size_t k) {
+            if (n != csr->dim)
+                throw std::runtime_error("ed::symmetry::csr_matvec_gpu_multi: length " + std::to_string(n) + " != rows "
+                                         + std::to_string(csr->dim));
+            ed::symmetry::gpu_mirror::launch_csr(*csr, reinterpret_cast<const DC* const*>(ins),
+                                                 reinterpret_cast<DC* const*>(outs), k);
+        };
 }
 
 ed::symmetry::DeviceCsrInfo ed::symmetry::device_csr_info(const ed::symmetry::DeviceCsr& csr) {
@@ -1291,7 +1316,8 @@ ed::matvec::ReducedSymmetryCsr<std::complex<double>> ed::symmetry::download_csr(
         to.resize(from.size());
         if (!from.empty())
             cuda_check(cudaMemcpy(to.data(), raw_pointer_cast(from.data()), from.size() * sizeof(to[0]),
-                                  cudaMemcpyDeviceToHost), what);
+                                  cudaMemcpyDeviceToHost),
+                       what);
     };
     down(h.row_ptr, c.row_ptr, "download row_ptr");
     down(h.col_idx, c.col, "download col");
@@ -1317,46 +1343,40 @@ ed::matvec::ReducedSymmetryCsr<std::complex<double>> ed::symmetry::download_csr(
 namespace {
 
 struct HostPtrStagingProfile {
-    bool          on    = false;
+    bool on = false;
     std::uint64_t calls = 0;
-    std::size_t   dim   = 0;
+    std::size_t dim = 0;
     double t_h2d = 0, t_kernel = 0, t_d2h = 0;
 
     ~HostPtrStagingProfile() {
         if (!on || calls == 0) return;
         const double pcie = t_h2d + t_d2h;
-        const double tot  = pcie + t_kernel;
+        const double tot = pcie + t_kernel;
         ED_LOG(Info,
-            "[sym_profile] hostptr rep matvec dim=%zu applies=%llu: "
-            "H2D=%.3fs kernel=%.3fs D2H=%.3fs (staging %.1f%% of %.3fs)",
-            dim, static_cast<unsigned long long>(calls),
-            t_h2d, t_kernel, t_d2h,
-            tot > 0.0 ? 100.0 * pcie / tot : 0.0, tot);
+               "[sym_profile] hostptr rep matvec dim=%zu applies=%llu: "
+               "H2D=%.3fs kernel=%.3fs D2H=%.3fs (staging %.1f%% of %.3fs)",
+               dim, static_cast<unsigned long long>(calls), t_h2d, t_kernel, t_d2h,
+               tot > 0.0 ? 100.0 * pcie / tot : 0.0, tot);
     }
 };
 
 }  // namespace
 
-ed::LinearOperator::MatvecFn
-ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
-    const ed::symmetry::RepSectorData& rep,
-    const ed::ops::MaskedProgram&      rows)
-{
+ed::LinearOperator::MatvecFn ed::symmetry::make_sector_matvec_gpu_rep_hostptr(const ed::symmetry::RepSectorData& rep,
+                                                                              const ed::ops::MaskedProgram& rows) {
     using ed::symmetry::gpu_mirror::detail::cuda_check;
 
     auto dev_fn = ed::symmetry::make_sector_matvec_gpu_rep(rep, rows);
-    auto d_in   = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
-    auto d_out  = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
-    auto prof   = std::make_shared<HostPtrStagingProfile>();
+    auto d_in = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
+    auto d_out = std::make_shared<thrust::device_vector<cuDoubleComplex>>();
+    auto prof = std::make_shared<HostPtrStagingProfile>();
     prof->on = ed::env::flag("ED_SYM_PROFILE", false);
 
-    return [dev_fn, d_in, d_out, prof](const ed::matvec::Complex* in,
-                                       ed::matvec::Complex*       out,
-                                       std::size_t                n) {
+    return [dev_fn, d_in, d_out, prof](const ed::matvec::Complex* in, ed::matvec::Complex* out, std::size_t n) {
         using Clock = std::chrono::steady_clock;
         const bool p = prof->on;
         auto stamp = [p] { return p ? Clock::now() : Clock::time_point{}; };
-        auto secs  = [](Clock::time_point a, Clock::time_point b) {
+        auto secs = [](Clock::time_point a, Clock::time_point b) {
             return std::chrono::duration<double>(b - a).count();
         };
         if (d_in->size() != n) {
@@ -1364,31 +1384,24 @@ ed::symmetry::make_sector_matvec_gpu_rep_hostptr(
             d_out->resize(n);
         }
         const auto t0 = stamp();
-        cuda_check(cudaMemcpy(thrust::raw_pointer_cast(d_in->data()), in,
-                              n * sizeof(cuDoubleComplex),
-                              cudaMemcpyHostToDevice),
-                   "hostptr rep matvec H2D");
+        cuda_check(
+            cudaMemcpy(thrust::raw_pointer_cast(d_in->data()), in, n * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice),
+            "hostptr rep matvec H2D");
         const auto t1 = stamp();
-        dev_fn(reinterpret_cast<const ed::matvec::Complex*>(
-                   thrust::raw_pointer_cast(d_in->data())),
-               reinterpret_cast<ed::matvec::Complex*>(
-                   thrust::raw_pointer_cast(d_out->data())),
-               n);
-        if (p)
-            cuda_check(cudaDeviceSynchronize(),
-                       "hostptr rep matvec profile sync");
+        dev_fn(reinterpret_cast<const ed::matvec::Complex*>(thrust::raw_pointer_cast(d_in->data())),
+               reinterpret_cast<ed::matvec::Complex*>(thrust::raw_pointer_cast(d_out->data())), n);
+        if (p) cuda_check(cudaDeviceSynchronize(), "hostptr rep matvec profile sync");
         const auto t2 = stamp();
-        cuda_check(cudaMemcpy(out, thrust::raw_pointer_cast(d_out->data()),
-                              n * sizeof(cuDoubleComplex),
+        cuda_check(cudaMemcpy(out, thrust::raw_pointer_cast(d_out->data()), n * sizeof(cuDoubleComplex),
                               cudaMemcpyDeviceToHost),
                    "hostptr rep matvec D2H");
         const auto t3 = stamp();
         if (p) {
             ++prof->calls;
-            prof->dim       = n;
-            prof->t_h2d    += secs(t0, t1);
+            prof->dim = n;
+            prof->t_h2d += secs(t0, t1);
             prof->t_kernel += secs(t1, t2);
-            prof->t_d2h    += secs(t2, t3);
+            prof->t_d2h += secs(t2, t3);
         }
     };
 }

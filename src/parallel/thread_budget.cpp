@@ -31,13 +31,11 @@ namespace {
 // in use is not OpenBLAS, which is fine -- we just skip the BLAS-side
 // thread cap in that case.
 extern "C" {
-int  openblas_get_num_threads(void) __attribute__((weak));
-void openblas_set_num_threads(int)  __attribute__((weak));
+int openblas_get_num_threads(void) __attribute__((weak));
+void openblas_set_num_threads(int) __attribute__((weak));
 }
 
-bool auto_threads_disabled() {
-    return !ed::env::flag("ED_AUTO_THREADS", true);
-}
+bool auto_threads_disabled() { return !ed::env::flag("ED_AUTO_THREADS", true); }
 
 int omp_max_threads() {
 #ifdef _OPENMP
@@ -108,14 +106,9 @@ ThreadBudgetScope::ThreadBudgetScope(int threads, int blas_threads) {
 
 ThreadBudgetScope::~ThreadBudgetScope() {
 #ifdef _OPENMP
-    if (restore_omp_ && prev_omp_ > 0) {
-        omp_set_num_threads(prev_omp_);
-    }
+    if (restore_omp_ && prev_omp_ > 0) { omp_set_num_threads(prev_omp_); }
 #endif
-    if (restore_blas_ && prev_openblas_ > 0 &&
-        openblas_set_num_threads) {
-        openblas_set_num_threads(prev_openblas_);
-    }
+    if (restore_blas_ && prev_openblas_ > 0 && openblas_set_num_threads) { openblas_set_num_threads(prev_openblas_); }
 }
 
 }  // namespace ed::parallel

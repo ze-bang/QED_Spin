@@ -15,6 +15,7 @@ Two failure modes are made loud:
     shadow or contradict ``QED_CORE_DIR`` -> RuntimeWarning naming both files;
   * no extension anywhere -> ImportError that says how to get one.
 """
+
 from __future__ import annotations
 
 import glob
@@ -33,16 +34,21 @@ def extend_package_path(package_path, package_dir):
         if not built:
             raise ImportError(
                 f"QED_CORE_DIR={core_dir} contains no _core*.so. Build one with "
-                "scripts/build.sh and point QED_CORE_DIR at <build>/python/qed.")
+                "scripts/build.sh and point QED_CORE_DIR at <build>/python/qed."
+            )
         if in_tree and os.path.realpath(core_dir) != os.path.realpath(package_dir):
             warnings.warn(
                 f"qed: using the extension from QED_CORE_DIR ({built[0]}); a second copy "
                 f"sits in the source package ({in_tree[0]}) and is ignored -- delete it, "
-                "the package is built out of tree.", RuntimeWarning, stacklevel=3)
+                "the package is built out of tree.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
         path.insert(0, core_dir)
     elif not in_tree:
         raise ImportError(
             "qed: the compiled extension qed._core was not found. From a source "
             "checkout, build it (scripts/build.sh) and set "
-            "QED_CORE_DIR=<build>/python/qed; or install the package (pip install .).")
+            "QED_CORE_DIR=<build>/python/qed; or install the package (pip install .)."
+        )
     return path

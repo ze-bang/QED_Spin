@@ -4,14 +4,16 @@
 """Claim: under total_spin, qed.expect refuses every non-SU(2)-invariant O (lg_sectors_expect.cpp:33),
 although the documented quantity (average over the level's symmetry multiplet) is well defined: for
 Sz_0 Sz_1 in an S=0 ground state it equals <S_0.S_1>/3. Dense reference on an 8-site ring."""
+
 import signal
 import numpy as np
 import qed
 
 signal.alarm(120)
 N = 8
-sx = np.array([[0, .5], [.5, 0]], complex); sy = np.array([[0, -.5j], [.5j, 0]], complex)
-sz = np.array([[.5, 0], [0, -.5]], complex)
+sx = np.array([[0, 0.5], [0.5, 0]], complex)
+sy = np.array([[0, -0.5j], [0.5j, 0]], complex)
+sz = np.array([[0.5, 0], [0, -0.5]], complex)
 
 
 def site(o, i):
@@ -43,8 +45,10 @@ try:
     v2 = float(qed.expect(H, [Ozz], 1, sym=qed.Symmetry(spatial=None)).values[0, 0].real)
 except Exception:
     v2 = float("nan")
-info = (f"E0 gap {E[1]-E[0]:.3f}; total_spin=0 expect(Sz0Sz1) -> {res}; without total_spin {v2:.10f}; "
-        f"dense <S0.S1>/3 = {ss/3:.10f}")
+info = (
+    f"E0 gap {E[1]-E[0]:.3f}; total_spin=0 expect(Sz0Sz1) -> {res}; without total_spin {v2:.10f}; "
+    f"dense <S0.S1>/3 = {ss/3:.10f}"
+)
 if not res.startswith("returned") and abs(v2 - ss / 3) < 1e-8:
     print("REPRO: CONFIRMED " + info)
 elif res.startswith("returned"):

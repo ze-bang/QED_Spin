@@ -64,18 +64,16 @@ TEST_CASE("ed::sym permutation algebra basics", "[symmetry][p2-11][dsl]") {
     REQUIRE(lhs == rhs);
 }
 
-TEST_CASE("ed::sym validate rejects malformed permutations",
-          "[symmetry][p2-11][dsl]") {
+TEST_CASE("ed::sym validate rejects malformed permutations", "[symmetry][p2-11][dsl]") {
     using namespace ed::sym;
     REQUIRE_THROWS_AS(validate({0, 1, 1}, 3), std::invalid_argument);
     REQUIRE_THROWS_AS(validate({0, 1, 3}, 3), std::invalid_argument);
-    REQUIRE_THROWS_AS(validate({0, 1},    3), std::invalid_argument);
-    REQUIRE_THROWS_AS(identity(0),            std::invalid_argument);
-    REQUIRE_THROWS_AS(power({0, 1, 2}, -1),   std::invalid_argument);
+    REQUIRE_THROWS_AS(validate({0, 1}, 3), std::invalid_argument);
+    REQUIRE_THROWS_AS(identity(0), std::invalid_argument);
+    REQUIRE_THROWS_AS(power({0, 1, 2}, -1), std::invalid_argument);
 }
 
-TEST_CASE("ed::sym generate_group is closed and deterministic",
-          "[symmetry][p2-11][dsl]") {
+TEST_CASE("ed::sym generate_group is closed and deterministic", "[symmetry][p2-11][dsl]") {
     using namespace ed::sym;
 
     const int N = 5;
@@ -85,9 +83,7 @@ TEST_CASE("ed::sym generate_group is closed and deterministic",
     // Closure: g o h is in the group for every (g, h).
     std::set<Permutation> set(group.begin(), group.end());
     for (const auto& g : group) {
-        for (const auto& h : group) {
-            REQUIRE(set.count(compose(g, h)) == 1);
-        }
+        for (const auto& h : group) { REQUIRE(set.count(compose(g, h)) == 1); }
     }
 
     // Determinism: a second call returns the same vector verbatim.

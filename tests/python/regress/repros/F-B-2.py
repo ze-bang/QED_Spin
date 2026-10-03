@@ -16,6 +16,7 @@ Model: open Ising chain N=4, H = sum_i Sz_i Sz_{i+1}, Symmetry(sz=2): one 6-dim 
 doubly degenerate levels {-3/4, -1/4, +1/4}. eigs(H, k=7) with ED_SYM_LG_DENSE_FLOOR=0 (the
 library's own test-grid setting, tests/python/grid/adapter.py:64) forces the Krylov lane.
 Expected: the 6 levels with multiplicity (k > restricted dim returns all)."""
+
 import os
 import signal
 
@@ -60,12 +61,13 @@ st, got, comp = run()
 print(f"ref (with multiplicity) = {ref.tolist()}")
 print(f"eigs(k={K}): {st} {got if st == 'raised' else got.tolist()} complete={comp}")
 st_p, got_p, comp_p = run(allow_partial=True)
-print(f"eigs(k={K}, allow_partial=True): {st_p} "
-      f"{got_p if st_p == 'raised' else got_p.tolist()} complete={comp_p}")
+print(f"eigs(k={K}, allow_partial=True): {st_p} " f"{got_p if st_p == 'raised' else got_p.tolist()} complete={comp_p}")
 
 if st == "raised" and "certify" in got:
-    print(f"REPRO: CONFIRMED eigs(k={K} > restricted dim 6) on a 6-dim block with doubly degenerate "
-          f"levels raises instead of returning the spectrum: {got[:120]}")
+    print(
+        f"REPRO: CONFIRMED eigs(k={K} > restricted dim 6) on a 6-dim block with doubly degenerate "
+        f"levels raises instead of returning the spectrum: {got[:120]}"
+    )
 elif st == "ok" and (len(got) != len(ref) or float(np.max(np.abs(got - ref))) > 1e-8):
     print(f"REPRO: CONFIRMED eigs returned {got.tolist()} (complete={comp}) instead of {ref.tolist()}")
 elif st == "ok":

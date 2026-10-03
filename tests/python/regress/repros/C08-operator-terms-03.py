@@ -7,6 +7,7 @@ the ladder basis builds terms with op_type 3, which the gate never annihilates: 
 (S+ + S-) (always flips). n_up_shifts maps op 3 to shift 0, so qed.dynamics treats it as
 Sz-conserving. Test: build obs with (3,3), check op types, compare Operator.apply with a dense
 sum of bit flips, and compare qed.dynamics against the same operator built legitimately."""
+
 import os
 import tempfile
 import signal
@@ -44,9 +45,9 @@ print(f"name={p.names[0]!r} op_types={ops} nterms={len(terms)}")
 # dense: sum_i phi_i X_i with X the bit flip of unit amplitude
 phi = {int(site): complex(c) for op, site, c in terms}
 rng = np.random.default_rng(1)
-v = rng.normal(size=2 ** N) + 1j * rng.normal(size=2 ** N)
+v = rng.normal(size=2**N) + 1j * rng.normal(size=2**N)
 w_ref = np.zeros_like(v)
-idx = np.arange(2 ** N)
+idx = np.arange(2**N)
 for i in range(N):
     w_ref += phi[i] * v[idx ^ (1 << i)]
 w = np.asarray(Ob.apply(v))

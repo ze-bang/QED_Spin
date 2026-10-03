@@ -7,6 +7,7 @@ each sampled block runs one after another inside ed::workflows::thermal, whose T
 gives 1 thread for dim < 16384 -- the whole sampled phase is effectively serial.
 Test: 20-site Heisenberg ring, Symmetry.auto(), FTLM at a fixed seed; compare wall time of
 device='cpu' and device='auto' (results must be identical: same seeds, same host kernels)."""
+
 import os
 import time
 import numpy as np
@@ -30,17 +31,21 @@ def run(dev):
     return time.perf_counter() - t0, r
 
 
-run("cpu")                       # warm-up (symmetry discovery, caches)
+run("cpu")  # warm-up (symmetry discovery, caches)
 tc, rc = run("cpu")
 ta, ra = run("auto")
 same = float(np.max(np.abs(rc.E - ra.E)))
-print(f"threads={os.environ.get('OMP_NUM_THREADS')} cuda devices={ncuda} blocks={rc.blocks} "
-      f"device_blocks(auto)={ra.device_blocks}")
+print(
+    f"threads={os.environ.get('OMP_NUM_THREADS')} cuda devices={ncuda} blocks={rc.blocks} "
+    f"device_blocks(auto)={ra.device_blocks}"
+)
 print(f"device='cpu' {tc:.2f} s, device='auto' {ta:.2f} s, ratio {ta / max(tc, 1e-9):.2f}, max|dE| {same:.1e}")
 if ra.device_blocks > 0:
     print("REPRO: INCONCLUSIVE a GPU was used under device='auto'; run on a CPU-only node")
 elif ta > 2.0 * tc:
-    print(f"REPRO: CONFIRMED device='auto' {ta:.2f}s vs device='cpu' {tc:.2f}s ({ta / tc:.1f}x) on the same host "
-          f"kernels, {rc.blocks} blocks, results equal to {same:.1e}")
+    print(
+        f"REPRO: CONFIRMED device='auto' {ta:.2f}s vs device='cpu' {tc:.2f}s ({ta / tc:.1f}x) on the same host "
+        f"kernels, {rc.blocks} blocks, results equal to {same:.1e}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED device='auto' {ta:.2f}s vs device='cpu' {tc:.2f}s")

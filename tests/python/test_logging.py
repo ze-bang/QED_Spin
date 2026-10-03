@@ -2,6 +2,7 @@
 warn- and error-level records arrive as QEDWarning; the engine's other messages reach
 ``logging.getLogger("qed")`` (or a stream) only through ``qed.set_log_level`` or
 ``QED_LOG_LEVEL``; errors are qed.errors classes that are also the builtins."""
+
 from __future__ import annotations
 
 import logging
@@ -66,6 +67,7 @@ def test_default_run_writes_nothing(capfd, monkeypatch):
 def test_warn_records_arrive_as_qedwarning():
     import warnings
     from qed import _log
+
     with pytest.warns(qed.errors.QEDWarning, match="sample dropped"):
         _log.log(_log.WARN, "FTLM %s", "sample dropped")
     qed.set_log_level("off")
@@ -88,7 +90,7 @@ def test_import_level_from_environment():
     assert _import_level({}) == "warn"
     assert _import_level({"QED_LOG_LEVEL": "debug"}) == "debug"
     assert _import_level({"QED_LOG_LEVEL": "off"}) == "off"
-    assert _import_level({"ED_SYM_PROFILE": "1"}) == "info"      # the profile still prints
+    assert _import_level({"ED_SYM_PROFILE": "1"}) == "info"  # the profile still prints
 
 
 def test_engine_records_are_replayed_into_the_qed_logger(caplog):
@@ -99,7 +101,7 @@ def test_engine_records_are_replayed_into_the_qed_logger(caplog):
         qed.spectrum(H, sym=sym)
     msgs = [r.getMessage() for r in caplog.records if r.name == "qed"]
     assert any("group-sector path," in m for m in msgs), msgs[:5]
-    assert qed._core.log_drain() == []          # replayed when the verb returned
+    assert qed._core.log_drain() == []  # replayed when the verb returned
 
 
 def test_off_again_stops_the_records(caplog):
@@ -118,7 +120,7 @@ def test_stream_receives_records_live(capfd):
     out, err = capfd.readouterr()
     assert out == ""
     assert "[qed info] [little_group]" in err
-    assert qed._core.log_drain() == []          # written at once, nothing queued
+    assert qed._core.log_drain() == []  # written at once, nothing queued
 
 
 def test_python_side_records_follow_the_same_level(caplog):
@@ -129,6 +131,7 @@ def test_python_side_records_follow_the_same_level(caplog):
     assert not [r for r in caplog.records if r.name == "qed"]
     qed.set_log_level("info")
     from qed import discovery
+
     discovery._FIND_SYM_MEMO.clear()
     with caplog.at_level(logging.DEBUG, logger="qed"):
         qed.find_symmetries(H, verbose=True)
@@ -149,10 +152,16 @@ def test_log_level_round_trip_and_refusal():
 
 def test_error_classes_are_also_the_builtins():
     E = qed.errors
-    for cls, base in [(E.InvalidRequest, ValueError), (E.EmptySelection, ValueError),
-                      (E.EmptySelection, E.InvalidRequest), (E.Unsupported, NotImplementedError),
-                      (E.DeviceUnavailable, RuntimeError), (E.DeviceUnsupported, RuntimeError),
-                      (E.ResourceLimit, MemoryError), (E.ConvergenceError, RuntimeError)]:
+    for cls, base in [
+        (E.InvalidRequest, ValueError),
+        (E.EmptySelection, ValueError),
+        (E.EmptySelection, E.InvalidRequest),
+        (E.Unsupported, NotImplementedError),
+        (E.DeviceUnavailable, RuntimeError),
+        (E.DeviceUnsupported, RuntimeError),
+        (E.ResourceLimit, MemoryError),
+        (E.ConvergenceError, RuntimeError),
+    ]:
         assert issubclass(cls, base) and issubclass(cls, E.QEDError)
 
 

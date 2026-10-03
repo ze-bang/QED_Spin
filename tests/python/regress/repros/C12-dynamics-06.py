@@ -7,6 +7,7 @@ so results are silently wrong; in expect/thermal the site indexes past the N-ent
 Test: 8-site Heisenberg ring, O = qed.Operator(12) with Sz on all 12 sites. The physical part
 sum_{i<8} Sz_i annihilates the singlet ground state, so a correct library raises (or gives 0); the
 claim predicts weight 4 at omega=0 and <GS|O|GS> = 2. expect is run in a subprocess (possible UB)."""
+
 import subprocess
 import sys
 import textwrap

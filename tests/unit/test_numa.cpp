@@ -63,13 +63,10 @@ struct ScopedNumaEnv {
 // ============================================================================
 // 1-2. Default-off behaviour and knob parsing
 // ============================================================================
-TEST_CASE("ED_NUMA_PIN_THREADS defaults to off and parses the standard truthy strings",
-          "[numa][knob]") {
+TEST_CASE("ED_NUMA_PIN_THREADS defaults to off and parses the standard truthy strings", "[numa][knob]") {
     ScopedNumaEnv guard;
 
-    SECTION("unset") {
-        REQUIRE_FALSE(ed::parallel::numa_pin_threads_enabled());
-    }
+    SECTION("unset") { REQUIRE_FALSE(ed::parallel::numa_pin_threads_enabled()); }
 
     SECTION("ED_NUMA_PIN_THREADS=1") {
         setenv("ED_NUMA_PIN_THREADS", "1", 1);
@@ -106,8 +103,7 @@ TEST_CASE("ED_NUMA_PIN_THREADS defaults to off and parses the standard truthy st
 // ============================================================================
 // 3. Deferred inside a parallel region; pinned threads stay in the allowed set
 // ============================================================================
-TEST_CASE("pin_omp_threads_once pins every thread to one CPU of the allowed set",
-          "[numa][pin][cpuset]") {
+TEST_CASE("pin_omp_threads_once pins every thread to one CPU of the allowed set", "[numa][pin][cpuset]") {
 #if defined(__linux__) && defined(_OPENMP)
     ScopedNumaEnv guard;
     setenv("ED_NUMA_PIN_THREADS", "1", 1);
@@ -120,9 +116,9 @@ TEST_CASE("pin_omp_threads_once pins every thread to one CPU of the allowed set"
     REQUIRE(sched_getaffinity(0, sizeof(allowed), &allowed) == 0);
 
     // A call from inside a parallel region pins nothing and leaves the once for later.
-    #pragma omp parallel num_threads(2)
+#pragma omp parallel num_threads(2)
     {
-        #pragma omp master
+#pragma omp master
         if (omp_get_num_threads() > 1) ed::parallel::pin_omp_threads_once();
     }
     REQUIRE(ed::parallel::pin_omp_threads_application_count() == 0);
@@ -134,7 +130,7 @@ TEST_CASE("pin_omp_threads_once pins every thread to one CPU of the allowed set"
     }
     REQUIRE(ed::parallel::pin_omp_threads_application_count() == 1);
     std::vector<int> ok(static_cast<std::size_t>(omp_get_max_threads()), 0);
-    #pragma omp parallel
+#pragma omp parallel
     {
         cpu_set_t mine;
         CPU_ZERO(&mine);
@@ -158,8 +154,7 @@ TEST_CASE("pin_omp_threads_once pins every thread to one CPU of the allowed set"
 // ============================================================================
 // 4. pin_omp_threads_once is idempotent
 // ============================================================================
-TEST_CASE("pin_omp_threads_once is idempotent within a process",
-          "[numa][pin][idempotent]") {
+TEST_CASE("pin_omp_threads_once is idempotent within a process", "[numa][pin][idempotent]") {
     ScopedNumaEnv guard;
     setenv("ED_NUMA_PIN_THREADS", "1", 1);
     REQUIRE(ed::parallel::numa_pin_threads_enabled());

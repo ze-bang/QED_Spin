@@ -124,10 +124,9 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc);
 //                    orientation; a pair listed twice (either way) is one bond
 //   * `sublattice`-- optional; zero-filled if empty.
 // The lattice knows no shells beyond these bonds (nnn_pairs() raises).
-Lattice from_neighbor_lists(
-    const std::vector<Position>& positions,
-    const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
-    const std::vector<int>& sublattice = {});
+Lattice from_neighbor_lists(const std::vector<Position>& positions,
+                            const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
+                            const std::vector<int>& sublattice = {});
 
 // Read a `cluster.txt`-style file into a Lattice. A "positions" block holds one
 // site per line, as "x y", "x y z" or "id x y z" (ids counting from 0 in order);

@@ -55,8 +55,7 @@ struct IrrepData {
     std::vector<std::vector<std::complex<double>>> matrices;
 
     /// Convenience: the (n,n) diagonal partner element D^Γ(g)_{nn} over all g.
-    [[nodiscard]] std::vector<std::complex<double>>
-    partner_diagonal(int n) const;
+    [[nodiscard]] std::vector<std::complex<double>> partner_diagonal(int n) const;
 };
 
 struct GroupIrreps {
@@ -68,7 +67,8 @@ struct GroupIrreps {
     std::vector<IrrepData> irreps;          ///< one per distinct irrep
 
     [[nodiscard]] bool is_abelian() const noexcept {
-        for (const auto& ir : irreps) if (ir.dim > 1) return false;
+        for (const auto& ir : irreps)
+            if (ir.dim > 1) return false;
         return true;
     }
 };
@@ -80,8 +80,7 @@ struct GroupIrreps {
 ///
 /// Throws std::runtime_error if `max_clique` is not closed under composition or
 /// if the numerical decomposition fails the Σd_Γ² == |G| / orthogonality checks.
-[[nodiscard]] GroupIrreps
-decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
+[[nodiscard]] GroupIrreps decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
 
 /// Decompose an ABSTRACT finite group given only
 /// its multiplication table (mult[a][b] = index of a·b). Element 0 need not be
@@ -89,8 +88,7 @@ decompose_irreps(const std::vector<std::vector<int>>& max_clique, int n_sites);
 /// the abelian translation subgroup and therefore have no faithful
 /// site-permutation realisation. Same numerical regular-representation
 /// commutant decomposition as `decompose_irreps`.
-[[nodiscard]] GroupIrreps
-decompose_irreps_tables(const std::vector<std::vector<int>>& mult);
+[[nodiscard]] GroupIrreps decompose_irreps_tables(const std::vector<std::vector<int>>& mult);
 
 /// The omega-projective irreps of an abstract group (its multiplication table): D(e) D(f) =
 /// omega(e, f) D(ef), omega a unit-modulus 2-cocycle normalised at the identity (omega[e][f]).
@@ -101,8 +99,7 @@ decompose_irreps_tables(const std::vector<std::vector<int>>& mult);
 /// sum of d^2 is |G| and the irreps are ordered by dimension. omega = 1 everywhere returns
 /// decompose_irreps_tables(mult). The tables (inverse, classes) are those of the group itself.
 /// Throws std::invalid_argument for an omega that is not a normalised unit 2-cocycle.
-[[nodiscard]] GroupIrreps
-decompose_projective_irreps(const std::vector<std::vector<int>>& mult,
-                            const std::vector<std::vector<std::complex<double>>>& omega);
+[[nodiscard]] GroupIrreps decompose_projective_irreps(const std::vector<std::vector<int>>& mult,
+                                                      const std::vector<std::vector<std::complex<double>>>& omega);
 
 }  // namespace ed::symmetry

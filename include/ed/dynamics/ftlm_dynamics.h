@@ -50,29 +50,29 @@ inline constexpr std::size_t kLocalReorthMinDim = std::size_t{1} << 16;
 
 /// Parameters for the FTLM cross-irrep kernel.
 struct FtlmCrossIrrepOptions {
-    std::size_t krylov_dim       = 200;
+    std::size_t krylov_dim = 200;
     /// Both Lanczos runs stop at an invariant subspace, beta <= breakdown_tol (energy units;
     /// the engine passes 64 eps s_H). 0: every step runs.
-    double      breakdown_tol    = 0.0;
-    std::size_t num_samples      = 30;
-    double      broadening       = 0.05;
+    double breakdown_tol = 0.0;
+    std::size_t num_samples = 30;
+    double broadening = 0.05;
     /// Base seed: sample s starts from gaussian_vector(dim_src, sample_engine(random_seed, s))
     /// (0 draws one).
-    std::uint64_t random_seed    = 0;
+    std::uint64_t random_seed = 0;
     /// Applied in place to each (host) random vector before use, e.g. a projection onto one
     /// spin tower; the kernel renormalises the result. The trace then runs over the image of
     /// the transform, whose dimension is `trace_dim` (0: the whole source sector).
     std::function<void(Complex*, std::size_t)> seed_transform;
-    std::size_t trace_dim        = 0;
+    std::size_t trace_dim = 0;
     /// Source Ritz pairs whose start weight |<r|psi_i>|^2 lies below this are dropped (0: none): with
     /// the start projected onto a spin tower, the levels outside it carry only roundoff weight
     /// (ed::thermal::FtlmOptions::min_weight).
-    double      min_weight       = 0.0;
+    double min_weight = 0.0;
     /// Device multi-vector source H (LinearOperator::bind_cuda_multi; each target carries its own,
     /// FtlmDynamicsTarget::batch): on a CUDA run up to `batch_width` samples advance in lockstep
     /// and share each H apply. A and B must then be safe to apply from several threads at once.
     std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src;
-    std::size_t batch_width      = 8;
+    std::size_t batch_width = 8;
 };
 
 /// One target sector of a source: H there, A and B from the source as rows of it (callables over
@@ -87,10 +87,10 @@ struct FtlmDynamicsTarget {
 /// temperature and S per target and temperature, about the common reference E_min (the lowest
 /// weighted source Ritz value over the samples). The caller sums S and Z over source sectors.
 struct FtlmDynamicsResult {
-    std::map<double, double>                            Z;
+    std::map<double, double> Z;
     std::vector<std::map<double, std::vector<Complex>>> S;   ///< per target
-    double                                              E_min = 0.0;
-    std::size_t                                         samples_done = 0;
+    double E_min = 0.0;
+    std::size_t samples_done = 0;
 };
 
 /// The estimator above for every target of one source at once: each sample's source Lanczos
@@ -100,8 +100,7 @@ struct FtlmDynamicsResult {
 template <class Backend, class HSrc>
 FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t dim_src,
                                         const std::vector<FtlmDynamicsTarget>& targets,
-                                        const std::vector<double>& temperatures,
-                                        const std::vector<double>& omega,
+                                        const std::vector<double>& temperatures, const std::vector<double>& omega,
                                         const FtlmCrossIrrepOptions& opts) {
     if (dim_src == 0) throw std::invalid_argument("ftlm_dynamics_kernel: empty source sector");
     for (const auto& t : targets)
@@ -133,10 +132,10 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         // blind the device-consistency checks.
         auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n) {
             ed::krylov::LanczosKernelOptions lo;
-            lo.max_iter   = std::min(n, opts.krylov_dim);
-            lo.reorth     = n > std::max<std::size_t>(4 * opts.krylov_dim, kLocalReorthMinDim)
-                                ? ed::krylov::ReorthPolicy::LocalDGKS3
-                                : ed::krylov::ReorthPolicy::FullCGS2;
+            lo.max_iter = std::min(n, opts.krylov_dim);
+            lo.reorth = n > std::max<std::size_t>(4 * opts.krylov_dim, kLocalReorthMinDim)
+                            ? ed::krylov::ReorthPolicy::LocalDGKS3
+                            : ed::krylov::ReorthPolicy::FullCGS2;
             lo.keep_basis = true;
             if (opts.breakdown_tol > 0.0) lo.breakdown_tol = opts.breakdown_tol;
             auto mv = [&H](const Complex* in, Complex* o, std::size_t nn) { H(in, o, nn); };
@@ -226,10 +225,10 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             // S_s[T][w] = sum_i e^{-beta (e_i - smin)} sum_j w_ij L_eta(w - (lambda_j - e_i)),
             // w_ij = c_i <A psi_i|chi_j> |B r| VS[j,0]: one source Ritz row s_i(w) at a time.
             auto& St = out.S[tt];
-            #pragma omp parallel
+#pragma omp parallel
             {
                 std::vector<Complex> si(nW), acc(nT * nW, Complex(0, 0));
-                #pragma omp for schedule(static)
+#pragma omp for schedule(static)
                 for (std::int64_t ii = 0; ii < static_cast<std::int64_t>(mH); ++ii) {
                     const std::size_t i = static_cast<std::size_t>(ii);
                     if (c[i] == 0.0) continue;
@@ -251,7 +250,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
                         for (std::size_t iw = 0; iw < nW; ++iw) acc[it * nW + iw] += wi * si[iw];
                     }
                 }
-                #pragma omp critical(ftlm_dynamics_rows)
+#pragma omp critical(ftlm_dynamics_rows)
                 for (std::size_t q = 0; q < nT * nW; ++q) St[q] += acc[q];
             }
         }

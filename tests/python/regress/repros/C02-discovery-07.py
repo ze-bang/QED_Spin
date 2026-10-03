@@ -7,6 +7,7 @@ whose S+S+ / S-S- records cancel is classified Parity-only and not SU(2): (a) th
 xyz_chain(8, 1, 1, 1) (isotropic Heisenberg in Cartesian form); (b) the library's own
 HamiltonianBuilder.dm with D_z (hamiltonian_builder.cpp:266-276 emits S+S+ with +-Dz/(4i)),
 which conserves Sz. Then Symmetry(sz=4) and total_spin=0 raise. Dense check via H.apply."""
+
 import signal
 import numpy as np
 import qed
@@ -34,8 +35,9 @@ def comm_sz(M):
 
 
 # independent Heisenberg ring spectrum (Kronecker products)
-sx = np.array([[0, .5], [.5, 0]], complex); sy = np.array([[0, -.5j], [.5j, 0]], complex)
-sz = np.array([[.5, 0], [0, -.5]], complex)
+sx = np.array([[0, 0.5], [0.5, 0]], complex)
+sy = np.array([[0, -0.5j], [0.5j, 0]], complex)
+sz = np.array([[0.5, 0], [0, -0.5]], complex)
 
 
 def site(o, i):
@@ -71,9 +73,11 @@ ca, cb = qed._core.sectors.sz_content(Ha), qed._core.sectors.sz_content(Hb)
 ra = attempt(Ha, qed.Symmetry(spatial=None, sz=N // 2))
 rs = attempt(Ha, qed.Symmetry(spatial=None, total_spin=0))
 rb = attempt(Hb, qed.Symmetry(spatial=None, sz=N // 2))
-info = (f"(a) xyz(1,1,1): spec-vs-Heisenberg {specdiff:.1e}, [H,Sz]={comm_sz(Ma):.1e}, sz_content={ca}, "
-        f"sz=4 -> {ra!r}, total_spin=0 -> {rs!r}; "
-        f"(b) builder Heis+Dz: [H,Sz]={comm_sz(Mb):.1e}, sz_content={cb}, sz=4 -> {rb!r}")
+info = (
+    f"(a) xyz(1,1,1): spec-vs-Heisenberg {specdiff:.1e}, [H,Sz]={comm_sz(Ma):.1e}, sz_content={ca}, "
+    f"sz=4 -> {ra!r}, total_spin=0 -> {rs!r}; "
+    f"(b) builder Heis+Dz: [H,Sz]={comm_sz(Mb):.1e}, sz_content={cb}, sz=4 -> {rb!r}"
+)
 true_u1 = comm_sz(Ma) < 1e-12 and comm_sz(Mb) < 1e-12 and specdiff < 1e-9
 if true_u1 and "U1" not in str(ca) and "U1" not in str(cb) and ra != "ok" and rb != "ok":
     print("REPRO: CONFIRMED " + info)

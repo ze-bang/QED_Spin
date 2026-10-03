@@ -35,8 +35,7 @@ constexpr double kSqrt3 = 1.7320508075688772;
 Pair unordered(std::size_t a, std::size_t b) { return a < b ? Pair{a, b} : Pair{b, a}; }
 
 // Appends the bond i -> j unless it joins a site to itself or a pair that already has a bond.
-void add_bond(std::vector<Bond>& out, std::set<Pair>& seen, std::size_t i, std::size_t j,
-              int type = 0) {
+void add_bond(std::vector<Bond>& out, std::set<Pair>& seen, std::size_t i, std::size_t j, int type = 0) {
     if (i != j && seen.insert(unordered(i, j)).second) out.push_back(Bond{i, j, type});
 }
 
@@ -70,9 +69,8 @@ public:
     Layout(const Cells& C, bool pbc) : C_(C), pbc_(pbc) {}
 
     std::size_t index(const Cell& c, int u) const {
-        const std::size_t cell = (static_cast<std::size_t>(c[2]) * C_.n[1] +
-                                  static_cast<std::size_t>(c[1])) * C_.n[0] +
-                                 static_cast<std::size_t>(c[0]);
+        const std::size_t cell = (static_cast<std::size_t>(c[2]) * C_.n[1] + static_cast<std::size_t>(c[1])) * C_.n[0]
+                                 + static_cast<std::size_t>(c[0]);
         return cell * C_.basis.size() + static_cast<std::size_t>(u);
     }
 
@@ -81,8 +79,10 @@ public:
         for (int k = 0; k < 3; ++k) {
             const long n = static_cast<long>(C_.n[k]);
             long t = c[k] + d[k];
-            if (pbc_ && k < C_.dims) t = ((t % n) + n) % n;
-            else if (t < 0 || t >= n) return false;
+            if (pbc_ && k < C_.dims)
+                t = ((t % n) + n) % n;
+            else if (t < 0 || t >= n)
+                return false;
             out[k] = t;
         }
         return true;
@@ -168,12 +168,15 @@ void fill_shells(Lattice& L, const Cells& C, const Layout& lay, const std::vecto
     std::set<Pair> bonded, first;
     for (const auto& b : L.nn_bonds) bonded.insert(unordered(b.i, b.j));
     for (const auto& [p, rank] : nearest) {
-        if (rank == 0) first.insert(p);
-        else (rank == 1 ? L.nnn_bonds : L.nnnn_bonds).push_back(Bond{p.first, p.second});
+        if (rank == 0)
+            first.insert(p);
+        else
+            (rank == 1 ? L.nnn_bonds : L.nnnn_bonds).push_back(Bond{p.first, p.second});
     }
     if (first != bonded)
-        throw std::logic_error(L.label + ": the nearest-neighbour bonds are not the first distance "
-                                         "shell of the lattice");
+        throw std::logic_error(L.label
+                               + ": the nearest-neighbour bonds are not the first distance "
+                                 "shell of the lattice");
     L.shells_known = true;
 }
 
@@ -204,9 +207,10 @@ void require_cells(const char* name, bool pbc, bool has_basis, std::initializer_
     for (std::size_t len : n) {
         if (len == 0) throw InvalidRequest(std::string(name) + ": every length must be > 0");
         if (has_basis && pbc && len == 1)
-            throw InvalidRequest(std::string(name) + ": a periodic length of 1 joins bonds of "
-                                 "different kinds to one pair of sites; use at least 2 cells, or "
-                                 "pbc=False");
+            throw InvalidRequest(std::string(name)
+                                 + ": a periodic length of 1 joins bonds of "
+                                   "different kinds to one pair of sites; use at least 2 cells, or "
+                                   "pbc=False");
     }
 }
 
@@ -226,15 +230,17 @@ std::vector<std::pair<std::size_t, std::size_t>> Lattice::nn_pairs() const { ret
 
 std::vector<std::pair<std::size_t, std::size_t>> Lattice::nnn_pairs() const {
     if (!shells_known && nnn_bonds.empty())
-        throw InvalidRequest("nnn_pairs: " + label + " was built from an adjacency list and knows no "
-                             "next-nearest neighbours; pass the pairs yourself");
+        throw InvalidRequest("nnn_pairs: " + label
+                             + " was built from an adjacency list and knows no "
+                               "next-nearest neighbours; pass the pairs yourself");
     return pairs_of(nnn_bonds);
 }
 
 std::vector<std::pair<std::size_t, std::size_t>> Lattice::nnnn_pairs() const {
     if (!shells_known && nnnn_bonds.empty())
-        throw InvalidRequest("nnnn_pairs: " + label + " was built from an adjacency list and knows "
-                             "no third-nearest neighbours; pass the pairs yourself");
+        throw InvalidRequest("nnnn_pairs: " + label
+                             + " was built from an adjacency list and knows "
+                               "no third-nearest neighbours; pass the pairs yourself");
     return pairs_of(nnnn_bonds);
 }
 
@@ -305,7 +311,7 @@ Lattice kagome(std::size_t Lx, std::size_t Ly, bool pbc) {
     C.dims = 2;
     C.a = {{{1.0, 0.0, 0.0}, {0.5, kSqrt3 / 2.0, 0.0}, {}}};
     C.basis = {{0.0, 0.0, 0.0}, {0.5, 0.0, 0.0}, {0.25, kSqrt3 / 4.0, 0.0}};
-    C.links = {{0, 1, {0, 0, 0}},  {1, 2, {0, 0, 0}}, {2, 0, {0, 0, 0}},
+    C.links = {{0, 1, {0, 0, 0}},  {1, 2, {0, 0, 0}},  {2, 0, {0, 0, 0}},
                {0, 1, {-1, 0, 0}}, {1, 2, {1, -1, 0}}, {2, 0, {0, 1, 0}}};
     return build(C, pbc, size_label("kagome", {Lx, Ly}, pbc));
 }
@@ -323,19 +329,17 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc) {
     C.dims = 3;
     C.a = {a2, a1, a0};
     C.basis = {{0.0, 0.0, 0.0}, {0.0, 0.25, 0.25}, {0.25, 0.0, 0.25}, {0.25, 0.25, 0.0}};
-    C.links = {{0, 1, {0, 0, 0}},  {0, 2, {0, 0, 0}},  {0, 3, {0, 0, 0}},
-               {1, 2, {0, 0, 0}},  {1, 3, {0, 0, 0}},  {2, 3, {0, 0, 0}},
-               {0, 1, {0, 0, -1}}, {0, 2, {0, -1, 0}}, {0, 3, {-1, 0, 0}},
-               {1, 2, {0, -1, 1}}, {1, 3, {-1, 0, 1}}, {2, 3, {-1, 1, 0}}};
+    C.links = {{0, 1, {0, 0, 0}},  {0, 2, {0, 0, 0}},  {0, 3, {0, 0, 0}},  {1, 2, {0, 0, 0}},
+               {1, 3, {0, 0, 0}},  {2, 3, {0, 0, 0}},  {0, 1, {0, 0, -1}}, {0, 2, {0, -1, 0}},
+               {0, 3, {-1, 0, 0}}, {1, 2, {0, -1, 1}}, {1, 3, {-1, 0, 1}}, {2, 3, {-1, 1, 0}}};
     Lattice L = build(C, pbc, size_label("pyrochlore", {Lx, Ly, Lz}, pbc));
     L.lattice_vectors = {a0, a1, a2};
     return L;
 }
 
-Lattice from_neighbor_lists(
-    const std::vector<Position>& positions,
-    const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
-    const std::vector<int>& sublattice) {
+Lattice from_neighbor_lists(const std::vector<Position>& positions,
+                            const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
+                            const std::vector<int>& sublattice) {
     Lattice L;
     L.num_sites = positions.size();
     L.positions = positions;
@@ -351,12 +355,12 @@ Lattice from_neighbor_lists(
     L.nn_bonds.reserve(nn_pairs.size());
     for (auto [i, j] : nn_pairs) {
         if (i >= L.num_sites || j >= L.num_sites) {
-            throw std::out_of_range("from_neighbor_lists: bond (" + std::to_string(i) + ", " +
-                                    std::to_string(j) + ") has an endpoint out of range");
+            throw std::out_of_range("from_neighbor_lists: bond (" + std::to_string(i) + ", " + std::to_string(j)
+                                    + ") has an endpoint out of range");
         }
         if (i == j) {
-            throw InvalidRequest("from_neighbor_lists: bond (" + std::to_string(i) + ", " +
-                                 std::to_string(j) + ") joins a site to itself");
+            throw InvalidRequest("from_neighbor_lists: bond (" + std::to_string(i) + ", " + std::to_string(j)
+                                 + ") joins a site to itself");
         }
         add_bond(L.nn_bonds, seen, i, j);
     }
@@ -368,8 +372,7 @@ Lattice from_neighbor_lists(
 namespace {
 
 bool parse_count(const std::string& s, std::size_t& out) {
-    if (s.empty() || s.size() > 18 ||
-        !std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); }))
+    if (s.empty() || s.size() > 18 || !std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); }))
         return false;
     out = std::stoull(s);
     return true;
@@ -385,9 +388,7 @@ bool parse_real(const std::string& s, double& out) {
 
 Lattice from_cluster_file(const std::string& path) {
     std::ifstream in(path);
-    if (!in) {
-        throw std::runtime_error("from_cluster_file: cannot open " + path);
-    }
+    if (!in) { throw std::runtime_error("from_cluster_file: cannot open " + path); }
     enum Section { None, Positions, Edges };
     Section sect = None;
     std::array<bool, 3> opened{};
@@ -442,8 +443,8 @@ Lattice from_cluster_file(const std::string& path) {
             if (tok.size() == 4) {
                 std::size_t id = 0;
                 if (!parse_count(tok[0], id) || id != positions.size())
-                    fail(no, "the id must be the site's index, counting from 0: expected " +
-                                 std::to_string(positions.size()) + ", read '" + tok[0] + "'");
+                    fail(no, "the id must be the site's index, counting from 0: expected "
+                                 + std::to_string(positions.size()) + ", read '" + tok[0] + "'");
                 positions.push_back({v[1], v[2], v[3]});
             } else {
                 positions.push_back({v[0], v[1], tok.size() == 3 ? v[2] : 0.0});
@@ -461,13 +462,12 @@ Lattice from_cluster_file(const std::string& path) {
     const std::array<std::size_t, 3> got{0, positions.size(), edges.size()};
     for (int s : {Positions, Edges})
         if (has_count[s] && stated[s] != got[s])
-            fail(stated_at[s], "the block states " + std::to_string(stated[s]) + " lines and holds " +
-                                   std::to_string(got[s]));
+            fail(stated_at[s],
+                 "the block states " + std::to_string(stated[s]) + " lines and holds " + std::to_string(got[s]));
     for (std::size_t e = 0; e < edges.size(); ++e)
         if (std::max(edges[e].first, edges[e].second) >= positions.size())
-            fail(edge_line[e], "edge (" + std::to_string(edges[e].first) + ", " +
-                                   std::to_string(edges[e].second) + ") names a site past the " +
-                                   std::to_string(positions.size()) + " positions");
+            fail(edge_line[e], "edge (" + std::to_string(edges[e].first) + ", " + std::to_string(edges[e].second)
+                                   + ") names a site past the " + std::to_string(positions.size()) + " positions");
     return from_neighbor_lists(positions, edges);
 }
 

@@ -58,9 +58,7 @@ using ed::ops::MaskedOperator;
 // Helpers to convert NumPy arrays <-> std::vector<Complex>.
 ComplexVec from_numpy(const ComplexArray& arr) {
     if (arr.ndim() != 1) {
-        throw std::invalid_argument(
-            "expected a 1-D complex128 array, got ndim=" +
-            std::to_string(arr.ndim()));
+        throw std::invalid_argument("expected a 1-D complex128 array, got ndim=" + std::to_string(arr.ndim()));
     }
     const auto n = static_cast<size_t>(arr.shape(0));
     const Complex* p = arr.data();
@@ -75,16 +73,9 @@ ComplexArray to_numpy(const ComplexVec& v) {
 
 // Add a one-site term op[site] with coefficient `coeff` to an Operator (one record, as the
 // C++ fixtures add them).
-void op_add_one_body(Operator& op,
-                     int op_type,
-                     uint64_t site,
-                     Complex coeff) {
-    if (op_type < 0 || op_type > 2) {
-        throw std::invalid_argument("op_type must be 0=S+, 1=S-, or 2=Sz");
-    }
-    if (site >= op.getNumBits()) {
-        throw std::out_of_range("site index >= num_sites");
-    }
+void op_add_one_body(Operator& op, int op_type, uint64_t site, Complex coeff) {
+    if (op_type < 0 || op_type > 2) { throw std::invalid_argument("op_type must be 0=S+, 1=S-, or 2=Sz"); }
+    if (site >= op.getNumBits()) { throw std::out_of_range("site index >= num_sites"); }
     Operator::TransformData t;
     t.op_type = static_cast<uint8_t>(op_type);
     t.site_index = site;
@@ -101,16 +92,11 @@ void op_add_one_body(Operator& op,
     op.invalidateMatrixCaches();
 }
 
-void op_add_two_body(Operator& op,
-                     int op_type_1, uint64_t site_1,
-                     int op_type_2, uint64_t site_2,
-                     Complex coeff) {
+void op_add_two_body(Operator& op, int op_type_1, uint64_t site_1, int op_type_2, uint64_t site_2, Complex coeff) {
     if (op_type_1 < 0 || op_type_1 > 2 || op_type_2 < 0 || op_type_2 > 2) {
         throw std::invalid_argument("op_type must be 0=S+, 1=S-, or 2=Sz");
     }
-    if (site_1 >= op.getNumBits() || site_2 >= op.getNumBits()) {
-        throw std::out_of_range("site index >= num_sites");
-    }
+    if (site_1 >= op.getNumBits() || site_2 >= op.getNumBits()) { throw std::out_of_range("site index >= num_sites"); }
     Operator::TransformData t;
     t.op_type = static_cast<uint8_t>(op_type_1);
     t.site_index = site_1;
@@ -122,19 +108,12 @@ void op_add_two_body(Operator& op,
     op.invalidateMatrixCaches();
 }
 
-void op_add_three_body(Operator& op,
-                       int op_type_1, uint64_t site_1,
-                       int op_type_2, uint64_t site_2,
-                       int op_type_3, uint64_t site_3,
-                       Complex coeff) {
-    if (op_type_1 < 0 || op_type_1 > 2 ||
-        op_type_2 < 0 || op_type_2 > 2 ||
-        op_type_3 < 0 || op_type_3 > 2) {
+void op_add_three_body(Operator& op, int op_type_1, uint64_t site_1, int op_type_2, uint64_t site_2, int op_type_3,
+                       uint64_t site_3, Complex coeff) {
+    if (op_type_1 < 0 || op_type_1 > 2 || op_type_2 < 0 || op_type_2 > 2 || op_type_3 < 0 || op_type_3 > 2) {
         throw std::invalid_argument("op_type must be 0=S+, 1=S-, or 2=Sz");
     }
-    if (site_1 >= op.getNumBits() ||
-        site_2 >= op.getNumBits() ||
-        site_3 >= op.getNumBits()) {
+    if (site_1 >= op.getNumBits() || site_2 >= op.getNumBits() || site_3 >= op.getNumBits()) {
         throw std::out_of_range("site index >= num_sites");
     }
     Operator::ThreeBodyTransformData t;
@@ -153,9 +132,8 @@ ComplexArray op_apply(const Operator& op, const ComplexArray& vin) {
     auto v = from_numpy(vin);
     const uint64_t n = (1ULL << op.getNumBits());
     if (v.size() != n) {
-        throw std::invalid_argument(
-            "input vector length " + std::to_string(v.size()) +
-            " != Hilbert dim 2^N = " + std::to_string(n));
+        throw std::invalid_argument("input vector length " + std::to_string(v.size())
+                                    + " != Hilbert dim 2^N = " + std::to_string(n));
     }
     ComplexVec out(n, Complex(0.0, 0.0));
     op.apply(v.data(), out.data(), n);
@@ -172,9 +150,7 @@ py::list op_iter_one_body(const Operator& op) {
     py::list out;
     for (const auto& t : op.records()) {
         if (t.is_two_body) continue;
-        out.append(py::make_tuple(static_cast<int>(t.op_type),
-                                  static_cast<uint64_t>(t.site_index),
-                                  t.coefficient));
+        out.append(py::make_tuple(static_cast<int>(t.op_type), static_cast<uint64_t>(t.site_index), t.coefficient));
     }
     return out;
 }
@@ -185,11 +161,8 @@ py::list op_iter_two_body(const Operator& op) {
     py::list out;
     for (const auto& t : op.records()) {
         if (!t.is_two_body) continue;
-        out.append(py::make_tuple(static_cast<int>(t.op_type),
-                                  static_cast<uint64_t>(t.site_index),
-                                  static_cast<int>(t.op_type_2),
-                                  static_cast<uint64_t>(t.site_index_2),
-                                  t.coefficient));
+        out.append(py::make_tuple(static_cast<int>(t.op_type), static_cast<uint64_t>(t.site_index),
+                                  static_cast<int>(t.op_type_2), static_cast<uint64_t>(t.site_index_2), t.coefficient));
     }
     return out;
 }
@@ -199,13 +172,9 @@ py::list op_iter_two_body(const Operator& op) {
 py::list op_iter_three_body(const Operator& op) {
     py::list out;
     for (const auto& t : op.three_body_records()) {
-        out.append(py::make_tuple(static_cast<int>(t.op_type_1),
-                                  static_cast<uint64_t>(t.site_index_1),
-                                  static_cast<int>(t.op_type_2),
-                                  static_cast<uint64_t>(t.site_index_2),
-                                  static_cast<int>(t.op_type_3),
-                                  static_cast<uint64_t>(t.site_index_3),
-                                  t.coefficient));
+        out.append(py::make_tuple(static_cast<int>(t.op_type_1), static_cast<uint64_t>(t.site_index_1),
+                                  static_cast<int>(t.op_type_2), static_cast<uint64_t>(t.site_index_2),
+                                  static_cast<int>(t.op_type_3), static_cast<uint64_t>(t.site_index_3), t.coefficient));
     }
     return out;
 }
@@ -217,9 +186,7 @@ void set_qed_error(const char* name, const char* what, PyObject* fallback) {
     try {
         py::object cls = py::module_::import("qed.errors").attr(name);
         PyErr_SetString(cls.ptr(), what);
-    } catch (py::error_already_set&) {
-        PyErr_SetString(fallback, what);
-    }
+    } catch (py::error_already_set&) { PyErr_SetString(fallback, what); }
 }
 
 void translate_ed_errors(std::exception_ptr p) {
@@ -272,15 +239,14 @@ PYBIND11_MODULE(_core, m) {
         if (PyErr_CheckSignals() != 0) throw py::error_already_set();
     });
 
-    m.doc() =
-        "qed._core: pybind11 binding for the C++ exact-diagonalization "
-        "engine. See qed.__init__ for the user-facing facade.";
+    m.doc() = "qed._core: pybind11 binding for the C++ exact-diagonalization "
+              "engine. See qed.__init__ for the user-facing facade.";
     m.attr("__version__") = QED_VERSION_STRING;   // pyproject.toml's, through CMake
 
     // Operator op-type constants. Keep in sync with TransformData::op_type.
-    m.attr("OP_SPLUS")  = py::int_(0);
+    m.attr("OP_SPLUS") = py::int_(0);
     m.attr("OP_SMINUS") = py::int_(1);
-    m.attr("OP_SZ")     = py::int_(2);
+    m.attr("OP_SZ") = py::int_(2);
 
     // The ed::input lattice generators, mounted under `qed._core.input` and re-exported as
     // `qed.input` with the Python HamiltonianBuilder.
@@ -298,54 +264,39 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init([](uint64_t num_sites) { return std::make_unique<Operator>(num_sites, 0.5f); }),
              py::arg("num_sites"))
         .def_property_readonly("num_sites", &Operator::getNumBits)
-        .def_property_readonly("dimension",
-                               [](const Operator& op) -> uint64_t {
-                                   return 1ULL << op.getNumBits();
-                               },
-                               "Full Hilbert-space dimension 2^num_sites.")
-        .def("add_one_body", &op_add_one_body,
-             py::arg("op_type"), py::arg("site"), py::arg("coeff"),
+        .def_property_readonly(
+            "dimension", [](const Operator& op) -> uint64_t { return 1ULL << op.getNumBits(); },
+            "Full Hilbert-space dimension 2^num_sites.")
+        .def("add_one_body", &op_add_one_body, py::arg("op_type"), py::arg("site"), py::arg("coeff"),
              "Append a one-body term `coeff * Op[site]`. op_type is one of "
              "OP_SPLUS, OP_SMINUS, OP_SZ.")
-        .def("add_two_body", &op_add_two_body,
-             py::arg("op_type_1"), py::arg("site_1"),
-             py::arg("op_type_2"), py::arg("site_2"),
-             py::arg("coeff"),
-             "Append a two-body term `coeff * Op1[site_1] Op2[site_2]`.")
-        .def("transform_tuples",
-             [](const Operator& op) {
+        .def("add_two_body", &op_add_two_body, py::arg("op_type_1"), py::arg("site_1"), py::arg("op_type_2"),
+             py::arg("site_2"), py::arg("coeff"), "Append a two-body term `coeff * Op1[site_1] Op2[site_2]`.")
+        .def(
+            "transform_tuples",
+            [](const Operator& op) {
                  // The one-/two-body terms in the canonical (op_type,
                  // site, coeff, is_two_body, op_type_2, site_2) layout,
                  // a list of 6-tuples mirroring ``Operator::TransformData``
                  // (three-body terms are not included).
-                 py::list out;
-                 for (const auto& t : op.records()) {
-                     out.append(py::make_tuple(
-                         static_cast<int>(t.op_type),
-                         t.site_index,
-                         t.coefficient,
-                         t.is_two_body,
-                         static_cast<int>(t.op_type_2),
-                         t.site_index_2));
-                 }
-                 return out;
-             },
-             R"pbdoc(
+                py::list out;
+                for (const auto& t : op.records()) {
+                    out.append(py::make_tuple(static_cast<int>(t.op_type), t.site_index, t.coefficient, t.is_two_body,
+                                              static_cast<int>(t.op_type_2), t.site_index_2));
+                }
+                return out;
+            },
+            R"pbdoc(
              Return the operator's one-/two-body terms as a list of
              6-tuples ``(op_type, site, coeff, is_two_body, op_type_2,
              site_2)``. Used by symmetry discovery (qed.discovery) to
              read the operator's TransformData without exposing the SoA
              internals directly. Three-body terms are not included.
              )pbdoc")
-        .def("add_three_body", &op_add_three_body,
-             py::arg("op_type_1"), py::arg("site_1"),
-             py::arg("op_type_2"), py::arg("site_2"),
-             py::arg("op_type_3"), py::arg("site_3"),
-             py::arg("coeff"),
+        .def("add_three_body", &op_add_three_body, py::arg("op_type_1"), py::arg("site_1"), py::arg("op_type_2"),
+             py::arg("site_2"), py::arg("op_type_3"), py::arg("site_3"), py::arg("coeff"),
              "Append a three-body term `coeff * Op1[s1] Op2[s2] Op3[s3]`.")
-        .def("apply", &op_apply,
-             py::arg("vec"),
-             "Compute H * v on a 1-D complex128 array.")
+        .def("apply", &op_apply, py::arg("vec"), "Compute H * v on a 1-D complex128 array.")
         // In-process introspection used by symmetry discovery (qed.discovery).
         .def("iter_one_body_terms", &op_iter_one_body,
              "List of ``(op_type, site, coeff)`` tuples for every one-body "
@@ -359,203 +310,239 @@ PYBIND11_MODULE(_core, m) {
         .def("iter_three_body_terms", &op_iter_three_body,
              "List of ``(op_type_1, site_1, op_type_2, site_2, op_type_3, "
              "site_3, coeff)`` tuples for every three-body term.")
-        .def("_extend",
-             [](Operator& a, const Operator& b) {
-                 if (a.getNumBits() != b.getNumBits())
-                     throw py::value_error("Operator._extend: the operators act on different numbers of sites");
-                 for (const auto& r : b.records()) a.add_record(r);
-                 for (const auto& r : b.three_body_records()) a.add_record(r);
-                 for (const auto& t : b.extra_terms()) a.add_extra_term(t);
-             },
-             py::arg("other"),
-             "Append ``other``'s records and four-site terms in place (no merging; the builder's "
-             "emit_into).")
+        .def(
+            "_extend",
+            [](Operator& a, const Operator& b) {
+                if (a.getNumBits() != b.getNumBits())
+                    throw py::value_error("Operator._extend: the operators act on different numbers of sites");
+                for (const auto& r : b.records()) a.add_record(r);
+                for (const auto& r : b.three_body_records()) a.add_record(r);
+                for (const auto& t : b.extra_terms()) a.add_extra_term(t);
+            },
+            py::arg("other"),
+            "Append ``other``'s records and four-site terms in place (no merging; the builder's "
+            "emit_into).")
         // The algebra: every result is computed exactly on the canonical terms and written
         // back as records, terms on four or more sites as extra terms.
-        .def_static("product",
-                    [](uint64_t num_sites, const std::string& ops, const std::vector<int>& sites, Complex coeff) {
-                        return ed::ops::to_operator(
-                            MaskedOperator::product(static_cast<int>(num_sites), ops, sites, coeff));
-                    },
-                    py::arg("num_sites"), py::arg("ops"), py::arg("sites"), py::arg("coeff") = Complex(1.0, 0.0),
-                    R"pbdoc(
+        .def_static(
+            "product",
+            [](uint64_t num_sites, const std::string& ops, const std::vector<int>& sites, Complex coeff) {
+                return ed::ops::to_operator(MaskedOperator::product(static_cast<int>(num_sites), ops, sites, coeff));
+            },
+            py::arg("num_sites"), py::arg("ops"), py::arg("sites"), py::arg("coeff") = Complex(1.0, 0.0),
+            R"pbdoc(
              ``coeff * O_0(sites[0]) O_1(sites[1]) ...``, the last factor acting first. Each
              character of ``ops`` is one of ``+ - z x y u d I``: S+, S-, S^z, S^x, S^y,
              the projectors |up><up| and |dn><dn|, and the identity. Sites may
              repeat: the spin-1/2 algebra is applied exactly (S+ S+ = 0, ...).
              )pbdoc")
-        .def("__add__", [](const Operator& a, const Operator& b) {
-                 return ed::ops::to_operator(a.canonical() + b.canonical());
-             }, py::is_operator())
-        .def("__sub__", [](const Operator& a, const Operator& b) {
-                 return ed::ops::to_operator(a.canonical() - b.canonical());
-             }, py::is_operator())
+        .def(
+            "__add__",
+            [](const Operator& a, const Operator& b) { return ed::ops::to_operator(a.canonical() + b.canonical()); },
+            py::is_operator())
+        .def(
+            "__sub__",
+            [](const Operator& a, const Operator& b) { return ed::ops::to_operator(a.canonical() - b.canonical()); },
+            py::is_operator())
         .def("__neg__", [](const Operator& a) { return ed::ops::to_operator(-a.canonical()); })
-        .def("__mul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
-             py::is_operator())
-        .def("__rmul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
-             py::is_operator())
-        .def("__truediv__", [](const Operator& a, Complex s) {
-                 if (s == Complex(0.0, 0.0)) throw py::value_error("Operator: division by zero");
-                 return ed::ops::to_operator(a.canonical().scaled(Complex(1.0, 0.0) / s));
-             }, py::is_operator())
-        .def("__matmul__", [](const Operator& a, const Operator& b) {
-                 return ed::ops::to_operator(a.canonical() * b.canonical());
-             }, py::is_operator(), "``A @ B``: the operator product, B acting first.")
-        .def("adjoint", [](const Operator& a) { return ed::ops::to_operator(a.canonical().dagger()); },
-             "The Hermitian conjugate.")
-        .def("copy", [](const Operator& a) { return Operator(a); }, "An independent copy.")
+        .def(
+            "__mul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
+            py::is_operator())
+        .def(
+            "__rmul__", [](const Operator& a, Complex s) { return ed::ops::to_operator(a.canonical().scaled(s)); },
+            py::is_operator())
+        .def(
+            "__truediv__",
+            [](const Operator& a, Complex s) {
+                if (s == Complex(0.0, 0.0)) throw py::value_error("Operator: division by zero");
+                return ed::ops::to_operator(a.canonical().scaled(Complex(1.0, 0.0) / s));
+            },
+            py::is_operator())
+        .def(
+            "__matmul__",
+            [](const Operator& a, const Operator& b) { return ed::ops::to_operator(a.canonical() * b.canonical()); },
+            py::is_operator(), "``A @ B``: the operator product, B acting first.")
+        .def(
+            "adjoint", [](const Operator& a) { return ed::ops::to_operator(a.canonical().dagger()); },
+            "The Hermitian conjugate.")
+        .def(
+            "copy", [](const Operator& a) { return Operator(a); }, "An independent copy.")
         .def("__copy__", [](const Operator& a) { return Operator(a); })
-        .def("__deepcopy__", [](const Operator& a, py::dict) { return Operator(a); }, py::arg("memo"))
-        .def("equals", [](const Operator& a, const Operator& b, double rtol) {
-                 return a.canonical().equals(b.canonical(), rtol);
-             }, py::arg("other"), py::arg("rtol") = ed::ops::kInvarianceRtol,
-             "The same operator: equal canonical terms, each within ``rtol`` times the largest "
-             "coefficient (however the two were written).")
-        .def("is_hermitian", [](const Operator& a, double rtol) { return ed::ops::hermitian(a.canonical(), rtol); },
-             py::arg("rtol") = ed::ops::kInvarianceRtol)
-        .def("terms", [](const Operator& a) {
-                 py::list out;
-                 for (const auto& p : ed::ops::product_terms(a.canonical()))
-                     out.append(py::make_tuple(p.coeff, p.ops, py::tuple(py::cast(p.sites))));
-                 return out;
-             },
-             R"pbdoc(
+        .def(
+            "__deepcopy__", [](const Operator& a, py::dict) { return Operator(a); }, py::arg("memo"))
+        .def(
+            "equals",
+            [](const Operator& a, const Operator& b, double rtol) { return a.canonical().equals(b.canonical(), rtol); },
+            py::arg("other"), py::arg("rtol") = ed::ops::kInvarianceRtol,
+            "The same operator: equal canonical terms, each within ``rtol`` times the largest "
+            "coefficient (however the two were written).")
+        .def(
+            "is_hermitian", [](const Operator& a, double rtol) { return ed::ops::hermitian(a.canonical(), rtol); },
+            py::arg("rtol") = ed::ops::kInvarianceRtol)
+        .def(
+            "terms",
+            [](const Operator& a) {
+                py::list out;
+                for (const auto& p : ed::ops::product_terms(a.canonical()))
+                    out.append(py::make_tuple(p.coeff, p.ops, py::tuple(py::cast(p.sites))));
+                return out;
+            },
+            R"pbdoc(
              The canonical terms, as ``(coeff, ops, sites)`` with ``ops`` over ``+ - z`` on
              ascending ``sites`` (the identity has ``ops == ''``): the operator is the sum of
              ``Operator.product(num_sites, ops, sites, coeff)``. Unique however the operator
              was written.
              )pbdoc")
-        .def("image", [](const Operator& a, const std::vector<int>& perm, bool flip) {
-                 const int n = static_cast<int>(a.getNumBits());
-                 ed::ops::require_permutation(perm, n);
-                 const std::uint64_t all = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
-                 return ed::ops::to_operator(a.canonical().image(perm.data(), flip ? all : 0ULL));
-             }, py::arg("perm"), py::arg("flip") = false,
-             R"pbdoc(
+        .def(
+            "image",
+            [](const Operator& a, const std::vector<int>& perm, bool flip) {
+                const int n = static_cast<int>(a.getNumBits());
+                ed::ops::require_permutation(perm, n);
+                const std::uint64_t all = (n == 64) ? ~0ULL : ((1ULL << n) - 1ULL);
+                return ed::ops::to_operator(a.canonical().image(perm.data(), flip ? all : 0ULL));
+            },
+            py::arg("perm"), py::arg("flip") = false,
+            R"pbdoc(
              ``U O U^dagger`` for the site permutation ``perm``, followed by the global spin
              flip when ``flip``. ``perm`` is read as in the engine: site ``i`` of the image
              carries what site ``perm[i]`` carried, so ``perm[i] = (i + 1) % N`` moves an
              operator on site 1 to site 0.
              )pbdoc");
 
-    m.def("have_cuda", [] { return ed::have_cuda(); },
-          "True when this build has CUDA support AND a device is present "
-          "(the same gate the engine's GPU rep-gather consults).");
-    m.def("env_dump", [](const std::string& prefix) { return ed::env::dump(prefix.c_str()); },
-          py::arg("prefix") = "",
-          "Every registered ED_* / QED_* environment variable whose name starts with "
-          "`prefix`: live value | default | meaning. The table is "
-          "include/ed/core/config.h. Paste into bug reports.");
-    m.def("env_snapshot", [] {
-              py::dict d;
-              for (const auto& kv : ed::env::snapshot()) d[py::str(kv.first)] = kv.second;
-              return d;
-          },
-          "{name: value} for the registered environment variables that are set -- the "
-          "environment-dependent inputs of this run, for result metadata.");
-    m.def("env_unknown", [] { return ed::env::unknown(); },
-          "ED_* / QED_* names present in the environment that the registry does not "
-          "declare. Nothing reads them: almost always a misspelt variable.");
-    m.def("env_malformed", [] { return ed::env::malformed(); },
-          "'NAME=value' for every set registered variable whose value does not parse as its "
-          "kind (flag, integer, real); the verbs refuse to run with any.");
-    m.def("env_names", [] {
-              std::vector<std::string> out;
-              for (const auto& r : ed::env::rows()) out.emplace_back(r.name);
-              return out;
-          },
-          "Names of all registered environment variables.");
-    m.def("has_cuda_build", [] {
+    m.def(
+        "have_cuda", [] { return ed::have_cuda(); },
+        "True when this build has CUDA support AND a device is present "
+        "(the same gate the engine's GPU rep-gather consults).");
+    m.def(
+        "env_dump", [](const std::string& prefix) { return ed::env::dump(prefix.c_str()); }, py::arg("prefix") = "",
+        "Every registered ED_* / QED_* environment variable whose name starts with "
+        "`prefix`: live value | default | meaning. The table is "
+        "include/ed/core/config.h. Paste into bug reports.");
+    m.def(
+        "env_snapshot",
+        [] {
+            py::dict d;
+            for (const auto& kv : ed::env::snapshot()) d[py::str(kv.first)] = kv.second;
+            return d;
+        },
+        "{name: value} for the registered environment variables that are set -- the "
+        "environment-dependent inputs of this run, for result metadata.");
+    m.def(
+        "env_unknown", [] { return ed::env::unknown(); },
+        "ED_* / QED_* names present in the environment that the registry does not "
+        "declare. Nothing reads them: almost always a misspelt variable.");
+    m.def(
+        "env_malformed", [] { return ed::env::malformed(); },
+        "'NAME=value' for every set registered variable whose value does not parse as its "
+        "kind (flag, integer, real); the verbs refuse to run with any.");
+    m.def(
+        "env_names",
+        [] {
+            std::vector<std::string> out;
+            for (const auto& r : ed::env::rows()) out.emplace_back(r.name);
+            return out;
+        },
+        "Names of all registered environment variables.");
+    m.def(
+        "has_cuda_build",
+        [] {
 #ifdef WITH_CUDA
-              return true;
+            return true;
 #else
-              return false;
+            return false;
 #endif
-          },
-          "True when this build was compiled with CUDA (a device may still be absent).");
+        },
+        "True when this build was compiled with CUDA (a device may still be absent).");
     m.def("cuda_device_count", &cuda_device_count,
           "Visible CUDA devices: 0 on a CPU build or when cudaGetDeviceCount fails.");
-    m.def("footprint", [](const std::string& path, std::uint64_t dim, std::size_t krylov, std::size_t k,
-                          std::size_t width, bool device, bool tower, std::uint64_t dim_target) {
-              using ed::core::Path;
-              static const std::pair<const char*, Path> names[] = {
-                  {"ftlm", Path::FtlmSample}, {"ftlm_kept", Path::FtlmSampleKept}, {"mtpq", Path::Mtpq},
-                  {"krylov_schur", Path::KrylovSchur}, {"gs_kept", Path::GsKeptBasis},
-                  {"gs_two_pass", Path::GsTwoPass}, {"dense_values", Path::DenseValues},
-                  {"dense_vectors", Path::DenseVectors}, {"multiplet", Path::Multiplet},
-                  {"dynamics_ftlm", Path::DynamicsFtlm}};
-              for (const auto& [name, p] : names)
-                  if (path == name) {
-                      ed::core::Shape s;
-                      s.dim = dim; s.krylov = krylov; s.k = k; s.width = width; s.device = device;
-                      s.tower = tower; s.dim_target = dim_target;
-                      const ed::core::Footprint f = ed::core::footprint(p, s);
-                      return std::make_pair(f.host, f.device);
-                  }
-              throw ed::InvalidRequest("footprint: unknown path '" + path + "'");
-          },
-          py::arg("path"), py::arg("dim"), py::arg("krylov") = 0, py::arg("k") = 0, py::arg("width") = 1,
-          py::arg("device") = false, py::arg("tower") = false, py::arg("dim_target") = 0,
-          "(host, device) bytes of one solver path's working set (ed/core/footprint.h): the estimate "
-          "every memory guard uses. Internal: for calibration and tests.");
+    m.def(
+        "footprint",
+        [](const std::string& path, std::uint64_t dim, std::size_t krylov, std::size_t k, std::size_t width,
+           bool device, bool tower, std::uint64_t dim_target) {
+            using ed::core::Path;
+            static const std::pair<const char*, Path> names[] = {{"ftlm", Path::FtlmSample},
+                                                                 {"ftlm_kept", Path::FtlmSampleKept},
+                                                                 {"mtpq", Path::Mtpq},
+                                                                 {"krylov_schur", Path::KrylovSchur},
+                                                                 {"gs_kept", Path::GsKeptBasis},
+                                                                 {"gs_two_pass", Path::GsTwoPass},
+                                                                 {"dense_values", Path::DenseValues},
+                                                                 {"dense_vectors", Path::DenseVectors},
+                                                                 {"multiplet", Path::Multiplet},
+                                                                 {"dynamics_ftlm", Path::DynamicsFtlm}};
+            for (const auto& [name, p] : names)
+                if (path == name) {
+                    ed::core::Shape s;
+                    s.dim = dim;
+                    s.krylov = krylov;
+                    s.k = k;
+                    s.width = width;
+                    s.device = device;
+                    s.tower = tower;
+                    s.dim_target = dim_target;
+                    const ed::core::Footprint f = ed::core::footprint(p, s);
+                    return std::make_pair(f.host, f.device);
+                }
+            throw ed::InvalidRequest("footprint: unknown path '" + path + "'");
+        },
+        py::arg("path"), py::arg("dim"), py::arg("krylov") = 0, py::arg("k") = 0, py::arg("width") = 1,
+        py::arg("device") = false, py::arg("tower") = false, py::arg("dim_target") = 0,
+        "(host, device) bytes of one solver path's working set (ed/core/footprint.h): the estimate "
+        "every memory guard uses. Internal: for calibration and tests.");
 
     // Log bridge (ed/core/log.h). Python owns the configuration; see python/qed/_log.py.
-    m.def("log_configure", [](int level, int fd) {
-              if (level < 0 || level > static_cast<int>(ed::logging::Level::Debug))
-                  throw ed::InvalidRequest("log level must be 0 (off) .. 4 (debug)");
-              ed::logging::set_stream(fd == 1 ? stdout : fd == 2 ? stderr : nullptr);
-              ed::logging::set_level(static_cast<ed::logging::Level>(level));
-          },
-          py::arg("level"), py::arg("fd") = 0,
-          "Set the engine's log level (0 off .. 4 debug) and sink: fd 1 / 2 writes each "
-          "record to stdout / stderr at once, 0 queues them for log_drain().");
-    m.def("log_level", [] { return static_cast<int>(ed::logging::level()); },
-          "The engine's log level, 0 (off) .. 4 (debug).");
-    m.def("log_drain", [] {
-              std::vector<std::pair<int, std::string>> out;
-              for (auto& r : ed::logging::drain())
-                  out.emplace_back(static_cast<int>(r.level), std::move(r.message));
-              return out;
-          },
-          "The queued (level, message) records, oldest first; empties the queue.");
-    m.def("check_generators_commute",
-          [](const Operator& op, const std::vector<std::vector<int>>& generators) {
-              const ed::ops::MaskedOperator& h = op.canonical();
-              std::vector<bool> out;
-              out.reserve(generators.size());
-              for (const auto& g : generators) out.push_back(ed::ops::commutes_with_permutation(h, g));
-              return out;
-          },
-          py::arg("op"), py::arg("generators"),
-          "Per permutation: [H, U_g] = 0, compared on H's canonical terms (exact, no matvec)?");
+    m.def(
+        "log_configure",
+        [](int level, int fd) {
+            if (level < 0 || level > static_cast<int>(ed::logging::Level::Debug))
+                throw ed::InvalidRequest("log level must be 0 (off) .. 4 (debug)");
+            ed::logging::set_stream(fd == 1 ? stdout : fd == 2 ? stderr : nullptr);
+            ed::logging::set_level(static_cast<ed::logging::Level>(level));
+        },
+        py::arg("level"), py::arg("fd") = 0,
+        "Set the engine's log level (0 off .. 4 debug) and sink: fd 1 / 2 writes each "
+        "record to stdout / stderr at once, 0 queues them for log_drain().");
+    m.def(
+        "log_level", [] { return static_cast<int>(ed::logging::level()); },
+        "The engine's log level, 0 (off) .. 4 (debug).");
+    m.def(
+        "log_drain",
+        [] {
+            std::vector<std::pair<int, std::string>> out;
+            for (auto& r : ed::logging::drain()) out.emplace_back(static_cast<int>(r.level), std::move(r.message));
+            return out;
+        },
+        "The queued (level, message) records, oldest first; empties the queue.");
+    m.def(
+        "check_generators_commute",
+        [](const Operator& op, const std::vector<std::vector<int>>& generators) {
+            const ed::ops::MaskedOperator& h = op.canonical();
+            std::vector<bool> out;
+            out.reserve(generators.size());
+            for (const auto& g : generators) out.push_back(ed::ops::commutes_with_permutation(h, g));
+            return out;
+        },
+        py::arg("op"), py::arg("generators"),
+        "Per permutation: [H, U_g] = 0, compared on H's canonical terms (exact, no matvec)?");
 
     bind_sectors(m);
 
     // ed::sym -- programmatic site-permutation symmetry DSL.
-    auto m_sym = m.def_submodule("symmetry",
-        "Site permutations: identity, composition, powers, order, translations, "
-        "reflections, swaps, and the closure of a generating set.");
+    auto m_sym = m.def_submodule("symmetry", "Site permutations: identity, composition, powers, order, translations, "
+                                             "reflections, swaps, and the closure of a generating set.");
 
-    m_sym.def("identity", &ed::sym::identity, py::arg("n_sites"),
-        "Identity permutation on `n_sites` sites.");
+    m_sym.def("identity", &ed::sym::identity, py::arg("n_sites"), "Identity permutation on `n_sites` sites.");
     m_sym.def("compose", &ed::sym::compose, py::arg("a"), py::arg("b"),
-        "Composition (a o b)[i] = a[b[i]]. b is applied first.");
-    m_sym.def("power", &ed::sym::power, py::arg("g"), py::arg("k"),
-        "g^k for k >= 0; g^0 is the identity.");
-    m_sym.def("order", &ed::sym::order, py::arg("g"),
-        "Smallest positive integer k with g^k == identity.");
-    m_sym.def("translation", &ed::sym::translation,
-        py::arg("n_sites"), py::arg("shift") = 1,
-        "Cyclic translation by `shift` sites on a 1D ring of `n_sites` sites.");
+              "Composition (a o b)[i] = a[b[i]]. b is applied first.");
+    m_sym.def("power", &ed::sym::power, py::arg("g"), py::arg("k"), "g^k for k >= 0; g^0 is the identity.");
+    m_sym.def("order", &ed::sym::order, py::arg("g"), "Smallest positive integer k with g^k == identity.");
+    m_sym.def("translation", &ed::sym::translation, py::arg("n_sites"), py::arg("shift") = 1,
+              "Cyclic translation by `shift` sites on a 1D ring of `n_sites` sites.");
     m_sym.def("reflection_1d", &ed::sym::reflection_1d, py::arg("n_sites"),
-        "Spatial reflection on a 1D chain: site i goes to site n_sites-1-i.");
-    m_sym.def("site_swap", &ed::sym::site_swap,
-        py::arg("n_sites"), py::arg("a"), py::arg("b"),
-        "Permutation that swaps sites a and b; identity elsewhere.");
-    m_sym.def("generate_group", &ed::sym::generate_group,
-        py::arg("generators"),
-        "Expand a list of generators into the full group (BFS). The result "
-        "is sorted lexicographically for deterministic ordering.");
-
+              "Spatial reflection on a 1D chain: site i goes to site n_sites-1-i.");
+    m_sym.def("site_swap", &ed::sym::site_swap, py::arg("n_sites"), py::arg("a"), py::arg("b"),
+              "Permutation that swaps sites a and b; identity elsewhere.");
+    m_sym.def("generate_group", &ed::sym::generate_group, py::arg("generators"),
+              "Expand a list of generators into the full group (BFS). The result "
+              "is sorted lexicographically for deterministic ordering.");
 }

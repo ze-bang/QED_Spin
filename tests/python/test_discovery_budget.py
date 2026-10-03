@@ -21,6 +21,7 @@ Three seams pinned here:
   hoisted before the parallel loop; the test pins a COLD operator's
   plain-dense full sweep against an independent numpy Sz-block oracle.
 """
+
 from __future__ import annotations
 
 import time
@@ -37,6 +38,7 @@ from qed import _core  # noqa: E402
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _complete_graph(n=8, J=1.0):
     """Heisenberg on K_n: |Aut| = n! -- 40320 at n=8, far past any budget."""
@@ -64,7 +66,7 @@ def _dense_oracle(op, n):
     operator's term list and eigvalsh it. Small n only."""
     dim = 1 << n
     H = np.zeros((dim, dim), dtype=complex)
-    for (o, site, c) in op.iter_one_body_terms():
+    for o, site, c in op.iter_one_body_terms():
         for s in range(dim):
             bit = (s >> site) & 1
             if o == int(_core.OP_SZ):
@@ -84,7 +86,7 @@ def _dense_oracle(op, n):
             return (s & ~(1 << site), 1.0) if bit else None
         return None
 
-    for (o1, s1, o2, s2, c) in op.iter_two_body_terms():
+    for o1, s1, o2, s2, c in op.iter_two_body_terms():
         for s in range(dim):
             r2 = apply1(s, o2, s2)
             if r2 is None:
@@ -121,7 +123,7 @@ def _sz_block_oracle(op, n):
     for _nup, states in sorted(states_by.items()):
         idx = {s: i for i, s in enumerate(states)}
         H = np.zeros((len(states), len(states)), dtype=complex)
-        for (o, site, c) in one:
+        for o, site, c in one:
             for s in states:
                 r = apply1(s, o, site)
                 if r is None:
@@ -130,7 +132,7 @@ def _sz_block_oracle(op, n):
                 j = idx.get(sp)
                 if j is not None:
                     H[j, idx[s]] += c * f
-        for (o1, s1, o2, s2, c) in two:
+        for o1, s1, o2, s2, c in two:
             for s in states:
                 r2 = apply1(s, o2, s2)
                 if r2 is None:
@@ -150,6 +152,7 @@ def _sz_block_oracle(op, n):
 # ---------------------------------------------------------------------------
 # 1. Group size caps
 # ---------------------------------------------------------------------------
+
 
 def _codes(diagnostics):
     return [c for c, _ in diagnostics]
@@ -202,6 +205,7 @@ def test_three_body_terms_enter_the_graph():
     cap, and the term check keeps the orientation-preserving part, the translations included."""
     from grid.models import triple
     from qed._groups import close_group
+
     L = 3
     idx = lambda x, y: (x % L) + L * (y % L)  # noqa: E731
     code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
@@ -216,12 +220,14 @@ def test_three_body_terms_enter_the_graph():
     G = set(close_group(rep.abelian + rep.residues))
     xy = [(x, y) for y in range(L) for x in range(L)]
     assert tuple(idx(x + 1, y) for x, y in xy) in G and tuple(idx(x, y + 1) for x, y in xy) in G
-    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
-                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+    np.testing.assert_allclose(
+        np.sort(qed.spectrum(H).energies), np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10
+    )
 
 
 def _group(rep):
     from qed._groups import close_group
+
     return {tuple(g) for g in close_group(rep.abelian + rep.residues)}
 
 
@@ -231,6 +237,7 @@ def test_discovery_reads_the_operator_not_its_spelling():
     triangles is a symmetry, and the graph colours must not tell the spellings apart."""
     from collections import defaultdict
     from grid.models import dot, triple
+
     code = {"+": _core.OP_SPLUS, "-": _core.OP_SMINUS, "z": _core.OP_SZ}
     H = qed.Operator(6)
 
@@ -245,8 +252,9 @@ def test_discovery_reads_the_operator_not_its_spelling():
         merged[tuple(ops)] += c
     add([(c, list(ops)) for ops, c in merged.items() if abs(c) > 1e-15])
     assert (3, 4, 5, 0, 1, 2) in _group(qed.find_symmetries(H, verbose=False))
-    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
-                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+    np.testing.assert_allclose(
+        np.sort(qed.spectrum(H).energies), np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10
+    )
 
 
 def test_every_one_body_term_colours_its_site():
@@ -259,8 +267,7 @@ def test_every_one_body_term_colours_its_site():
     b.zeeman_per_site([(0.3 * (-1) ** i, 0.0, 0.2) for i in range(n)])
     H = b.to_operator()
     assert tuple((i + 1) % n for i in range(n)) not in _group(qed.find_symmetries(H, verbose=False))
-    np.testing.assert_allclose(qed.eigs(H, 4).energies,
-                               qed.eigs(H, 4, sym=qed.Symmetry.none()).energies, atol=1e-10)
+    np.testing.assert_allclose(qed.eigs(H, 4).energies, qed.eigs(H, 4, sym=qed.Symmetry.none()).energies, atol=1e-10)
 
 
 def test_a_uniform_dm_ring_keeps_its_translations():
@@ -273,15 +280,16 @@ def test_a_uniform_dm_ring_keeps_its_translations():
     b.dm(bonds, [[0.0, 0.0, 0.3]] * n)
     H = b.to_operator()
     assert tuple((i + 1) % n for i in range(n)) in _group(qed.find_symmetries(H, verbose=False))
-    np.testing.assert_allclose(np.sort(qed.spectrum(H).energies),
-                               np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10)
+    np.testing.assert_allclose(
+        np.sort(qed.spectrum(H).energies), np.sort(qed.spectrum(H, sym=qed.Symmetry.none()).energies), atol=1e-10
+    )
 
 
 def test_clique_budget_is_deprecated_and_ignored():
     H = _ring(6)
     with pytest.warns(DeprecationWarning, match="clique_budget"):
         r1 = qed.find_symmetries(H, verbose=False, clique_budget=1)
-    assert qed.find_symmetries(H, verbose=False) is r1          # one memo entry: the budget is gone
+    assert qed.find_symmetries(H, verbose=False) is r1  # one memo entry: the budget is gone
 
 
 def test_default_split_matches_explicit_list_spectrum():
@@ -299,6 +307,7 @@ def test_default_split_matches_explicit_list_spectrum():
 # 2. Trivial-spatial-group blocked sweep (no more plain 2^N dense)
 # ---------------------------------------------------------------------------
 
+
 def test_trivial_group_sz_blocked_sweep_matches_oracle():
     n = 10
     H = _bent_tree_xxz(n)
@@ -313,6 +322,7 @@ def test_trivial_group_named_sz_returns_that_block():
     n = 8
     H = _bent_tree_xxz(n)
     from math import comb
+
     ev = qed.spectrum(H, sym=qed.Symmetry(spatial=None, sz=3)).energies
     assert len(ev) == comb(n, 3)
     full = _sz_block_oracle(H, n)
@@ -324,6 +334,7 @@ def test_trivial_group_named_sz_returns_that_block():
 # ---------------------------------------------------------------------------
 # 3. Cold-operator plain-dense assembly
 # ---------------------------------------------------------------------------
+
 
 def test_cold_plain_dense_assembly_no_term_loss():
     """COLD operator (no prior matvec/commit) through the plain-dense FULL

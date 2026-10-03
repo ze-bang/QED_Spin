@@ -80,10 +80,9 @@ struct OrbitTable {
         for (const auto& s : stab_elems) b += s.size() * sizeof(std::uint16_t);
         return b + (rank_slot ? rank_slot->bytes.load() : 0);
     }
-    [[nodiscard]] bool        empty() const noexcept { return reps.empty(); }
+    [[nodiscard]] bool empty() const noexcept { return reps.empty(); }
 
-    [[nodiscard]] const std::vector<std::uint16_t>&
-    stabilizer_of(std::size_t rep_i) const noexcept {
+    [[nodiscard]] const std::vector<std::uint16_t>& stabilizer_of(std::size_t rep_i) const noexcept {
         return stab_elems[stab_id[rep_i]];
     }
 };
@@ -91,9 +90,8 @@ struct OrbitTable {
 /// Closed-form orbit-projected norm² of a rep with stabiliser ``st`` in the 1-D irrep
 /// with per-element characters ``chi`` (length |G|): |Σ_{h∈Stab}χ(h)|²/|Stab|, with the
 /// |Stab|=1 fast path. For rep i of a table: projected_norm_sq_stab(tab.stabilizer_of(i), chi).
-[[nodiscard]] inline double
-projected_norm_sq_stab(const std::vector<std::uint16_t>& st,
-                       const std::vector<std::complex<double>>& chi) {
+[[nodiscard]] inline double projected_norm_sq_stab(const std::vector<std::uint16_t>& st,
+                                                   const std::vector<std::complex<double>>& chi) {
     if (st.size() == 1 || chi.empty()) return 1.0;
     std::complex<double> sum(0.0, 0.0);
     for (std::uint16_t g : st) sum += chi[g];
@@ -108,7 +106,7 @@ inline constexpr std::uint64_t kOrbitTableVersion = 1;
 
 /// Thread-local stabilizer dedup: element-set -> local id.
 struct StabDedup {
-    std::vector<std::vector<std::uint16_t>>       sets;
+    std::vector<std::vector<std::uint16_t>> sets;
     std::unordered_map<std::uint64_t, std::vector<std::uint16_t>> by_hash;
 
     static std::uint64_t hash_set(const std::vector<std::uint16_t>& v) {
@@ -146,10 +144,8 @@ struct StabDedup {
 /// With a sublattice code the order is the key order: a state whose least reachable leading block
 /// is below its own is no representative, and otherwise only the candidates -- the identity and
 /// every element fixing the state among them, ascending -- need a full image.
-inline bool visit_state(std::uint64_t                s,
-                        const CompiledGroup&         cg,
-                        std::size_t                  G,
-                        std::vector<std::uint16_t>&  stab_scratch) {
+inline bool visit_state(std::uint64_t s, const CompiledGroup& cg, std::size_t G,
+                        std::vector<std::uint16_t>& stab_scratch) {
     stab_scratch.clear();
     if (const SublatticeCode* code = cg.sublattice()) {
         const SublatticeView v = code->view();
@@ -159,8 +155,10 @@ inline bool visit_state(std::uint64_t                s,
         v.for_each_candidate(k, [&](int g) {
             if (!rep) return;
             const std::uint64_t ik = v.key(cg.apply(s, static_cast<std::size_t>(g)));
-            if (ik < k) rep = false;
-            else if (ik == k) stab_scratch.push_back(static_cast<std::uint16_t>(g));
+            if (ik < k)
+                rep = false;
+            else if (ik == k)
+                stab_scratch.push_back(static_cast<std::uint16_t>(g));
         });
         return rep;
     }
@@ -187,23 +185,23 @@ inline void scan_orbits(std::uint64_t total, const CompiledGroup& cg, First firs
     nthreads = omp_get_max_threads();
 #endif
     if (total < (std::uint64_t{1} << 14) || nthreads < 1) nthreads = 1;
-    const std::uint64_t n_chunks = std::max<std::uint64_t>(
-        1, std::min<std::uint64_t>(total, 64ull * static_cast<std::uint64_t>(nthreads)));
+    const std::uint64_t n_chunks =
+        std::max<std::uint64_t>(1, std::min<std::uint64_t>(total, 64ull * static_cast<std::uint64_t>(nthreads)));
     struct Local {
         std::vector<std::uint64_t> reps;
         std::vector<std::uint16_t> stab_id;
-        StabDedup                  dedup;
+        StabDedup dedup;
     };
     std::vector<Local> local(static_cast<std::size_t>(n_chunks));
     // chunk c covers items [c total / n_chunks, (c + 1) total / n_chunks), without overflow
     const std::uint64_t q = total / n_chunks, r = total % n_chunks;
     const auto bound = [q, r](std::uint64_t c) { return c * q + std::min(c, r); };
 #ifdef _OPENMP
-#   pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
 #endif
     for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
         const std::uint64_t begin = bound(static_cast<std::uint64_t>(c));
-        const std::uint64_t end   = bound(static_cast<std::uint64_t>(c) + 1);
+        const std::uint64_t end = bound(static_cast<std::uint64_t>(c) + 1);
         Local& out = local[static_cast<std::size_t>(c)];
         std::vector<std::uint16_t> stab_scratch;
         stab_scratch.reserve(G ? G : 1);
@@ -232,8 +230,7 @@ inline void scan_orbits(std::uint64_t total, const CompiledGroup& cg, First firs
     StabDedup global;
     for (auto& l : local) {
         std::vector<std::uint16_t> remap(l.dedup.sets.size());
-        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k)
-            remap[k] = global.id_of(l.dedup.sets[k]);
+        for (std::size_t k = 0; k < l.dedup.sets.size(); ++k) remap[k] = global.id_of(l.dedup.sets[k]);
         tab.reps.insert(tab.reps.end(), l.reps.begin(), l.reps.end());
         for (std::uint16_t id : l.stab_id) tab.stab_id.push_back(remap[id]);
         l = Local{};   // release as we go
@@ -250,10 +247,8 @@ inline void scan_orbits(std::uint64_t total, const CompiledGroup& cg, First firs
 /// preserve the popcount of every subspace state (the all-ones spin flip
 /// does exactly at half filling, n_up == N/2) -- otherwise the min-image
 /// convention and the closed-form norms are invalid.
-[[nodiscard]] inline OrbitTable
-build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
-                                     int                  n_up,
-                                     const CompiledGroup& cg) {
+[[nodiscard]] inline OrbitTable build_orbit_table_fixed_sz_streaming(std::uint64_t n_bits, int n_up,
+                                                                     const CompiledGroup& cg) {
     SymPhaseTimer prof("pass1+1.5 fused orbit-table (fixed-Sz, streaming)");
     OrbitTable tab;
     if (n_up < 0 || static_cast<std::uint64_t>(n_up) > n_bits) return tab;
@@ -265,16 +260,14 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
 
     const std::size_t G = cg.size();
     tab.slc = cg.sublattice_shared();
-    tab.content_hash = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL)
-        ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
+    tab.content_hash = cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+                       ^ (n_bits * 0x2545F4914F6CDD1DULL)
+                       ^ (static_cast<std::uint64_t>(n_up + 1) * 0xD6E8FEB86659FD93ULL);
 
     if (n_up == 0) {  // state 0 is its own rep; every element fixes it
         tab.reps.push_back(0);
         std::vector<std::uint16_t> st;
-        for (std::size_t g = 0; g < G; ++g)
-            st.push_back(static_cast<std::uint16_t>(g));
+        for (std::size_t g = 0; g < G; ++g) st.push_back(static_cast<std::uint16_t>(g));
         if (st.empty()) st.push_back(0);
         tab.stab_elems.push_back(std::move(st));
         tab.stab_id.push_back(0);
@@ -297,24 +290,20 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
 /// (the global spin flip; it commutes with every site permutation, so
 /// this IS the direct product). Only meaningful on subspaces F preserves
 /// (half filling; parity halves with N even; the full space).
-[[nodiscard]] inline CompiledGroup
-make_flip_extended_group_from_perms(std::vector<std::vector<int>> perms,
-                                    std::uint64_t                 n_bits) {
+[[nodiscard]] inline CompiledGroup make_flip_extended_group_from_perms(std::vector<std::vector<int>> perms,
+                                                                       std::uint64_t n_bits) {
     if (perms.empty()) {  // trivial spatial group: identity + flip
         std::vector<int> ident(static_cast<std::size_t>(n_bits));
-        for (std::size_t i = 0; i < ident.size(); ++i)
-            ident[i] = static_cast<int>(i);
+        for (std::size_t i = 0; i < ident.size(); ++i) ident[i] = static_cast<int>(i);
         perms.push_back(ident);
     }
     const std::size_t Gs = perms.size();
-    const std::uint64_t all_ones =
-        (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
+    const std::uint64_t all_ones = (n_bits >= 64) ? ~0ULL : ((1ULL << n_bits) - 1ULL);
     std::vector<std::vector<int>> perms2 = perms;
     perms2.insert(perms2.end(), perms.begin(), perms.end());
     std::vector<std::uint64_t> flips(2 * Gs, 0ULL);
     for (std::size_t g = Gs; g < 2 * Gs; ++g) flips[g] = all_ones;
-    return CompiledGroup::from_elements(perms2, flips,
-                                        static_cast<int>(n_bits));
+    return CompiledGroup::from_elements(perms2, flips, static_cast<int>(n_bits));
 }
 
 /// Fused rep + stabilizer scan over the full 2^N Hilbert space for an
@@ -322,18 +311,15 @@ make_flip_extended_group_from_perms(std::vector<std::vector<int>> perms,
 /// 2^N space is closed under EVERY such element, so the min-image
 /// convention and closed-form norms hold unconditionally). This is the
 /// entry the flip-extended full-space sectors use.
-[[nodiscard]] inline OrbitTable
-build_orbit_table_full_compiled(std::uint64_t        n_bits,
-                                const CompiledGroup& cg) {
+[[nodiscard]] inline OrbitTable build_orbit_table_full_compiled(std::uint64_t n_bits, const CompiledGroup& cg) {
     SymPhaseTimer prof("pass1+1.5 fused orbit-table (full, compiled)");
     OrbitTable tab;
     const std::uint64_t dim = (1ULL << n_bits);
     tab.subspace_dim = dim;
 
     tab.slc = cg.sublattice_shared();
-    tab.content_hash = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL);
+    tab.content_hash =
+        cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL) ^ (n_bits * 0x2545F4914F6CDD1DULL);
 
     detail::scan_orbits(
         dim, cg, [](std::uint64_t i) { return i; }, [](std::uint64_t s) { return s + 1; },
@@ -347,20 +333,17 @@ build_orbit_table_full_compiled(std::uint64_t        n_bits,
 /// element here must preserve popcount parity: site permutations
 /// always do; the all-ones flip does iff N is even (the caller
 /// enforces the closure rule).
-[[nodiscard]] inline OrbitTable
-build_orbit_table_parity_compiled(std::uint64_t        n_bits,
-                                  int                  parity,
-                                  const CompiledGroup& cg) {
+[[nodiscard]] inline OrbitTable build_orbit_table_parity_compiled(std::uint64_t n_bits, int parity,
+                                                                  const CompiledGroup& cg) {
     SymPhaseTimer prof("pass1+1.5 fused orbit-table (Sz-parity)");
     OrbitTable tab;
     const std::uint64_t dim_all = (1ULL << n_bits);
     tab.subspace_dim = dim_all / 2;
 
     tab.slc = cg.sublattice_shared();
-    tab.content_hash = cg.content_hash()
-        ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
-        ^ (n_bits * 0x2545F4914F6CDD1DULL)
-        ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
+    tab.content_hash = cg.content_hash() ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
+                       ^ (n_bits * 0x2545F4914F6CDD1DULL)
+                       ^ (static_cast<std::uint64_t>(parity + 7) * 0xA24BAED4963EE407ULL);
 
     detail::scan_orbits(
         dim_all, cg, [](std::uint64_t i) { return i; }, [](std::uint64_t s) { return s + 1; },

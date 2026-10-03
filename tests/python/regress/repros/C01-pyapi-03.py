@@ -13,6 +13,7 @@ is not orthonormal.
     normal, how many residues normalise A; select(momentum={T1: 0}) must work.
 (b) K4 Heisenberg, spatial=[(0123), (01)], sz=2: vectors(basis='sz') of all 6 states must be
     orthonormal eigenvectors (checked against a dense numpy H)."""
+
 import signal
 
 import numpy as np
@@ -51,8 +52,10 @@ res = [tuple(r) for r in res]
 is_normal = all(comp(comp(inv(r), a), r) in Aset for r in res for a in A)
 n_keep = sum(all(comp(comp(inv(r), a), r) in Aset for a in A) for r in res)
 t_in = tuple(T1) in Aset
-print(f"tri9 [T1,T2,C6]: |A|={len(A)} (translations: 9) T1 in A={t_in} A normal={is_normal} "
-      f"residues={len(res)} normalising A={n_keep}")
+print(
+    f"tri9 [T1,T2,C6]: |A|={len(A)} (translations: 9) T1 in A={t_in} A normal={is_normal} "
+    f"residues={len(res)} normalising A={n_keep}"
+)
 if not t_in or not is_normal:
     problems.append(f"tri9 |A|={len(A)} T1inA={t_in} normal={is_normal} kept residues {n_keep}/{len(res)}")
 try:
@@ -88,8 +91,10 @@ try:
     G = V.conj() @ V.T
     gram_err = float(np.max(np.abs(G - np.eye(len(V)))))
     res_err = max(float(np.linalg.norm(Hd @ v - np.vdot(v, Hd @ v).real * v)) for v in V)
-    print(f"K4: max|dE|={dE:.2e} n_vectors={len(V)} max|Gram-I|={gram_err:.3e} "
-          f"max eigen-residual={res_err:.2e} levels={[(round(L.energy, 6), int(L.multiplicity)) for L in ek.levels]}")
+    print(
+        f"K4: max|dE|={dE:.2e} n_vectors={len(V)} max|Gram-I|={gram_err:.3e} "
+        f"max eigen-residual={res_err:.2e} levels={[(round(L.energy, 6), int(L.multiplicity)) for L in ek.levels]}"
+    )
     if gram_err > 1e-8:
         problems.append(f"K4 vectors() not orthonormal, max|Gram-I|={gram_err:.3e}")
 except Exception as ex:

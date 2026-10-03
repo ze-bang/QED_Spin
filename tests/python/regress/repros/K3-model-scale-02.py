@@ -22,6 +22,7 @@ the sectors building at once (csr_policy.h concurrent_sector_builders): T>0 dyna
 small sectors in a pool of T threads, so a budget of three merged CSRs admits none of them when
 T > 3 -- which measures the sharing rule, not the claim (gate 62545019 failed both; at T = 4 they read
 ratios 1.7-2.3, jobs 62546238/62546239)."""
+
 import json
 import math
 import os
@@ -72,13 +73,13 @@ def run(budget):
     return None, f"rc={p.returncode} {p.stderr[-200:]!r}"
 
 
-rows = math.comb(N, N // 2) // N + N                     # rows of the largest momentum sector (bound)
-merged = rows * 2 * 20 + (rows + 1) * 8                   # one diagonal group: <= 2 entries per row
-premerge = math.comb(N, N // 2) // N * N * N * 24         # the unmerged stream the claim describes
-budget = 3 * merged / 2 ** 30
+rows = math.comb(N, N // 2) // N + N  # rows of the largest momentum sector (bound)
+merged = rows * 2 * 20 + (rows + 1) * 8  # one diagonal group: <= 2 entries per row
+premerge = math.comb(N, N // 2) // N * N * N * 24  # the unmerged stream the claim describes
+budget = 3 * merged / 2**30
 dflt, e1 = run(None)
 tight, e2 = run(f"{budget:.3e}")
-info = (f"merged CSR <= {merged / 1024:.1f} KiB, pre-merge stream {premerge / 1024:.0f} KiB, budget {3 * merged / 1024:.1f} KiB")
+info = f"merged CSR <= {merged / 1024:.1f} KiB, pre-merge stream {premerge / 1024:.0f} KiB, budget {3 * merged / 1024:.1f} KiB"
 if dflt is None or tight is None:
     print(f"REPRO: INCONCLUSIVE child failed: default={e1} tight={e2}; {info}")
     raise SystemExit(0)
@@ -87,7 +88,9 @@ import numpy as np  # noqa: E402
 a, b = np.array(dflt["S"]), np.array(tight["S"])
 diff = float(np.max(np.abs(a - b)) / max(np.max(np.abs(a)), 1e-300))
 ratio = tight["dt"] / max(dflt["dt"], 1e-9)
-info = f"default {dflt['dt']:.3f} s, budget 3x merged {tight['dt']:.3f} s, ratio {ratio:.2f}, rel diff {diff:.1e}; {info}"
+info = (
+    f"default {dflt['dt']:.3f} s, budget 3x merged {tight['dt']:.3f} s, ratio {ratio:.2f}, rel diff {diff:.1e}; {info}"
+)
 if diff < 1e-6 and ratio > 2.0:
     print("REPRO: CONFIRMED a budget above the merged CSR still refuses it: " + info)
 elif diff < 1e-6:

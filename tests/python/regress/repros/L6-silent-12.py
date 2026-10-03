@@ -15,6 +15,7 @@ RESTATED 2026-10-03 (P7.5): OFTLM has a device lane -- its exact eigensolve and 
 lane place() chooses -- so device_blocks > 0 under device='gpu' is now the truth, and runs on different
 lanes are not identical. The check is the label itself: a block counted on the device must be placed
 there (no host_krylov behind a device count), and device='cpu' counts none. 12-site ring, Symmetry.none()."""
+
 import numpy as np
 import qed
 
@@ -40,11 +41,15 @@ g = qed.thermal(H, T, method="ftlm", exact_states=8, samples=20, seed=4, sym=sym
 c = qed.thermal(H, T, method="ftlm", exact_states=8, samples=20, seed=4, sym=sym, device="cpu")
 pg = dict(getattr(g, "placement", {}) or {})
 d = float(np.max(np.abs(np.asarray(g.E) - np.asarray(c.E))))
-print(f"OFTLM 12-ring: gpu device_blocks={g.device_blocks} placement={pg}; cpu device_blocks={c.device_blocks}; "
-      f"max|E_gpu-E_cpu|={d:.2e}")
+print(
+    f"OFTLM 12-ring: gpu device_blocks={g.device_blocks} placement={pg}; cpu device_blocks={c.device_blocks}; "
+    f"max|E_gpu-E_cpu|={d:.2e}"
+)
 mislabelled = (g.device_blocks > 0 and pg.get("host_krylov", 0) > 0) or c.device_blocks > 0
 if mislabelled:
-    print(f"REPRO: CONFIRMED OFTLM blocks counted on the device but solved on the host "
-          f"(gpu device_blocks={g.device_blocks}, placement={pg}; cpu device_blocks={c.device_blocks})")
+    print(
+        f"REPRO: CONFIRMED OFTLM blocks counted on the device but solved on the host "
+        f"(gpu device_blocks={g.device_blocks}, placement={pg}; cpu device_blocks={c.device_blocks})"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED gpu device_blocks={g.device_blocks} with placement {pg}; cpu 0")

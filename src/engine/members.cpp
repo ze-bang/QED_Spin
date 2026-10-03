@@ -52,18 +52,17 @@ Complex amplitude(const ed::symmetry::RepSectorData& rd, const Policy& pol, cons
 // conjugated too): a residue, the spin flip, conjugation K or time reversal Theta.
 struct StateMap {
     std::vector<int> perm, inv;       // a site permutation and its inverse (empty: none)
-    std::uint64_t    mask  = 0;       // the flip (0: none)
-    bool             theta = false;   // eps(s) = (-1)^{n_down(s)}
-    bool             anti  = false;
-    int              n_sites = 0;
+    std::uint64_t mask = 0;       // the flip (0: none)
+    bool theta = false;   // eps(s) = (-1)^{n_down(s)}
+    bool anti = false;
+    int n_sites = 0;
 
     [[nodiscard]] std::uint64_t forward(std::uint64_t s) const {
         if (!perm.empty()) s = applyPermutation(s, perm);
         return s ^ mask;
     }
     // <t|U v> from v's amplitudes.
-    template <class Amp>
-    [[nodiscard]] Complex image(std::uint64_t t, const Amp& amp) const {
+    template <class Amp> [[nodiscard]] Complex image(std::uint64_t t, const Amp& amp) const {
         t ^= mask;
         const std::uint64_t s = perm.empty() ? t : applyPermutation(t, inv);
         Complex a = amp(s);
@@ -101,7 +100,10 @@ std::uint64_t probe_state(const BlockVector& from, const Policy& pol, const Stat
         const int rank = rd.irrep_dim == 1 ? 1 : pol.rank_of(a);
         for (int al = 0; al < rank; ++al) {
             const double m = std::abs(v[o + static_cast<std::uint64_t>(al)]);
-            if (m > top) { top = m; lead = a; }
+            if (m > top) {
+                top = m;
+                lead = a;
+            }
         }
     }
     std::uint64_t best_state = 0;
@@ -109,7 +111,10 @@ std::uint64_t probe_state(const BlockVector& from, const Policy& pol, const Stat
     for (int g = 0; g < rd.group_size; ++g) {
         const std::uint64_t s = pol.apply_perm(rd.reps[lead], g);
         const double m = std::abs(amplitude(rd, pol, v.data(), s));
-        if (m > best) { best = m; best_state = s; }
+        if (m > best) {
+            best = m;
+            best_state = s;
+        }
     }
     if (!(best > 0.0)) throw std::logic_error("members_of: a vector has no amplitude on its leading orbit");
     return U.forward(best_state);
@@ -138,7 +143,7 @@ Member carry(const BlockVector& from, const Subspace& from_sub, const StateMap& 
     const Policy pt = to->make_policy();
     const std::size_t n = to->reps.size();
     std::vector<Complex> y(n);
-    #pragma omp parallel for schedule(dynamic, 1024) if(n > 8192)
+#pragma omp parallel for schedule(dynamic, 1024) if (n > 8192)
     for (long long jj = 0; jj < static_cast<long long>(n); ++jj) {
         const auto j = static_cast<std::size_t>(jj);
         Complex pr;
@@ -187,8 +192,8 @@ std::shared_ptr<const ed::symmetry::RepSectorData> MomentumSectors::of(const std
     return nullptr;
 }
 
-std::vector<Member>
-members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s, MemberSectors& ms) {
+std::vector<Member> members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec& s,
+                               MemberSectors& ms) {
     if (!v.basis) throw std::invalid_argument("members_of: the level has no vector");
     if (v.basis->irrep_dim > kMaxIrrepDim)
         throw std::invalid_argument("members_of: irreps of dimension above " + std::to_string(kMaxIrrepDim));
@@ -209,8 +214,10 @@ members_of(const Level& L, const BlockVector& v, std::uint64_t count, const Spec
     Th.anti = true;
     const bool theta_fold = L.fold == Antiunitary::Theta;
     if (L.tag.tr_folded) ops.push_back(theta_fold ? Th : K);
-    if (theta_fold && L.mirror == 2 && !L.tag.tr_folded) ops.push_back(Th);
-    else if (L.mirror == 2 || L.tag.flip_parity >= 0) ops.push_back(F);
+    if (theta_fold && L.mirror == 2 && !L.tag.tr_folded)
+        ops.push_back(Th);
+    else if (L.mirror == 2 || L.tag.flip_parity >= 0)
+        ops.push_back(F);
 
     StateMap I;
     I.n_sites = N;

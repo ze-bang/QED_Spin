@@ -10,6 +10,7 @@ instead of capping the subspace (as the CPU lane does from available RAM) or fal
 Model: Heisenberg ring N=30, translations only, n_up=15, momentum 0: one 5,170,604-state block.
 qed.eigs(H, 2, device='gpu') needs ~200 x 5.17e6 x 16 B = 16.5 GB of basis on a 10 GB MIG slice,
 while 8 vectors (0.66 GB) fit."""
+
 import signal
 import sys
 import time
@@ -34,8 +35,10 @@ sym = base.select(momentum={tuple(T): 0})
 t0 = time.time()
 try:
     r = qed.eigs(H, 2, sym=sym, device="gpu")
-    print(f"eigs(k=2, gpu) returned {list(r.energies)} complete={r.complete} "
-          f"device_blocks={r.device_blocks} in {time.time() - t0:.1f} s")
+    print(
+        f"eigs(k=2, gpu) returned {list(r.energies)} complete={r.complete} "
+        f"device_blocks={r.device_blocks} in {time.time() - t0:.1f} s"
+    )
     if r.device_blocks == 0:
         print("REPRO: INCONCLUSIVE the block did not run on the device")
     else:

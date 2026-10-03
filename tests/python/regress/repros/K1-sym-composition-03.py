@@ -10,6 +10,7 @@ Heisenberg ring N=12, translation + reflection, total_spin=4 (n_up=2, Sz=S+1 is 
  (b) with select(momentum={T: 1/2}) it runs silently; at T=1e6 lnZ -> ln(#states of S=4 at k=pi).
      Independent count: (dim(n_up=2,k=pi) - dim(n_up=1,k=pi)) * 9 = 45 (computed below by brute force);
      the bug gives 54 (ln ratio 0.182). Control: the same with point_group=False must give ln 45."""
+
 import itertools
 import signal
 import types
@@ -43,8 +44,10 @@ def k_dim(n, kfrac):
 
 mult_pi = k_dim(2, 0.5) - k_dim(1, 0.5)
 want = np.log(9 * mult_pi)
-print(f"independent count: dim(2,pi)={k_dim(2, 0.5)} dim(1,pi)={k_dim(1, 0.5)} -> {mult_pi} S=4 multiplets at k=pi; "
-      f"expected lnZ(T->inf) = ln({9 * mult_pi}) = {want:.6f}")
+print(
+    f"independent count: dim(2,pi)={k_dim(2, 0.5)} dim(1,pi)={k_dim(1, 0.5)} -> {mult_pi} S=4 multiplets at k=pi; "
+    f"expected lnZ(T->inf) = ln({9 * mult_pi}) = {want:.6f}"
+)
 
 notes, bug = [], []
 # (a) no selection
@@ -83,8 +86,10 @@ if "pg" in vals and abs(vals["pg"] - want) > 1e-3:
     bug.append("b")
 ctrl_ok = "nopg" in vals and abs(vals["nopg"] - want) < 1e-3
 if bug:
-    print(f"REPRO: CONFIRMED parts {bug}: point-group tower count wrong; lnZ_pg={vals.get('pg')} vs ln45={want:.6f} "
-          f"(control no-PG {vals.get('nopg')}, ok={ctrl_ok})")
+    print(
+        f"REPRO: CONFIRMED parts {bug}: point-group tower count wrong; lnZ_pg={vals.get('pg')} vs ln45={want:.6f} "
+        f"(control no-PG {vals.get('nopg')}, ok={ctrl_ok})"
+    )
 elif not vals:
     print("REPRO: INCONCLUSIVE no thermal call ran")
 else:

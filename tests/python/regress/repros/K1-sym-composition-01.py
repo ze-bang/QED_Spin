@@ -9,6 +9,7 @@ ED_SYM_PROFILE=1 the engine logs, per star, whether the group-sector path engage
 ("group-sector path, |G_k0|=...") or declined for a "trivial little co-group". eigs must show the
 group path; dynamics(T=None) with the same Symmetry must show only trivial co-groups. Also checks
 that both report the same E0 and times both calls (informational)."""
+
 import os
 import signal
 import subprocess
@@ -48,8 +49,7 @@ sys.stdout.write("RESULT %s %.12f %.3f\n" % (mode, e0, time.time() - t0))
 
 def run(mode):
     env = dict(os.environ, ED_SYM_PROFILE="1")
-    p = subprocess.run([sys.executable, "-c", CHILD, mode], env=env, capture_output=True, text=True,
-                       timeout=130)
+    p = subprocess.run([sys.executable, "-c", CHILD, mode], env=env, capture_output=True, text=True, timeout=130)
     e0 = t = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT"):
@@ -73,8 +73,10 @@ for l in err_d[:6]:
 if rc_e != 0 or rc_d != 0 or e0_e is None or e0_d is None:
     print("REPRO: INCONCLUSIVE a child failed", "\n".join(err_e[-3:] + err_d[-3:])[:400])
 elif gp_e > 0 and gp_d == 0 and tr_d > 0:
-    print(f"REPRO: CONFIRMED eigs engages the point group on {gp_e} stars; dynamics(T=None) ground search "
-          f"engages it on 0 and logs {tr_d} trivial co-groups (E0 {e0_e:.10f} vs {e0_d:.10f}; t {t_e}s vs {t_d}s)")
+    print(
+        f"REPRO: CONFIRMED eigs engages the point group on {gp_e} stars; dynamics(T=None) ground search "
+        f"engages it on 0 and logs {tr_d} trivial co-groups (E0 {e0_e:.10f} vs {e0_d:.10f}; t {t_e}s vs {t_d}s)"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED eigs group stars={gp_e}, dynamics group stars={gp_d}, trivial={tr_d}")
 sys.exit(0)

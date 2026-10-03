@@ -11,6 +11,7 @@ Model: 12-site Heisenberg ring, Symmetry(spatial=None) (Sz blocks, all on the ex
 The constant c is added as sum_i (4c/N) Sz_i Sz_i (= c * identity for spin-1/2); this is checked
 against qed.eigs before use. Reference: independent dense numpy ED of the c = 0 model with a
 numerically stable variance sum_n p_n (E_n - <E>)^2 (C is invariant under H -> H + c)."""
+
 import signal
 import numpy as np
 import scipy.sparse as sps
@@ -22,22 +23,33 @@ bonds = [(i, (i + 1) % N) for i in range(N)]
 Ts = np.array([0.1, 0.05, 0.04, 0.03, 0.025, 0.02])
 offsets = [0.0, 100.0, 1000.0, 10000.0]
 
-sp_ = sps.csr_matrix(np.array([[0.0, 1.0], [0.0, 0.0]])); sm_ = sp_.T.tocsr()
+sp_ = sps.csr_matrix(np.array([[0.0, 1.0], [0.0, 0.0]]))
+sm_ = sp_.T.tocsr()
 sz_ = sps.csr_matrix(np.diag([0.5, -0.5]))
+
+
 def at(o, i):
-    return sps.kron(sps.kron(sps.identity(2 ** i), o), sps.identity(2 ** (N - i - 1)), format="csr")
-SP = [at(sp_, i) for i in range(N)]; SM = [at(sm_, i) for i in range(N)]; SZ = [at(sz_, i) for i in range(N)]
+    return sps.kron(sps.kron(sps.identity(2**i), o), sps.identity(2 ** (N - i - 1)), format="csr")
+
+
+SP = [at(sp_, i) for i in range(N)]
+SM = [at(sm_, i) for i in range(N)]
+SZ = [at(sz_, i) for i in range(N)]
 Hs = sum(0.5 * (SP[i] @ SM[j] + SM[i] @ SP[j]) + SZ[i] @ SZ[j] for i, j in bonds)
 ev = np.sort(np.linalg.eigvalsh(Hs.toarray()))
+
 
 def c_ref(T):
     b = 1.0 / T
     x = ev - ev[0]
-    w = np.exp(-b * x); p = w / w.sum()
+    w = np.exp(-b * x)
+    p = w / w.sum()
     m = (p * x).sum()
     return b * b * (p * (x - m) ** 2).sum()
 
+
 Cref = np.array([c_ref(T) for T in Ts])
+
 
 def build(c):
     H = qed.Operator(N)
@@ -49,6 +61,7 @@ def build(c):
         for i in range(N):
             H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, i, 4.0 * c / N)
     return H
+
 
 sym = qed.Symmetry(spatial=None)
 rel = {}
@@ -62,8 +75,12 @@ try:
         r = qed.thermal(H, list(Ts), method="exact", sym=sym)
         C = np.asarray(r.C)
         rel[c] = np.abs(C - Cref) / Cref
-        print(f"c={c:>8g}: " + "  ".join(f"T={T:.3f} C={Ci:+.3e} ref={Cr:.3e} rel={ri:.1e}"
-                                      for T, Ci, Cr, ri in zip(Ts, C, Cref, rel[c])))
+        print(
+            f"c={c:>8g}: "
+            + "  ".join(
+                f"T={T:.3f} C={Ci:+.3e} ref={Cr:.3e} rel={ri:.1e}" for T, Ci, Cr, ri in zip(Ts, C, Cref, rel[c])
+            )
+        )
 except SystemExit:
     raise
 except Exception as ex:
@@ -80,8 +97,12 @@ for k, T in enumerate(Ts):
             break
 if hits:
     T, c, r0, rc = hits[0]
-    print(f"REPRO: CONFIRMED at T={T}: rel err of C {r0:.1e} (c=0) vs {rc:.1e} (c={c:g}); "
-          f"{len(hits)} temperature(s) where an added constant destroys C")
+    print(
+        f"REPRO: CONFIRMED at T={T}: rel err of C {r0:.1e} (c=0) vs {rc:.1e} (c={c:g}); "
+        f"{len(hits)} temperature(s) where an added constant destroys C"
+    )
 else:
-    print("REPRO: NOT_REPRODUCED C stays accurate under H + c at every tested T: "
-          + "; ".join(f"c={c:g} max rel {np.max(rel[c]):.1e}" for c in offsets))
+    print(
+        "REPRO: NOT_REPRODUCED C stays accurate under H + c at every tested T: "
+        + "; ".join(f"c={c:g} max rel {np.max(rel[c]):.1e}" for c in offsets)
+    )

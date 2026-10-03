@@ -34,7 +34,7 @@ namespace ed::matvec {
 
 class MatvecBatcher {
 public:
-    using Multi  = ed::LinearOperator::MultiMatvecFn;
+    using Multi = ed::LinearOperator::MultiMatvecFn;
     using Single = std::function<void(const Complex*, Complex*, std::size_t)>;
 
     /// A matvec on `multi` that batches with the other samples' calls. Wrap once, share.
@@ -46,12 +46,11 @@ public:
 
     /// fn(i) for i in [0, k), each on its own thread; the first exception is rethrown after all
     /// threads have finished.
-    template <class Fn>
-    void run(std::size_t k, Fn&& fn) {
+    template <class Fn> void run(std::size_t k, Fn&& fn) {
         {
             std::lock_guard<std::mutex> lk(mu_);
             active_ = k;
-            error_  = nullptr;
+            error_ = nullptr;
         }
         std::exception_ptr first;
         std::mutex first_mu;
@@ -72,15 +71,22 @@ public:
     }
 
 private:
-    struct Call { const Multi* op; const Complex* in; Complex* out; std::size_t n; };
+    struct Call {
+        const Multi* op;
+        const Complex* in;
+        Complex* out;
+        std::size_t n;
+    };
 
     void call(const Multi* op, const Complex* in, Complex* out, std::size_t n) {
         std::unique_lock<std::mutex> lk(mu_);
         if (error_) std::rethrow_exception(error_);
         pending_.push_back({op, in, out, n});
         const std::uint64_t gen = gen_;
-        if (pending_.size() == active_) flush();
-        else cv_.wait(lk, [&] { return gen_ != gen; });
+        if (pending_.size() == active_)
+            flush();
+        else
+            cv_.wait(lk, [&] { return gen_ != gen; });
         if (error_) std::rethrow_exception(error_);
     }
 
@@ -102,26 +108,25 @@ private:
                 std::vector<const Complex*> ins;
                 std::vector<Complex*> outs;
                 for (const Call* c : cs) {
-                    if (c->n != cs.front()->n) throw std::invalid_argument("MatvecBatcher: sizes differ for one operator");
+                    if (c->n != cs.front()->n)
+                        throw std::invalid_argument("MatvecBatcher: sizes differ for one operator");
                     ins.push_back(c->in);
                     outs.push_back(c->out);
                 }
                 (*op)(ins.data(), outs.data(), cs.front()->n, ins.size());
             }
-        } catch (...) {
-            error_ = std::current_exception();
-        }
+        } catch (...) { error_ = std::current_exception(); }
         ++gen_;
         cv_.notify_all();
     }
 
     std::vector<std::shared_ptr<Multi>> ops_;
-    std::mutex              mu_;
+    std::mutex mu_;
     std::condition_variable cv_;
-    std::vector<Call>       pending_;
-    std::size_t             active_ = 0;
-    std::uint64_t           gen_    = 0;
-    std::exception_ptr      error_;
+    std::vector<Call> pending_;
+    std::size_t active_ = 0;
+    std::uint64_t gen_ = 0;
+    std::exception_ptr error_;
 };
 
 }  // namespace ed::matvec

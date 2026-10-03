@@ -5,6 +5,7 @@
 (absolute), so a Hamiltonian whose energy scale is ~1e-13 loses its imaginary (DM) part.
 Test: 8-site Heisenberg ring + z-axis DM, H = s*[J S_i.S_j + D z.(S_i x S_j)], J=1, D=0.5.
 qed.spectrum at s=1 and at s=1e-13 versus an independent numpy dense reference."""
+
 import numpy as np
 import qed
 
@@ -22,7 +23,7 @@ def site(op, i):
 
 
 def dense(s):
-    H = np.zeros((2 ** N, 2 ** N), complex)
+    H = np.zeros((2**N, 2**N), complex)
     for i in range(N):
         j = (i + 1) % N
         H += s * J * (site(sz, i) @ site(sz, j) + 0.5 * (site(sp, i) @ site(sm, j) + site(sm, i) @ site(sp, j)))

@@ -6,6 +6,7 @@ subspaces() (src/solvers/little_group/lg_sectors.cpp:175-184) enumerates every n
 branch and never reads Spec.sz_parity, so spectrum / eigs / thermal run over the full space
 although the docstring promises "one parity half". Test: 8-site Heisenberg ring, spatial=None,
 against an independent dense numpy reference restricted to even/odd popcount."""
+
 import signal
 import sys
 
@@ -29,12 +30,12 @@ def site(op, i):
     return out
 
 
-Hd = np.zeros((2 ** N, 2 ** N), complex)
+Hd = np.zeros((2**N, 2**N), complex)
 for i in range(N):
     j = (i + 1) % N
     for s in (sx, sy, sz):
         Hd += site(s, i) @ site(s, j)
-pop = np.array([bin(x).count("1") for x in range(2 ** N)])
+pop = np.array([bin(x).count("1") for x in range(2**N)])
 E_full = np.linalg.eigvalsh(Hd)
 halves = {}
 for par in (0, 1):
@@ -47,10 +48,12 @@ b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
 H = b.to_operator()
 
 ref_full = np.sort(np.asarray(qed.spectrum(H, sym=qed.Symmetry.none()).energies))
-conv_ok = len(ref_full) == 2 ** N and np.max(np.abs(ref_full - E_full)) < 1e-8
+conv_ok = len(ref_full) == 2**N and np.max(np.abs(ref_full - E_full)) < 1e-8
 if not conv_ok:
-    print("REPRO: INCONCLUSIVE coupling convention differs from S.S dense reference "
-          f"(len {len(ref_full)}, max|dE| {np.max(np.abs(ref_full - E_full)) if len(ref_full) == 2**N else 'n/a'})")
+    print(
+        "REPRO: INCONCLUSIVE coupling convention differs from S.S dense reference "
+        f"(len {len(ref_full)}, max|dE| {np.max(np.abs(ref_full - E_full)) if len(ref_full) == 2**N else 'n/a'})"
+    )
     sys.exit(0)
 
 findings = []
@@ -64,8 +67,10 @@ for key, par in (("even", 0), ("odd", 1)):
     want = halves[par]
     match_half = len(e) == len(want) and np.max(np.abs(e - want)) < 1e-8
     match_full = len(e) == len(E_full) and np.max(np.abs(e - E_full)) < 1e-8
-    print(f"spectrum sz={key}: {len(e)} energies (parity half has {len(want)}); "
-          f"equals half={match_half} equals full={match_full}")
+    print(
+        f"spectrum sz={key}: {len(e)} energies (parity half has {len(want)}); "
+        f"equals half={match_half} equals full={match_full}"
+    )
     if not match_half:
         findings.append(f"spectrum[{key}] n={len(e)} vs {len(want)}")
 
@@ -85,8 +90,10 @@ try:
     th_all = qed.thermal(H, T, method="exact", sym=qed.Symmetry(spatial=None))
     same = np.allclose(th_odd.entropy, th_all.entropy, atol=1e-10) and np.allclose(th_odd.E, th_all.E, atol=1e-10)
     print(f"thermal S(T) sz=odd {np.round(th_odd.entropy, 6)}  full {np.round(th_all.entropy, 6)}  identical={same}")
-    print(f"  expectations at T=50: odd half S->~{7*np.log(2):.4f} (7 ln2), full ~{8*np.log(2):.4f} (8 ln2)"
-          " (per-site normalisation would divide by N)")
+    print(
+        f"  expectations at T=50: odd half S->~{7*np.log(2):.4f} (7 ln2), full ~{8*np.log(2):.4f} (8 ln2)"
+        " (per-site normalisation would divide by N)"
+    )
     if same:
         findings.append("thermal[odd] identical to full-space thermal")
 except Exception as ex:

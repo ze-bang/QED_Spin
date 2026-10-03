@@ -2,6 +2,7 @@
 nearest-neighbour Heisenberg ring and 6x6 triangular torus of the XDiag twins, the 36-site
 kagome torus (Heisenberg and the BFG model), the triangle-based NLCE clusters, and the
 symmetry selections the cases use (a block named by momentum and irrep characters)."""
+
 from __future__ import annotations
 
 import itertools
@@ -28,8 +29,9 @@ def tri36():
     lat = TriangularTorus("36")
     bonds = [(i, j) for (i, j, _) in lat.bonds()]
     H = qed.input.HamiltonianBuilder(lat.N).heisenberg(bonds, 1.0).to_operator()
-    spatial = qed.Symmetries(abelian=[list(p) for p in lat.momentum_generators()],
-                             residues=[list(p) for _, p in lat.point_group()])
+    spatial = qed.Symmetries(
+        abelian=[list(p) for p in lat.momentum_generators()], residues=[list(p) for _, p in lat.point_group()]
+    )
     return H, lat, spatial
 
 
@@ -39,7 +41,7 @@ def tri36():
 KAGOME_NN = [(0, 0, 0, 1), (0, 0, 0, 2), (1, 0, 0, 2), (1, 1, 0, 0), (2, 0, 1, 0), (1, 1, -1, 2)]
 KAGOME_NN2 = [(0, 1, -1, 2), (0, -1, 1, 1), (1, 1, 0, 2), (1, 0, 1, 0), (2, 1, 0, 0), (2, 0, 1, 1)]
 KAGOME_NN3 = [(0, 1, -1, 0), (1, 0, 1, 1), (2, 1, 0, 2)]
-KAGOME_36 = ((2, 2), (-2, 4))          # the BFG campaign's 36d torus: full C6v, 12 cells
+KAGOME_36 = ((2, 2), (-2, 4))  # the BFG campaign's 36d torus: full C6v, 12 cells
 
 
 class KagomeTorus:
@@ -69,8 +71,8 @@ class KagomeTorus:
     def bonds(self, table):
         """Sorted distinct (i, j) pairs of one bond table; raises when the torus double counts."""
         out = set()
-        for (ci, cj) in self._cells_int():
-            for (s, di, dj, t) in table:
+        for ci, cj in self._cells_int():
+            for s, di, dj, t in table:
                 i, j = self.site(ci, cj, s), self.site(ci + di, cj + dj, t)
                 if i == j:
                     raise ValueError("torus too small: a bond wraps onto its own site")
@@ -113,8 +115,7 @@ def select_block(sym, H, momentum=None, characters=None):
     group :meth:`Symmetry.groups` returns, so the result names exactly one star."""
     A, R = sym.groups(H)
     ident = list(range(int(H.num_sites)))
-    mom = ({tuple(a): 0 for a in A if a != ident} if momentum is None
-           else {tuple(T): th for T, th in momentum.items()})
+    mom = {tuple(a): 0 for a in A if a != ident} if momentum is None else {tuple(T): th for T, th in momentum.items()}
     chars = {}
     for r in R:
         c = 1.0 if characters is None else characters(r)
@@ -151,20 +152,22 @@ def _up(x, y):
     return ((x, y), (x + 1, y), (x, y + 1))
 
 
-_UP_NBRS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1))   # up triangles sharing a corner
+_UP_NBRS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1))  # up triangles sharing a corner
 
 
 def _canonical(cells):
     """Translation- and C3v-canonical form of a set of up triangles (by their corner cell)."""
+
     def c3(n1, n2):
         return (-n1 - n2, n1)
+
     forms = []
     for mirror in (False, True):
         for rot in range(3):
             img = []
-            for (x, y) in cells:
+            for x, y in cells:
                 pts = []
-                for (n1, n2) in _up(x, y):
+                for n1, n2 in _up(x, y):
                     if mirror:
                         n1, n2 = n2, n1
                     for _ in range(rot):
@@ -192,8 +195,9 @@ def nlce_triangle_clusters(max_order=8, max_sites=16):
             if len(sites) > max_sites:
                 continue
             idx = {p: i for i, p in enumerate(sites)}
-            bonds = sorted({tuple(sorted((idx[a], idx[b])))
-                            for c in cells for a, b in itertools.combinations(_up(*c), 2)})
+            bonds = sorted(
+                {tuple(sorted((idx[a], idx[b]))) for c in cells for a, b in itertools.combinations(_up(*c), 2)}
+            )
             if pynauty is not None:
                 adj = {i: [] for i in range(len(sites))}
                 for i, j in bonds:
@@ -207,9 +211,13 @@ def nlce_triangle_clusters(max_order=8, max_sites=16):
             seen_graphs.add(key)
             out.append((len(sites), bonds))
         if order < max_order:
-            level = {_canonical(list(cells) + [(x + dx, y + dy)])
-                     for cells in level for (x, y) in cells for (dx, dy) in _UP_NBRS
-                     if (x + dx, y + dy) not in cells}
+            level = {
+                _canonical(list(cells) + [(x + dx, y + dy)])
+                for cells in level
+                for (x, y) in cells
+                for (dx, dy) in _UP_NBRS
+                if (x + dx, y + dy) not in cells
+            }
     return out
 
 
@@ -220,11 +228,12 @@ def cluster_operator(n_sites, bonds):
 def random_xxz_chain(N=18, seed=1234):
     """The P3-krylov-01 model: open chain, random nn + nnn XXZ couplings (no degeneracies)."""
     import numpy as np
+
     rng = np.random.default_rng(seed)
     bonds = [(i, i + 1, rng.uniform(0.5, 1.5), rng.uniform(0.5, 1.5)) for i in range(N - 1)]
     bonds += [(i, i + 2, rng.uniform(0.2, 0.6), rng.uniform(0.2, 0.6)) for i in range(N - 2)]
     b = qed.input.HamiltonianBuilder(N)
-    for (i, j, jxy, jz) in bonds:
+    for i, j, jxy, jz in bonds:
         b.xxz([(i, j)], jxy, jz)
     return b.to_operator(), bonds
 
@@ -233,6 +242,7 @@ def sector_matrix(N, n_up, bonds):
     """Independent scipy sparse matrix of the random XXZ chain in one Sz sector (set bit = up)."""
     import numpy as np
     import scipy.sparse as sp
+
     allst = np.arange(1 << N, dtype=np.int64)
     pc = np.zeros_like(allst)
     for i in range(N):
@@ -241,7 +251,7 @@ def sector_matrix(N, n_up, bonds):
     D = states.size
     diag = np.zeros(D)
     rows, cols, vals = [], [], []
-    for (i, j, jxy, jz) in bonds:
+    for i, j, jxy, jz in bonds:
         bi, bj = (states >> i) & 1, (states >> j) & 1
         diag += jz * (bi - 0.5) * (bj - 0.5)
         m = bi != bj
@@ -252,4 +262,3 @@ def sector_matrix(N, n_up, bonds):
         vals.append(np.full(src.size, 0.5 * jxy))
     Hs = sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(D, D))
     return Hs + sp.diags(diag)
-

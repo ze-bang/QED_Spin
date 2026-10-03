@@ -5,6 +5,7 @@
 still write discovery chatter to Python's sys.stdout, because only the nauty pipeline step is
 wrapped in contextlib.redirect_stdout; the max-clique search (AutomorphismCliqueAnalyzer) and the
 minimal-generator extraction (MaximalAbelianSubgroupFinder) print unconditionally."""
+
 import contextlib
 import io
 import signal
@@ -46,10 +47,14 @@ except Exception as e:
 hit_fs = [m for m in MARKERS if m in out_fs]
 hit_eigs = [m for m in MARKERS if m in out_eigs]
 if hit_fs and hit_eigs:
-    print(f"REPRO: CONFIRMED verbose=False printed {len(out_fs.splitlines())} lines {hit_fs}; "
-          f"qed.eigs(H,2) default sym printed {len(out_eigs.splitlines())} lines {hit_eigs}")
+    print(
+        f"REPRO: CONFIRMED verbose=False printed {len(out_fs.splitlines())} lines {hit_fs}; "
+        f"qed.eigs(H,2) default sym printed {len(out_eigs.splitlines())} lines {hit_eigs}"
+    )
 elif hit_fs or hit_eigs:
     print(f"REPRO: CONFIRMED partial: find_symmetries markers={hit_fs} eigs markers={hit_eigs}")
 else:
-    print(f"REPRO: NOT_REPRODUCED no discovery chatter on sys.stdout "
-          f"(find_symmetries {len(out_fs)} chars, eigs {len(out_eigs)} chars)")
+    print(
+        f"REPRO: NOT_REPRODUCED no discovery chatter on sys.stdout "
+        f"(find_symmetries {len(out_fs)} chars, eigs {len(out_eigs)} chars)"
+    )

@@ -6,6 +6,7 @@ coefficients +-Dz/(4i) that cancel exactly but are each nonzero (hamiltonian_bui
 Sz detection reads raw records, so a z-axis DM model (which conserves Sz) is classified as
 parity-only: Symmetry(sz=N/2) raises. The same model with the merged form (S+S-, S-S+ only)
 is accepted and gives the dense Sz-sector ground energy."""
+
 import signal
 import numpy as np
 import qed
@@ -30,7 +31,8 @@ def dense(op):
     d = 1 << N
     M = np.zeros((d, d), complex)
     for j in range(d):
-        e = np.zeros(d, complex); e[j] = 1.0
+        e = np.zeros(d, complex)
+        e[j] = 1.0
         M[:, j] = np.asarray(op.apply(e))
     return M
 
@@ -43,7 +45,7 @@ E_ref = float(np.linalg.eigvalsh(Mb[np.ix_(sel, sel)])[0])
 
 # hand-merged equivalent: Dz (Sx_i Sy_j - Sy_i Sx_j) = (i Dz/2)(S+_i S-_j - S-_i S+_j)
 Hm = qed.Operator(N)
-for (i, j) in bonds:
+for i, j in bonds:
     Hm.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, 1.0)
     Hm.add_two_body(qed.OP_SPLUS, i, qed.OP_SMINUS, j, 0.5 + 0.5j * D)
     Hm.add_two_body(qed.OP_SMINUS, i, qed.OP_SPLUS, j, 0.5 - 0.5j * D)
@@ -60,11 +62,20 @@ def attempt(H):
 
 rb, eb = attempt(Hb)
 rm, em = attempt(Hm)
-info = (f"S+S+ records={len(pp)} S-S- records={len(mm)} max|sum per bond|={pp_sum:.1e} [H,Sz]={comm:.1e} "
-        f"sz_content(builder)={qed._core.sectors.sz_content(Hb)} sz=4 builder -> {rb!r}; merged form diff={merged_diff:.1e}, "
-        f"sz=4 merged -> {rm} E={em} ref={E_ref:.12f}")
-if comm < 1e-12 and len(pp) > 0 and pp_sum < 1e-14 and rb != "ok" and merged_diff < 1e-12 \
-        and em is not None and abs(em - E_ref) < 1e-8:
+info = (
+    f"S+S+ records={len(pp)} S-S- records={len(mm)} max|sum per bond|={pp_sum:.1e} [H,Sz]={comm:.1e} "
+    f"sz_content(builder)={qed._core.sectors.sz_content(Hb)} sz=4 builder -> {rb!r}; merged form diff={merged_diff:.1e}, "
+    f"sz=4 merged -> {rm} E={em} ref={E_ref:.12f}"
+)
+if (
+    comm < 1e-12
+    and len(pp) > 0
+    and pp_sum < 1e-14
+    and rb != "ok"
+    and merged_diff < 1e-12
+    and em is not None
+    and abs(em - E_ref) < 1e-8
+):
     print("REPRO: CONFIRMED " + info)
 elif rb == "ok":
     print("REPRO: NOT_REPRODUCED " + info)

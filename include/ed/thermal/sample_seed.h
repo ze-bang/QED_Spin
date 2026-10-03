@@ -38,7 +38,7 @@ namespace ed::thermal {
     std::uint64_t z = base_seed + 0x9E3779B97F4A7C15ULL * (sample + 1);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    z =  z ^ (z >> 31);
+    z = z ^ (z >> 31);
     return std::mt19937(static_cast<std::mt19937::result_type>(z));
 }
 

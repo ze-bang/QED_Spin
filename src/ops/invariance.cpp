@@ -18,19 +18,17 @@ namespace {
 
 char op_char(std::uint8_t t) {
     switch (t) {
-        case 0: return '+';
-        case 1: return '-';
-        case 2: return 'z';
-        default:
-            throw std::invalid_argument("Operator: op_type " + std::to_string(t)
-                                        + " is not 0 (S+), 1 (S-) or 2 (Sz)");
+    case 0: return '+';
+    case 1: return '-';
+    case 2: return 'z';
+    default: throw std::invalid_argument("Operator: op_type " + std::to_string(t) + " is not 0 (S+), 1 (S-) or 2 (Sz)");
     }
 }
 
 int site_of(std::uint64_t s, int n) {
     if (s >= static_cast<std::uint64_t>(n))
-        throw std::invalid_argument("Operator: site " + std::to_string(s) + " is outside [0, "
-                                    + std::to_string(n) + ")");
+        throw std::invalid_argument("Operator: site " + std::to_string(s) + " is outside [0, " + std::to_string(n)
+                                    + ")");
     return static_cast<int>(s);
 }
 
@@ -48,17 +46,15 @@ MaskedOperator masked(const ::Operator& op) {
     for (const auto& t : op.records()) {
         if (t.is_two_body)
             m.add(MaskedOperator::product(n, {op_char(t.op_type), op_char(t.op_type_2)},
-                                          {site_of(t.site_index, n), site_of(t.site_index_2, n)},
-                                          t.coefficient));
+                                          {site_of(t.site_index, n), site_of(t.site_index_2, n)}, t.coefficient));
         else
-            m.add(MaskedOperator::product(n, std::string(1, op_char(t.op_type)),
-                                          {site_of(t.site_index, n)}, t.coefficient));
+            m.add(MaskedOperator::product(n, std::string(1, op_char(t.op_type)), {site_of(t.site_index, n)},
+                                          t.coefficient));
     }
     for (const auto& t : op.three_body_records())   // O1 acts first: the last factor of a product
-        m.add(MaskedOperator::product(n, {op_char(t.op_type_3), op_char(t.op_type_2), op_char(t.op_type_1)},
-                                      {site_of(t.site_index_3, n), site_of(t.site_index_2, n),
-                                       site_of(t.site_index_1, n)},
-                                      t.coefficient));
+        m.add(MaskedOperator::product(
+            n, {op_char(t.op_type_3), op_char(t.op_type_2), op_char(t.op_type_1)},
+            {site_of(t.site_index_3, n), site_of(t.site_index_2, n), site_of(t.site_index_1, n)}, t.coefficient));
     for (const auto& t : op.extra_terms()) m.add_term(t);
     return m;
 }
@@ -96,11 +92,11 @@ std::vector<ProductTerm> product_terms(const MaskedOperator& m) {
         const auto& o = p.ops;
         auto s = [&p](std::size_t k) { return static_cast<std::uint64_t>(p.sites[k]); };
         switch (o.size()) {
-            case 0: op.addTwoBodyTerm(2, 0, 2, 0, 4.0 * p.coeff); break;   // Sz_0 Sz_0 = 1/4
-            case 1: op.addOneBodyTerm(code(o[0]), s(0), p.coeff); break;
-            case 2: op.addTwoBodyTerm(code(o[0]), s(0), code(o[1]), s(1), p.coeff); break;
-            case 3: op.addThreeBodyTerm(code(o[0]), s(0), code(o[1]), s(1), code(o[2]), s(2), p.coeff); break;
-            default: op.add_extra_term(terms[i]); break;   // four or more sites: no record holds it
+        case 0: op.addTwoBodyTerm(2, 0, 2, 0, 4.0 * p.coeff); break;   // Sz_0 Sz_0 = 1/4
+        case 1: op.addOneBodyTerm(code(o[0]), s(0), p.coeff); break;
+        case 2: op.addTwoBodyTerm(code(o[0]), s(0), code(o[1]), s(1), p.coeff); break;
+        case 3: op.addThreeBodyTerm(code(o[0]), s(0), code(o[1]), s(1), code(o[2]), s(2), p.coeff); break;
+        default: op.add_extra_term(terms[i]); break;   // four or more sites: no record holds it
         }
     }
     return op;
@@ -108,8 +104,8 @@ std::vector<ProductTerm> product_terms(const MaskedOperator& m) {
 
 void require_permutation(const std::vector<int>& perm, int n) {
     if (static_cast<int>(perm.size()) != n)
-        throw std::invalid_argument("permutation: " + std::to_string(perm.size()) + " entries for "
-                                    + std::to_string(n) + " sites");
+        throw std::invalid_argument("permutation: " + std::to_string(perm.size()) + " entries for " + std::to_string(n)
+                                    + " sites");
     std::vector<char> seen(static_cast<std::size_t>(n), 0);
     for (int p : perm) {
         if (p < 0 || p >= n || seen[static_cast<std::size_t>(p)])
@@ -239,15 +235,20 @@ MaskedOperator su2_scalar_part(const MaskedOperator& O) {
     MaskedOperator out(O.n_sites());
     for (const ProductTerm& t : product_terms(O)) {
         const std::size_t n = t.ops.size();
-        if (n == 0) { out.add(MaskedOperator::product(O.n_sites(), "", {}, t.coeff)); continue; }
+        if (n == 0) {
+            out.add(MaskedOperator::product(O.n_sites(), "", {}, t.coeff));
+            continue;
+        }
         if (n > 5)
-            throw ed::Unsupported("su2_scalar_part: a term on " + std::to_string(n) + " sites; the rotation "
-                                  "average is exact on at most 5");
+            throw ed::Unsupported("su2_scalar_part: a term on " + std::to_string(n)
+                                  + " sites; the rotation "
+                                    "average is exact on at most 5");
         // A factor S+ = S^x + i S^y, S- = S^x - i S^y, S^z as its Cartesian vector v (op = v.S).
         std::vector<std::array<C, 3>> v(n);
         for (std::size_t k = 0; k < n; ++k)
-            v[k] = t.ops[k] == '+' ? std::array<C, 3>{1.0, I, 0.0}
-                 : t.ops[k] == '-' ? std::array<C, 3>{1.0, -I, 0.0} : std::array<C, 3>{0.0, 0.0, 1.0};
+            v[k] = t.ops[k] == '+'   ? std::array<C, 3>{1.0, I, 0.0}
+                   : t.ops[k] == '-' ? std::array<C, 3>{1.0, -I, 0.0}
+                                     : std::array<C, 3>{0.0, 0.0, 1.0};
         std::size_t combos = 1;
         for (std::size_t k = 0; k < n; ++k) combos *= 3;
         std::string ops(n, ' ');

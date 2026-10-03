@@ -13,6 +13,7 @@ prune=False builds one CSR per Lanczos block; prune=True builds one per candidat
 CONFIRMED when builds(prune=True) - builds(prune=False) equals the number of surviving candidates (> 0)
 and the energies agree (1e-8); the extra build wall time is reported from the timings.
 """
+
 import json
 import os
 import subprocess
@@ -24,20 +25,25 @@ N, K = 22, 4
 
 def worker(prune):
     import qed
+
     b = qed.input.HamiltonianBuilder(N)
     b.heisenberg([(i, (i + 1) % N) for i in range(N)], J=1.0)
     H = b.to_operator()
     t0 = time.perf_counter()
     r = qed.eigs(H, K, sym=qed.Symmetry(sz=N // 2), prune=prune)
     dt = time.perf_counter() - t0
-    print("RESULT " + json.dumps(dict(t=dt, E=[float(x) for x in r.energies], pruned=int(r.pruned_blocks))),
-          flush=True)
+    print("RESULT " + json.dumps(dict(t=dt, E=[float(x) for x in r.energies], pruned=int(r.pruned_blocks))), flush=True)
 
 
 def run(prune):
     env = dict(os.environ, ED_SYM_PROFILE="1")
-    p = subprocess.run([sys.executable, os.path.abspath(__file__), "--worker", "1" if prune else "0"],
-                       env=env, capture_output=True, text=True, timeout=280)
+    p = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "--worker", "1" if prune else "0"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=280,
+    )
     res = None
     for line in p.stdout.splitlines():
         if line.startswith("RESULT "):
@@ -56,13 +62,15 @@ def main():
         print(f"REPRO: INCONCLUSIVE {type(ex).__name__}: {ex}")
         return
     dE = max(abs(a - b) for a, b in zip(rp["E"], rn["E"]))
-    n_blocks = len(dn)                       # one CSR per Lanczos block without pruning
+    n_blocks = len(dn)  # one CSR per Lanczos block without pruning
     survivors = n_blocks - rp["pruned"]
     extra = len(dp) - len(dn)
     rebuilt = sorted({d for d in dp if dp.count(d) > dn.count(d)})
-    key = (f"csr_builds prune=True {len(dp)} vs prune=False {len(dn)}; candidates {n_blocks}, pruned {rp['pruned']}, "
-           f"survivors {survivors}, extra builds {extra}; rebuilt dims {rebuilt[:6]}; "
-           f"t(prune)={rp['t']:.2f}s t(no prune)={rn['t']:.2f}s; |dE|={dE:.1e}")
+    key = (
+        f"csr_builds prune=True {len(dp)} vs prune=False {len(dn)}; candidates {n_blocks}, pruned {rp['pruned']}, "
+        f"survivors {survivors}, extra builds {extra}; rebuilt dims {rebuilt[:6]}; "
+        f"t(prune)={rp['t']:.2f}s t(no prune)={rn['t']:.2f}s; |dE|={dE:.1e}"
+    )
     if dE > 1e-8:
         print(f"REPRO: INCONCLUSIVE energies differ {key}")
     elif n_blocks == 0:

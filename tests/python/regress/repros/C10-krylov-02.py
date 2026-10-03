@@ -13,6 +13,7 @@ time_reversal='off'), qed.eigs(H, k=12). Sz=0 (12870), Sz=+-1 (11440), Sz=+-2 (8
 Sz=+-3 (4368) blocks all exceed the k=12 dense crossover (1920). Exact answer from the diagonal
 (bit counting, independent of the library): [-4,-4,-3 x10]. As a control the same H scaled by
 1000 is also run (the claim says a larger ||H|| misses the breakdown and finds the copies)."""
+
 import signal
 import numpy as np
 import qed
@@ -52,7 +53,9 @@ for scale in (1.0, 1000.0):
         continue
     dev = float(np.max(np.abs(np.sort(got)[:K] - ref))) / scale if len(got) >= K else float("inf")
     print(f"scale={scale:g}: got/scale={np.round(got / scale, 6).tolist()}")
-    print(f"scale={scale:g}: ref/scale={np.round(ref / scale, 6).tolist()}  complete={complete}  max|dE|/scale={dev:.3e}")
+    print(
+        f"scale={scale:g}: ref/scale={np.round(ref / scale, 6).tolist()}  complete={complete}  max|dE|/scale={dev:.3e}"
+    )
     out[scale] = ("ok", complete, dev)
 
 st, complete, dev = out[1.0]
@@ -60,8 +63,10 @@ if st == "ok" and complete and dev > 1e-8:
     extra = ""
     if out[1000.0][0] == "ok":
         extra = f"; scale=1000 max|dE|/scale={out[1000.0][2]:.2e} complete={out[1000.0][1]}"
-    print(f"REPRO: CONFIRMED eigs(k=12) on Ising ring N=16 returned a wrong window with complete=True, "
-          f"max|dE|={dev:.3g}{extra}")
+    print(
+        f"REPRO: CONFIRMED eigs(k=12) on Ising ring N=16 returned a wrong window with complete=True, "
+        f"max|dE|={dev:.3g}{extra}"
+    )
 elif st == "ok" and not complete:
     print(f"REPRO: NOT_REPRODUCED window flagged incomplete (complete=False), max|dE|={dev:.3g}")
 elif st == "raised":

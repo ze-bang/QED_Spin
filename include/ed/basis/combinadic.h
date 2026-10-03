@@ -38,9 +38,7 @@ public:
         c_.assign(stride * stride, 0ULL);
         for (int n = 0; n <= max_n; ++n) {
             c_[idx_(n, 0)] = 1ULL;
-            for (int k = 1; k <= n; ++k) {
-                c_[idx_(n, k)] = c_[idx_(n - 1, k - 1)] + c_[idx_(n - 1, k)];
-            }
+            for (int k = 1; k <= n; ++k) { c_[idx_(n, k)] = c_[idx_(n - 1, k - 1)] + c_[idx_(n - 1, k)]; }
         }
     }
 
@@ -53,10 +51,9 @@ public:
 
 private:
     [[nodiscard]] std::size_t idx_(int n, int k) const noexcept {
-        return static_cast<std::size_t>(n) * (static_cast<std::size_t>(max_n_) + 1)
-             + static_cast<std::size_t>(k);
+        return static_cast<std::size_t>(n) * (static_cast<std::size_t>(max_n_) + 1) + static_cast<std::size_t>(k);
     }
-    int                        max_n_ = -1;
+    int max_n_ = -1;
     std::vector<std::uint64_t> c_;
 };
 
@@ -70,9 +67,8 @@ private:
 //
 // Returns 0 (a valid rank) when ``popcount(state) != k``; callers that may
 // pass out-of-sector states must guard with their own popcount check.
-[[nodiscard]] inline std::int64_t
-rank_state(std::uint64_t state, int n_bits, int k,
-           const BinomialTable& binom) noexcept {
+[[nodiscard]] inline std::int64_t rank_state(std::uint64_t state, int n_bits, int k,
+                                             const BinomialTable& binom) noexcept {
     std::int64_t rank = 0;
     int seen = 0;
     for (int bit = 0; bit < 64; ++bit) {
@@ -87,9 +83,8 @@ rank_state(std::uint64_t state, int n_bits, int k,
 }
 
 // Combinadic UNRANK: same colex convention as ``rank_state``.
-[[nodiscard]] inline std::uint64_t
-unrank_to_state(std::uint64_t rank, int n_bits, int k,
-                const BinomialTable& binom) noexcept {
+[[nodiscard]] inline std::uint64_t unrank_to_state(std::uint64_t rank, int n_bits, int k,
+                                                   const BinomialTable& binom) noexcept {
     std::uint64_t state = 0ULL;
     for (int i = k - 1; i >= 0; --i) {
         int p = i;

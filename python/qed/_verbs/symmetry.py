@@ -28,6 +28,7 @@ into the engine's :class:`qed._core.sectors.Spec`:
 :meth:`select` narrows the sectors (a momentum, a little-group irrep named by its character,
 or the engine's star/irrep indices) without changing the symmetry.
 """
+
 from __future__ import annotations
 
 import cmath
@@ -60,8 +61,8 @@ class Symmetry:
     total_spin: Optional[float] = None
     only_k0: Sequence[int] = field(default_factory=tuple)
     only_irrep: Sequence[int] = field(default_factory=tuple)
-    only_momentum: Sequence = field(default_factory=tuple)          # (((perm), Fraction), ...) per request
-    only_irrep_character: Sequence = field(default_factory=tuple)   # (((perm), chi), ...) per request
+    only_momentum: Sequence = field(default_factory=tuple)  # (((perm), Fraction), ...) per request
+    only_irrep_character: Sequence = field(default_factory=tuple)  # (((perm), chi), ...) per request
 
     @classmethod
     def auto(cls) -> "Symmetry":
@@ -71,9 +72,15 @@ class Symmetry:
     def none(cls) -> "Symmetry":
         return cls(spatial=None, sz="off", spin_flip="off", time_reversal="off")
 
-    def select(self, *, sz: Any = None, k0: Optional[Sequence[int]] = None,
-               irrep: Optional[Sequence[int]] = None, momentum: Any = None,
-               irrep_character: Any = None) -> "Symmetry":
+    def select(
+        self,
+        *,
+        sz: Any = None,
+        k0: Optional[Sequence[int]] = None,
+        irrep: Optional[Sequence[int]] = None,
+        momentum: Any = None,
+        irrep_character: Any = None,
+    ) -> "Symmetry":
         """The same symmetry restricted to some sectors.
 
         ``momentum``: ``{T: theta}`` keeps the momenta with T|psi> = exp(-2 pi i theta)|psi>
@@ -100,13 +107,21 @@ class Symmetry:
             out = replace(out, only_irrep=tuple(int(i) for i in irrep))
         if momentum is not None:
             reqs = [momentum] if isinstance(momentum, dict) else list(momentum)
-            out = replace(out, only_momentum=tuple(
-                tuple((tuple(int(x) for x in T), Fraction(th).limit_denominator(1 << 20))
-                      for T, th in r.items()) for r in reqs))
+            out = replace(
+                out,
+                only_momentum=tuple(
+                    tuple((tuple(int(x) for x in T), Fraction(th).limit_denominator(1 << 20)) for T, th in r.items())
+                    for r in reqs
+                ),
+            )
         if irrep_character is not None:
             reqs = [irrep_character] if isinstance(irrep_character, dict) else list(irrep_character)
-            out = replace(out, only_irrep_character=tuple(
-                tuple((tuple(int(x) for x in R), complex(c)) for R, c in r.items()) for r in reqs))
+            out = replace(
+                out,
+                only_irrep_character=tuple(
+                    tuple((tuple(int(x) for x in R), complex(c)) for R, c in r.items()) for r in reqs
+                ),
+            )
         return out
 
     # ------------------------------------------------------------------
@@ -124,13 +139,16 @@ class Symmetry:
             return identity, []
         if isinstance(spatial, str):
             if spatial.lower() != "auto":
-                raise InvalidRequest(f"spatial must be 'auto', a permutation list, a Symmetries or None, "
-                                     f"got {spatial!r}")
+                raise InvalidRequest(
+                    f"spatial must be 'auto', a permutation list, a Symmetries or None, " f"got {spatial!r}"
+                )
             from ..discovery import find_symmetries
+
             try:
                 report = find_symmetries(H, verbose=False)
-            except ImportError as e:        # the graph-automorphism search needs pynauty
+            except ImportError as e:  # the graph-automorphism search needs pynauty
                 import warnings
+
                 msg = f"Symmetry(spatial='auto'): {e}; continuing without spatial symmetry"
                 warnings.warn(msg, RuntimeWarning, stacklevel=3)
                 if diagnostics is not None:
@@ -140,9 +158,9 @@ class Symmetry:
                 diagnostics.extend(report.diagnostics)
             A, residues = report.abelian or identity, report.residues
         else:
-            gens = getattr(spatial, "abelian", None)        # a Symmetries: an explicit split
+            gens = getattr(spatial, "abelian", None)  # a Symmetries: an explicit split
             star = []
-            if gens is not None and self.point_group:   # else its residues go unchecked
+            if gens is not None and self.point_group:  # else its residues go unchecked
                 sp = getattr(spatial, "residues", None)
                 star = list(sp) if sp is not None else []
             perms = list(gens) + star if gens is not None else list(spatial)
@@ -153,7 +171,7 @@ class Symmetry:
                     raise InvalidRequest(f"spatial symmetry: {list(p)} is not a permutation of the {n} sites")
             if not perms:
                 return identity, []
-            if gens is not None:            # an explicit split: checked, not re-chosen
+            if gens is not None:  # an explicit split: checked, not re-chosen
                 A, residues = split_generator_set(gens, star, n)
             else:
                 G = close_group(perms)
@@ -181,8 +199,9 @@ class Symmetry:
                 raise InvalidRequest(f"sz must be 'auto', 'off', 'even', 'odd' or an int, got {sz!r}")
         elif sz is not None:
             if isinstance(sz, bool) or not isinstance(sz, numbers.Integral):
-                raise InvalidRequest("sz must be 'auto', 'off', 'even', 'odd' or an int (the number of up "
-                                     f"spins), got {sz!r}")
+                raise InvalidRequest(
+                    "sz must be 'auto', 'off', 'even', 'odd' or an int (the number of up " f"spins), got {sz!r}"
+                )
             if sz < 0:
                 raise InvalidRequest(f"sz = {sz} counts up spins and must be >= 0")
             spec.n_up = int(sz)
@@ -191,8 +210,7 @@ class Symmetry:
         if self.total_spin is not None:
             two_s = round(2 * float(self.total_spin))
             if abs(two_s - 2 * float(self.total_spin)) > 1e-9 or two_s < 0:
-                raise InvalidRequest("total_spin must be a non-negative multiple of 1/2, "
-                                 f"got {self.total_spin!r}")
+                raise InvalidRequest("total_spin must be a non-negative multiple of 1/2, " f"got {self.total_spin!r}")
             spec.two_S = int(two_s)
         spec.only_k0 = list(self.only_k0)
         spec.only_irrep = list(self.only_irrep)
@@ -219,8 +237,10 @@ class Symmetry:
                     elif R in index:
                         c.append((index[R], chi))
                     else:
-                        raise InvalidRequest(f"select(irrep_character=...): {list(R)} is not a point-group "
-                                         "coset representative (see Symmetry.groups)")
+                        raise InvalidRequest(
+                            f"select(irrep_character=...): {list(R)} is not a point-group "
+                            "coset representative (see Symmetry.groups)"
+                        )
                 reqs.append(c)
             spec.only_irrep_chars = reqs
         return spec

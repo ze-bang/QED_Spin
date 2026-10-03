@@ -40,12 +40,12 @@ using ed::sectors::ThermalSpec;
 
 namespace {
 
-constexpr int    N_SITES = 6;
-constexpr double J       = 1.0;
+constexpr int N_SITES = 6;
+constexpr double J = 1.0;
 
-constexpr double TOL_E  = 0.08;
+constexpr double TOL_E = 0.08;
 constexpr double TOL_CV = 0.25;
-constexpr double TOL_S  = 0.15;
+constexpr double TOL_S = 0.15;
 
 const std::vector<std::uint64_t> SEEDS = {42ULL, 1337ULL, 99991ULL};
 
@@ -57,10 +57,12 @@ std::vector<double> logspaced(double t_lo, double t_hi, int n) {
 }
 
 const std::vector<double> T_BROAD = logspaced(1.0, 10.0, 15);   // FTLM
-const std::vector<double> T_HIGH  = logspaced(3.0, 10.0, 10);   // mTPQ
+const std::vector<double> T_HIGH = logspaced(3.0, 10.0, 10);   // mTPQ
 
 // Exact canonical E, C and S on the grid T, from the dense spectrum.
-struct Exact { std::vector<double> E, C, S; };
+struct Exact {
+    std::vector<double> E, C, S;
+};
 Exact dense_reference(const std::vector<double>& T) {
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
     const auto eigs = reference_from_operator(*H, 1ULL << N_SITES).eigs;
@@ -71,7 +73,9 @@ Exact dense_reference(const std::vector<double>& T) {
         double z = 0.0, e1 = 0.0, e2 = 0.0;
         for (double e : eigs) {
             const double w = std::exp(-beta * (e - e0));
-            z += w; e1 += w * (e - e0); e2 += w * (e - e0) * (e - e0);
+            z += w;
+            e1 += w * (e - e0);
+            e2 += w * (e - e0) * (e - e0);
         }
         const double m1 = e1 / z, var = e2 / z - m1 * m1;
         r.E.push_back(e0 + m1);
@@ -98,14 +102,14 @@ ed::sectors::Spec sz_sectors() {
 
 ThermalSpec spec_for(ThermalSpec::Method m, std::uint64_t seed, ed::Device device = ed::Device::Cpu) {
     ThermalSpec t;
-    t.method        = m;
-    t.temperatures  = m == ThermalSpec::Method::mTPQ ? T_HIGH : T_BROAD;
-    t.samples       = 50;
-    t.krylov        = 60;                                       // FTLM Lanczos depth
-    t.steps         = m == ThermalSpec::Method::mTPQ ? 200 : 0;  // mTPQ steps per sample
+    t.method = m;
+    t.temperatures = m == ThermalSpec::Method::mTPQ ? T_HIGH : T_BROAD;
+    t.samples = 50;
+    t.krylov = 60;                                       // FTLM Lanczos depth
+    t.steps = m == ThermalSpec::Method::mTPQ ? 200 : 0;  // mTPQ steps per sample
     t.dense_max_dim = 0;   // dim 64: the sampling kernels, not the dense crossover
-    t.seed          = seed;
-    t.device        = device;
+    t.seed = seed;
+    t.device = device;
     return t;
 }
 
@@ -127,8 +131,7 @@ void check_close(const ed::sectors::ThermalCurves& got, const Exact& ref, double
 
 }  // namespace
 
-TEST_CASE("thermal methods vs dense reference: no symmetry (one block)",
-          "[thermal][dense-ref][no-sym]") {
+TEST_CASE("thermal methods vs dense reference: no symmetry (one block)", "[thermal][dense-ref][no-sym]") {
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
     SECTION("FTLM") {
         const auto ref = dense_reference(T_BROAD);
@@ -148,8 +151,7 @@ TEST_CASE("thermal methods vs dense reference: no symmetry (one block)",
     }
 }
 
-TEST_CASE("thermal methods vs dense reference: Sz sectors combined by the verb",
-          "[thermal][dense-ref][sz-sym]") {
+TEST_CASE("thermal methods vs dense reference: Sz sectors combined by the verb", "[thermal][dense-ref][sz-sym]") {
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
     SECTION("FTLM") {
         const auto ref = dense_reference(T_BROAD);
@@ -170,8 +172,7 @@ TEST_CASE("thermal methods vs dense reference: Sz sectors combined by the verb",
 }
 
 #ifdef WITH_CUDA
-TEST_CASE("thermal on the device vs dense reference",
-          "[thermal][dense-ref][gpu][with-cuda]") {
+TEST_CASE("thermal on the device vs dense reference", "[thermal][dense-ref][gpu][with-cuda]") {
     if (!ed::have_cuda()) {
         SUCCEED("no CUDA device: skipped");
         return;
@@ -179,14 +180,14 @@ TEST_CASE("thermal on the device vs dense reference",
     auto H = build_heisenberg_chain(N_SITES, J, /*periodic=*/true);
     constexpr std::uint64_t GPU_SEED = 42ULL;
     SECTION("FTLM") {
-        const auto r = ed::sectors::thermal(*H, no_symmetry(),
-                                            spec_for(ThermalSpec::Method::FTLM, GPU_SEED, ed::Device::Gpu));
+        const auto r =
+            ed::sectors::thermal(*H, no_symmetry(), spec_for(ThermalSpec::Method::FTLM, GPU_SEED, ed::Device::Gpu));
         REQUIRE(r.placement.device_krylov == 1);
         check_close(r, dense_reference(T_BROAD), TOL_E, true, "FTLM/gpu");
     }
     SECTION("mTPQ") {
-        const auto r = ed::sectors::thermal(*H, no_symmetry(),
-                                            spec_for(ThermalSpec::Method::mTPQ, GPU_SEED, ed::Device::Gpu));
+        const auto r =
+            ed::sectors::thermal(*H, no_symmetry(), spec_for(ThermalSpec::Method::mTPQ, GPU_SEED, ed::Device::Gpu));
         REQUIRE(r.placement.device_krylov == 1);
         check_close(r, dense_reference(T_HIGH), TOL_E, false, "mTPQ/gpu");
     }

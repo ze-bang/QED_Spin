@@ -15,9 +15,8 @@ namespace ed::symmetry {
 ///   * an Sz-parity half  iff N is even,
 ///   * the full space     always.
 /// ``n_up >= 0`` wins over ``sz_parity`` (mutually exclusive upstream).
-[[nodiscard]] inline bool
-flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
-    if (n_up >= 0)      return 2 * n_up == n_sites;
+[[nodiscard]] inline bool flip_subspace_admissible(int n_up, int sz_parity, int n_sites) noexcept {
+    if (n_up >= 0) return 2 * n_up == n_sites;
     if (sz_parity >= 0) return n_sites % 2 == 0;
     return true;
 }

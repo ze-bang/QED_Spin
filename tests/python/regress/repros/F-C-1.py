@@ -12,6 +12,7 @@ Fuzzer cluster C (9 of 10 cases), two shapes reproduced here:
  (b) 8-site sawtooth Heisenberg, spatial=[T], total_spin=1: k=6 must give 6 vectors (one
      two-member star x 3 Sz members); the fuzzer saw 3 (only the S- ladder is generated).
 Reference: dense numpy H in the library basis (bit i of a state = site i, set bit = spin up)."""
+
 import signal
 import sys
 
@@ -43,8 +44,8 @@ def dense_ops(N):
         Sz.append(np.diag(np.where(bit == 1, 0.5, -0.5)))
         P = np.zeros((dim, dim))
         M = np.zeros((dim, dim))
-        P[s[bit == 0] ^ (1 << i), s[bit == 0]] = 1.0   # S+ sets a clear (down) bit
-        M[s[bit == 1] ^ (1 << i), s[bit == 1]] = 1.0   # S- clears it
+        P[s[bit == 0] ^ (1 << i), s[bit == 0]] = 1.0  # S+ sets a clear (down) bit
+        M[s[bit == 1] ^ (1 << i), s[bit == 1]] = 1.0  # S- clears it
         Sp.append(P)
         Sm.append(M)
     return Sz, Sp, Sm
@@ -73,8 +74,10 @@ def check(tag, H, Hd, sym, k, ref, problems, info):
     lv = [(round(L.energy, 6), int(L.multiplicity), bool(L.tr_folded), int(L.star_size)) for L in r.levels]
     vs = r.vectors()
     want = min(k, len(ref))
-    info.append(f"{tag}: levels (E,mult,tr_folded,star)={lv} time_reversal={r._raw.time_reversal} "
-                f"vectors={len(vs)} want={want}")
+    info.append(
+        f"{tag}: levels (E,mult,tr_folded,star)={lv} time_reversal={r._raw.time_reversal} "
+        f"vectors={len(vs)} want={want}"
+    )
     if len(vs) != want:
         problems.append(f"{tag}: {len(vs)} vectors for k={k} (restriction dim {len(ref)}, want {want})")
     if vs:
@@ -84,8 +87,10 @@ def check(tag, H, Hd, sym, k, ref, problems, info):
         HV = Hd @ V
         ray = np.real(np.einsum("im,im->m", V.conj(), HV))
         res = max(float(np.linalg.norm(HV[:, m] - ray[m] * V[:, m])) for m in range(V.shape[1]))
-        info.append(f"{tag}: orth {orth:.1e} residual {res:.1e} Rayleigh {np.round(np.sort(ray), 6).tolist()} "
-                    f"ref lowest {np.round(ref[:want], 6).tolist()}")
+        info.append(
+            f"{tag}: orth {orth:.1e} residual {res:.1e} Rayleigh {np.round(np.sort(ray), 6).tolist()} "
+            f"ref lowest {np.round(ref[:want], 6).tolist()}"
+        )
         if orth > 1e-8 or res > 1e-8:
             problems.append(f"{tag}: orth {orth:.1e} residual {res:.1e}")
 
@@ -116,9 +121,9 @@ try:
     H, Hd, (Sz, Sp, Sm) = build(N, bonds)
     Stot_z = sum(Sz)
     Stot_p = sum(Sp)
-    S2 = Stot_p.T @ Stot_p + Stot_z @ Stot_z + Stot_z      # S-S+ + Sz^2 + Sz  (S- = S+^T)
+    S2 = Stot_p.T @ Stot_p + Stot_z @ Stot_z + Stot_z  # S-S+ + Sz^2 + Sz  (S- = S+^T)
     w, U = np.linalg.eigh(S2)
-    Q = U[:, np.abs(w - 2.0) < 1e-8]                        # S = 1 subspace (all Sz members)
+    Q = U[:, np.abs(w - 2.0) < 1e-8]  # S = 1 subspace (all Sz members)
     ref = np.sort(np.linalg.eigvalsh(Q.T @ Hd @ Q))
     T = [(i + 2) % N for i in range(N)]
     sym = qed.Symmetry(spatial=[T], point_group=False, total_spin=1)

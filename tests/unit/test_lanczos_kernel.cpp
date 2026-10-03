@@ -40,28 +40,23 @@ namespace {
 
 /// Run the kernel with full CGS2 reorth and a kept basis.
 struct KernelResult {
-    std::vector<double>                         alpha;
-    std::vector<double>                         beta;
-    ed::krylov::KrylovBasis<Complex>            basis;
+    std::vector<double> alpha;
+    std::vector<double> beta;
+    ed::krylov::KrylovBasis<Complex> basis;
 };
 
-KernelResult run_kernel(const Operator& op,
-                        std::size_t dim,
-                        const std::vector<Complex>& v0,
-                        std::size_t max_iter) {
+KernelResult run_kernel(const Operator& op, std::size_t dim, const std::vector<Complex>& v0, std::size_t max_iter) {
     LanczosKernelOptions opts;
     opts.max_iter = max_iter;
-    opts.reorth   = ReorthPolicy::FullCGS2;
+    opts.reorth = ReorthPolicy::FullCGS2;
     opts.keep_basis = true;
 
     auto& be = default_cpu_backend();
-    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) {
-        op.apply(in, out, n);
-    };
+    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) { op.apply(in, out, n); };
     auto R = lanczos_kernel(be, matvec, dim, v0.data(), opts);
     KernelResult kr;
     kr.alpha = std::move(R.alpha);
-    kr.beta  = std::move(R.beta);
+    kr.beta = std::move(R.beta);
     kr.basis = std::move(R.basis);
     return kr;
 }
@@ -72,11 +67,10 @@ KernelResult run_kernel(const Operator& op,
 // Test 1: the full-reorth kernel's lowest Ritz value matches the dense
 // ground-state energy of a real Heisenberg chain.
 // ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel ground state matches the dense reference",
-          "[krylov][kernel][regression]") {
-    constexpr int  N   = 6;
+TEST_CASE("unified Lanczos kernel ground state matches the dense reference", "[krylov][kernel][regression]") {
+    constexpr int N = 6;
     constexpr auto dim = std::size_t{1} << N;
-    auto op  = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
     auto ref = reference_from_operator(*op, dim);
 
     auto v0 = random_unit_vector(dim, /*seed=*/0xC0FFEEu);
@@ -97,8 +91,7 @@ TEST_CASE("unified Lanczos kernel ground state matches the dense reference",
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(T);
     REQUIRE(es.info() == Eigen::Success);
-    INFO("E0 lanczos=" << es.eigenvalues()(0)
-         << " E0 dense=" << ref.eigs.front());
+    INFO("E0 lanczos=" << es.eigenvalues()(0) << " E0 dense=" << ref.eigs.front());
     REQUIRE(std::abs(es.eigenvalues()(0) - ref.eigs.front()) < 1e-8);
 }
 
@@ -109,9 +102,8 @@ TEST_CASE("unified Lanczos kernel ground state matches the dense reference",
 //
 // CGS2 typically holds this to ~ M * O(eps). We allow 1e-10 for M=40.
 // ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps",
-          "[krylov][kernel][orthogonality]") {
-    constexpr int  N   = 6;
+TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps", "[krylov][kernel][orthogonality]") {
+    constexpr int N = 6;
     constexpr auto dim = std::size_t{1} << N;
     auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
 
@@ -126,8 +118,7 @@ TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps",
     double max_diag_err = 0.0;
     for (std::size_t i = 0; i < M; ++i) {
         for (std::size_t j = i; j < M; ++j) {
-            const Complex z = be.dot(kr.basis[i],
-                                     kr.basis[j], dim);
+            const Complex z = be.dot(kr.basis[i], kr.basis[j], dim);
             const double mag = std::abs(z);
             if (i == j) {
                 max_diag_err = std::max(max_diag_err, std::abs(mag - 1.0));
@@ -136,8 +127,7 @@ TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps",
             }
         }
     }
-    INFO("M=" << M << " max_off_diag=" << max_off_diag
-         << " max_diag_err=" << max_diag_err);
+    INFO("M=" << M << " max_off_diag=" << max_off_diag << " max_diag_err=" << max_diag_err);
     REQUIRE(max_off_diag < 1e-10);
     REQUIRE(max_diag_err < 1e-12);
 }
@@ -146,8 +136,7 @@ TEST_CASE("unified Lanczos kernel basis is orthonormal to ~M*eps",
 // Test 4: Breakdown path. A 1-D Hilbert space (e.g. fully-polarised
 // single-state sector) should immediately break down after one step.
 // ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel handles trivial 1-state breakdown",
-          "[krylov][kernel][edge]") {
+TEST_CASE("unified Lanczos kernel handles trivial 1-state breakdown", "[krylov][kernel][edge]") {
     // Synthetic: a "matvec" that returns 0 on dim=1 simulates an
     // invariant subspace. Real Heisenberg N=1 has dim=2; we use a
     // hand-rolled 1-D op so the test is deterministic.
@@ -163,7 +152,7 @@ TEST_CASE("unified Lanczos kernel handles trivial 1-state breakdown",
 
     LanczosKernelOptions opts;
     opts.max_iter = 20;
-    opts.reorth   = ReorthPolicy::FullCGS2;
+    opts.reorth = ReorthPolicy::FullCGS2;
     opts.keep_basis = true;
 
     auto R = lanczos_kernel(be, matvec, /*local_n=*/1, v0.data(), opts);
@@ -194,23 +183,21 @@ TEST_CASE("unified Lanczos kernel handles trivial 1-state breakdown",
 TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
           "recovers the first excited state (KS restart-cycle idiom)",
           "[krylov][kernel][aux_ortho]") {
-    constexpr int  N   = 6;
+    constexpr int N = 6;
     constexpr auto dim = std::size_t{1} << N;
-    auto op  = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
     auto ref = reference_from_operator(*op, dim);
     REQUIRE(ref.eigs.size() >= 2);
 
     auto& be = default_cpu_backend();
-    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) {
-        op->apply(in, out, n);
-    };
+    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) { op->apply(in, out, n); };
 
     // Pass 1: get the ground-state Ritz vector. Run lanczos_kernel, then
     // diagonalise the tridiagonal and reconstruct y_0 = sum_j S(j,0)*V_j.
     auto v0_a = random_unit_vector(dim, /*seed=*/0xA110CAU);
     LanczosKernelOptions opts_a;
-    opts_a.max_iter   = 30;
-    opts_a.reorth     = ReorthPolicy::FullCGS2;
+    opts_a.max_iter = 30;
+    opts_a.reorth = ReorthPolicy::FullCGS2;
     opts_a.keep_basis = true;
 
     auto R_a = lanczos_kernel(be, matvec, dim, v0_a.data(), opts_a);
@@ -228,8 +215,7 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_a(T_a);
     REQUIRE(es_a.info() == Eigen::Success);
-    INFO("E0 dense=" << ref.eigs[0]
-         << " E0 lanczos=" << es_a.eigenvalues()(0));
+    INFO("E0 dense=" << ref.eigs[0] << " E0 lanczos=" << es_a.eigenvalues()(0));
     REQUIRE(std::abs(es_a.eigenvalues()(0) - ref.eigs[0]) < 1e-8);
 
     // Reconstruct y_0 = sum_j S(j,0) * V_j  on host as a plain
@@ -266,10 +252,10 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
     }
 
     LanczosKernelOptions opts_b;
-    opts_b.max_iter        = 30;
-    opts_b.reorth          = ReorthPolicy::FullCGS2;
-    opts_b.keep_basis      = true;
-    opts_b.aux_ortho_ptrs  = { y0.data() };
+    opts_b.max_iter = 30;
+    opts_b.reorth = ReorthPolicy::FullCGS2;
+    opts_b.keep_basis = true;
+    opts_b.aux_ortho_ptrs = {y0.data()};
 
     auto R_b = lanczos_kernel(be, matvec, dim, v0_b.data(), opts_b);
     const std::size_t M_b = R_b.alpha.size();
@@ -299,15 +285,13 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
     }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_b(T_b);
     REQUIRE(es_b.info() == Eigen::Success);
-    INFO("E0 (deflated kernel) = " << es_b.eigenvalues()(0)
-         << "  E1 (dense ref)   = " << ref.eigs[1]
-         << "  E0 (dense ref)   = " << ref.eigs[0]);
+    INFO("E0 (deflated kernel) = " << es_b.eigenvalues()(0) << "  E1 (dense ref)   = " << ref.eigs[1]
+                                   << "  E0 (dense ref)   = " << ref.eigs[0]);
     REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[1]) < 1e-7);
     // The smallest Ritz value must NOT be the ground state; the
     // dense E0/E1 gap on N=6 PBC Heisenberg is well above the
     // numerical tolerance.
-    REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[0]) >
-            std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
+    REQUIRE(std::abs(es_b.eigenvalues()(0) - ref.eigs[0]) > std::abs(ref.eigs[1] - ref.eigs[0]) - 1e-8);
 }
 
 // ----------------------------------------------------------------------------
@@ -338,15 +322,13 @@ TEST_CASE("lanczos_kernel `aux_ortho_ptrs` projects out the ground state and "
 TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
           "short-circuits when satisfied",
           "[krylov][kernel][convergence_check]") {
-    constexpr int  N   = 6;
+    constexpr int N = 6;
     constexpr auto dim = std::size_t{1} << N;
-    auto op  = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
+    auto op = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
     auto ref = reference_from_operator(*op, dim);
 
     auto& be = default_cpu_backend();
-    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) {
-        op->apply(in, out, n);
-    };
+    auto matvec = [&op](const Complex* in, Complex* out, std::size_t n) { op->apply(in, out, n); };
     auto v0 = random_unit_vector(dim, /*seed=*/0xC0DECAFEU);
 
     SECTION("counting probe fires every `interval` iterations") {
@@ -358,18 +340,16 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
         Probe probe;
 
         LanczosKernelOptions opts;
-        opts.max_iter                  = 22;
-        opts.reorth                    = ReorthPolicy::FullCGS2;
-        opts.keep_basis                = true;
+        opts.max_iter = 22;
+        opts.reorth = ReorthPolicy::FullCGS2;
+        opts.keep_basis = true;
         opts.convergence_check_interval = 5;
-        opts.convergence_check =
-            [&probe](const std::vector<double>& a,
-                     const std::vector<double>& b) {
-                probe.calls++;
-                probe.alpha_sizes_at_call.push_back(a.size());
-                probe.beta_sizes_at_call.push_back(b.size());
-                return false;  // never short-circuit
-            };
+        opts.convergence_check = [&probe](const std::vector<double>& a, const std::vector<double>& b) {
+            probe.calls++;
+            probe.alpha_sizes_at_call.push_back(a.size());
+            probe.beta_sizes_at_call.push_back(b.size());
+            return false;  // never short-circuit
+        };
 
         auto R = lanczos_kernel(be, matvec, dim, v0.data(), opts);
 
@@ -380,31 +360,26 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
         // At call j the kernel has just pushed alpha[j] and beta[j+1],
         // so alpha.size() == j + 1 and beta.size() == j + 2 (with
         // beta[0] preloaded).
-        REQUIRE(probe.alpha_sizes_at_call ==
-                std::vector<std::size_t>{5, 10, 15, 20});
-        REQUIRE(probe.beta_sizes_at_call ==
-                std::vector<std::size_t>{6, 11, 16, 21});
+        REQUIRE(probe.alpha_sizes_at_call == std::vector<std::size_t>{5, 10, 15, 20});
+        REQUIRE(probe.beta_sizes_at_call == std::vector<std::size_t>{6, 11, 16, 21});
     }
 
     SECTION("a Paige-bound check on the lowest Ritz value exits before max_iter") {
         LanczosKernelOptions opts;
-        opts.max_iter                  = 200;
-        opts.reorth                    = ReorthPolicy::FullCGS2;
-        opts.keep_basis                = true;
+        opts.max_iter = 200;
+        opts.reorth = ReorthPolicy::FullCGS2;
+        opts.keep_basis = true;
         opts.convergence_check_interval = 5;
-        opts.convergence_check =
-            [](const std::vector<double>& a, const std::vector<double>& b) {
-                const std::size_t m = a.size();
-                const auto t = ed::krylov::tridiag_eig(a, b, m, /*vectors=*/true);
-                return std::abs(b[m]) * std::abs(t.z(m - 1, 0))
-                       < 1e-8 * std::max(1.0, std::abs(t.values[0]));
-            };
+        opts.convergence_check = [](const std::vector<double>& a, const std::vector<double>& b) {
+            const std::size_t m = a.size();
+            const auto t = ed::krylov::tridiag_eig(a, b, m, /*vectors=*/true);
+            return std::abs(b[m]) * std::abs(t.z(m - 1, 0)) < 1e-8 * std::max(1.0, std::abs(t.values[0]));
+        };
 
         auto R = lanczos_kernel(be, matvec, dim, v0.data(), opts);
 
         // Early exit must have fired well below the cap.
-        INFO("iters_done=" << R.iters_done
-             << " (cap=" << opts.max_iter << ")");
+        INFO("iters_done=" << R.iters_done << " (cap=" << opts.max_iter << ")");
         REQUIRE(R.iters_done < opts.max_iter);
         REQUIRE(R.iters_done >= 5);                 // at least one cadence hit
         REQUIRE(R.basis.size() == R.iters_done);    // no off-by-one
@@ -413,8 +388,7 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
         // chain converges E_0 to better than 1e-10 within 30 iterations; we ask for 1e-8 to
         // match the callback's bound.
         const auto t = ed::krylov::tridiag_eig(R.alpha, R.beta, R.alpha.size(), /*vectors=*/false);
-        INFO("E_0 (lanczos, early-exit) = " << t.values[0]
-             << "  E_0 (dense)         = " << ref.eigs.front());
+        INFO("E_0 (lanczos, early-exit) = " << t.values[0] << "  E_0 (dense)         = " << ref.eigs.front());
         REQUIRE(std::abs(t.values[0] - ref.eigs.front()) < 1e-8);
     }
 }
@@ -422,39 +396,33 @@ TEST_CASE("lanczos_kernel `convergence_check` fires on cadence and "
 // ----------------------------------------------------------------------------
 // Test 5: Rejection of zero initial vector and missing keep_basis.
 // ----------------------------------------------------------------------------
-TEST_CASE("unified Lanczos kernel rejects misuse",
-          "[krylov][kernel][edge]") {
+TEST_CASE("unified Lanczos kernel rejects misuse", "[krylov][kernel][edge]") {
     auto& be = default_cpu_backend();
     auto matvec = [](const Complex*, Complex*, std::size_t) {};
 
     SECTION("zero initial vector") {
         std::vector<Complex> v0(8, Complex{0, 0});
         LanczosKernelOptions opts;
-        opts.max_iter   = 4;
-        opts.reorth     = ReorthPolicy::FullCGS2;
+        opts.max_iter = 4;
+        opts.reorth = ReorthPolicy::FullCGS2;
         opts.keep_basis = true;
-        REQUIRE_THROWS_AS(
-            lanczos_kernel(be, matvec, 8, v0.data(), opts),
-            std::invalid_argument);
+        REQUIRE_THROWS_AS(lanczos_kernel(be, matvec, 8, v0.data(), opts), std::invalid_argument);
     }
 
     SECTION("reorth requested without keep_basis") {
         std::vector<Complex> v0(8, Complex{1.0, 0.0});
         LanczosKernelOptions opts;
-        opts.max_iter   = 4;
-        opts.reorth     = ReorthPolicy::FullCGS2;
+        opts.max_iter = 4;
+        opts.reorth = ReorthPolicy::FullCGS2;
         opts.keep_basis = false;
-        REQUIRE_THROWS_AS(
-            lanczos_kernel(be, matvec, 8, v0.data(), opts),
-            std::invalid_argument);
+        REQUIRE_THROWS_AS(lanczos_kernel(be, matvec, 8, v0.data(), opts), std::invalid_argument);
     }
 }
 
 // -----------------------------------------------------------------------------
 // LocalDGKS3 reorthogonalization (moved from test_minimalist_collapse).
 // -----------------------------------------------------------------------------
-TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
-          "[lanczos][reorth][local_dgks3]") {
+TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy", "[lanczos][reorth][local_dgks3]") {
     constexpr std::uint64_t N = 4;
     auto H = build_heisenberg_chain(N, /*J=*/1.0, /*periodic=*/true);
     const std::size_t dim = static_cast<std::size_t>(1ull << N);
@@ -469,8 +437,8 @@ TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
     for (auto& z : seed) z = Complex{dist(rng), dist(rng)};
 
     LanczosKernelOptions opts;
-    opts.max_iter   = 12;
-    opts.reorth     = ReorthPolicy::LocalDGKS3;
+    opts.max_iter = 12;
+    opts.reorth = ReorthPolicy::LocalDGKS3;
     opts.keep_basis = false;
 
     auto res = lanczos_kernel(be, matvec, dim, seed.data(), opts);
@@ -478,7 +446,7 @@ TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
     // A non-trivial run with a well-formed tridiagonal.
     REQUIRE(res.iters_done >= 4u);
     REQUIRE(res.alpha.size() == res.iters_done);
-    REQUIRE(res.beta.size()  == res.iters_done + 1);
+    REQUIRE(res.beta.size() == res.iters_done + 1);
     for (auto a : res.alpha) REQUIRE(std::isfinite(a));
     for (auto b : res.beta) {
         REQUIRE(std::isfinite(b));
@@ -489,8 +457,7 @@ TEST_CASE("lanczos_kernel converges under LocalDGKS3 reorth policy",
 // -----------------------------------------------------------------------------
 // tridiag_eig: the one tridiagonal eigensolve, in lanczos_kernel's convention.
 // -----------------------------------------------------------------------------
-TEST_CASE("tridiag_eig solves the Lanczos tridiagonal",
-          "[krylov][tridiag]") {
+TEST_CASE("tridiag_eig solves the Lanczos tridiagonal", "[krylov][tridiag]") {
     std::mt19937_64 rng(0x7D1A6ull);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     const std::size_t m = 9;
@@ -558,11 +525,12 @@ TEST_CASE("tridiag_ends matches tridiag_eig at the ends of the spectrum", "[kryl
             CHECK(std::abs(ends.top - full.values[m - 1]) < 1e-13);
             for (std::size_t j = 0; j < c; ++j) {
                 CHECK(std::abs(ends.values[j] - full.values[j]) < 1e-13);
-                for (std::size_t i = 0; i < m; ++i) CHECK(std::abs(std::abs(ends.z(i, j)) - std::abs(full.z(i, j))) < 1e-10);
+                for (std::size_t i = 0; i < m; ++i)
+                    CHECK(std::abs(std::abs(ends.z(i, j)) - std::abs(full.z(i, j))) < 1e-10);
                 // The Paige bound the gates compare with their thresholds.
                 const double bound_full = beta[m] * std::abs(full.z(m - 1, j));
                 const double bound_ends = beta[m] * std::abs(ends.z(m - 1, j));
-                CHECK(std::abs(bound_ends - bound_full) <= 1e-10 * bound_full + 1e-13);   // the gates judge >= 1e-9 scale
+                CHECK(std::abs(bound_ends - bound_full) <= 1e-10 * bound_full + 1e-13); // the gates judge >= 1e-9 scale
             }
         }
     }
@@ -579,7 +547,7 @@ TEST_CASE("BasicCpuBackend<double> runs the Krylov kernels on a real symmetric m
     std::mt19937_64 rng(0x5EA1ull);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     Eigen::MatrixXd A = Eigen::MatrixXd::Zero(static_cast<Eigen::Index>(n), static_cast<Eigen::Index>(n));
-    for (std::size_t i = 0; i < n; ++i)              // banded, sparse-ish, symmetric
+    for (std::size_t i = 0; i < n; ++i) // banded, sparse-ish, symmetric
         for (std::size_t j = i; j < std::min(n, i + 6); ++j) {
             const double a = dist(rng);
             A(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = a;

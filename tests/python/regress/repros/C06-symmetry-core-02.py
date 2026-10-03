@@ -9,6 +9,7 @@ Toy: J1-J2 ring N=12, abelian = <T^2> (order 6), residues = [T]. T fixes every m
 and T*T = T^2 in A; at chi(T^2) != 1 the co-group {e, T} (cyclic -> cocycle is a coboundary) is
 declined. Expect: blocks with irrep -1 at the 5 nontrivial momenta, about twice the size of the
 reduced blocks at the trivial momentum. Spectrum correctness checked against dense numpy ED."""
+
 import numpy as np
 import scipy.sparse as sps
 import qed
@@ -24,20 +25,31 @@ for i, j, J in bonds:
     H.add_two_body(qed.OP_SZ, i, qed.OP_SZ, j, J)
 
 # dense reference
-sp_ = sps.csr_matrix(np.array([[0.0, 1.0], [0.0, 0.0]])); sm_ = sp_.T.tocsr()
+sp_ = sps.csr_matrix(np.array([[0.0, 1.0], [0.0, 0.0]]))
+sm_ = sp_.T.tocsr()
 sz_ = sps.csr_matrix(np.diag([0.5, -0.5]))
+
+
 def at(o, i):
-    return sps.kron(sps.kron(sps.identity(2 ** i), o), sps.identity(2 ** (N - i - 1)), format="csr")
-SP = [at(sp_, i) for i in range(N)]; SM = [at(sm_, i) for i in range(N)]; SZ = [at(sz_, i) for i in range(N)]
+    return sps.kron(sps.kron(sps.identity(2**i), o), sps.identity(2 ** (N - i - 1)), format="csr")
+
+
+SP = [at(sp_, i) for i in range(N)]
+SM = [at(sm_, i) for i in range(N)]
+SZ = [at(sz_, i) for i in range(N)]
 Hs = sum(J * (0.5 * (SP[i] @ SM[j] + SM[i] @ SP[j]) + SZ[i] @ SZ[j]) for i, j, J in bonds)
 ev_ref = np.linalg.eigvalsh(Hs.toarray())
 
 T = [(i + 1) % N for i in range(N)]
+
+
 def power(p, k):
     q = list(range(N))
     for _ in range(k):
         q = [p[x] for x in q]
     return q
+
+
 A = [power(T, 2 * m) for m in range(N // 2)]
 
 spec = _core.sectors.Spec()
@@ -64,12 +76,16 @@ for k in sorted(hs):
 unred = [blocks[k] for k in hs if k[2] < 0]
 red = [blocks[k] for k in hs if k[2] >= 0]
 n_unred_k = len({k[1] for k in hs if k[2] < 0})
-print(f"half-filling: unreduced blocks={len(unred)} (momenta {n_unred_k}), reduced blocks={len(red)}; "
-      f"max|E-E_dense|={err:.2e}")
+print(
+    f"half-filling: unreduced blocks={len(unred)} (momenta {n_unred_k}), reduced blocks={len(red)}; "
+    f"max|E-E_dense|={err:.2e}"
+)
 if err > 1e-8:
     print(f"REPRO: INCONCLUSIVE spectrum differs from dense by {err:.2e} (separate correctness bug)")
 elif unred and red and max(unred) > 1.5 * max(red):
-    print(f"REPRO: CONFIRMED {n_unred_k} momenta keep unreduced blocks (irrep -1, dim up to {max(unred)}) "
-          f"vs reduced dims up to {max(red)} at the trivial momentum; spectrum exact ({err:.1e})")
+    print(
+        f"REPRO: CONFIRMED {n_unred_k} momenta keep unreduced blocks (irrep -1, dim up to {max(unred)}) "
+        f"vs reduced dims up to {max(red)} at the trivial momentum; spectrum exact ({err:.1e})"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED unreduced={unred} reduced={red}")

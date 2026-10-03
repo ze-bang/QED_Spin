@@ -36,11 +36,11 @@ namespace ed::thermal {
 using Complex = std::complex<double>;
 
 struct MtpqOptions {
-    std::size_t num_samples    = 1;
-    std::size_t max_iter       = 1000;
-    double      large_value    = 1.0e5;
+    std::size_t num_samples = 1;
+    std::size_t max_iter = 1000;
+    double large_value = 1.0e5;
     /// Base seed of the sample engines; 0 draws one (resolve_base_seed).
-    std::uint64_t random_seed  = 0;
+    std::uint64_t random_seed = 0;
 
     /// Host-side transform applied to every
     /// TPQ sample seed before staging (e.g. the Lowdin total-spin
@@ -75,11 +75,7 @@ struct MtpqResult {
 };
 
 template <typename Backend, typename MatvecFn>
-MtpqResult mtpq_kernel(Backend&       backend,
-                       MatvecFn&&     apply_H,
-                       std::size_t    local_n,
-                       const MtpqOptions& opts)
-{
+MtpqResult mtpq_kernel(Backend& backend, MatvecFn&& apply_H, std::size_t local_n, const MtpqOptions& opts) {
     if (local_n == 0) throw std::invalid_argument("mtpq_kernel: empty block");
     MtpqResult out;
     out.energies.reserve(opts.num_samples);
@@ -90,7 +86,9 @@ MtpqResult mtpq_kernel(Backend&       backend,
 
     // One sample's trajectory; samples are independent and are stored in sample order, however
     // they were run.
-    struct Sample { std::vector<double> Es, log_norms; };
+    struct Sample {
+        std::vector<double> Es, log_norms;
+    };
     auto sample = [&](auto& be, auto&& apply_H, std::size_t s) {
         std::mt19937 gen = sample_engine(base_seed, s);
         std::vector<Complex> host_seed = gaussian_vector(local_n, gen);
@@ -101,15 +99,14 @@ MtpqResult mtpq_kernel(Backend&       backend,
             double sumsq = 0.0;
             for (const auto& z : host_seed) sumsq += std::norm(z);
             if (!(sumsq > 0.0)) {
-                throw std::runtime_error(
-                    "mtpq_kernel: the seed transform annihilated sample "
-                    + std::to_string(s) + " (the targeted subspace has "
-                    "no weight in this block)");
+                throw std::runtime_error("mtpq_kernel: the seed transform annihilated sample " + std::to_string(s)
+                                         + " (the targeted subspace has "
+                                           "no weight in this block)");
             }
             const double inv = 1.0 / std::sqrt(sumsq);
             for (auto& z : host_seed) z *= inv;
         }
-        auto psi  = be.make_zero_vector(local_n);
+        auto psi = be.make_zero_vector(local_n);
         auto hpsi = be.make_zero_vector(local_n);
         be.copy_from_host(host_seed.data(), psi.get(), local_n);
         {
@@ -127,8 +124,8 @@ MtpqResult mtpq_kernel(Backend&       backend,
             // L must lie above the spectrum: (L - H) is then positive and every moment is too.
             if (!(E < L))
                 throw ed::ConvergenceError("mtpq_kernel: the energy " + std::to_string(E) + " of step "
-                                           + std::to_string(k) + " is not below the shift L = "
-                                           + std::to_string(L) + " (L must exceed the largest eigenvalue)");
+                                           + std::to_string(k) + " is not below the shift L = " + std::to_string(L)
+                                           + " (L must exceed the largest eigenvalue)");
             out_s.Es.push_back(E);
         };
         energy(0);
@@ -200,18 +197,18 @@ MtpqResult mtpq_kernel(Backend&       backend,
 
 /// One mTPQ run of a block, as the thermal verb asks for it.
 struct MtpqRun {
-    std::size_t   samples = 1;
+    std::size_t samples = 1;
     /// Steps per sample; 0 sizes them for the coldest beta (mtpq_steps_for), with one retry at
     /// twice the count when the trajectory falls short.
-    std::size_t   steps   = 0;
+    std::size_t steps = 0;
     /// Base seed of the run (0 draws one): the bound estimate and every sample derive from it.
-    std::uint64_t seed    = 0;
+    std::uint64_t seed = 0;
     std::function<void(Complex*, std::size_t)> seed_transform;
     std::function<double(Complex*, std::size_t)> scrub;   ///< MtpqOptions::scrub
-    std::size_t   scrub_every = 0;
+    std::size_t scrub_every = 0;
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
-    std::size_t   batch_width = 8;                     ///< device: samples in lockstep at most
-    double        scale = 0.0;   ///< s_H (LinearOperator::norm_bound()), floors the shift margin; 0: unknown
+    std::size_t batch_width = 8;                     ///< device: samples in lockstep at most
+    double scale = 0.0;   ///< s_H (LinearOperator::norm_bound()), floors the shift margin; 0: unknown
 };
 
 /// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
@@ -222,8 +219,7 @@ struct MtpqRun {
 ///   3. steps so the series converges at the coldest beta: j* + 8 sqrt(j*) terms; a target the
 ///      trajectory cannot reach is refused, never clamped.
 template <typename Backend, typename MatvecFn>
-Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas,
-                const MtpqRun& run) {
+Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>& betas, const MtpqRun& run) {
     if (n == 0) throw std::invalid_argument("mtpq: empty block");
     std::vector<double> temperatures;
     temperatures.reserve(betas.size());
@@ -234,12 +230,12 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
 
     const std::uint64_t base_seed = resolve_base_seed(run.seed);
     MtpqOptions kopts;
-    kopts.num_samples    = run.samples;
-    kopts.random_seed    = base_seed;
+    kopts.num_samples = run.samples;
+    kopts.random_seed = base_seed;
     kopts.seed_transform = run.seed_transform;
-    kopts.scrub          = run.scrub;
-    kopts.scrub_every    = run.scrub_every;
-    kopts.batch_matvec   = run.batch_matvec;
+    kopts.scrub = run.scrub;
+    kopts.scrub_every = run.scrub_every;
+    kopts.batch_matvec = run.batch_matvec;
     kopts.batch_width = run.batch_width;
 
     double e_min_est = 0.0, e_max_est = 0.0;
@@ -249,11 +245,11 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
         auto v0 = be.make_zero_vector(n);
         be.copy_from_host(start.data(), v0.get(), n);
         ed::krylov::LanczosKernelOptions bo;
-        bo.max_iter   = std::min<std::size_t>(60, n);
-        bo.reorth     = ed::krylov::ReorthPolicy::None;
+        bo.max_iter = std::min<std::size_t>(60, n);
+        bo.reorth = ed::krylov::ReorthPolicy::None;
         bo.keep_basis = false;
         const auto lk = ed::krylov::lanczos_kernel(be, H, n, v0.get(), bo);
-        const auto t  = ed::krylov::tridiag_eig(lk.alpha, lk.beta, lk.alpha.size(), /*vectors=*/false);
+        const auto t = ed::krylov::tridiag_eig(lk.alpha, lk.beta, lk.alpha.size(), /*vectors=*/false);
         if (t.values.empty())
             throw ed::ConvergenceError("mTPQ: the spectral bounds of the block could not be estimated");
         e_min_est = t.values.front();
@@ -263,23 +259,24 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     const double W = e_max_est - e_min_est;
     // Relative throughout (s * H alike); s_H floors it, so a block of zero width at E = 0 still
     // gets a margin (DBL_MIN made (L - H) psi underflow to zero).
-    const double L = e_max_est + std::max({0.05 * W, 1e-6 * std::max(std::abs(e_max_est), W),
-                                           1e-6 * ed::numerics::scale_or_one(run.scale)});
+    const double L =
+        e_max_est
+        + std::max({0.05 * W, 1e-6 * std::max(std::abs(e_max_est), W), 1e-6 * ed::numerics::scale_or_one(run.scale)});
     kopts.large_value = L;
 
     constexpr std::size_t MTPQ_HARD_CAP = 200000;
     const bool auto_steps = run.steps == 0;
     std::size_t steps = auto_steps ? mtpq_steps_for(beta_max, L, e_min_est) : run.steps;
     if (steps > MTPQ_HARD_CAP)
-        throw ed::ResourceLimit("mTPQ: T_min = " + std::to_string(1.0 / beta_max) + " needs "
-                                + std::to_string(steps) + " steps per sample (cap "
-                                + std::to_string(MTPQ_HARD_CAP) + "); ask for a warmer T_min");
+        throw ed::ResourceLimit("mTPQ: T_min = " + std::to_string(1.0 / beta_max) + " needs " + std::to_string(steps)
+                                + " steps per sample (cap " + std::to_string(MTPQ_HARD_CAP)
+                                + "); ask for a warmer T_min");
     for (int attempt = 0;; ++attempt) {
         kopts.max_iter = std::max<std::size_t>(steps, 1);
         MtpqResult kres = mtpq_kernel<Backend>(be, H, n, kopts);
         if (betas.empty()) return Curves{};
-        MtpqThermo mt = mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, betas,
-                                              static_cast<double>(n));
+        MtpqThermo mt =
+            mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, betas, static_cast<double>(n));
         if (mt.unconverged.empty()) return std::move(mt.curves);
         // Too cold for the trajectory. An auto-sized run had underestimated the spectral range:
         // run once more with twice the steps. Never clamp.

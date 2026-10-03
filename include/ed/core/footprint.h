@@ -18,7 +18,7 @@
 namespace ed::core {
 
 struct Footprint {
-    std::uint64_t host   = 0;
+    std::uint64_t host = 0;
     std::uint64_t device = 0;
 };
 
@@ -59,14 +59,14 @@ enum class Path {
 };
 
 struct Shape {
-    std::uint64_t dim    = 0;      ///< D
+    std::uint64_t dim = 0;      ///< D
     std::uint64_t dim_target = 0;  ///< DynamicsFtlm: the target sector's dimension
-    std::size_t   krylov = 0;      ///< Lanczos depth, or the Krylov-Schur cycle length
-    std::size_t   k      = 0;      ///< levels, or multiplet members
-    std::size_t   width  = 1;      ///< samples in lockstep (device)
-    std::size_t   scalar_bytes = 16;   ///< bytes of one vector entry: 16 complex, 8 on a real lane
-    bool          device = false;  ///< the Krylov vectors live on the device
-    bool          tower  = false;  ///< seeds projected onto a spin tower (one more host vector)
+    std::size_t krylov = 0;      ///< Lanczos depth, or the Krylov-Schur cycle length
+    std::size_t k = 0;      ///< levels, or multiplet members
+    std::size_t width = 1;      ///< samples in lockstep (device)
+    std::size_t scalar_bytes = 16;   ///< bytes of one vector entry: 16 complex, 8 on a real lane
+    bool device = false;  ///< the Krylov vectors live on the device
+    bool tower = false;  ///< seeds projected onto a spin tower (one more host vector)
 };
 
 /// Peak bytes of `p` at shape `s` (saturating; a dimension this large never fits anyway).
@@ -78,46 +78,64 @@ struct Shape {
     const double t = s.tower ? 1.0 : 0.0;
     double host = 0.0, dev = 0.0;
     switch (p) {
-        case Path::FtlmSample:
-            if (s.device) { dev = W * 4.0 * V; host = W * (1.0 + t) * V; }
-            else          { host = W * (5.0 + t) * V; }
-            break;
-        case Path::FtlmSampleKept:
-            if (s.device) { dev = W * (2.0 * M + 5.0) * V; host = W * (1.0 + t) * V; }
-            else          { host = W * (M + 6.0 + t) * V; }
-            break;
-        case Path::Mtpq:
-            if (s.device) { dev = std::max(5.0, 2.0 * W) * V; host = W * (1.0 + t) * V; }
-            else          { host = (5.0 + t) * V; }
-            break;
-        case Path::KrylovSchur: {
-            const double p = k + std::max(std::floor(k / 2.0), 8.0);   // the vectors a restart keeps
-            if (s.device) { dev = (2.0 * M + p + 2.0 * k + 8.0) * V; host = 3.0 * V; }
-            else          { host = (M + p + k + 3.0) * V; }
-            break;
+    case Path::FtlmSample:
+        if (s.device) {
+            dev = W * 4.0 * V;
+            host = W * (1.0 + t) * V;
+        } else {
+            host = W * (5.0 + t) * V;
         }
-        case Path::GsKeptBasis:
-        case Path::GsTwoPass: {
-            const double kept = p == Path::GsKeptBasis ? std::min(M, static_cast<double>(s.dim)) : 0.0;
-            if (s.device) { dev = (kept + 5.0) * V; host = V; }
-            else          { host = (kept + 5.0) * V; }
-            break;
+        break;
+    case Path::FtlmSampleKept:
+        if (s.device) {
+            dev = W * (2.0 * M + 5.0) * V;
+            host = W * (1.0 + t) * V;
+        } else {
+            host = W * (M + 6.0 + t) * V;
         }
-        case Path::DenseValues:
-            host = 24.0 * D2;
-            break;
-        case Path::DenseVectors:
-            host = 32.0 * D2;
-            break;
-        case Path::Multiplet:
-            host = (k + 2.0) * V + 8.0 * static_cast<double>(s.dim);
-            break;
-        case Path::DynamicsFtlm: {
-            const double Vt = 16.0 * static_cast<double>(s.dim_target);
-            if (s.device) { dev = W * ((M + 4.0) * V + (M + 5.0) * Vt + M * std::max(V, Vt)); host = W * V; }
-            else          { host = W * ((M + 5.0) * V + (M + 5.0) * Vt); }
-            break;
+        break;
+    case Path::Mtpq:
+        if (s.device) {
+            dev = std::max(5.0, 2.0 * W) * V;
+            host = W * (1.0 + t) * V;
+        } else {
+            host = (5.0 + t) * V;
         }
+        break;
+    case Path::KrylovSchur: {
+        const double p = k + std::max(std::floor(k / 2.0), 8.0);   // the vectors a restart keeps
+        if (s.device) {
+            dev = (2.0 * M + p + 2.0 * k + 8.0) * V;
+            host = 3.0 * V;
+        } else {
+            host = (M + p + k + 3.0) * V;
+        }
+        break;
+    }
+    case Path::GsKeptBasis:
+    case Path::GsTwoPass: {
+        const double kept = p == Path::GsKeptBasis ? std::min(M, static_cast<double>(s.dim)) : 0.0;
+        if (s.device) {
+            dev = (kept + 5.0) * V;
+            host = V;
+        } else {
+            host = (kept + 5.0) * V;
+        }
+        break;
+    }
+    case Path::DenseValues: host = 24.0 * D2; break;
+    case Path::DenseVectors: host = 32.0 * D2; break;
+    case Path::Multiplet: host = (k + 2.0) * V + 8.0 * static_cast<double>(s.dim); break;
+    case Path::DynamicsFtlm: {
+        const double Vt = 16.0 * static_cast<double>(s.dim_target);
+        if (s.device) {
+            dev = W * ((M + 4.0) * V + (M + 5.0) * Vt + M * std::max(V, Vt));
+            host = W * V;
+        } else {
+            host = W * ((M + 5.0) * V + (M + 5.0) * Vt);
+        }
+        break;
+    }
     }
     constexpr double cap = 1.8e19;   // below 2^64
     return {static_cast<std::uint64_t>(std::min(host, cap)), static_cast<std::uint64_t>(std::min(dev, cap))};

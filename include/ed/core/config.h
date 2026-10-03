@@ -56,13 +56,14 @@ enum class Kind { Flag, Tristate, Integer, Real, Text, Path };
 
 struct Row {
     const char* name;
-    Kind        kind;
+    Kind kind;
     const char* scope;
     const char* default_text;
     const char* meaning;
 };
 
 // X(name, kind, scope, default_text, meaning)
+// clang-format off
 #define ED_ENV_TABLE(X)                                                        \
     X("ED_SYM_PROFILE", Flag, "symmetry", "0",                                 \
       "Logs symmetry-construction / little-group phase timers and lane-decline reasons at Info")\
@@ -105,6 +106,7 @@ struct Row {
     X("QED_LOG_LEVEL", Text, "python", "warn (ED_SYM_PROFILE=1: info)",          \
       "Log level at import (off|error|warn|info|debug); above warn the records also stream to stderr") \
     /* end of table */
+// clang-format on
 
 inline const std::vector<Row>& rows() {
     static const std::vector<Row> table = {
@@ -123,9 +125,9 @@ inline const std::vector<Row>& rows() {
 
 // ---- typed accessors ---------------------------------------------------------
 [[nodiscard]] inline bool is_false_word(const char* v) {
-    return std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0 || std::strcmp(v, "FALSE") == 0 ||
-           std::strcmp(v, "off") == 0 || std::strcmp(v, "OFF") == 0 || std::strcmp(v, "no") == 0 ||
-           std::strcmp(v, "NO") == 0;
+    return std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0 || std::strcmp(v, "FALSE") == 0
+           || std::strcmp(v, "off") == 0 || std::strcmp(v, "OFF") == 0 || std::strcmp(v, "no") == 0
+           || std::strcmp(v, "NO") == 0;
 }
 
 [[nodiscard]] inline std::optional<bool> tristate(const char* name) {
@@ -134,9 +136,7 @@ inline const std::vector<Row>& rows() {
     return !is_false_word(v);
 }
 
-[[nodiscard]] inline bool flag(const char* name, bool dflt) {
-    return tristate(name).value_or(dflt);
-}
+[[nodiscard]] inline bool flag(const char* name, bool dflt) { return tristate(name).value_or(dflt); }
 
 /// Strict parses: the whole value, trailing blanks allowed.
 [[nodiscard]] inline bool parses_flag(const char* v) {
@@ -209,10 +209,11 @@ inline const std::vector<Row>& rows() {
         if (v == nullptr || v[0] == '\0') continue;
         bool ok = true;
         switch (r.kind) {
-            case Kind::Flag: case Kind::Tristate: ok = parses_flag(v); break;
-            case Kind::Integer: ok = parses_integer(v); break;
-            case Kind::Real: ok = parses_real(v); break;
-            default: break;
+        case Kind::Flag:
+        case Kind::Tristate: ok = parses_flag(v); break;
+        case Kind::Integer: ok = parses_integer(v); break;
+        case Kind::Real: ok = parses_real(v); break;
+        default: break;
         }
         if (!ok) out.push_back(std::string(r.name) + "=" + v);
     }
@@ -252,8 +253,8 @@ inline const std::vector<Row>& rows() {
             out += line;
         }
         const char* v = std::getenv(r.name);
-        std::snprintf(line, sizeof(line), "  %-34s %-12s | %s | %s\n", r.name,
-                      v != nullptr ? v : "(unset)", r.default_text, r.meaning);
+        std::snprintf(line, sizeof(line), "  %-34s %-12s | %s | %s\n", r.name, v != nullptr ? v : "(unset)",
+                      r.default_text, r.meaning);
         out += line;
     }
     return out;

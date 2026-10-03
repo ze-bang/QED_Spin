@@ -8,6 +8,7 @@ a shifted copy of another sublattice. Test: the hang runs in a child process wit
 a memory cap; the other two cases run in-process.
 Restated for the single-observable qed.dssf (P2.1 removed the pair modes): the filter (i, j) is
 now the one sublattice i."""
+
 import os
 import tempfile
 import resource
@@ -59,7 +60,8 @@ except Exception as e:
     print(f"U=4 sublattice 5 raised {type(e).__name__}: {e}")
 
 # (3) U=0 with filter -> infinite loop; child limited to 2 GB address space, 60 s
-CHILD = r'''
+CHILD = (
+    r'''
 import qed
 s = qed.dssf.OperatorSpec()
 s.operator_type = "sublattice"; s.basis = "ladder"; s.components = [2]
@@ -70,7 +72,9 @@ try:
     print("CHILD returned", len(p))
 except Exception as e:
     print("CHILD raised", type(e).__name__, e)
-''' % pos
+'''
+    % pos
+)
 
 
 def cap():
@@ -78,8 +82,7 @@ def cap():
 
 
 try:
-    r = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, timeout=60,
-                       preexec_fn=cap)
+    r = subprocess.run([sys.executable, "-c", CHILD], capture_output=True, text=True, timeout=60, preexec_fn=cap)
     tail = (r.stdout.strip().splitlines() or [""])[-1]
     err = (r.stderr.strip().splitlines() or [""])[-1]
     print(f"U=0 filter child: rc={r.returncode} out={tail!r} err={err[:120]!r}")

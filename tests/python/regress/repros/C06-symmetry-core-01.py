@@ -6,6 +6,7 @@
 rounding noise (or exactly 0). Test: six decoupled Heisenberg dimers (N=12, J=1, E0=-4.5, gap 1).
 Exact reference in closed form: C = 6 beta^2 * 3 e^{-beta} / (1 + 3 e^{-beta})^2 (independent of
 any moment subtraction). qed.thermal(method='exact') with Symmetry.none() and with Sz sectors."""
+
 import numpy as np
 import qed
 
@@ -20,7 +21,7 @@ for i, j in dimers:
 betas = np.array([10.0, 20.0, 25.0, 30.0, 35.0, 40.0])
 Ts = list(1.0 / betas)
 x = 3.0 * np.exp(-betas)
-Cex = 6.0 * betas ** 2 * x / (1.0 + x) ** 2
+Cex = 6.0 * betas**2 * x / (1.0 + x) ** 2
 
 worst = {}
 try:

@@ -5,6 +5,7 @@
 complex (discovery.py:488); when two records share (op_type, site) but differ in coefficient
 (J1-J2, field + exchange), sorting raises TypeError, the bare except returns None, and nothing
 is cached, so every verb call reruns the automorphism search."""
+
 import signal
 import time
 import qed
@@ -37,9 +38,13 @@ except TypeError as e:
     sort_err = str(e)[:80]
 times = []
 for _ in range(2):
-    t0 = time.time(); qed.find_symmetries(Hj, verbose=False); times.append(time.time() - t0)
-info = (f"key(uniform)={'set' if ku is not None else None} key(J1-J2)={kj} key(Heis+field)={kh} "
-        f"sort error={sort_err!r}; J1-J2 find_symmetries call1={times[0]:.3f}s call2={times[1]:.3f}s")
+    t0 = time.time()
+    qed.find_symmetries(Hj, verbose=False)
+    times.append(time.time() - t0)
+info = (
+    f"key(uniform)={'set' if ku is not None else None} key(J1-J2)={kj} key(Heis+field)={kh} "
+    f"sort error={sort_err!r}; J1-J2 find_symmetries call1={times[0]:.3f}s call2={times[1]:.3f}s"
+)
 if ku is not None and kj is None and kh is None:
     print("REPRO: CONFIRMED " + info)
 elif kj is not None and kh is not None:

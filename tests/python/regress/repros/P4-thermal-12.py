@@ -7,12 +7,15 @@ so those tiny blocks are sampled with FTLM noise although an exact solve would b
 Test: 10-site Heisenberg ring (every block <= 252). (a) Sz sectors: FTLM E(T) without observables
 (fallback -> exact) vs with one observable (sampled). (b) total_spin=0: FTLM vs an independent dense
 reference over the S=0 levels. Reference: dense numpy ED (Kronecker spin operators)."""
+
 import numpy as np
 import qed
 
 N = 10
 T = [0.3, 0.6, 1.0, 2.0]
-sp = np.array([[0, 1], [0, 0]], complex); sm = sp.T.copy(); sz = np.diag([0.5, -0.5]).astype(complex)
+sp = np.array([[0, 1], [0, 0]], complex)
+sm = sp.T.copy()
+sz = np.diag([0.5, -0.5]).astype(complex)
 
 
 def site(op, i):
@@ -22,7 +25,9 @@ def site(op, i):
     return m
 
 
-SP = [site(sp, i) for i in range(N)]; SM = [site(sm, i) for i in range(N)]; SZ = [site(sz, i) for i in range(N)]
+SP = [site(sp, i) for i in range(N)]
+SM = [site(sm, i) for i in range(N)]
+SZ = [site(sz, i) for i in range(N)]
 Hd = sum(0.5 * (SP[i] @ SM[(i + 1) % N] + SM[i] @ SP[(i + 1) % N]) + SZ[i] @ SZ[(i + 1) % N] for i in range(N))
 ev_all = np.linalg.eigvalsh(Hd)
 Stot2 = sum(SM) @ sum(SP) + sum(SZ) @ sum(SZ) + sum(SZ)
@@ -68,7 +73,9 @@ print(f"(b) total_spin=0: FTLM max|dE| {e_su2:.2e} (method='exact' {e_su2_exact:
 hit_a = e_plain < 1e-8 and e_obs > 1e-5
 hit_b = np.isfinite(e_su2) and e_su2 > 1e-5 and e_su2_exact < 1e-8
 if hit_a or hit_b:
-    print(f"REPRO: CONFIRMED blocks <= 252 sampled noisily: FTLM dE no-obs {e_plain:.1e} vs with-obs {e_obs:.1e}; "
-          f"total_spin FTLM dE {e_su2:.1e} vs exact {e_su2_exact:.1e}")
+    print(
+        f"REPRO: CONFIRMED blocks <= 252 sampled noisily: FTLM dE no-obs {e_plain:.1e} vs with-obs {e_obs:.1e}; "
+        f"total_spin FTLM dE {e_su2:.1e} vs exact {e_su2_exact:.1e}"
+    )
 else:
     print(f"REPRO: NOT_REPRODUCED dE no-obs {e_plain:.1e}, with-obs {e_obs:.1e}, su2 {e_su2:.1e}")

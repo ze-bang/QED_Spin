@@ -19,6 +19,7 @@ sym = qed.symmetry
 # Permutation algebra
 # ---------------------------------------------------------------------------
 
+
 def test_identity_has_expected_shape():
     assert sym.identity(5) == [0, 1, 2, 3, 4]
 
@@ -61,6 +62,7 @@ def test_site_swap_is_self_inverse():
 # generate_group: closure + determinism
 # ---------------------------------------------------------------------------
 
+
 def test_generate_group_yields_full_cyclic_group():
     t = sym.translation(4, 1)
     g = sym.generate_group([t])
@@ -80,6 +82,7 @@ def test_generate_group_dihedral_size():
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def test_compose_rejects_size_mismatch():
     with pytest.raises(ValueError):

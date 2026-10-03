@@ -24,8 +24,7 @@ using namespace ed_tests;
 using ed::input::Op;
 namespace lat = ed::input::lattice;
 
-TEST_CASE("ed::input::lattice::chain produces canonical NN bonds",
-          "[input][lattice]") {
+TEST_CASE("ed::input::lattice::chain produces canonical NN bonds", "[input][lattice]") {
     SECTION("OBC chain has L-1 bonds") {
         auto L = lat::chain(6, /*pbc=*/false);
         REQUIRE(L.num_sites == 6);
@@ -46,8 +45,7 @@ TEST_CASE("ed::input::lattice::chain produces canonical NN bonds",
     }
 }
 
-TEST_CASE("ed::input::lattice::pyrochlore PBC has both tetrahedra",
-          "[input][lattice]") {
+TEST_CASE("ed::input::lattice::pyrochlore PBC has both tetrahedra", "[input][lattice]") {
     auto L = lat::pyrochlore(2, 2, 2, /*pbc=*/true);
     REQUIRE(L.num_sites == 32);
     REQUIRE(L.nn_bonds.size() == 96);
@@ -60,20 +58,16 @@ TEST_CASE("ed::input::lattice::pyrochlore PBC has both tetrahedra",
     for (int c : coord) REQUIRE(c == 6);
 }
 
-TEST_CASE("ed::input::lattice::square PBC bond count is 2*Lx*Ly",
-          "[input][lattice]") {
+TEST_CASE("ed::input::lattice::square PBC bond count is 2*Lx*Ly", "[input][lattice]") {
     auto L = lat::square(3, 4, /*pbc=*/true);
     REQUIRE(L.num_sites == 12);
     REQUIRE(L.nn_bonds.size() == 24);  // 2 directions x 3*4 sites
 }
 
-TEST_CASE("ed::input::lattice::pyrochlore site + bond accounting",
-          "[input][lattice]") {
+TEST_CASE("ed::input::lattice::pyrochlore site + bond accounting", "[input][lattice]") {
     auto L = lat::pyrochlore(1, 1, 1, /*pbc=*/false);
     REQUIRE(L.num_sites == 4);
     // 1 up tetrahedron only (no PBC neighbours when Lx=Ly=Lz=1, OBC).
     REQUIRE(L.nn_bonds.size() == 6);
-    for (int u = 0; u < 4; ++u) {
-        REQUIRE(L.sublattice[u] == u);
-    }
+    for (int u = 0; u < 4; ++u) { REQUIRE(L.sublattice[u] == u); }
 }
