@@ -46,6 +46,7 @@
 #include <cstdint>
 
 #include <ed/basis/combinadic.h>
+#include <ed/basis/sublattice_code.h>
 
 namespace ed::matvec::basis {
 
@@ -103,6 +104,11 @@ struct RepSymmetryBasisPolicy {
     const std::uint16_t* rep_class    = nullptr;   // per rep
     const std::uint64_t* state_offset = nullptr;   // per rep, and one past
 
+    // The group's sublattice code (<ed/basis/sublattice_code.h>; RepSectorData::make_policy sets it):
+    // representatives are least in its key order, found from the candidates alone. Empty: the plain
+    // order, every element scanned.
+    ed::symmetry::SublatticeView slc;
+
     [[nodiscard]] inline std::uint64_t dim() const noexcept { return dim_; }
 
     [[nodiscard]] inline std::uint64_t state_of(std::uint64_t idx) const noexcept {
@@ -138,13 +144,30 @@ struct RepSymmetryBasisPolicy {
         return r ^ flip;
     }
 
-    // Representative of ``state``: numeric minimum over the orbit.
-    [[nodiscard]] inline std::uint64_t representative(std::uint64_t state) const noexcept {
-        std::uint64_t rb = state;
-        for (int g = 1; g < group_size; ++g) {
-            const std::uint64_t img = apply_perm(state, g);
-            if (img < rb) rb = img;
+    // fn(g, image, key) for the elements that can map ``state`` to its representative, in ascending
+    // element order, with the key the images are compared by: every element and the image itself
+    // (the plain order), or the sublattice candidates and the image's key.
+    template <class Fn>
+    inline void for_each_image(std::uint64_t state, Fn&& fn) const noexcept {
+        if (slc.engaged()) {
+            slc.for_each_candidate(slc.key(state), [&](int g) {
+                const std::uint64_t img = apply_perm(state, g);
+                fn(g, img, slc.key(img));
+            });
+            return;
         }
+        for (int g = 0; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            fn(g, img, img);
+        }
+    }
+
+    // Representative of ``state``: the orbit's least member (in the key order with a sublattice code).
+    [[nodiscard]] inline std::uint64_t representative(std::uint64_t state) const noexcept {
+        std::uint64_t rb = state, best = ~std::uint64_t{0};
+        for_each_image(state, [&](int, std::uint64_t img, std::uint64_t k) {
+            if (k < best) { best = k; rb = img; }
+        });
         return rb;
     }
 
@@ -195,6 +218,7 @@ struct RepSymmetryBasisPolicy {
         return index_of_rep(representative(state));
     }
 
+
     // Fused destination index + projection phase for a connected state, the
     // host equivalent of the device ``index_and_projection``. Returns the
     // orbit index ``k`` (or -1) and writes ``conj(beta_state) * inv_norms[k]``
@@ -207,19 +231,19 @@ struct RepSymmetryBasisPolicy {
     [[nodiscard]] inline std::int64_t
     index_and_projection(std::uint64_t state, Complex& proj_out) const noexcept {
         if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
-        std::uint64_t rb = ~std::uint64_t{0};
+        std::uint64_t rb = ~std::uint64_t{0}, best = ~std::uint64_t{0};
         double acc_re = 0.0, acc_im = 0.0;
-        for (int g = 0; g < group_size; ++g) {
-            const std::uint64_t img = apply_perm(state, g);
-            if (img < rb) {
+        for_each_image(state, [&](int g, std::uint64_t img, std::uint64_t k) {
+            if (k < best) {
+                best = k;
                 rb = img;
                 acc_re = 0.0 + characters[g].real();   // conj: +real (from 0.0, as a sum)
                 acc_im = 0.0 - characters[g].imag();   //       -imag
-            } else if (img == rb) {
+            } else if (k == best) {
                 acc_re += characters[g].real();
                 acc_im -= characters[g].imag();
             }
-        }
+        });
         const std::int64_t k = index_of_rep(rb);
         if (k < 0) return -1;
         const double s = inv_norms[static_cast<std::size_t>(k)];
@@ -234,18 +258,18 @@ struct RepSymmetryBasisPolicy {
         if (n_up >= 0 && __builtin_popcountll(state) != n_up) return -1;
         const int d = irrep_dim;
         const std::size_t dd = static_cast<std::size_t>(d) * static_cast<std::size_t>(d);
-        std::uint64_t rb = ~std::uint64_t{0};
-        for (int g = 0; g < group_size; ++g) {
-            const std::uint64_t img = apply_perm(state, g);
-            if (img > rb) continue;
-            if (img < rb) {
+        std::uint64_t rb = ~std::uint64_t{0}, best = ~std::uint64_t{0};
+        for_each_image(state, [&](int g, std::uint64_t img, std::uint64_t k) {
+            if (k > best) return;
+            if (k < best) {
+                best = k;
                 rb = img;
                 for (std::size_t e = 0; e < dd; ++e) A[e] = Complex(0.0, 0.0);
             }
             const Complex* Dg = irrep_D + static_cast<std::size_t>(g) * dd;
             for (int i = 0; i < d; ++i)
                 for (int j = 0; j < d; ++j) A[i * d + j] += Dg[j * d + i];
-        }
+        });
         return index_of_rep(rb);
     }
 

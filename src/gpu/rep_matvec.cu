@@ -165,6 +165,18 @@ struct GpuSectorMirror {
     // Two-level lookup: shared table (co-owned) + per-sector remap.
     std::shared_ptr<GpuSharedRankTable>    shared_rank_tab;
     thrust::device_vector<std::int32_t>    d_local_of_shared;
+    // State buckets over the sorted reps (DeviceRepSymmetryBasisPolicy::bucket_off), when neither
+    // rank lookup is resident.
+    thrust::device_vector<std::uint32_t>   d_bucket_off;
+    std::uint64_t                          bucket_base  = 0;
+    std::uint64_t                          bucket_count = 0;
+    int                                    bucket_shift = 0;
+    // The group's sublattice code (DeviceRepSymmetryBasisPolicy::slc), when it has one.
+    thrust::device_vector<std::uint64_t>   d_slc_to_key;
+    thrust::device_vector<std::uint16_t>   d_slc_lead;
+    thrust::device_vector<std::uint32_t>   d_slc_cand_off;
+    thrust::device_vector<std::uint16_t>   d_slc_cand;
+    int                                    slc_L = 0, slc_m = 0, slc_bpw = 0;
 
     int           group_size = 1;
     int           n_sites    = 0;
@@ -182,6 +194,16 @@ struct GpuSectorMirror {
         v.perm_lut          = d_perm_lut.empty()
             ? nullptr : thrust::raw_pointer_cast(d_perm_lut.data());
         v.perm_lut_bpw      = perm_lut_bpw;
+        if (!d_bucket_off.empty()) {
+            v.bucket_off   = thrust::raw_pointer_cast(d_bucket_off.data());
+            v.bucket_base  = bucket_base;
+            v.bucket_count = bucket_count;
+            v.bucket_shift = bucket_shift;
+        }
+        if (!d_slc_to_key.empty())
+            v.slc = {thrust::raw_pointer_cast(d_slc_to_key.data()), thrust::raw_pointer_cast(d_slc_lead.data()),
+                     thrust::raw_pointer_cast(d_slc_cand_off.data()), thrust::raw_pointer_cast(d_slc_cand.data()),
+                     n_sites, slc_bpw, slc_L, slc_m};
         if (shared_rank_tab && !d_local_of_shared.empty()) {
             v.shared_rank_of  = thrust::raw_pointer_cast(
                 shared_rank_tab->d_shared_of_rank.data());
@@ -286,18 +308,41 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
 
     // Reverse lookup: when the host sector carries the two-level lookup,
     // upload the small per-sector remap and co-own ONE shared rank table per
-    // (N, n_up); otherwise the device BINARY SEARCH over the resident sorted
-    // ``reps``. No dense per-sector rank table is built (it would cost
+    // (N, n_up); otherwise state buckets over the resident sorted ``reps``
+    // (a search within one bucket), or the binary search over all of them
+    // past 2^32 reps. No dense per-sector rank table is built (it would cost
     // 2.4 GiB per sector at N=32 and 36 GiB at N=36).
     if (data.has_two_level()) {
         mirror->shared_rank_tab = acquire_gpu_shared_rank(data.shared_rank);
         mirror->d_local_of_shared = data.local_of_shared;
-    } else if (ed::env::flag("ED_SYM_PROFILE", false)) {
-        ED_LOG(Info,
-                     "[sym_profile] GPU rep mirror: binary-search lookup over "
-                     "%zu reps (rank space %llu)",
-                     data.reps.size(),
-                     static_cast<unsigned long long>(dim_full_sz));
+    } else if (data.reps.size() < (std::uint64_t{1} << 32)) {
+        // State buckets (P7.2): ~ one per rep, at most 2^24, over [reps.front(), reps.back()];
+        // every bucket's offset is written once, by the first rep at or past it (serial: nvcc builds
+        // this host code without OpenMP; once per cached mirror).
+        const std::uint64_t lo = data.reps.front(), span = data.reps.back() - lo + 1;
+        int bits = 0, key_bits = 0;
+        while ((std::uint64_t{1} << bits) < data.reps.size() && bits < 24) ++bits;
+        while (key_bits < 63 && (std::uint64_t{1} << key_bits) < span) ++key_bits;
+        const int shift = std::max(0, key_bits - bits);
+        const std::uint64_t nb = ((span - 1) >> shift) + 1;
+        std::vector<std::uint32_t> off(static_cast<std::size_t>(nb + 1));
+        const auto bucket = [lo, shift](std::uint64_t s) { return (s - lo) >> shift; };
+        const auto n = static_cast<long long>(data.reps.size());
+        for (long long ii = 0; ii < n; ++ii) {
+            const auto i = static_cast<std::size_t>(ii);
+            const std::uint64_t b = bucket(data.reps[i]);
+            const std::uint64_t from = i == 0 ? 0 : bucket(data.reps[i - 1]) + 1;
+            for (std::uint64_t c = from; c <= b; ++c) off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(i);
+        }
+        for (std::uint64_t c = bucket(data.reps.back()) + 1; c <= nb; ++c)
+            off[static_cast<std::size_t>(c)] = static_cast<std::uint32_t>(data.reps.size());
+        mirror->d_bucket_off = off;
+        mirror->bucket_base  = lo;
+        mirror->bucket_count = nb;
+        mirror->bucket_shift = shift;
+        if (ed::env::flag("ED_SYM_PROFILE", false))
+            ED_LOG(Info, "[sym_profile] GPU rep mirror: %llu state buckets over %zu reps (rank space %llu)",
+                   static_cast<unsigned long long>(nb), data.reps.size(), static_cast<unsigned long long>(dim_full_sz));
     }
 
     std::vector<cuDoubleComplex> h_characters(data.characters.size());
@@ -328,6 +373,20 @@ build_sector_mirror(const ed::symmetry::RepSectorData& data)
         tmp.build_perm_lut();
         mirror->d_perm_lut   = tmp.perm_lut_data;
         mirror->perm_lut_bpw = tmp.perm_lut_bpw;
+    }
+    // The group's sublattice code, the host policy's (the same element list gives the same cached
+    // code): the device finds the representatives the host tables hold.
+    if (const auto code = data.sublattice()) {
+        mirror->d_slc_to_key   = code->to_key();
+        mirror->d_slc_lead     = code->lead();
+        mirror->d_slc_cand_off = code->cand_off();
+        mirror->d_slc_cand     = code->cand();
+        mirror->slc_L          = code->block_size();
+        mirror->slc_m          = code->blocks();
+        mirror->slc_bpw        = (n_sites + 7) / 8;
+        if (ed::env::flag("ED_SYM_PROFILE", false))
+            ED_LOG(Info, "[sym_profile] GPU rep mirror: sublattice code, %d blocks of %d sites, %.2f candidates an entry",
+                   code->blocks(), code->block_size(), code->mean_candidates());
     }
 
     cuda_check(cudaDeviceSynchronize(), "synchronize after sector mirror upload");
@@ -485,6 +544,7 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
         std::vector<std::complex<double>>       chi;
         std::vector<int>                        perms;
         std::vector<std::uint64_t>              flips;
+        std::uint64_t                           slc_fp;   // the sublattice code's key order (0: none)
         std::weak_ptr<const GpuSectorMirror>    mirror;
     };
     auto signature = [](const ed::symmetry::RepSectorData& r, std::uint64_t (&sig)[4]) {
@@ -495,9 +555,10 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     };
     std::uint64_t sig[4];
     signature(rep, sig);
+    const std::uint64_t slc_fp = [&rep] { const auto c = rep.sublattice(); return c ? c->fingerprint() : 0; }();
     auto matches = [&](const MirrorSlot& s) {
         return s.n_up == rep.n_up && std::equal(sig, sig + 4, s.reps_sig) && s.chi == rep.characters
-            && s.perms == rep.perms_flat && s.flips == rep.flip_masks;
+            && s.perms == rep.perms_flat && s.flips == rep.flip_masks && s.slc_fp == slc_fp;
     };
 
     static std::mutex mtx;
@@ -521,12 +582,15 @@ std::shared_ptr<const GpuSectorMirror> acquire_sector_mirror(const ed::symmetry:
     s.chi    = rep.characters;
     s.perms  = rep.perms_flat;
     s.flips  = rep.flip_masks;
+    s.slc_fp = slc_fp;
     s.mirror = mirror;
     bucket.push_back(std::move(s));
     keep.push_back(mirror);
     auto bytes_of = [](const std::shared_ptr<const GpuSectorMirror>& mm) {
         return static_cast<double>(mm->d_reps.size() * 8 + mm->d_inv_norms.size() * 8 + mm->d_perm_lut.size() * 8
-                                   + mm->d_perms.size() * 4 + mm->d_local_of_shared.size() * 4);
+                                   + mm->d_perms.size() * 4 + mm->d_local_of_shared.size() * 4
+                                   + mm->d_bucket_off.size() * 4 + mm->d_slc_to_key.size() * 8
+                                   + mm->d_slc_lead.size() * 2 + mm->d_slc_cand_off.size() * 4 + mm->d_slc_cand.size() * 2);
     };
     double total = 0.0;
     for (const auto& mm : keep) total += bytes_of(mm);

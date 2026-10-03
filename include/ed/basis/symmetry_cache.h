@@ -109,8 +109,7 @@ orbit_table_consistent(const OrbitTable&    t,
         const int pc = __builtin_popcountll(r);
         if (n_up >= 0 && pc != n_up) return false;
         if (parity >= 0 && (pc & 1) != parity) return false;
-        for (std::size_t g = 0; g < cg.size(); ++g)
-            if (cg.apply(r, g) < r) return false;   // not canonical here
+        if (!cg.is_canonical(r)) return false;   // not canonical here
     }
     return true;
 }

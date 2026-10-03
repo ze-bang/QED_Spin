@@ -31,7 +31,7 @@ if [ "${V}" = cpu ]; then
 else
   GPU_TASKS=(
     "${CTEST}"
-    "pytest_gpu|python -u -m pytest tests/python/test_device.py -q -rf -p no:cacheprovider"
+    "pytest_gpu|python -u -m pytest tests/python/test_device.py tests/python/test_sublattice.py -q -rf -p no:cacheprovider"
     "golden_gpu|ED_SYM_LG_GPU=1 python -u tests/python/golden/golden.py compare --device gpu --ref ${REF}/gpu.json.gz"
     "grid_gpu_levels|${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or spectrum)'"
     "grid_gpu_exact_ftlm|${GRID} -k 'gpu and (th_exact or th_ftlm or th_Oexact)'"
@@ -68,4 +68,26 @@ if [ "${V}" = cuda ]; then
   for k in 1 2; do
       GPU_TASKS+=("fuzz_gpu_s${k}|${FUZZ} --seed ${k} --device gpu")
   done
+fi
+# Representatives through a block system (sublattice coding, ED_SYM_SUBLATTICE): unset, it engages
+# only from 24 sites, which no small test reaches, so these stages force it on the test suites --
+# every result must be the one the plain order gives (tests/python/test_sublattice.py compares the
+# two directly).
+SLC="ED_SYM_SUBLATTICE=1"
+CPU_TASKS+=(
+  "pytest_slc|${SLC} python -u -m pytest tests/python -q -rf -p no:cacheprovider"
+  "grid_cpu_levels_slc|${SLC} ${GRID} -k 'cpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+  "grid_cpu_thermal_slc|${SLC} ${GRID} -k 'cpu and th_'"
+  "grid_cpu_dyn0_zz_slc|${SLC} ${GRID} -k 'cpu and dyn0_zz'"
+  "grid_cpu_dyn0_pm_slc|${SLC} ${GRID} -k 'cpu and dyn0_pm'"
+  "grid_cpu_dyn0_3b_slc|${SLC} ${GRID} -k 'cpu and dyn0_3b'"
+)
+if [ "${V}" = cpu ]; then
+  CPU_TASKS+=("ctest_slc|${SLC} ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}")
+fi
+if [ "${V}" = cuda ]; then
+  GPU_TASKS+=(
+    "ctest_slc|${SLC} ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}"
+    "grid_gpu_levels_slc|${SLC} ${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+  )
 fi

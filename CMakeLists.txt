@@ -184,6 +184,8 @@ if(BUILD_ED_TESTS)
     ed_add_test(test_compiled_group             tests/unit/test_compiled_group.cpp)
     # Fused OrbitTable (hash, Burnside sum rule)
     ed_add_test(test_orbit_table                tests/unit/test_orbit_table.cpp)
+    # Representatives through a block system (sublattice coding, P7.6)
+    ed_add_test(test_sublattice_code            tests/unit/test_sublattice_code.cpp)
     # The in-process OrbitTable registry
     ed_add_test(test_symmetry_cache             tests/unit/test_symmetry_cache.cpp)
     # SU(2): S^2 Casimir in the TermStorage schema + labeling

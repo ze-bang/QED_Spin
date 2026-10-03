@@ -354,6 +354,8 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     const int n_sites = static_cast<int>(H.getNumBits());
     detail::validate_hamiltonian(H, "thermal");
     detail::validate_spec(s, n_sites, "thermal");
+    // the orbit tables this call builds take the device's or the host's sublattice rule (sublattice_code.h)
+    const ed::symmetry::SublatticeDeviceScope slc_rule(t.device == Device::Gpu || (t.device == Device::Auto && ed::have_cuda()));
     detail::validate_thermal_spec(t, n_sites);
     std::vector<double> beta;
     for (double T : t.temperatures) beta.push_back(1.0 / T);

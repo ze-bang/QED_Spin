@@ -153,6 +153,7 @@ std::shared_ptr<const ed::symmetry::RepSectorData> raised_sector(const ed::symme
 
 void filter_reps(const ed::symmetry::OrbitTable& tab, const std::vector<Complex>& characters,
                  ed::symmetry::RepSectorData& rd, std::vector<std::int32_t>* local) {
+    rd.slc = tab.slc;   // the rule the table's representatives were found with
     const std::size_t n = tab.reps.size();
     int T = 1;
 #ifdef _OPENMP

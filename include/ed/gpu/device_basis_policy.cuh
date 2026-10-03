@@ -37,6 +37,7 @@
 
 #include <ed/matvec/basis_policy.h>
 #include <ed/gpu/combinadic.cuh>
+#include <ed/basis/sublattice_code.h>
 
 namespace ed::matvec::basis {
 
@@ -116,10 +117,22 @@ struct DeviceRepSymmetryBasisPolicy {
     // 26 s/matvec at the 126M-dim 36-site block).
     const std::uint64_t*    perm_lut          = nullptr;
     int                     perm_lut_bpw      = 0;
+    // State buckets (P7.2): the reps whose state falls in each run of 2^bucket_shift states above
+    // bucket_base, as offsets into `reps` (bucket_count + 1 of them). Keyed on the state itself, not
+    // the combinadic rank the host buckets use: the rank reads a Pascal triangle with divergent
+    // indices, which a warp serialises. A lookup reads one offset pair and searches a rep or a few
+    // instead of all the reps. nullptr: the binary search below.
+    const std::uint32_t*    bucket_off        = nullptr;
+    std::uint64_t           bucket_base       = 0;
+    std::uint64_t           bucket_count      = 0;
+    int                     bucket_shift      = 0;
     std::uint64_t           dim_              = 0;
     int                     group_size        = 1;
     int                     n_sites           = 0;
     int                     n_up              = -1;
+    // The group's sublattice code on the device (the host policy's, uploaded by the mirror):
+    // representatives are least in its key order, found from the candidates. Empty: every element.
+    ed::symmetry::SublatticeView slc;
 
     __host__ __device__ inline std::uint64_t dim() const noexcept {
         return dim_;
@@ -177,6 +190,13 @@ struct DeviceRepSymmetryBasisPolicy {
             return rep_index_of_rank[rank_of_rep(rb)];
         }
         std::uint64_t lo = 0, hi = dim_;
+        if (bucket_off != nullptr) {
+            if (rb < bucket_base) return std::int32_t{-1};
+            const std::uint64_t b = (rb - bucket_base) >> bucket_shift;
+            if (b >= bucket_count) return std::int32_t{-1};
+            lo = bucket_off[b];
+            hi = bucket_off[b + 1];
+        }
         while (lo < hi) {
             const std::uint64_t mid = lo + ((hi - lo) >> 1);
             if (reps[mid] < rb) lo = mid + 1;
@@ -186,13 +206,29 @@ struct DeviceRepSymmetryBasisPolicy {
             ? static_cast<std::int32_t>(lo) : std::int32_t{-1};
     }
 
+    // fn(g, image, key) for the elements that can map ``state`` to its representative, ascending,
+    // with the key the images are compared by (the host policy's for_each_image).
+    template <class Fn>
+    __device__ inline void for_each_image(std::uint64_t state, Fn&& fn) const noexcept {
+        if (slc.engaged()) {
+            slc.for_each_candidate(slc.key(state), [&](int g) {
+                const std::uint64_t img = apply_perm(state, g);
+                fn(g, img, slc.key(img));
+            });
+            return;
+        }
+        for (int g = 0; g < group_size; ++g) {
+            const std::uint64_t img = apply_perm(state, g);
+            fn(g, img, img);
+        }
+    }
+
     __device__ inline std::uint64_t index_of(std::uint64_t state) const noexcept {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
-        std::uint64_t rb = state;
-        for (int g = 1; g < group_size; ++g) {
-            const std::uint64_t img = apply_perm(state, g);
-            if (img < rb) rb = img;
-        }
+        std::uint64_t rb = state, best = ~std::uint64_t{0};
+        for_each_image(state, [&](int, std::uint64_t img, std::uint64_t key) {
+            if (key < best) { best = key; rb = img; }
+        });
         const std::int32_t k = index_of_rep_dev(rb);
         return (k < 0) ? kDeviceNotFound : static_cast<std::uint64_t>(k);
     }
@@ -207,19 +243,19 @@ struct DeviceRepSymmetryBasisPolicy {
     __device__ inline std::uint64_t
     index_and_projection(std::uint64_t state, cuDoubleComplex& proj_out) const noexcept {
         if (n_up >= 0 && __popcll(state) != n_up) return kDeviceNotFound;
-        std::uint64_t rb = ~std::uint64_t{0};
+        std::uint64_t rb = ~std::uint64_t{0}, best = ~std::uint64_t{0};
         double acc_re = 0.0, acc_im = 0.0;
-        for (int g = 0; g < group_size; ++g) {
-            const std::uint64_t img = apply_perm(state, g);
-            if (img < rb) {
+        for_each_image(state, [&](int g, std::uint64_t img, std::uint64_t key) {
+            if (key < best) {
+                best = key;
                 rb = img;
                 acc_re = 0.0 + cuCreal(characters[g]);   // conj: +real
                 acc_im = 0.0 - cuCimag(characters[g]);   //       -imag
-            } else if (img == rb) {
+            } else if (key == best) {
                 acc_re += cuCreal(characters[g]);
                 acc_im -= cuCimag(characters[g]);
             }
-        }
+        });
         const std::int32_t k = index_of_rep_dev(rb);
         if (k < 0) return kDeviceNotFound;
         const double s = inv_norms[k];

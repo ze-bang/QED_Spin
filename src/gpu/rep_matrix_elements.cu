@@ -52,6 +52,11 @@ struct DevSector {
     thrust::device_vector<std::uint64_t> flips;
     thrust::device_vector<std::uint64_t> lut;
     int bpw = 0;
+    // the group's sublattice code (RepSectorData::sublattice), as the sector's host policy has it
+    thrust::device_vector<std::uint64_t> slc_to_key;
+    thrust::device_vector<std::uint16_t> slc_lead;
+    thrust::device_vector<std::uint32_t> slc_cand_off;
+    thrust::device_vector<std::uint16_t> slc_cand;
     DevPolicy pol{};
 
     explicit DevSector(const ed::symmetry::RepSectorData& rd) {
@@ -86,6 +91,15 @@ struct DevSector {
         pol.group_size = rd.group_size;
         pol.n_sites = rd.n_sites;
         pol.n_up = rd.n_up;
+        if (const auto code = rd.sublattice()) {
+            slc_to_key = code->to_key();
+            slc_lead = code->lead();
+            slc_cand_off = code->cand_off();
+            slc_cand = code->cand();
+            pol.slc = {thrust::raw_pointer_cast(slc_to_key.data()), thrust::raw_pointer_cast(slc_lead.data()),
+                       thrust::raw_pointer_cast(slc_cand_off.data()), thrust::raw_pointer_cast(slc_cand.data()),
+                       rd.n_sites, (rd.n_sites + 7) / 8, code->block_size(), code->blocks()};
+        }
         // rep_index_of_rank / shared_rank_of stay null: binary search over reps
     }
 };

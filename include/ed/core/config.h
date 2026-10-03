@@ -74,6 +74,8 @@ struct Row {
       "AGGREGATE reduced-CSR byte budget (an absolute cap when set); over-budget sectors (all of them at 0) fall back to the CSR-free walk")\
     X("ED_SYM_REAL", Flag, "symmetry", "1",                                    \
       "Runs the host Krylov lanes of a real block (real matrix elements in a dictionary CSR) in real arithmetic; 0 keeps every block complex")\
+    X("ED_SYM_SUBLATTICE", Tristate, "symmetry", "unset -> on for N >= 24 and >= 16 (device verbs) or 64 (host) distinct permutations", \
+      "Finds representatives through a block system of the group (sublattice coding, <ed/basis/sublattice_code.h>): =1 whenever one exists, =0 never")\
     X("ED_SYM_LG_GPU", Tristate, "little-group", "auto (device present + block >= 2^20 reps)",\
       "=0 vetoes the little-group GPU lanes; =1 drops the 2^20-rep dim floor") \
     X("ED_CSR_FORCE", Tristate, "krylov", "-1 (use the dim cutoff)",           \

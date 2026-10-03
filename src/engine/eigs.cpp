@@ -321,6 +321,8 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
     const int n_sites = static_cast<int>(H.getNumBits());
     detail::validate_hamiltonian(H, "eigs");
     detail::validate_spec(s, n_sites, "eigs");
+    // the orbit tables this call builds take the device's or the host's sublattice rule (sublattice_code.h)
+    const ed::symmetry::SublatticeDeviceScope slc_rule(o.device == Device::Gpu || (o.device == Device::Auto && ed::have_cuda()));
     detail::validate_eigs_options(o);
     detail::require_device(o.device, "eigs");
     ed::parallel::pin_omp_threads_once();
@@ -594,6 +596,8 @@ SpectrumResult spectrum(const ::Operator& H, const Spec& s, Device device) {
     const int n_sites = static_cast<int>(H.getNumBits());
     detail::validate_hamiltonian(H, "spectrum");
     detail::validate_spec(s, n_sites, "spectrum");
+    // the orbit tables this call builds take the device's or the host's sublattice rule (sublattice_code.h)
+    const ed::symmetry::SublatticeDeviceScope slc_rule(device == Device::Gpu || (device == Device::Auto && ed::have_cuda()));
     detail::require_device(device, "spectrum");
     ed::parallel::pin_omp_threads_once();
     SpectrumResult res;

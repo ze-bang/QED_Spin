@@ -36,10 +36,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
 #include <ed/basis/bits.h>  // applyPermutation (reference semantics)
+#include <ed/basis/sublattice_code.h>
 
 namespace ed::symmetry {
 
@@ -86,9 +88,29 @@ public:
         return out ^ flips_[g];
     }
 
-    /// Canonical FNV-1a content hash over (n_sites, per-element perm+flip).
-    /// Basis-cache key material.
+    /// Canonical FNV-1a content hash over (n_sites, per-element perm+flip) and the sublattice key
+    /// order when there is one (it decides the representatives). Basis-cache key material.
     [[nodiscard]] std::uint64_t content_hash() const noexcept { return hash_; }
+
+    /// The group's sublattice code (<ed/basis/sublattice_code.h>), or null: representatives are
+    /// then the least images in the plain site order.
+    [[nodiscard]] const SublatticeCode* sublattice() const noexcept { return slc_.get(); }
+    [[nodiscard]] const std::shared_ptr<const SublatticeCode>& sublattice_shared() const noexcept { return slc_; }
+
+    /// True iff ``s`` is its orbit's representative: no image of it is smaller (in the key order
+    /// when the group has a sublattice code).
+    [[nodiscard]] bool is_canonical(std::uint64_t s) const noexcept {
+        if (slc_) {
+            const SublatticeView v = slc_->view();
+            const std::uint64_t k = v.key(s);
+            for (std::size_t g = 0; g < size_; ++g)
+                if (v.key(apply(s, g)) < k) return false;
+            return true;
+        }
+        for (std::size_t g = 0; g < size_; ++g)
+            if (apply(s, g) < s) return false;
+        return true;
+    }
 
 private:
     [[nodiscard]] static CompiledGroup
@@ -152,12 +174,18 @@ private:
                 }
             }
         }
+        std::vector<int> flat;
+        flat.reserve(cg.size_ * static_cast<std::size_t>(n_sites));
+        for (const auto& p : perms) flat.insert(flat.end(), p.begin(), p.end());
+        cg.slc_ = SublatticeCode::of(flat.data(), flip_masks.data(), static_cast<int>(cg.size_), n_sites);
+        if (cg.slc_) mix(cg.slc_->fingerprint());
         cg.hash_ = h;
         return cg;
     }
 
     std::vector<std::uint64_t> lut_;       // size_ * stride_ entries
     std::vector<std::uint64_t> flips_;     // per element XOR mask
+    std::shared_ptr<const SublatticeCode> slc_;   // null: the plain order
     std::size_t                size_    = 0;
     std::size_t                stride_  = 0;  // bpw_ * 256
     int                        bpw_     = 0;

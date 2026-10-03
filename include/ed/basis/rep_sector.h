@@ -164,6 +164,12 @@ struct RepSectorData {
     // so flip-extended sectors run on both CPU and GPU.
     std::vector<std::uint64_t> flip_masks;
 
+    // The sublattice code (<ed/basis/sublattice_code.h>) the representatives were found with: the
+    // orbit table's (OrbitTable::slc), copied by every sector built from it (filter_reps); null --
+    // the default, and every hand-built sector -- means the plain order. The policies and device
+    // mirrors read it here, so the rule cannot change under a sector.
+    std::shared_ptr<const ed::symmetry::SublatticeCode> slc;
+
     [[nodiscard]] bool has_flips() const noexcept {
         for (std::uint64_t m : flip_masks)
             if (m != 0) return true;
@@ -357,7 +363,7 @@ struct RepSectorData {
     // pointers into this object's vectors -- keep it alive for the policy's
     // lifetime.
     [[nodiscard]] ed::matvec::basis::RepSymmetryBasisPolicy
-    make_policy() const noexcept {
+    make_policy() const {
         ed::matvec::basis::RepSymmetryBasisPolicy p;
         p.reps       = reps.data();
         p.inv_norms  = inv_norms.data();
@@ -402,7 +408,14 @@ struct RepSectorData {
             p.rep_class    = rep_class.data();
             p.state_offset = state_offset.data();
         }
+        if (slc) p.slc = slc->view();
         return p;
+    }
+
+    /// The sublattice code the representatives were found with (slc), or null: the plain order.
+    /// Every canonicalisation of the sector -- host policy, device mirror -- takes it here.
+    [[nodiscard]] const std::shared_ptr<const ed::symmetry::SublatticeCode>& sublattice() const noexcept {
+        return slc;
     }
 
     // A RepSectorData is usable by the rep matvec only when it carries a

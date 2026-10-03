@@ -60,6 +60,9 @@ struct OrbitTable {
                                                          // element-index sets
     std::uint64_t subspace_dim = 0;       // C(N, n_up) or 2^N
     std::uint64_t content_hash = 0;       // (group, subspace, engine version)
+    // The sublattice code the representatives were found with (null: the plain order); every sector
+    // built from the table carries it (RepSectorData::slc).
+    std::shared_ptr<const SublatticeCode> slc;
     /// A fixed-Sz table's dense rank -> rep index lookup (rep_sector.h rank_lookup_of), built on
     /// first use and kept with the table, so every walk over it shares one.
     struct RankSlot {
@@ -140,11 +143,27 @@ struct StabDedup {
 /// Fused per-state visit: rejects non-reps by early exit on the first
 /// smaller image; for survivors records the stabilizer element set.
 /// Returns true iff ``s`` is its orbit's canonical rep.
+/// With a sublattice code the order is the key order: a state whose least reachable leading block
+/// is below its own is no representative, and otherwise only the candidates -- the identity and
+/// every element fixing the state among them, ascending -- need a full image.
 inline bool visit_state(std::uint64_t                s,
                         const CompiledGroup&         cg,
                         std::size_t                  G,
                         std::vector<std::uint16_t>&  stab_scratch) {
     stab_scratch.clear();
+    if (const SublatticeCode* code = cg.sublattice()) {
+        const SublatticeView v = code->view();
+        const std::uint64_t k = v.key(s);
+        if (v.least_lead(k) < v.pattern(k, 0)) return false;
+        bool rep = true;
+        v.for_each_candidate(k, [&](int g) {
+            if (!rep) return;
+            const std::uint64_t ik = v.key(cg.apply(s, static_cast<std::size_t>(g)));
+            if (ik < k) rep = false;
+            else if (ik == k) stab_scratch.push_back(static_cast<std::uint16_t>(g));
+        });
+        return rep;
+    }
     for (std::size_t g = 0; g < G; ++g) {
         const std::uint64_t img = cg.apply(s, g);
         if (img < s) return false;
@@ -245,6 +264,7 @@ build_orbit_table_fixed_sz_streaming(std::uint64_t        n_bits,
     if (total == 0) return tab;
 
     const std::size_t G = cg.size();
+    tab.slc = cg.sublattice_shared();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)
@@ -310,6 +330,7 @@ build_orbit_table_full_compiled(std::uint64_t        n_bits,
     const std::uint64_t dim = (1ULL << n_bits);
     tab.subspace_dim = dim;
 
+    tab.slc = cg.sublattice_shared();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL);
@@ -335,6 +356,7 @@ build_orbit_table_parity_compiled(std::uint64_t        n_bits,
     const std::uint64_t dim_all = (1ULL << n_bits);
     tab.subspace_dim = dim_all / 2;
 
+    tab.slc = cg.sublattice_shared();
     tab.content_hash = cg.content_hash()
         ^ (detail::kOrbitTableVersion * 0x9E3779B97F4A7C15ULL)
         ^ (n_bits * 0x2545F4914F6CDD1DULL)

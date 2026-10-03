@@ -104,6 +104,8 @@ py::dict eigs_to_arrays(const sec::EigsResult& r, const sec::Spec& s) {
             d[py::str(p + "perms")] = arr(b.perms_flat);
             d[py::str(p + "flip_masks")] = arr(b.flip_masks);
             d[py::str(p + "shape")] = arr(std::vector<std::int64_t>{b.group_size, b.n_sites, b.n_up, b.irrep_dim});
+            // which members represent the orbits: the sublattice key order's fingerprint, 0 the plain order
+            d[py::str(p + "sublattice")] = arr(std::vector<std::uint64_t>{b.slc ? b.slc->fingerprint() : 0});
             if (b.irrep_dim > 1) {   // a sector of a d > 1 irrep (rep_sector.h)
                 d[py::str(p + "irrep_D")] = arr(b.irrep_D);
                 d[py::str(p + "class_rank")] = arr(std::vector<std::int64_t>(b.class_rank.begin(), b.class_rank.end()));
@@ -256,6 +258,28 @@ py::tuple eigs_from_arrays(const py::dict& d) {
             fail("basis " + std::to_string(b) + " has arrays of the wrong length");
         if (!rd->usable()) fail("basis " + std::to_string(b) + " is not a usable sector");
         rd->build_perm_lut();
+        // Which members represent the orbits: the sublattice key order the sector was computed with
+        // (<ed/basis/sublattice_code.h>), rebuilt from the group whatever ED_SYM_SUBLATTICE says now;
+        // a file without the field predates the codes and holds the plain order.
+        const std::string slc_key = p + "sublattice";
+        const std::uint64_t fp = d.contains(slc_key.c_str()) ? vec<std::uint64_t>(d, slc_key.c_str()).at(0) : 0;
+        if (fp != 0) {
+            rd->slc = ed::symmetry::SublatticeCode::of(rd->perms_flat.data(),
+                                                       rd->flip_masks.empty() ? nullptr : rd->flip_masks.data(),
+                                                       rd->group_size, rd->n_sites, true);
+            if (!rd->slc || rd->slc->fingerprint() != fp)
+                fail("basis " + std::to_string(b) + " was computed with a sublattice key order this build does "
+                     "not reproduce");
+        }
+        {   // the stored representatives are the ones that rule finds (a sample)
+            const auto pol = rd->make_policy();
+            const std::size_t n = rd->reps.size(), samples = std::min<std::size_t>(n, 64);
+            for (std::size_t i = 0; i < samples; ++i) {
+                const std::uint64_t r = rd->reps[samples == 1 ? 0 : i * (n - 1) / (samples - 1)];
+                if (pol.representative(r) != r)
+                    fail("basis " + std::to_string(b) + " holds a state that is not its orbit's representative");
+            }
+        }
         bases.push_back(std::move(rd));
     }
     const auto vbasis = vec<std::int64_t>(d, "vector_basis");
