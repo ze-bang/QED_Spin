@@ -207,8 +207,8 @@ inline constexpr std::size_t kCsrDictMax = 65536;
 /// sector of a clean lattice holds hundreds. One pass over the rows: chunks of rows go to threads
 /// dynamically, each keeping its merged rows as (column, chunk-local value id) with the chunk's own
 /// values; the row lengths give row_ptr; the chunks' values merge into one dictionary in chunk
-/// order; each chunk is copied into the first-touched arrays and freed. The build peaks near 14
-/// bytes an entry. Too many values for one dictionary (disordered couplings) and the rows are
+/// order; each chunk is copied into the first-touched arrays and freed. Each slab is reserved from a sampled
+/// row length, so the build peaks near 7 bytes an entry (14 when the slabs grew by doubling). Too many values for one dictionary (disordered couplings) and the rows are
 /// computed twice instead (count, then fill) into full values, which never holds more than the
 /// CSR. Either way the entries are those of the two-pass build bit for bit. The rows come in units: a row
 /// of a d = 1 sector, or the rank rows of one representative of a d > 1 sector (`dim` counts rows).
@@ -237,12 +237,28 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
     const auto first_unit = [q, rem](std::uint64_t c) { return c * q + std::min(c, rem); };
     const auto first_row = [&](std::uint64_t c) { return row_of_unit(first_unit(c)); };
     struct Slab {
-        std::vector<std::uint32_t> col;       // per entry: column,
-        std::vector<std::uint16_t> id;        // and chunk-local value id (a chunk keeps <= kCsrDictMax)
+        // Unmapped when released (core/numa_vector.h), so a copied slab leaves the RSS at once.
+        std::vector<std::uint32_t, ed::core::ReleasingAllocator<std::uint32_t>> col;   // per entry: column,
+        std::vector<std::uint16_t, ed::core::ReleasingAllocator<std::uint16_t>> id;    // and chunk-local value id (<= kCsrDictMax)
         std::vector<SectorComplex> values;    // the chunk's distinct values, by local id
         std::unordered_map<ValueBits, std::uint32_t, ValueBitsHash> index;
     };
     std::vector<Slab> slabs(static_cast<std::size_t>(n_chunks));
+    // Entries per row over up to 1024 evenly spaced units, to reserve each chunk's slab: grown by
+    // doubling, a slab held up to twice its entries and the build peaked near 14 bytes an entry
+    // (tri36 Gamma A1: 15.2 GiB for a 7.2 GB CSR). A chunk past its estimate regrows on its own.
+    double per_row = 0.0;
+    {
+        const std::uint64_t ns = std::min<std::uint64_t>(units, 1024);
+        std::vector<detail::Row> rows;
+        std::uint64_t entries = 0, nrows = 0;
+        for (std::uint64_t i = 0; i < ns; ++i) {
+            detail::unit_rows(P, rowp, colp, same, i * units / ns, rows);
+            for (const auto& r : rows) entries += r.size();
+            nrows += rows.size();
+        }
+        if (nrows > 0) per_row = static_cast<double>(entries) / static_cast<double>(nrows);
+    }
     std::atomic<bool> overflow{false};
     #pragma omp parallel
     {
@@ -251,6 +267,13 @@ inline ReducedSymmetryCsr<SectorComplex> build_cross_csr(const ed::ops::ProgramV
         for (long long c = 0; c < static_cast<long long>(n_chunks); ++c) {
             if (overflow.load(std::memory_order_relaxed)) continue;
             Slab& slab = slabs[static_cast<std::size_t>(c)];
+            {
+                const auto rows_c = static_cast<double>(first_row(static_cast<std::uint64_t>(c) + 1)
+                                                        - first_row(static_cast<std::uint64_t>(c)));
+                const auto want = static_cast<std::size_t>(1.05 * per_row * rows_c) + 64;
+                slab.col.reserve(want);
+                slab.id.reserve(want);
+            }
             for (std::uint64_t u = first_unit(static_cast<std::uint64_t>(c)); u < first_unit(static_cast<std::uint64_t>(c) + 1);
                  ++u) {
                 detail::unit_rows(P, rowp, colp, same, u, rows);
