@@ -4,9 +4,10 @@
 # Bring in Catch2 v3 via FetchContent (with a system-wide find_package
 # fallback). Defines the imported targets:
 #
-#   Catch2::Catch2          core library, no main()
-#   Catch2::Catch2WithMain  bundles a main() that runs the registered
-#                           TEST_CASEs (use this for ed_add_test).
+#   Catch2::Catch2          core library, no main() (ed_add_test links it with
+#                           tests/common/catch2_main.cpp)
+#   Catch2::Catch2WithMain  Catch2's own main() (unused: its exit code is the
+#                           failed-assertion count, which collides with 4 = all skipped)
 #
 # Why FetchContent first? Most lab clusters and HPC images do not ship
 # Catch2 v3 (Debian bookworm, RHEL 8/9 ship v2). Pinning to v3.5.4 makes

@@ -112,17 +112,30 @@ endif()
 option(BUILD_ED_TESTS "Build the ED regression test suite" ON)
 if(BUILD_ED_TESTS)
     enable_testing()
-    include(EDCatch2)               # Catch2::Catch2WithMain, catch_discover_tests
+    include(EDCatch2)               # Catch2::Catch2, catch_discover_tests
+
+    # Catch2's session with an exit code ctest can trust (tests/common/catch2_main.cpp): 1 on any
+    # failure, 77 when every test case run was skipped. Catch2's own main exits with the failed
+    # assertion count, so four failures read as its all-skipped code 4.
+    add_library(ed_catch2_main OBJECT tests/common/catch2_main.cpp)
+    target_link_libraries(ed_catch2_main PUBLIC Catch2::Catch2)
 
     function(ed_add_test test_name test_source)
         add_executable(${test_name} ${test_source})
         target_include_directories(${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-        target_link_libraries(${test_name} PRIVATE qed_engine Catch2::Catch2WithMain)
+        target_link_libraries(${test_name} PRIVATE qed_engine ed_catch2_main Catch2::Catch2)
         target_compile_options(${test_name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${CPU_OPT_FLAGS}>)
-        # SKIP_RETURN_CODE 4: a TEST_CASE that calls SKIP(...) and is the only one matched
-        # exits with 4 ("no tests ran"), which ctest would otherwise report as a failure.
-        catch_discover_tests(${test_name} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 4)
+        # SKIP_RETURN_CODE 77: a TEST_CASE that calls SKIP(...) (no device, ...) and nothing failed.
+        catch_discover_tests(${test_name} PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
     endfunction()
+
+    # The exit code itself: four failed assertions exit 1, a skip alone 77.
+    add_executable(test_harness_exit tests/unit/test_harness_exit.cpp)
+    target_link_libraries(test_harness_exit PRIVATE ed_catch2_main Catch2::Catch2)
+    add_test(NAME harness_four_failures_exit_1
+             COMMAND sh -c "\"$<TARGET_FILE:test_harness_exit>\" \"[harness_four]\" > /dev/null; test $? -eq 1")
+    add_test(NAME harness_skip_alone_exits_77
+             COMMAND sh -c "\"$<TARGET_FILE:test_harness_exit>\" \"[harness_skip]\" > /dev/null; test $? -eq 77")
 
     ed_add_test(test_operator_apply             tests/unit/test_operator_apply.cpp)
     # One Lanczos algorithm shared by CPU / GPU via the abstract Backend
