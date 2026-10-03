@@ -1213,6 +1213,22 @@ TEST_CASE("rep sectors: a d-dim sector's CSR and walk are V^dag H V", "[row_walk
                     CHECK(std::string(op.lane()) == "walk");
                     CHECK(max_diff(M, ref) <= tol);
                 }
+#ifdef WITH_CUDA
+                if (ed::have_cuda()) {   // the device: the host CSR uploaded (P7.5)
+                    RepSectorMatVec op(*m.H, *rds);
+                    op.enable_device(true);
+                    REQUIRE(op.has_device_kernel());
+                    const auto f = op.bind_cuda();
+                    CHECK(std::string(op.device_lane()) == "device-csr");
+                    const Mat M = columns(d, [&](const Cx* in, Cx* out) { on_device(f, in, out, d); });
+                    CHECK(max_diff(M, ref) <= tol);
+                    EnvGuard env;
+                    env.set("ED_GPU_CSR_BUDGET_GIB", "0");
+                    RepSectorMatVec none(*m.H, *rds);
+                    none.enable_device(true);
+                    CHECK_FALSE(none.has_device_kernel());   // no room for a device CSR: no device kernel
+                }
+#endif
             }
         }
     }

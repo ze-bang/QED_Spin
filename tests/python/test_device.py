@@ -117,11 +117,21 @@ def _square4x4_c4v():
 
 
 @gpu
-def test_gpu_refuses_a_block_without_a_device_kernel():
-    # With every block a Krylov solve (dense floor 0), device='gpu' refuses the E blocks;
-    # device='auto' runs them on the host and says so.
+def test_gpu_runs_e_blocks_through_their_uploaded_csr(monkeypatch):
+    # P7.5: a sector of an irrep of dimension > 1 (the E blocks) runs on the device through its
+    # reduced CSR, built on the host and uploaded: with every block a Krylov solve (dense floor 0)
+    # device='gpu' solves them all there, the levels the host's. With no room for a device CSR
+    # (ED_GPU_CSR_BUDGET_GIB=0) they have no device kernel: 'gpu' refuses them, naming why, and
+    # 'auto' runs them on the host.
     H, sym = _square4x4_c4v()
-    with pytest.raises(qed.errors.DeviceUnsupported, match="dimension > 1"):
+    c = qed.eigs(H, 1, sym=sym, device="cpu", prune=False, dense_max_dim=0)
+    g = qed.eigs(H, 1, sym=sym, device="gpu", prune=False, dense_max_dim=0)
+    np.testing.assert_allclose(g.energies, c.energies, atol=1e-10)
+    assert g.placement["host_krylov"] == 0 and g.placement["device_krylov"] > 0, g.placement
+    t = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu", dense_max_dim=0)
+    assert t.placement["host_krylov"] == 0 and t.placement["device_krylov"] > 0, t.placement
+    monkeypatch.setenv("ED_GPU_CSR_BUDGET_GIB", "0")
+    with pytest.raises(qed.errors.DeviceUnsupported, match="dimension > 1, whose device kernel"):
         qed.eigs(H, 1, sym=sym, device="gpu", prune=False, dense_max_dim=0)
     assert qed.eigs(H, 1, sym=sym, device="auto", prune=False, dense_max_dim=0).placement["host_krylov"] > 0
 
@@ -129,12 +139,10 @@ def test_gpu_refuses_a_block_without_a_device_kernel():
 @gpu
 def test_gpu_thermal_solves_small_e_blocks_densely():
     # An E block of at most dense_max_dim states is diagonalised on the host before any device
-    # check, so device='gpu' runs it there; sampled (dense_max_dim=0) it is refused, naming it.
+    # check, so device='gpu' runs it there.
     H, sym = _square4x4_c4v()
     r = qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu")
     assert r.placement["host_dense"] > 0 and r.placement["host_krylov"] == 0
-    with pytest.raises(qed.errors.DeviceUnsupported, match="dimension > 1"):
-        qed.thermal(H, [1.0], method="ftlm", sym=sym, samples=2, krylov=20, device="gpu", dense_max_dim=0)
 
 
 @gpu

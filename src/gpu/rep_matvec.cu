@@ -1091,6 +1091,35 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& rep, const
     }
 }
 
+std::shared_ptr<const ed::symmetry::DeviceCsr>
+ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& h, std::uint64_t max_bytes)
+{
+    using DC = thrust::complex<double>;
+    if (!h.built() || h.bytes() > max_bytes) return nullptr;
+    const auto t0 = std::chrono::steady_clock::now();
+    try {
+        auto c = std::make_shared<ed::symmetry::DeviceCsr>();
+        c->dim = h.dim;
+        c->nnz = h.nnz();
+        c->row_ptr.assign(h.row_ptr.data(), h.row_ptr.data() + h.row_ptr.size());
+        c->col.assign(h.col_idx.data(), h.col_idx.data() + h.col_idx.size());
+        c->id8.assign(h.id8.data(), h.id8.data() + h.id8.size());
+        c->id16.assign(h.id16.data(), h.id16.data() + h.id16.size());
+        // std::complex<double> and thrust::complex<double> share their layout
+        const auto* val = reinterpret_cast<const DC*>(h.val.data());
+        c->val.assign(val, val + h.val.size());
+        const auto* dict = reinterpret_cast<const DC*>(h.dict.data());
+        c->dict.assign(dict, dict + h.dict.size());
+        c->lanes = ed::symmetry::gpu_mirror::lanes_for(h.dim ? static_cast<double>(c->nnz) / static_cast<double>(h.dim)
+                                                             : 0.0);
+        c->build_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return c;
+    } catch (const std::bad_alloc&) {   // thrust's bad_alloc: out of device memory
+        cudaGetLastError();
+        return nullptr;
+    }
+}
+
 ed::LinearOperator::MatvecFn ed::symmetry::csr_matvec_gpu(std::shared_ptr<const ed::symmetry::DeviceCsr> csr) {
     using DC = thrust::complex<double>;
     return [csr](const ed::matvec::Complex* in, ed::matvec::Complex* out, std::size_t n) {

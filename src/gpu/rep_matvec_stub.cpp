@@ -60,6 +60,12 @@ ed::symmetry::build_sector_csr_gpu(const ed::symmetry::RepSectorData& /*rep*/, c
     throw std::logic_error("ed::symmetry::build_sector_csr_gpu: built without WITH_CUDA.");
 }
 
+std::shared_ptr<const ed::symmetry::DeviceCsr>
+ed::symmetry::upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& /*csr*/,
+                             std::uint64_t /*max_bytes*/) {
+    throw std::logic_error("ed::symmetry::upload_csr_gpu: built without WITH_CUDA.");
+}
+
 ed::LinearOperator::MatvecFn ed::symmetry::csr_matvec_gpu(std::shared_ptr<const ed::symmetry::DeviceCsr> /*csr*/) {
     throw std::logic_error("ed::symmetry::csr_matvec_gpu: built without WITH_CUDA.");
 }

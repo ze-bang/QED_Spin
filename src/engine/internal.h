@@ -239,19 +239,27 @@ public:
     /// Walk the first `applies` applies before building the reduced CSR: an operator applied once
     /// or twice (a spin tower's S^2 certifying a few vectors) does not pay for a build.
     void defer_csr(std::uint64_t applies) noexcept { defer_csr_ = applies; }
+    /// A 1-dim sector: the device CSR, else the device walk. A sector of an irrep of dimension > 1:
+    /// its reduced CSR, built on the host (as either lane would on its first apply) and uploaded --
+    /// a device kernel exactly when that CSR fits the block's budget and the device CSR budget.
     [[nodiscard]] bool has_device_kernel() const override {
 #ifdef WITH_CUDA
-        return device_ok_ && rd_->irrep_dim == 1;   // the device kernels are 1-dim (d > 1: P7.5)
+        if (!device_ok_) return false;
+        if (rd_->irrep_dim == 1) return true;
+        std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+        return csr_ && csr_->bytes() <= device_csr_room_();
 #else
         return false;
 #endif
     }
-    /// The device apply: the reduced CSR built on the device when it fits (device_csr_), else the
-    /// device walk.
+    /// The device apply: the reduced CSR on the device when it fits (device_csr_), else the device
+    /// walk -- which exists for 1-dim sectors only, so a sector of an irrep of dimension > 1 whose
+    /// CSR could not go up after all (device memory taken since place()) raises ResourceLimit.
     [[nodiscard]] MatvecFn bind_cuda() const override {
 #ifdef WITH_CUDA
         if (has_device_kernel()) {
             if (auto c = device_csr_()) return ed::symmetry::csr_matvec_gpu(std::move(c));
+            if (rd_->irrep_dim > 1) throw ed::ResourceLimit(upload_refusal_());
             return ed::symmetry::make_sector_matvec_gpu_rep(*rd_, *rows_);
         }
 #endif
@@ -261,6 +269,7 @@ public:
 #ifdef WITH_CUDA
         if (has_device_kernel()) {
             if (auto c = device_csr_()) return ed::symmetry::csr_matvec_gpu_multi(std::move(c));
+            if (rd_->irrep_dim > 1) throw ed::ResourceLimit(upload_refusal_());
             return ed::symmetry::make_sector_matvec_gpu_rep_multi(*rd_, *rows_);
         }
 #endif
@@ -388,21 +397,44 @@ private:
     // binding) and the operator is not one applied only once or twice (defer_csr); null: the device
     // walk serves. A bound apply holds it, and so does the idle slot (IdleDeviceCsr) until another
     // operator builds one. Declined once, it is not tried again.
+    std::string upload_refusal_() const {
+        return "a sector of an irrep of dimension " + std::to_string(rd_->irrep_dim) + " (" + std::to_string(rd_->states())
+               + " states) runs on the device through its reduced CSR (" + std::to_string(csr_bytes() >> 20)
+               + " MiB), which could not be uploaded (device CSR budget " + std::to_string(device_csr_room_() >> 20)
+               + " MiB)";
+    }
+
+    // The device CSR's budget: ED_GPU_CSR_BUDGET_GIB, unset half the free device memory.
+    static std::uint64_t device_csr_room_() {
+        const double gib = ed::env::real("ED_GPU_CSR_BUDGET_GIB", -1.0);   // -1: not set
+        if (gib >= 0.0) return static_cast<std::uint64_t>(gib * 1073741824.0);
+        const auto free = ed::core::available_device_bytes(/*fresh=*/true);
+        return free ? *free / 2 : 0;
+    }
+
+    // A sector of an irrep of dimension > 1 uploads its host CSR (has_device_kernel built it); a
+    // 1-dim one builds its CSR on the device, unless it is applied only once or twice (defer_csr).
     std::shared_ptr<const ed::symmetry::DeviceCsr> device_csr_() const {
         std::lock_guard<std::mutex> lk(dcsr_mtx_);
         if (auto c = dcsr_.lock()) return c;
-        if (dcsr_declined_ || defer_csr_ > 0) return nullptr;
+        const bool upload = rd_->irrep_dim > 1;
+        if (dcsr_declined_ || (!upload && defer_csr_ > 0)) return nullptr;
         auto& idle = IdleDeviceCsr::get();
         {   // free the idle one first: its memory may be what this one needs
             std::lock_guard<std::mutex> g(idle.m);
             idle.csr.reset();
             idle.owner = nullptr;
         }
-        std::uint64_t room = 0;
-        const double gib = ed::env::real("ED_GPU_CSR_BUDGET_GIB", -1.0);   // -1: not set
-        if (gib >= 0.0) room = static_cast<std::uint64_t>(gib * 1073741824.0);
-        else if (const auto free = ed::core::available_device_bytes(/*fresh=*/true)) room = *free / 2;
-        auto c = room > 0 ? ed::symmetry::build_sector_csr_gpu(*rd_, *rows_, room) : nullptr;
+        const std::uint64_t room = device_csr_room_();
+        std::shared_ptr<const ed::symmetry::DeviceCsr> c;
+        if (room > 0) {
+            if (upload) {
+                std::call_once(csr_once_, [this] { maybe_build_csr_(); });
+                if (csr_) c = ed::symmetry::upload_csr_gpu(*csr_, room);
+            } else {
+                c = ed::symmetry::build_sector_csr_gpu(*rd_, *rows_, room);
+            }
+        }
         if (!c) {
             dcsr_declined_ = true;
             return nullptr;

@@ -368,8 +368,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         auto t_gm = std::chrono::steady_clock::now();
         // The window is relative to H's scale: s * H keeps the same manifold.
         const double window = d.degeneracy_tol * ed::numerics::scale_or_one(H.norm_bound());
-        // On the folded Spec, unless a momentum selection names momentum sectors, or device='gpu'
-        // would meet a block of an irrep of dimension > 1, which has no device kernel yet (plan P7.5).
+        // On the folded Spec, unless a momentum selection names momentum sectors, or device='gpu':
+        // a block of an irrep of dimension > 1 has a device kernel only when its CSR fits (P7.5),
+        // a momentum sector always has one.
         std::vector<std::pair<BlockVector, int>> ground;   // (vector, Sz parity of its subspace)
         if (s.only_momentum.empty() && d.device != Device::Gpu) {
             for (auto& m : folded_ground_manifold(H, n_sites, s, A, window, d.device, d.dense_max_dim, d.prune,

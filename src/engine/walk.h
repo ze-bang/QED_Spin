@@ -627,7 +627,9 @@ inline std::string block_name(const ed::solvers::LittleGroupBlockTag& tag) {
 
 /// Why a block has no device kernel, for place()'s refusal.
 inline const char* no_kernel_reason(int irrep_dim) {
-    if (irrep_dim > 1) return "is a sector of an irrep of dimension > 1, which has no device kernel";
+    if (irrep_dim > 1)
+        return "is a sector of an irrep of dimension > 1, whose device kernel -- its reduced CSR, built on the host and "
+               "uploaded -- does not fit the block's CSR budget or the device CSR budget";
     return "has no device kernel";
 }
 

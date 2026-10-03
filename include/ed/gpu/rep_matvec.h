@@ -92,6 +92,12 @@ build_sector_csr_gpu(const RepSectorData&            rep,
                      const ed::ops::MaskedProgram&   rows,
                      std::uint64_t                   max_bytes);
 
+/// A reduced CSR built on the host, uploaded as is (P7.5: the device kernel of a sector of an
+/// irrep of dimension > 1, whose rows the host builds). Null when it holds more than `max_bytes`
+/// or the device is out of memory.
+std::shared_ptr<const DeviceCsr>
+upload_csr_gpu(const ed::matvec::ReducedSymmetryCsr<std::complex<double>>& csr, std::uint64_t max_bytes);
+
 /// Its applies on device pointers: one vector, and k at once (every output of the k-vector
 /// apply equals the single apply bit for bit).
 ed::LinearOperator::MatvecFn      csr_matvec_gpu(std::shared_ptr<const DeviceCsr> csr);
