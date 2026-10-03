@@ -13,7 +13,7 @@ from pathlib import Path
 import qed
 from qed._groups import close_group
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "python"))
 from support.triangular import TriangularTorus  # noqa: E402
 
 model, path = sys.argv[1], sys.argv[2]
