@@ -41,9 +41,10 @@ enum class SymMatvecRepr : int {
 };
 
 /// Resolve the EFFECTIVE strategy: the env knob is the manual escape hatch
-/// (cached process-globally): ``ED_SYM_REDUCED_CSR=1`` forces RepReducedCsr,
-/// ``=0`` the CSR-free rep walk; unset -> the default below. Consumed by
-/// CpuMatVecBackend and the little-group engine (the reduced-CSR sub-choice).
+/// (cached process-globally): ``ED_SYM_REDUCED_CSR=0`` selects the CSR-free rep
+/// walk; ``=1`` and unset resolve to RepReducedCsr, which the budget and the
+/// 32-bit column limit may still decline per sector. Consumed by the sector
+/// operator's CSR build (RepSectorMatVec, src/engine/internal.h).
 [[nodiscard]] inline int resolved_sym_matvec_repr() noexcept {
     static const int env_override = [] {
         if (const std::optional<bool> on = ed::env::tristate("ED_SYM_REDUCED_CSR"))

@@ -16,10 +16,10 @@
 // S^2 there too, because [S^2, g] = 0 for every site permutation g, every
 // flip mask, and Sz (S^2 conserves popcount term-by-term).
 //
-// The (3N/4) Id shift needs NO new kernel: a diag_two_body term with
-// site_1 == site_2 evaluates through diag_two_body_factor (term_gate_math.h)
-// to spin_sq * sign^2 = 1/4 for EVERY basis state, on the CPU and GPU gate
-// math alike. N such terms with coefficient 3.0 are exactly (3N/4) Id.
+// The (3N/4) Id shift needs NO new kernel: the record Sz_i Sz_i (site_1 ==
+// site_2) is reduced exactly by the canonical algebra (masked(), invariance.h;
+// MaskedOperator::product) to 1/4 times the identity, so N such records with
+// coefficient 3.0 are exactly (3N/4) Id on every lane.
 //
 // Cost model: S^2 carries ~1.5*N^2 terms vs ~3*z*N for a short-range H, so
 // one S^2 matvec costs about (N/2z) H-matvecs.

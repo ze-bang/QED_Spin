@@ -23,7 +23,7 @@ class Model:
     name: str
     N: int
     terms: list
-    translations: list = field(default_factory=list)  # generator permutations, perm[i] = image of i
+    translations: list = field(default_factory=list)  # generator permutations, engine convention: (U s)_i = s_perm[i]
     shape: tuple = ()  # translation orders, one per generator
     coords: list = field(default_factory=list)  # integer coordinates per site, one per generator
     u1: bool = True

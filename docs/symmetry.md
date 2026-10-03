@@ -74,8 +74,9 @@ The remaining fields (`only_k0`, `only_irrep`, `only_momentum`, `only_irrep_char
 ### `groups()` and `resolve()`
 
 `Symmetry.groups(H, diagnostics=None)` returns `(A, residues)`: `A` the closed abelian group (the
-momenta), identity first, normal in the spatial group; `residues` one representative per coset of
-A other than A itself (empty under `point_group=False`). Each element is a `list[int]`.
+momenta), identity first, normal in the group it spans with the residues (the whole spatial
+group, unless a `co_group_capped` cut kept a subgroup); `residues` one representative per coset of
+A in that group other than A itself (empty under `point_group=False`). Each element is a `list[int]`.
 `diagnostics`, when given, receives a `(code, message)` pair for each fallback taken. A string
 `spatial` other than `"auto"` raises `InvalidRequest`.
 
@@ -119,7 +120,8 @@ What H conserves along z is read from its canonical terms: every term keeps the 
 | `"even"` / `"odd"` | the sectors with n of that parity | that half | `InvalidRequest` |
 | `"off"` | the full space | the full space | the full space |
 
-`sz` must be a non-negative `int` at most N (a `bool` is refused) or one of the strings.
+`sz` must be a non-negative `int` at most N (a `bool` is refused), one of the strings, or `None`,
+which is read as `"auto"`.
 `sz="off"` on a U(1) H gives correct but larger blocks. With the spin flip, sectors are paired
 (see [Spin flip](#spin-flip)); a level reports the sector its block was solved in (`Level.n_up`,
 or `Level.sz_parity` for a parity half, with `n_up == -1`).
@@ -174,7 +176,10 @@ wrong spectrum.
 explicit split, checked but not re-chosen: the generators of the abelian part must commute (their
 closure is capped at 4096 elements), and each residue must normalise the abelian part
 ($p A p^{-1} = A$), else `InvalidRequest`. A residue in A, or in the coset of an earlier residue,
-is dropped. With `point_group=False` the residues are not used and not checked. Any object with an
+is dropped. The cosets the residues name must form a group with A (the product and the inverse
+of every residue lie in a listed coset; pass every coset representative), and there may be at
+most 128 of them (the co-group cap of `"auto"`); either failure raises `InvalidRequest`. With
+`point_group=False` the residues are not used and not checked. Any object with an
 `abelian` attribute (and optionally `residues`; numpy arrays included) is accepted.
 
 ```python
@@ -260,7 +265,9 @@ irreps are used (`ed::symmetry::decompose_projective_irreps`); a coboundary (cos
 representatives that do not close into a subgroup) and a genuinely projective factor system are
 handled alike. Irreps of dimension $d > 1$ are blocks of their
 own: each level of such a block counts d times. The sector kernels carry irreps up to dimension 8
-(`ed::matvec::kMaxIrrepDim`). With `ED_SYM_PROFILE=1` (set before `import qed`, it also makes the
+(`ed::matvec::kMaxIrrepDim`); a sector of a larger irrep (only a co-group of more than 64
+elements has one) is refused with `qed.errors.Unsupported` when it is built: pass fewer residues
+or `point_group=False`. With `ED_SYM_PROFILE=1` (set before `import qed`, it also makes the
 import-time log level `"info"` on stderr), or at log level `"debug"`, the engine logs each
 group-sector star with `|G_k0|`, its block count, the momentum sector's dimension, and
 "projective factor system" when $\omega \not\equiv 1$.
@@ -398,8 +405,10 @@ For odd N, $\Theta^2 = -1$ (Kramers): with Sz conserved and every Sz sector requ
 (`sz="auto"`), every sector is paired with its $-S^z$ partner (by $\Theta$, or by the flip when H
 has it) and every level's multiplicity is even. An explicit `sz=n` solves one member of each pair.
 
-$\Theta$ is not used under a [selection](#selecting-sectors-select): it would add sectors the
-selection did not name. K is not used under an `irrep_character` selection: it would fold
+$\Theta$ is not used under a [selection](#selecting-sectors-select) of `momentum`,
+`irrep_character`, `k0` or `irrep`: it would add sectors the selection did not name.
+`select(sz=...)` only replaces `sz` and is not such a selection: in the $S^z = 0$ sector $\Theta$
+still folds k with -k. K is not used under an `irrep_character` selection: it would fold
 $\sigma^*$ into $\sigma$'s block.
 
 `time_reversal="require"` raises `InvalidRequest` when H is invariant under neither K nor
@@ -494,7 +503,7 @@ the same symmetry restricted to some sectors. The group, folds and labels are un
 - `momentum` and `irrep_character` are resolved by `resolve()`: a T that is not in the abelian
   group, or an R that is not a listed coset representative, raises `InvalidRequest`.
 - Under `irrep_character` time reversal is not folded, so each irrep is its own block. $\Theta$ is
-  not used under any selection.
+  not used under a `momentum`, `irrep_character`, `k0` or `irrep` selection (`sz` does not count).
 
 A selection (`momentum`, `irrep_character`, `k0`, `irrep`) that matches no block raises
 `qed.errors.EmptySelection` (a subclass of `InvalidRequest` and `ValueError`) in `eigs`,
@@ -578,10 +587,12 @@ half the free device memory; 0, or over the budget: the device walk). Under `dev
 (strict) the sectors of irreps of dimension > 1 run on the device through their reduced CSR,
 built on the host and uploaded; a block whose CSR does not fit both its CSR budget and
 `ED_GPU_CSR_BUDGET_GIB` raises `qed.errors.DeviceUnsupported`, naming the block. Under `"gpu"`,
-`eigs` still solves densely on the host a block of at most 32 states or with $2k \geq$ its
-dimension, and every block within its dense crossover (`dense_max_dim`). Dense spectra of many blocks are solved on the
+`eigs` still solves densely on the host a block of at most 32 states or with
+$2\,\mathrm{want} \geq$ its dimension (want: the levels the block owes, $\lceil k/m \rceil$ for
+a block of multiplicity m), and every block within its dense crossover (`dense_max_dim`). Dense spectra of many blocks are solved on the
 device in batches of up to 2 GiB of matrices (`ED_GPU_DENSE_BATCH_GIB`; at most a quarter of the
-free device memory and of the RAM).
+free device memory and of the RAM); under `"gpu"` a block too large for the device raises
+`qed.errors.ResourceLimit` instead of moving to the host.
 
 ## Representatives: plain order and sublattice key order
 

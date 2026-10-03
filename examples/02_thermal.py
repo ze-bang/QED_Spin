@@ -27,7 +27,8 @@ print("   T      C exact    C ftlm    C oftlm    C mtpq     chi")
 for i in range(0, len(T), 3):
     print(f"{T[i]:5.2f}  {exact.C[i]:9.5f} {ftlm.C[i]:9.5f} {oftlm.C[i]:9.5f} {mtpq.C[i]:9.5f} " f"{exact.chi[i]:9.5f}")
 # method="exact" diagonalises every symmetry block; the sampled methods scale to far
-# larger blocks. device="gpu" runs the blocks that have a device kernel on the GPU.
+# larger blocks. device="auto" runs the blocks that have a device kernel (and fit) on the GPU
+# and the rest on the host; device="gpu" is strict and raises for a block that cannot run there.
 
 # Thermal averages <O>(T) of operators that need not share H's symmetries: the
 # nearest-neighbour correlation on one bond, exactly and by FTLM.

@@ -1,13 +1,14 @@
 // =============================================================================
 // include/ed/input/types.h
 //
-// Common types for the ed_input library: spin operator enum, term records,
-// and small typedefs shared by the lattice geometry and the Hamiltonian
-// builder.
+// Common types for the ed_input library: the spin operator enum, and the bond,
+// plaquette and position records of the lattice geometry. The Hamiltonian
+// builder is Python (python/qed/_builder.py); it reads Op through the bindings
+// (qed.input.Op).
 //
-// All terms speak the canonical (S+, S-, Sz) basis used by the C++
-// `Operator` (`include/ed/ops/operator.h`), so building an Operator is a
-// one-step translation with no basis change.
+// Op speaks the (S+, S-, Sz) codes of the C++ `Operator`
+// (`include/ed/ops/operator.h`) records, so a builder record maps onto an
+// Operator record with no basis change.
 // =============================================================================
 
 #pragma once
@@ -24,9 +25,7 @@ namespace ed::input {
 using Complex = std::complex<double>;
 
 // Spin operator codes that match the C++ Operator's TransformData::op_type
-// (0 = S+, 1 = S-, 2 = Sz). Storing them as a strong enum lets the
-// templated DSL refuse mistakes at compile time without losing the wire
-// format guarantee.
+// (0 = S+, 1 = S-, 2 = Sz), as a strong enum (bound as qed.input.Op).
 enum class Op : std::uint8_t {
     Sp = 0,
     Sm = 1,

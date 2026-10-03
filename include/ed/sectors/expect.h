@@ -11,9 +11,11 @@
 // pairs a level with its time-reversed partner, is averaged in the result. Obar commutes
 // with every symmetry, so it acts inside the level's own block basis with the same kernels
 // as H -- nothing is expanded to the Sz sector or the full space. Terms of O that change
-// Sz (or its parity, in a parity sector) have no diagonal element and are dropped. With a
-// total-spin restriction, O must be SU(2) invariant (the value is then the same for every
-// member of the spin multiplet).
+// Sz (or its parity, in a parity sector) have no diagonal element and are dropped. Under a
+// total-spin restriction with an SU(2)-symmetric H a level is a whole spin multiplet, and an O
+// that is not SU(2) invariant enters through its SU(2)-scalar part (ed::ops::su2_scalar_part),
+// whose expectation is the multiplet average; such an O with a term on more than 5 sites raises
+// ed::Unsupported. In a uniform field every member is a level of its own and O enters as it is.
 //
 // matrix_element(): <v_i| O |v_j> between two returned vectors -- the partners the solver
 // chose. O is arbitrary: it may change Sz and break every symmetry.
@@ -30,7 +32,9 @@ namespace ed::sectors {
 [[nodiscard]] std::vector<std::vector<Complex>> expect(const EigsResult& r, const Spec& s,
                                                        const std::vector<const ::Operator*>& ops);
 
-/// <v_i| O |v_j> for levels i and j of `r` (one- and two-body terms).
+/// <v_i| O |v_j> for levels i and j of `r`; O may hold terms on any number of sites. A level
+/// index out of range throws std::out_of_range; O on another number of sites or with a
+/// non-finite coefficient, or a level without a vector, throws ed::InvalidRequest.
 [[nodiscard]] Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j);
 
 }  // namespace ed::sectors

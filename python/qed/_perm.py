@@ -1,7 +1,8 @@
 """Site permutations: the one convention of the package.
 
-A permutation p of the n sites is a tuple of images: site i goes to p[i]. Composition is
-function composition, ``compose(a, b)[i] = a[b[i]]`` (b first), as in ``ed::sym`` and
+A permutation p of the n sites is a tuple read as the engine reads it: site i of the image
+carries the spin site p[i] carried ((U_p s)_i = s_{p[i]}), so an operator on site k moves to
+p^-1(k). Composition is ``compose(a, b)[i] = a[b[i]]`` (b first), as in ``ed::sym`` and
 :mod:`qed.symmetry`.
 """
 

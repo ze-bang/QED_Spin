@@ -33,7 +33,7 @@ inline constexpr double kInvarianceRtol = 1e-10;
 [[nodiscard]] MaskedOperator masked(const ::Operator& op);
 
 /// The Operator of `m`'s canonical terms, in key order: a term on k <= 3 sites is one k-body
-/// record (Z = 2 Sz folded into the coefficient; the identity is the record Sz_0 Sz_0 = 1/4),
+/// record (Z = (-1)^bit = -2 Sz folded into the coefficient; the identity is the record Sz_0 Sz_0 = 1/4),
 /// a term on more sites an extra canonical term (Operator::add_extra_term). masked(to_operator(m))
 /// == m.
 [[nodiscard]] ::Operator to_operator(const MaskedOperator& m);
@@ -45,7 +45,7 @@ struct ProductTerm {
     std::string ops;
     std::vector<int> sites;
 };
-/// m's canonical terms in key order, each as a product of S+, S-, S^z (Z = 2 S^z folded in).
+/// m's canonical terms in key order, each as a product of S+, S-, S^z (Z = -2 S^z folded in).
 [[nodiscard]] std::vector<ProductTerm> product_terms(const MaskedOperator& m);
 
 /// Throws std::invalid_argument unless perm is a permutation of 0..n-1.

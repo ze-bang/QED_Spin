@@ -17,8 +17,9 @@ scripts/
 
 ## Gate (Alliance clusters; never on a login node)
 
-`gate/submit.sh <account>` submits the build and, depending on it, one CPU and one GPU job
-array; every task appends `<stage> <exit code>` to `logs/gate/<build id>/rc`. Summary:
+`gate/submit.sh <account>` submits the build job and, depending on it, two CPU job arrays
+(10- and 20-minute limits; the regress, grid and fuzz stages take the longer one) and one GPU
+job array; every task appends `<stage> <exit code>` to `logs/gate/<build id>/rc`. Summary:
 
 ```
 awk '{c[$1]=$2} END {for (k in c) print k, c[k]}' logs/gate/<build id>/rc
@@ -34,5 +35,5 @@ The same script runs part of the table or the other build:
 gate/submit.sh <account> ctest                    # the C++ unit tests (on a GPU slice)
 gate/submit.sh <account> pytest 'grid_cpu_*'      # stages by name or glob
 gate/submit.sh <account> --variant cpu ctest      # the CPU-only build and its unit tests
-gate/submit.sh <account> --build-only             # build the extension and nothing else
+gate/submit.sh <account> --build-only             # the build job alone: the four lints, unit tests, _core
 ```

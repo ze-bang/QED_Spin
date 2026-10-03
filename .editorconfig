@@ -14,11 +14,11 @@ indent_size = 4
 
 [*.{c,h,cc,cxx,cpp,hh,hpp,hxx,cu,cuh,inl,ipp,tpp}]
 indent_size = 4
-max_line_length = 100
+max_line_length = 120
 
 [*.{py,pyi}]
 indent_size = 4
-max_line_length = 100
+max_line_length = 120
 
 [*.{cmake,CMakeLists.txt}]
 indent_size = 4

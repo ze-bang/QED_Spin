@@ -16,7 +16,7 @@
 // weighted by multiplicity (|star| x irrep dimension x time-reversal fold x flip
 // mirror), merged across blocks and subspaces, and cut at k. A block that could not
 // certify the levels it owes below the cut makes the window incomplete; eigs() throws
-// unless the caller allows a partial window.
+// ed::ConvergenceError unless the caller allows a partial window.
 //
 // Vectors stay in the basis the block was solved in (a group sector or a momentum
 // sector, both RepSectorData). multiplet() expands one level's vector into the Sz
@@ -81,10 +81,11 @@ using Complex = std::complex<double>;
 using Perm = std::vector<int>;
 
 /// Where the blocks run (ed::Device, include/ed/core/device.h). place() (select_backend.h)
-/// decides each block: Cpu never touches CUDA; Gpu runs every Krylov solve on the device or
-/// raises naming the block (OFTLM, blocks without a device kernel); blocks
-/// the verb solves densely stay on the host under every device; Auto uses the device above the
-/// task's floor in the 'auto' table (auto_row). Results count where the solves ran.
+/// decides each block: Cpu never touches CUDA; Gpu runs every Krylov solve and every dense batch
+/// on the device or raises (DeviceUnsupported for a block without a device kernel, ResourceLimit
+/// for one that does not fit), with no host fallback; blocks the verb solves densely stay on the
+/// host under every device; Auto uses the device above the task's floor in the 'auto' table
+/// (auto_row) where the block fits, and the host otherwise. Results count where the solves ran.
 using Device = ed::Device;
 
 /// Things a caller should know about a result that did not stop it: (code, message) pairs,
@@ -164,13 +165,16 @@ struct EigsOptions {
 };
 
 /// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host, one
-/// count per lane place() chose. Under Device::Gpu no Krylov solve runs on the host (a block
-/// that cannot run on the device raises); small blocks may still be solved densely there.
+/// count per lane place() chose. Under Device::Gpu no Krylov solve or dense batch runs on the
+/// host (a block that cannot run on the device raises); small blocks may still be solved
+/// densely there.
 /// Units: one per block solve. Prune estimates and setup work (projector shifts, seed
-/// projections) are not counted; dynamics counts one per continued fraction at T = 0 and one
-/// per source sector at T > 0. A host Krylov solve whose H apply is the device gather on host
-/// vectors (the hybrid lane, dim >= kHostGatherFloor) counts host_krylov, since its vectors
-/// and Krylov work are on the host; its block_stats lane says "gpu-gather".
+/// projections) are not counted. dynamics counts, at T = 0, the block solves of its
+/// ground-manifold eigensolves (the first k = 1 solve and each deeper per-block solve) and one
+/// per continued fraction; at T > 0 one per source sector. A host Krylov solve whose H apply is
+/// the device gather on host vectors (the hybrid lane, dim >= kHostGatherFloor) counts
+/// host_krylov, since its vectors and Krylov work are on the host; its block_stats lane says
+/// "gpu-gather".
 struct Placement {
     std::size_t device_krylov = 0, device_dense = 0, host_krylov = 0, host_dense = 0;
     void add(ed::Lane lane) {
@@ -219,8 +223,10 @@ struct BlockStats {
     int k0 = 0, irrep = -1, flip_parity = -1, n_up = -1;
     std::uint64_t dim = 0;
     std::string kind;              ///< "group" (full little group), "plain" (k-sector of a trivial co-group)
-    /// How H was applied: "dense" (materialised), "csr" (reduced CSR), "walk" (CSR-free gather),
-    /// "gpu-gather" (device kernel on host vectors), "device" (the whole solve on the device lane).
+    /// How H was applied: "dense" (materialised; a host block with no apply), "csr" (reduced CSR),
+    /// "csr-real" (its real part on real vectors), "walk" (CSR-free gather), "gpu-gather" (device
+    /// kernel on host vectors); the whole solve on the device lane: "device-csr" (the device CSR)
+    /// or "device-gather" (the device walk).
     std::string lane;
     double context_orbit_s = 0.0;  ///< the walk's abelian orbit table (shared by its blocks; 0 while no star
                                           ///< has needed its momentum sector)
@@ -282,9 +288,10 @@ struct SpectrumResult {
                                           int n_up);
 
 /// The degenerate multiplet of `level` in the Sz sector n_up (n_up < 0: full space):
-/// the span of the expanded vector under the abelian group, the residues, complex
-/// conjugation when the level is time-reversal folded, and the global flip when the
-/// basis holds both flip partners. Orthonormal; at most the level's multiplicity
+/// the span of the expanded vector under the residues (the abelian group only multiplies a
+/// momentum eigenstate by a phase), the level's antiunitary fold (K, or Theta for fold ==
+/// Theta), the global flip or the Theta mirror, and total S- for a whole SU(2) multiplet.
+/// Orthonormal; at most the level's multiplicity
 /// vectors (fewer in an Sz sector, which holds only part of a flip-mirrored multiplet), and at
 /// most `max_vectors` when that is > 0 (the first ones of the same orthonormal sequence).
 [[nodiscard]] std::vector<std::vector<Complex>> multiplet(const Spec& s, int n_sites, const Level& level,

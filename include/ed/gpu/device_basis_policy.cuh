@@ -74,8 +74,8 @@ inline constexpr std::uint64_t kDeviceNotFound = static_cast<std::uint64_t>(-1);
 // inside ``index_and_projection`` from ``perms`` + ``characters`` -- no
 // O(dim) orbit table. This is the standard Sandvik / HPhi / QuSpin
 // representative scheme; the matvec applies H to the single representative
-// of each row (``needs_orbit_walk == false``) and the rep-symmetry kernel
-// in ``term_kernels.cuh`` supplies ``pre_phase = inv_norms[i]``.
+// of each row (``needs_orbit_walk == false``); the device gather
+// (src/gpu/rep_matvec.cu) weights row ``i`` by ``inv_norms[i]``.
 //
 // Math (equivalent to the explicit orbit-sum formulation):
 //   For a connected state ``s'`` reached by a term from ``reps[i]`` we need

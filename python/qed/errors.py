@@ -26,7 +26,10 @@ class QEDWarning(RuntimeWarning):
 
 
 class QEDError(Exception):
-    """Base of every error qed raises on purpose."""
+    """Base of the errors qed raises when it refuses a request or a solve fails. An
+    argument of the wrong Python type raises ``TypeError``, and an index out
+    of range (an Operator site, a level of ``matrix_element``) ``IndexError``, as elsewhere
+    in Python."""
 
 
 class InvalidRequest(QEDError, ValueError):
@@ -55,4 +58,5 @@ class ResourceLimit(QEDError, MemoryError):
 
 
 class ConvergenceError(QEDError, RuntimeError):
-    """An iterative solve did not converge."""
+    """A solve did not converge: an eigs window with uncertified levels (without
+    ``allow_partial``), or a failed dense or tridiagonal LAPACK eigensolve."""

@@ -29,15 +29,17 @@ struct ThermalSpec {
     enum class Method { Exact, FTLM, mTPQ } method = Method::FTLM;
     std::vector<double> temperatures;
     std::size_t samples = 40;
-    std::size_t krylov = 100;   ///< FTLM / OFTLM Lanczos depth (>= 1)
+    std::size_t krylov = 100;   ///< FTLM / OFTLM Lanczos depth (>= 2)
     std::size_t steps = 0;     ///< mTPQ steps per sample (0 = sized for the coldest T)
     std::size_t exact_states = 0;     ///< FTLM: treat this many lowest states of each block exactly
     std::uint64_t dense_max_dim = 512;  ///< FTLM / mTPQ diagonalise blocks up to this dimension; 0: always sample
     std::uint64_t seed = 0;     ///< 0 = draw one
     Device device = Device::Cpu;
-    /// Static observables <O>(T) (method Exact or FTLM without exact_states). Each O is
-    /// averaged over the symmetries every block uses, so it may break them; with a spin
-    /// restriction it must be SU(2) invariant. Exact runs diagonalise these blocks on the host.
+    /// Static observables <O>(T) (method Exact or FTLM, with exact_states = 0). Each O is
+    /// averaged over the symmetries every block uses, so it may break them. Under a spin
+    /// restriction with an SU(2)-symmetric H an O that is not SU(2) invariant enters through its
+    /// SU(2)-scalar part (a term on more than 5 sites then raises ed::Unsupported); in a uniform
+    /// field O enters as it is. Exact runs diagonalise these blocks on the host.
     std::vector<const ::Operator*> observables;
 };
 
@@ -45,12 +47,15 @@ struct ThermalCurves {
     std::vector<double> T, lnZ, E, C, S, F;
     std::vector<double> M, chi;          ///< empty unless H conserves Sz
     std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables
-    double e0 = 0.0;       ///< lowest energy seen (exact: the ground state)
+    /// The lowest energy resolved: exact, the ground state; FTLM, the lowest weighted Ritz value of
+    /// any sample (an upper bound on E0, usually close); OFTLM, the lowest certified eigenvalue;
+    /// mTPQ, the spectral-bounds Lanczos estimate (an upper bound).
+    double e0 = 0.0;
     /// States in the ensemble: block dimension x multiplicity summed over the blocks; under a
     /// total-spin restriction the tower's states (2S + 1 per multiplet).
     std::uint64_t total_dim = 0;
     std::size_t blocks = 0;
-    std::size_t device_blocks = 0;   ///< blocks sampled on a GPU
+    std::size_t device_blocks = 0;   ///< blocks solved on a GPU: sampled blocks, or (Exact) dense-batch blocks
     Placement placement;
     Diagnostics diagnostics;
 };

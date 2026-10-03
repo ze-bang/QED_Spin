@@ -13,8 +13,8 @@
 //   * bind<CpuBackend>() -> bind_cpu(), bind<CudaBackend>() -> bind_cuda(),
 //     bind<BasicCpuBackend<double>>() -> bind_cpu_real() for an operator that is_real().
 //
-// Internal kernels stay templated (term_kernels.h), so the virtual call costs
-// one indirection per apply.
+// Internal kernels stay templated (ed/ops/row_walk.h, ed/matvec/sector_rows.h), so the
+// virtual call costs one indirection per apply.
 // =============================================================================
 
 #include <complex>

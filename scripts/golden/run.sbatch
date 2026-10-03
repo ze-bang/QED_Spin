@@ -16,9 +16,9 @@ set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 DEVICE="${DEVICE:-cpu}"
 if [ "${DEVICE}" = gpu ]; then
-    export ED_SYM_LG_GPU=1   # drop the dimension floor so toy blocks exercise the GPU lane
-    # A GPU gate without a working GPU proves nothing: the library would run the device="gpu"
-    # cases on the host, with different random streams, and report them as mismatches. Refuse.
+    export ED_SYM_LG_GPU=1   # drop the 2^20 floor of the host-vector device gather (gpu-gather); placement ignores it
+    # A GPU gate without a working GPU proves nothing: every device="gpu" case would raise
+    # DeviceUnavailable. Refuse up front, naming the node.
     if ! nvidia-smi -L 2>/dev/null | grep -q "^GPU 0"; then
         echo "=== NODE FAILURE: no usable GPU on $(hostname); resubmit with --exclude=$(hostname) ==="
         exit 3

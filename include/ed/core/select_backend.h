@@ -99,7 +99,8 @@ struct DeviceProbe {
 /// The lane one block runs on. In order:
 ///   a. DenseBatch: the host under Cpu or without a device ('gpu' raises DeviceUnavailable), and
 ///      under Auto below kDeviceDenseMinDim; else the device (no memory check here: DenseBatch
-///      sizes its batches and sends a block too large for the device to the host).
+///      sizes its batches, and a block too large for the device goes to the host under Auto and
+///      raises ResourceLimit under Gpu).
 ///   b. A block the verb solves densely runs dense on the host under every device.
 ///   c. Cpu: the host Krylov lanes, before any probe ('cpu' never initialises CUDA).
 ///   d. Auto: the device when the block has a kernel, its task may run there, dim >= the

@@ -148,7 +148,7 @@ s_H = sum(abs(c) / 2 ** ops.count("z") for c, ops, _ in H.terms())
 A pruned $k = 1$ eigensolve with that window finds the blocks at $E_0$; each is then solved
 alone, deeper until a level above the window appears, so degeneracies inside a block are
 caught. `dense_max_dim` and `prune` apply to these solves as in `qed.eigs`. A block that cannot
-certify its levels raises `RuntimeError`. Each level is expanded into all its symmetry
+certify its levels raises `qed.errors.ConvergenceError` (a `RuntimeError`). Each level is expanded into all its symmetry
 partners (other momenta of its star, point-group partners, its spin-flip and time-reversal
 partners), and under `Symmetry(total_spin=S)` with an SU(2)-symmetric $H$ into all $2S + 1$
 members of each multiplet (the solve returns the $S^z = S$ member; the others follow by
@@ -334,12 +334,14 @@ neither number is a complete zeroth moment.
 | `device` | T = 0 | T > 0 |
 |---|---|---|
 | `"cpu"` | everything on the host; CUDA is never initialised | the same |
-| `"auto"` | the ground-manifold eigensolve as `qed.eigs(device="auto")`; continued fractions on the device for target blocks of at least $2^{14}$ states | source sectors of at least $2^{16}$ states on the device |
+| `"auto"` | the ground-manifold eigensolve as `qed.eigs(device="auto")`; continued fractions on the device for target blocks of at least $2^{14}$ states whose Lanczos vectors fit in free device memory | on the device: source sectors of at least $2^{16}$ states whose two Krylov bases fit in free device memory |
 | `"gpu"` | the ground manifold is solved on momentum sectors on the device (small blocks may still be solved densely on the host); every continued fraction on the device | every source sector on the device |
 
 - `"gpu"` is strict: without a CUDA build or a visible device it raises
   `qed.errors.DeviceUnavailable` before any work. The blocks dynamics runs on (momentum
-  sectors and one-dimensional irrep blocks) have device kernels.
+  sectors and one-dimensional irrep blocks) have device kernels; a continued fraction or a
+  source sector whose device working set exceeds the free device memory raises
+  `qed.errors.ResourceLimit`.
 - On the device a source sector runs up to 8 of its samples in lockstep, sharing each $H$
   apply, as many as fit in 90% of the free device memory; device sources run one at a time.
 - An operator applied many times (a target $H$ in a continued fraction or FTLM run) is applied
@@ -412,7 +414,7 @@ autocorrelations of $S^+_q$ and $S^-_q$, which the script computes separately an
 | `qed.errors.Unsupported` (`NotImplementedError`) | `select(k0=...)`, `select(irrep=...)`, `select(irrep_character=...)` |
 | `qed.errors.DeviceUnavailable` (`RuntimeError`) | `device="gpu"` without a CUDA build or a visible device |
 | `qed.errors.ResourceLimit` (`MemoryError`) | a working set that does not fit |
-| `RuntimeError` | a ground-manifold block that could not certify its levels |
+| `qed.errors.ConvergenceError` (`RuntimeError`) | a ground-manifold block that could not certify its levels |
 | `TypeError` | a negative `krylov`, `samples` or `seed` |
 
 ## Implementation map

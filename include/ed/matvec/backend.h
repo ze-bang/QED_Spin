@@ -25,11 +25,11 @@
 // they return, the result is visible. Internally Backends may chain CUDA
 // streams, but the API is sync, which is what the solvers assume.
 //
-// NOTE: the matvec dispatch strategy (matrix-free vs assembled-CSR, real
-// vs complex specialisation) lives in a SEPARATE header
-// ``ed/matvec/matvec_backend.h``. The two are orthogonal: Backend is the
-// vector-primitives backend the solver talks to; MatVecBackendBase
-// (CpuMatVecBackend) is the SpMV-kernel strategy the Operator talks to.
+// NOTE: applying an operator is not the Backend's job. A LinearOperator
+// (ed/matvec/linear_operator.h) chooses its own representation (row walk or
+// reduced CSR, real or complex) and binds an apply to a backend's vectors
+// (bind_cpu, bind_cpu_real, bind_cuda); Backend is only the vector primitives
+// the solver talks to.
 // =============================================================================
 
 #include <complex>

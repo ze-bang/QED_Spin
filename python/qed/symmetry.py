@@ -1,7 +1,10 @@
 """Site permutations: the builders and group helpers behind ``Symmetry(spatial=...)``.
 
-A permutation is a ``list[int]`` of length ``num_sites``: entry ``i`` is the site that
-site ``i`` is mapped to. Composition is ``(a o b)[i] = a[b[i]]`` (``b`` first).
+A permutation is a ``list[int]`` of length ``num_sites``. It acts on states as
+``(U_p s)_i = s_{p[i]}``: site ``i`` of the image carries the spin site ``p[i]`` carried, so an
+operator on site ``k`` moves to site ``p^-1(k)`` (``Operator.image``), and
+``translation(N, 1)`` (``p[i] = i - 1``) shifts every spin by one site, ``i -> i + 1``.
+Composition is ``(a o b)[i] = a[b[i]]`` (``b`` first).
 
 .. code-block:: python
 

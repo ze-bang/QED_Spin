@@ -157,7 +157,8 @@ if(BUILD_ED_TESTS)
     target_include_directories(test_block_solve PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)   # internal.h
     # THE reduced-CSR budget decision (shared by the abelian + little-group
     # lanes): serial admission, and the aggregate split across concurrent
-    # sector builders that keeps ED_SYM_SECTOR_PARALLEL=1 from OOMing.
+    # sector builders (blocks solved inside an outer parallel loop) that keeps
+    # their CSRs within one budget together.
     ed_add_test(test_sector_csr_budget          tests/unit/test_sector_csr_budget.cpp)
     # Numerical accuracy: FTLM and mTPQ through ed::sectors::thermal against a dense
     # reference, without symmetry and over the Sz sectors, on the CPU and (WITH_CUDA) the
@@ -218,9 +219,9 @@ if(BUILD_ED_TESTS)
     # -------------------------------------------------------------------------
     # CUDA backend tests. Only added when WITH_CUDA is ON so non-GPU
     # builds skip compilation entirely. The TEST_CASEs themselves SKIP at
-    # runtime when no CUDA device is detected (cudaGetDeviceCount), which
-    # keeps the build-only `linux-cuda-build` CI lane green even though it
-    # has no NVIDIA hardware attached.
+    # runtime when no CUDA device is detected (cudaGetDeviceCount). The CI
+    # job `cuda-build` configures with BUILD_ED_TESTS=OFF and compiles no
+    # tests; they run in the gate's ctest stage on a GPU node.
     # -------------------------------------------------------------------------
     if(WITH_CUDA)
         # CudaBackend BLAS-1 round-trips + agreement of
@@ -229,7 +230,7 @@ if(BUILD_ED_TESTS)
         ed_add_test(test_cuda_backend           tests/unit/test_cuda_backend.cpp)
     endif()
 
-    # Backend BLAS-3 surface (gemm / gemv / trsm / qr_thin) lockdown across CpuBackend
-    # (+ CudaBackend when WITH_CUDA).
+    # The Backend's gemm, its batched level-1 calls (dot_many, axpy_many, copy) and the real
+    # BasicCpuBackend<double> against naive loops, on CpuBackend (+ CudaBackend gemm when WITH_CUDA).
     ed_add_test(test_backend_blas3              tests/unit/test_backend_blas3.cpp)
 endif()

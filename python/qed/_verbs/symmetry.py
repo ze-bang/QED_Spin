@@ -8,18 +8,20 @@ into the engine's :class:`qed._core.sectors.Spec`:
   ``None``. A list is closed and split into its largest normal abelian subgroup (the
   momenta) and one representative per coset of it (the point group); a ``Symmetries``
   is an explicit split: its ``abelian`` part (generators or the whole group) must be
-  abelian and every residue must normalise it. With accidental symmetry (a cluster whose
+  abelian, every residue must normalise it, and the residues must form a group with it (at
+  most 128 cosets). With accidental symmetry (a cluster whose
   graph has more automorphisms than its lattice) the abelian part need not be the lattice
   translations: pass the translations and point group as a list to label by them.
-* ``sz`` -- ``"auto"`` (decompose by Sz, or by Sz parity when H only conserves that),
+* ``sz`` -- ``"auto"`` or None (decompose by Sz, or by Sz parity when H only conserves that),
   an integer n (one Sz sector: n spins up, Sz = n - N/2), ``"even"`` / ``"odd"`` (the half
   whose number of up spins has that parity), or ``"off"``.
 * ``spin_flip`` / ``time_reversal`` -- ``"auto"`` (use when H has it), ``"off"``,
   ``"require"`` (fail when H lacks it). Time reversal is an antiunitary map that pairs
   momentum k with -k: complex conjugation K in the S^z basis for a real H, else
   Theta = prod_i (i sigma^y_i) K (every S^a -> -S^a), which also pairs Sz with -Sz and is not
-  used under a :meth:`select` (it would add sectors the selection did not name). Results name
-  the one used (``time_reversal``: ``"K"``, ``"theta"`` or None).
+  used under a momentum, irrep-character, ``k0`` or ``irrep`` selection of :meth:`select` (it
+  would add sectors the selection did not name; ``select(sz=...)`` does not count). Results
+  name the map that folded a returned level (``time_reversal``: ``"K"``, ``"theta"`` or None).
 * ``point_group`` -- ``False`` keeps only the abelian part.
 * ``total_spin`` -- a number S restricts to total spin S. H must be SU(2) symmetric, up to
   a uniform field along z: without the field each level counts 2S + 1 times (one multiplet);
@@ -126,9 +128,10 @@ class Symmetry:
 
     # ------------------------------------------------------------------
     def groups(self, H, diagnostics: Optional[list] = None) -> tuple[list[list[int]], list[list[int]]]:
-        """(closed abelian group, point-group coset representatives) for H: the abelian group is
-        normal in the whole spatial group, the identity first. ``diagnostics``, when given,
-        receives a (code, message) pair for each fallback taken."""
+        """(closed abelian group, point-group coset representatives) for H: the abelian group,
+        the identity first, is normal in the group it spans with the residues -- the whole
+        spatial group, unless a ``co_group_capped`` cut kept a subgroup. ``diagnostics``, when
+        given, receives a (code, message) pair for each fallback taken."""
         from .._groups import spatial_split, split_generator_set
         from .._perm import close_group, is_permutation
 
@@ -263,11 +266,10 @@ def momentum_of(level, spec, translations) -> tuple:
 
 
 def irrep_characters_of(level, spec, n_sites: int) -> dict:
-    """{R: chi_sigma(R)} over the level's little co-group, R the coset representatives
-    (the identity included: its character is the irrep dimension), and over the residues
-    that act on the level's sector as a multiple of a co-group element. A star with a trivial
-    co-group reports the trivial irrep ({identity: 1}); empty when the co-group could not be
-    projected (the block mixes irreps)."""
+    """{R: chi_sigma(R)} over the level's little co-group: the identity (its character is the
+    irrep dimension) and every residue R that fixes the level's star momentum, each residue
+    naming its own coset. A star with a trivial co-group reports the trivial irrep
+    ({identity: 1}); a level without labels (a file saved before labels existed) gives {}."""
     ident = tuple(range(n_sites))
     return {(ident if e < 0 else tuple(spec.residues[e])): complex(c) for e, c in level.irrep_characters}
 

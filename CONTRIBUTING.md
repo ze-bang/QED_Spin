@@ -187,8 +187,9 @@ commits are compared with it. The references are in
 - `REF=<file>`.
 - `ONLY`, `REASON`, `TOL`, `GOT`, `ONCE` for the modes that take them.
 
-The GPU harness sets `ED_SYM_LG_GPU=1`, so that toy blocks reach the device lane. The tiers
-are `exact` (1e-10), `transport` (1e-7) and `stochastic` (fixed-seed sampling, 1e-10).
+The GPU harness sets `ED_SYM_LG_GPU=1`, which drops the 2^20-representative floor of the
+host-vector device gather (`gpu-gather`); it does not change where `place()` puts a block. The
+tiers are `exact` (1e-10), `transport` (1e-7) and `stochastic` (fixed-seed sampling, 1e-10).
 
 Rules:
 
@@ -298,7 +299,10 @@ repeats with the baseline. It exits 1 when a case is more than 10% slower or use
 - Errors are the types in `include/ed/core/errors.h` (`InvalidRequest`, `EmptySelection`,
   `Unsupported`, `DeviceUnavailable`, `DeviceUnsupported`, `ResourceLimit`,
   `ConvergenceError`). The bindings translate them into `qed.errors`.
-- A device lane never falls back to the host under `device="gpu"`: it raises, naming the block.
+- Under `device="gpu"` nothing `place()` sent to the device falls back to the host: a block
+  without a device kernel raises `DeviceUnsupported` (naming the block), one that does not fit
+  `ResourceLimit` (a failed dense batch is first retried in halves on the device).
+  `device="auto"` keeps its host fallbacks.
 
 ## Where things live
 

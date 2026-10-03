@@ -123,7 +123,8 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc);
 //   * `nn_pairs`  -- nearest-neighbour edges (i, j), i != j, kept in their
 //                    orientation; a pair listed twice (either way) is one bond
 //   * `sublattice`-- optional; zero-filled if empty.
-// The lattice knows no shells beyond these bonds (nnn_pairs() raises).
+// An endpoint >= num_sites, an edge (i, i) or a non-empty `sublattice` of another length
+// is an InvalidRequest. The lattice knows no shells beyond these bonds (nnn_pairs() raises).
 Lattice from_neighbor_lists(const std::vector<Position>& positions,
                             const std::vector<std::pair<std::size_t, std::size_t>>& nn_pairs,
                             const std::vector<int>& sublattice = {});
@@ -133,7 +134,8 @@ Lattice from_neighbor_lists(const std::vector<Position>& positions,
 // an "edges" or "bonds" block holds one "i j" per line. Headers are case-blind
 // and may end in ':'. A block may state its length, on its header line or alone
 // on its first line, and must then hold exactly that many lines. '#' starts a
-// comment line. Anything else is an InvalidRequest naming the line.
+// comment line. Anything else is an InvalidRequest naming the line; a file that
+// cannot be opened or lists no positions is an InvalidRequest too.
 Lattice from_cluster_file(const std::string& path);
 
 }  // namespace lattice

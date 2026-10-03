@@ -37,7 +37,7 @@ Each verb checks its arguments, resolves `device=` (`_verbs/_device.py`) and cal
 
 | Spec field | from | meaning |
 |---|---|---|
-| `abelian` | `spatial` | a closed abelian group of site permutations, normal in the spatial group; its characters are the momenta |
+| `abelian` | `spatial` | a closed abelian group of site permutations, normal in the group it spans with the residues (the whole spatial group unless the co-group was capped); its characters are the momenta |
 | `residues` | `spatial`, `point_group` | one representative per coset of `abelian` (the point group) |
 | `n_up`, `sz_parity`, `use_sz` | `sz` | one Sz sector, one half by the parity of the up-spin count, or `sz="off"` |
 | `spin_flip`, `time_reversal` | same names | -1 auto, 0 off, 1 require |
@@ -49,7 +49,8 @@ canonical terms and splits the automorphisms that commute with H into the larges
 subgroup and its coset representatives. A graph with more than 4096 automorphisms is not
 enumerated (no spatial symmetry, with a diagnostic); a group whose co-group exceeds 128 elements
 is cut down to a subgroup whose co-group fits. A permutation list is closed (at most 4096
-elements) and split the same way; a `qed.Symmetries` is an explicit split, checked, not re-chosen.
+elements) and split the same way; a `qed.Symmetries` is an explicit split, checked, not re-chosen
+(its residues must form a group with the abelian part and give at most 128 cosets).
 The engine then validates H (1 to 63 sites, finite, Hermitian), the Spec (permutations, `abelian`
 normalised by every residue, every permutation commuting with H), the options and the environment
 (a malformed `ED_*` value refuses every verb) before any work.
@@ -77,7 +78,8 @@ space); chooses the antiunitary fold of stars -- K for a real H, else Theta wher
 closed under it and the flip is not engaged; and maps each residue's conjugation onto the momenta.
 `star_partition` unites momenta under the residues and the fold, and `walk()` (`src/engine/walk.h`)
 builds one star at a time and hands its blocks to the verb. Under `select(irrep_character=...)`
-nothing is folded by time reversal, and Theta folds nothing under any selection.
+nothing is folded by time reversal, and Theta folds nothing under a momentum, star or irrep
+selection (`select(sz=...)` only names an Sz sector: at Sz = 0 Theta still folds k with -k).
 
 `build_star_blocks` (`src/engine/stars.cpp`) takes the momentum sector's dimension from Burnside's
 count, (1/|A'|) sum_g conj(chi(g)) Tr U_g, without building the sector, and then:
@@ -143,8 +145,9 @@ M_r = sum_{s in Stab(r)} conj(D(s)) is |Stab| times a projector; C_r, shared by 
 class, holds its eigenvectors of eigenvalue |Stab| scaled by 1/sqrt(|Stab|), so
 C_r^dag M_r C_r = I (`group_sector_irrep_from_table`). An operator entry between representatives
 is the rank(r) x rank(c) block conj(h) C_r^dag A(t) C_c, A(t) = sum_{g: g t = rep_c} D(g)^T.
-The row walk's blocks hold irreps up to dimension 8 (`kMaxIrrepDim`, `<ed/matvec/sector_rows.h>`;
-`load_eigs` refuses a larger one); d = 1 is the case C = 1/norm.
+The row walk's blocks hold irreps up to dimension 8 (`kMaxIrrepDim`, `<ed/matvec/sector_rows.h>`):
+the sector build refuses a larger one (`Unsupported`), and `load_eigs` a file that holds one
+(`InvalidRequest`); d = 1 is the case C = 1/norm.
 
 ### State lookups
 
@@ -174,14 +177,14 @@ operators between two sectors (`CrossSectorMatVec`: rows of the target, looked u
 `EigResult.block_stats` (one dict per solved `eigs` block: `k0`, `irrep`, `flip_parity`, `n_up`,
 `dim`, `kind` (`"group"` or `"plain"`), `lane`, `context_orbit_s`, `star_orbit_s`,
 `star_build_s`, `build_s`, `nnz`, `csr_bytes`, `applies`, `apply_s`, `other_s`, `solve_s`)
-reports it in `lane` (`"none"` before any apply):
+reports it in `lane` (a host block solved without an apply of H, a dense solve, reports `"dense"`):
 
 | lane | representation | when |
 |---|---|---|
 | `csr` | the reduced CSR, built once, then an SpMV | default (`ED_SYM_REDUCED_CSR` unset or true); dim < 2^32; estimate within the block's CSR budget |
 | `csr-real` | the CSR's real dictionary on real vectors | a host `eigs` lane (or its prune estimate) of a block whose CSR keeps a dictionary with every imaginary part within 32 eps of its largest value, unless `ED_SYM_REAL=0`; FTLM, OFTLM, mTPQ and dynamics stay complex |
 | `walk` | the row walk on every apply, O(#reps) memory | the CSR declined |
-| `gpu-gather` | the device gather on host vectors | a host Krylov lane under `device="auto"`, 1-dim sector, CSR declined, >= 2^20 representatives (`ED_SYM_LG_GPU`) |
+| `gpu-gather` | the device gather on host vectors | an operator applied on the host under `device="auto"` or `"gpu"` (a host Krylov lane under `"auto"`; under `"gpu"` an operator a host path applies, such as S^2 or an observable), 1-dim sector, CSR declined, >= 2^20 representatives (`ED_SYM_LG_GPU`) |
 | `device-csr`, `device-gather` | the device kernels below | the solve runs on the device |
 | `dense` | the matrix, written from the CSR | dense solves |
 
@@ -233,8 +236,10 @@ solve them concurrently, one serial LAPACK call per thread, largest first (a blo
 budget is solved alone, on the threaded LAPACK); device blocks are written from their CSR into
 batches of at most `ED_GPU_DENSE_BATCH_GIB` of matrices and solved on a pool of up to 8 streams by
 cuSOLVER's 64-bit syevd, a real block in real arithmetic. A block larger than a batch goes up alone when it
-and its workspace fit half the free device memory, else to the host, as does a batch whose device
-solve fails.
+and its workspace fit half the free device memory. Under `"auto"` a block that does not fit, and a
+batch whose device solve fails, go to the host; under `"gpu"` the block raises `ResourceLimit`, and
+the failed batch is retried in halves on the device until a single block that still fails raises
+`ResourceLimit`.
 
 ## Device placement
 
@@ -260,8 +265,8 @@ the block owes) is solved densely on the host under `"auto"` and `"gpu"`. The `"
 |---|---|---|
 | `Eigs`, `Sampled`, `Oftlm` | 2^14 | yes |
 | `DenseBatch` | 1024 (rule 1) | the batch sizes itself |
-| `DynamicsCf` | 2^14 | no |
-| `DynamicsFtlm` | 2^16 | no |
+| `DynamicsCf` | 2^14 | yes (Lanczos vectors) |
+| `DynamicsFtlm` | 2^16 | yes (both bases) |
 
 Device kernels (`<ed/gpu/rep_matvec.h>`):
 
@@ -283,13 +288,14 @@ the width on an allocation failure. The device blocks of a thread share one
 |---|---|
 | no CUDA build, no visible device, or device memory that cannot be queried | `DeviceUnavailable` |
 | a block without a device kernel: a sector of an irrep of dimension > 1 whose CSR does not fit; the message names star, irrep, n_up and dimension | `DeviceUnsupported` |
-| an `eigs` or sampled `thermal` block whose device working set exceeds the free device memory | `ResourceLimit` |
+| a thermal observable without a device kernel; a spin-tower penalty re-solve whose penalty operator has no device kernel | `DeviceUnsupported` |
+| an `eigs`, sampled `thermal`, OFTLM or `dynamics` block whose device working set exceeds the free device memory | `ResourceLimit` |
 | a d > 1 CSR that cannot be uploaded after the block was placed | `ResourceLimit` |
+| a dense-batch block too large for the device, or whose device solve fails alone (a failed batch is retried in halves first) | `ResourceLimit` |
 
 It still runs on the host: `eigs` blocks within the dense crossover, of at most 32 states or with
-2 want >= dim; sampled `thermal` blocks within `dense_max_dim`; dense-batch blocks too large for the
-device, and a batch whose device solve failed; exact `thermal` with observables; `expect`,
-`matrix_element` and `vectors()`.
+2 want >= dim; sampled `thermal` blocks within `dense_max_dim`; exact `thermal` with observables;
+`expect`, `matrix_element` and `vectors()`.
 
 ## Memory budgets
 
@@ -322,7 +328,7 @@ memory pool holds unused.
 | `ED_SYM_REP_RANKTABLE_BUDGET_GIB` | 0.5 | the shared rank table, C(N, n_up) int32; 0 builds none |
 | `ED_GPU_CSR_BUDGET_GIB` | half the free device memory at the bind | an operator's device CSR, built there or uploaded; 0: the device gather for a 1-dim sector, and no device kernel for a sector of an irrep of dimension > 1 |
 | `ED_GPU_DENSE_BATCH_GIB` | 2 | matrices per device dense batch, also at most a quarter of the free device memory and of the free RAM |
-| `ED_GPU_SYM_CACHE_GIB` | 25% (rank tables, at most 24 GiB) and 15% (sector mirrors, at most 16 GiB) of the device | the device caches that pin recent symmetry tables; 0 pins none |
+| `ED_GPU_SYM_CACHE_GIB` | 25% (rank tables, at most 24 GiB) and 15% (sector mirrors, at most 16 GiB) of the device's total memory | each device cache that pins recent symmetry tables, read once per process; 0 pins none, a positive budget keeps at least the newest entry |
 | `ED_MEM_GUARD_OFF` | off | on: the RAM guard and the RAM- and device-fit caps above stand down (the defaults of `ED_GPU_CSR_BUDGET_GIB` and `ED_GPU_SYM_CACHE_GIB` stay) |
 
 Fixed caps: the orbit-table registry (8 tables; past the newest, a quarter of the free RAM), the

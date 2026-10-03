@@ -50,7 +50,9 @@ S1 = qed.dynamics(H, Sz_pi, w, eta=0.05, T=[0.5])   # T > 0: finite-temperature 
 
   The sampled methods draw `samples` random vectors per block. `seed=0` draws a seed. Blocks
   up to `dense_max_dim` states (default 512; 0 always samples) are diagonalised exactly.
-  `observables` works with `"exact"`, and with `"ftlm"` when `exact_states` is 0.
+  `observables` works with `"exact"` and `"ftlm"`, and only with `exact_states` = 0 (`"mtpq"`,
+  or `exact_states > 0` with any method, raises `InvalidRequest`). Only `"ftlm"` reads
+  `exact_states`.
 - **`dynamics`.** It computes
   $S_{AB}(\omega) = \sum_m p_m \langle m|A^\dagger \delta(\omega - H + E_m) B|m\rangle$,
   broadened by a Lorentzian of width `eta`.
@@ -178,24 +180,25 @@ Every verb takes `device="cpu" | "gpu" | "auto"`; `expect` passes it on to `eigs
 - **`"gpu"` is strict.**
   - It needs a CUDA build and a visible device; otherwise it raises
     `qed.errors.DeviceUnavailable`.
-  - Every Krylov solve runs on the device. A block that cannot run there raises
-    `DeviceUnsupported`, naming the block, or `ResourceLimit` when its working set does not
-    fit in device memory. Nothing falls back to the host silently.
+  - Every Krylov solve and every dense batch runs on the device. A block that cannot run
+    there raises `DeviceUnsupported`, naming the block, or `ResourceLimit` when its working
+    set does not fit in device memory; a dense block too large for the device, or whose
+    device solve fails even alone, also raises `ResourceLimit`. Nothing falls back to the host.
   - Some dense solves stay on the host, and `placement` counts them:
     - `eigs` blocks up to `dense_max_dim`, of at most 32 states, or whose dimension is at most
       twice the number of levels the block owes;
     - sampled `thermal` blocks up to `dense_max_dim`;
-    - exact `thermal` with `observables`;
-    - blocks of a dense batch that do not fit on the device.
+    - exact `thermal` with `observables`.
 - **`"auto"`** places each block by the table in `include/ed/core/device.h`. A block goes to
-  the device at these sizes (Krylov blocks also need a device kernel):
-  - eigs, FTLM/mTPQ and OFTLM: from 2^14 states, when the working set fits in free device
-    memory;
+  the device at these sizes (Krylov blocks also need a device kernel and a working set that
+  fits in free device memory):
+  - eigs, FTLM/mTPQ and OFTLM: from 2^14 states;
   - T = 0 continued fractions: from 2^14 states;
   - T > 0 dynamics sources: from 2^16 states;
   - dense spectra: from 1024 states.
 
-  Every other block runs on the host.
+  Every other block runs on the host, and so does a dense block too large for the device or a
+  dense batch whose device solve fails.
 
 These parts run on the device:
 
@@ -215,13 +218,18 @@ These parts run on the device:
     after the block was placed.
   - Without a device CSR, a sector of a one-dimensional irrep is applied by a matrix-free
     gather kernel. `block_stats` reports the lane as `device-csr` or `device-gather`.
-  - Under `"auto"`, a block of a one-dimensional irrep kept on the host whose reduced CSR was
-    not built may still apply H with the device gather on host vectors from 2^20
-    representatives (lane `gpu-gather`, counted as `host_krylov`). `ED_SYM_LG_GPU=0` vetoes this, `=1` drops the floor.
+  - Under `"auto"` and `"gpu"`, an operator on a sector of a one-dimensional irrep that is
+    applied on the host and whose reduced CSR was not built (under `"auto"` a block kept on the
+    host; under `"gpu"` an operator a host path applies, such as S² or an observable) may still
+    be applied with the device gather on host vectors from 2^20 representatives (lane
+    `gpu-gather`; a Krylov solve on it counts as `host_krylov`). `ED_SYM_LG_GPU=0` vetoes this,
+    `=1` drops the floor.
 - **Dense spectra** (`spectrum`, exact `thermal`). They use cuSOLVER's 64-bit `syevd`, and real
   blocks run in real arithmetic. Batches hold up to `ED_GPU_DENSE_BATCH_GIB` (default 2 GiB,
   at most a quarter of the free device memory and of the RAM). A block larger than a batch
-  runs alone when it and its workspace fit in half the free device memory.
+  runs alone when it and its workspace fit in half the free device memory; otherwise `"auto"`
+  solves it on the host and `"gpu"` raises `ResourceLimit`. Under `"gpu"` a batch whose device
+  solve fails is retried in halves on the device.
 
 `qed.debug_env("ED_GPU")` lists the device variables with their values and defaults.
 
@@ -274,12 +282,16 @@ when it is absent.
   `qed.set_log_level(level, stream=None)` or `QED_LOG_LEVEL` sets the level (default `"warn"`).
   Without a stream, warn- and error-level records also arrive as `qed.errors.QEDWarning`.
 - Refusals raise the classes in `qed.errors`. Each one also derives from the matching builtin
-  (`ValueError`, `NotImplementedError`, `RuntimeError`, `MemoryError`).
+  (`ValueError`, `NotImplementedError`, `RuntimeError`, `MemoryError`). An argument of the wrong
+  Python type raises `TypeError`, and an index out of range (an `Operator` site, a level of
+  `matrix_element`) `IndexError`.
 - Environment variables are read through one registry (`include/ed/core/config.h`);
   `qed.debug_env(prefix)` lists them. An `ED_*` name the registry does not declare warns at
   import (`ED_BUILD_*`, `ED_TEST_*` and `ED_BENCH_*` excepted; `QED_*` names are not scanned).
   A registered variable whose value does not parse warns at import, and every verb then
-  refuses to run. With `ED_ENV_STRICT=1` both raise at import.
+  refuses to run. With `ED_ENV_STRICT=1` both raise at import. A flag is off for `false`,
+  `off`, `no` (any case) or an integer equal to zero, and on for `true`, `on`, `yes` or a
+  nonzero integer.
 
 ## Verification
 

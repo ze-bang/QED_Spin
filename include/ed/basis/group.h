@@ -5,7 +5,7 @@
 // the permutation algebra (identity / validate /
 // compose / power / order), the common builders (translation,
 // reflection_1d, site_swap) and `generate_group`, which closes a list of
-// generators into the full group. Exposed to Python as `qed._core.sym`.
+// generators into the full group. Exposed to Python as `qed._core.symmetry`.
 //
 // What this DSL does NOT do
 // -------------------------
@@ -14,9 +14,10 @@
 //   * Irreps / sectors: the symmetry engine derives characters from the
 //     group itself (ed/basis/irreps.h).
 //
-// All functions throw `std::invalid_argument` on malformed input
-// (wrong-length permutation, non-bijective permutation, ...). Validation
-// is cheap (<1us per generator), so we always run it.
+// validate, order, the builders and generate_group throw `std::invalid_argument` on
+// malformed input (wrong length, an entry out of range, not a bijection). compose and
+// power check lengths only: they sit in the group-closure loops, so their callers
+// validate first (the Python bindings validate every argument).
 // =============================================================================
 
 #pragma once
@@ -30,9 +31,9 @@
 
 namespace ed::sym {
 
-/// A site permutation: `perm[i]` is the new label of site `i` after the
-/// permutation acts. Composition convention: `(a o b)[i] = a[b[i]]`,
-/// i.e. `b` is applied first.
+/// A site permutation `perm`. It acts on states as (U s)_i = s_{perm[i]}: site `i` of the image
+/// carries the spin site `perm[i]` carried, so an operator on site k moves to perm^-1(k).
+/// Composition convention: `(a o b)[i] = a[b[i]]`, i.e. `b` is applied first.
 using Permutation = std::vector<int>;
 
 // ---------------------------------------------------------------------------

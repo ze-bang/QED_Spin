@@ -93,7 +93,8 @@ void bind_input(py::module_& parent) {
         Attributes
         ----------
         num_sites : int
-        positions : list[tuple[float, float, float]]
+        positions : list[list[float]]
+            One [x, y, z] list per site.
         sublattice : list[int]
         nn_bonds : list[Bond]
             Each nearest-neighbour pair once, oriented as generated (the
@@ -105,7 +106,7 @@ void bind_input(py::module_& parent) {
             The second and third distance shells (minimum image on a
             periodic lattice), i < j. ``nnn_pairs()`` / ``nnnn_pairs()``
             raise for a lattice built from an adjacency list.
-        lattice_vectors : tuple of three (float, float, float)
+        lattice_vectors : list of three [x, y, z] lists
         pbc : bool
         label : str
     )pbdoc")

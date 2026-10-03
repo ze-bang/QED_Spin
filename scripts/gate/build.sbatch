@@ -1,6 +1,6 @@
 #!/bin/bash
-# Gate step 1: environment registry, no-print check + build (tests, _core) of VARIANT (cuda | cpu,
-# default cuda). The task arrays depend on it.
+# Gate step 1: the four lints (environment registry, no-print, tolerance literals, int narrowing),
+# then the build (unit tests, _core) of VARIANT (cuda | cpu, default cuda). The task arrays depend on it.
 # Measured on 16 cores: a full rebuild 3.5 min, an incremental one about 1 min.
 #SBATCH --job-name=gate_build
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=16 --mem=32G

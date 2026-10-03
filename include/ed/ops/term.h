@@ -14,9 +14,9 @@
 //
 // Canonical form (what MaskedOperator stores): cond_mask == flip_mask (a condition
 // only where a ladder operator acts: the bit's value says which ladder), and sign_mask is
-// disjoint from flip_mask (Z = 2 S^z factors on unflipped sites). In that form every
-// site carries exactly one of {I, Z, S+, S-}, which is a basis of the 2x2 matrices,
-// so the expansion of an operator into terms is unique.
+// disjoint from flip_mask (Z = (-1)^bit = -2 S^z factors on unflipped sites, a set bit
+// being up). In that form every site carries exactly one of {I, Z, S+, S-}, which is a
+// basis of the 2x2 matrices, so the expansion of an operator into terms is unique.
 // =============================================================================
 #pragma once
 
@@ -43,7 +43,7 @@ struct MaskedTerm {
     std::uint64_t cond_mask{0};   ///< bits whose value the term requires
     std::uint64_t cond_val{0};    ///< required values on cond_mask
     std::uint64_t flip_mask{0};   ///< bits the term flips
-    std::uint64_t sign_mask{0};   ///< bits contributing (-1)^bit (Z = 2 S^z)
+    std::uint64_t sign_mask{0};   ///< bits contributing (-1)^bit (Z = -2 S^z: a set bit is up)
     std::complex<double> coeff{0.0, 0.0};
 };
 
@@ -67,8 +67,8 @@ ED_OPS_HD bool masked_apply(const MaskedTerm& t, std::uint64_t s, std::uint64_t&
 /// Change of the number of set bits (up spins) the term produces, when it acts: a flipped
 /// bit that was set removes one, a flipped bit that was clear adds one.
 ED_OPS_HD int masked_delta_set_bits(const MaskedTerm& t) {
-    const std::uint64_t flipped_set = t.flip_mask & t.cond_val;             // S+ sites
-    const std::uint64_t flipped_clear = t.flip_mask & ~t.cond_val & t.cond_mask;  // S- sites
+    const std::uint64_t flipped_set = t.flip_mask & t.cond_val;             // S- sites (a set bit is up)
+    const std::uint64_t flipped_clear = t.flip_mask & ~t.cond_val & t.cond_mask;  // S+ sites
     return masked_popcount(flipped_clear) - masked_popcount(flipped_set);
 }
 

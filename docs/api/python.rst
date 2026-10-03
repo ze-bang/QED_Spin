@@ -198,7 +198,8 @@ turns it into the engine's ``Spec`` for a given H. Its fields are:
 ``spin_flip``, ``time_reversal``
    ``"auto"`` uses the symmetry when H has it, ``"off"`` never, and ``"require"`` fails when
    H lacks it. Time reversal is complex conjugation K for a real H. Otherwise it is
-   Θ = Π_i (iσʸ_i) K, which is not used under a :meth:`Symmetry.select`.
+   Θ = Π_i (iσʸ_i) K, which is not used under a momentum, irrep-character, ``k0`` or
+   ``irrep`` selection of :meth:`Symmetry.select` (``select(sz=...)`` does not count).
 ``point_group``
    ``False`` keeps only the abelian part.
 ``total_spin``
@@ -233,15 +234,19 @@ is a ``list[int]`` of length ``n_sites``.
 
 .. py:function:: compose(a, b)
 
-   The composition ``(a o b)[i] = a[b[i]]``; ``b`` is applied first.
+   The composition ``(a o b)[i] = a[b[i]]``; ``b`` is applied first. Raises
+   :class:`qed.errors.InvalidRequest` unless ``a`` and ``b`` are permutations of the same
+   length.
 
 .. py:function:: power(g, k)
 
-   ``g`` to the power ``k`` for ``k >= 0``; the power 0 is the identity.
+   ``g`` to the power ``k`` for ``k >= 0``; the power 0 is the identity. Raises
+   :class:`qed.errors.InvalidRequest` unless ``g`` is a permutation and ``k >= 0``.
 
 .. py:function:: order(g)
 
-   The smallest positive ``k`` with ``g`` to the power ``k`` equal to the identity.
+   The smallest positive ``k`` with ``g`` to the power ``k`` equal to the identity. Raises
+   :class:`qed.errors.InvalidRequest` unless ``g`` is a permutation.
 
 .. py:function:: translation(n_sites, shift=1)
 
@@ -328,6 +333,8 @@ Operators
 
    .. py:method:: is_hermitian(rtol=1e-10)
 
+      ``equals(adjoint(), rtol)``; False when a coefficient is NaN or infinite.
+
    .. py:method:: terms()
 
       The canonical terms, as ``(coeff, ops, sites)`` with ``ops`` over ``+ - z`` on
@@ -350,7 +357,8 @@ Operators
                   transform_tuples()
 
       The records in insertion order, as tuples. These read the records, not the
-      canonical form, and do not include the terms on four or more sites.
+      canonical form; no record holds a term on four or more sites, so they raise
+      :class:`qed.errors.Unsupported` for an operator that has one.
       ``transform_tuples()`` gives the one- and two-body records as
       ``(op_type, site, coeff, is_two_body, op_type_2, site_2)``, without the three-body ones.
 
@@ -402,7 +410,7 @@ The lattice types are bound from ``ed::input`` (``include/ed/input/``).
    .. py:attribute:: num_sites
    .. py:attribute:: positions
 
-      One ``(x, y, z)`` per site.
+      One ``[x, y, z]`` list per site.
 
    .. py:attribute:: sublattice
    .. py:attribute:: nn_bonds
@@ -448,15 +456,17 @@ The lattice types are bound from ``ed::input`` (``include/ed/input/``).
 
 .. py:function:: from_neighbor_lists(positions, nn_pairs, sublattice=[])
 
-   A lattice from explicit positions and nearest-neighbour edges, each kept in its
-   orientation. It knows no further shells.
+   A lattice from explicit positions (each an ``(x, y, z)`` 3-vector) and nearest-neighbour
+   edges, each kept in its orientation. It knows no further shells. An edge endpoint
+   ``>= len(positions)``, an edge ``(i, i)`` or a non-empty ``sublattice`` of another length
+   raises :class:`qed.errors.InvalidRequest`.
 
 .. py:function:: from_cluster_file(path)
 
    Reads a ``cluster.txt``-style file: a ``positions`` block and an ``edges`` (or
    ``bonds``) block. The parse is strict: anything else raises
-   :class:`qed.errors.InvalidRequest`, naming the line. A file that cannot be opened raises
-   ``RuntimeError``.
+   :class:`qed.errors.InvalidRequest`, naming the line. A file that cannot be opened, or
+   that lists no positions, also raises :class:`qed.errors.InvalidRequest`.
 
 ``qed.dssf``: structure-factor probes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

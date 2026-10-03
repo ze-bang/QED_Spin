@@ -4,8 +4,8 @@
 //
 // Basis policies: compile-time-known descriptions of how a
 // (array-index, bitstring) pairing works in a given Hilbert subspace. They
-// are the second template argument of the unified term kernel
-// (term_kernels.h). This header defines FullBasisPolicy (full Hilbert
+// are the basis argument of the row walk (ed/ops/row_walk.h) and the full-space
+// matvec. This header defines FullBasisPolicy (full Hilbert
 // space). The symmetry sectors use RepSymmetryBasisPolicy with its own
 // kernels, see rep_symmetry_basis_policy.h.
 //

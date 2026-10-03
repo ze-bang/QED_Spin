@@ -5,7 +5,7 @@ the package in 0.6.0; the physical-label helpers did not survive.)
 Conventions
   a1 = (1, 0), a2 = (1/2, sqrt3/2); a site is (n1, n2) in this basis, wrapped on the
   superlattice T1 = (a, b), T2 = (c, d) (rows, in the same basis). Permutations follow
-  qed: p[i] = image of site i.
+  qed (qed.symmetry): site i of the image carries the spin of site p[i].
 
 Bonds are a MULTISET: on a small torus two offsets can wrap onto the same site pair
 (the 12-site cluster's second shell does), and the torus Hamiltonian carries that

@@ -95,12 +95,12 @@ WITH_CUDA = "OFF"
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 python_files = ["test_*.py"]
-# Skip the long-running perf/scale guards by default (run them in the nightly
-# benchmarks lane with `-m slow`).
+# Skip the long-running perf/scale guards, the grid and the regress ratchet by default (select
+# them with -m; the gate runs the grid and regress shards from scripts/gate/tasks.sh).
 addopts = "-q -m 'not slow and not grid and not regress'"
 markers = [
-    "slow: long-running performance / scale guard (deselected by default; run in nightly with -m slow)",
-    "grid: task x symmetry x backend coverage grid (run with -m grid; scripts/run_grid.sbatch)",
+    "slow: long-running performance / scale guard (deselected by default; run by hand with -m slow)",
+    "grid: task x symmetry x backend coverage grid (run with -m grid; the gate shards it in scripts/gate/tasks.sh)",
     "regress: audit repro ratchet, tests/python/regress (run with -m 'regress and not perf and not info')",
     "perf: regress case for a confirmed performance issue (non-blocking bench stage)",
     "info: regress case that is inconclusive, not reproduced or an elegance note",

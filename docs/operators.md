@@ -28,7 +28,7 @@ O.num_sites                          # N
 O.dimension                          # 2**N
 ```
 
-`num_sites >= 64` raises `RuntimeError`. An operator on 0 sites can be constructed but not
+`num_sites >= 64` raises `qed.errors.Unsupported`. An operator on 0 sites can be constructed but not
 used: its canonical form, and every verb, need `1 <= num_sites <= 63`.
 
 Terms are appended in place, one record per call, with integer op codes `qed.OP_SPLUS = 0`,
@@ -90,7 +90,7 @@ raise `InvalidRequest`. The identity is `P(N, "I", [i])` for any valid `i` (or `
 |---|---|
 | `A + B`, `A - B`, `-A` | sum, difference, negation |
 | `c * A`, `A * c` | scalar multiple; `c` a Python `int`, `float` or `complex` |
-| `A / c` | `A` times `1/c`; `c == 0` raises `ValueError` |
+| `A / c` | `A` times `1/c`; `c == 0` raises `qed.errors.InvalidRequest` (a `ValueError`) |
 | `A @ B` | operator product, `B` acting first |
 | `A.adjoint()` | $A^\dagger$ |
 | `A.copy()`, `copy.copy(A)`, `copy.deepcopy(A)` | an independent copy |
@@ -118,7 +118,7 @@ otherwise). Notes:
 | method | returns |
 |---|---|
 | `A.equals(other, rtol=1e-10)` | `True` when the canonical terms agree, each within `rtol` times the largest coefficient of either. Different `num_sites`: `False`. |
-| `A.is_hermitian(rtol=1e-10)` | `A.equals(A.adjoint())` in the same sense |
+| `A.is_hermitian(rtol=1e-10)` | `A.equals(A.adjoint())` in the same sense; `False` when a coefficient is NaN or infinite |
 | `A.terms()` | the canonical terms as a list of `(coeff, ops, sites)` |
 | `A.image(perm, flip=False)` | $U A U^\dagger$ for the site permutation `perm`, then the global spin flip $\prod_i \sigma^x_i$ when `flip` |
 | `A.apply(vec)` | $A\lvert v\rangle$ on the full $2^N$ space |
@@ -158,14 +158,16 @@ checks (a dense matrix is `np.column_stack([A.apply(e) for e in np.eye(2**N, dty
 
 **Record readers.** `iter_one_body_terms()`, `iter_two_body_terms()`,
 `iter_three_body_terms()` and `transform_tuples()` (one- and two-body records only) list the
-records as stored -- unmerged, in insertion order, and without the terms on four or more
-sites. `terms()` is the representation to read.
+records as stored -- unmerged, in insertion order. No record holds a term on four or more
+sites, so they raise `qed.errors.Unsupported` for an operator that has one. `terms()` is the
+representation to read.
 
 ### Terms on four or more sites
 
 A canonical term on four or more sites (from `Operator.product` with four distinct sites, a
 product such as `bond(0, 1) @ bond(2, 3)`, or the builder's `ring_exchange` and `ss_ss`) is
-stored as a canonical term, not as a record; `terms()` lists it and the record readers do not.
+stored as a canonical term, not as a record; `terms()` lists it, and the record readers refuse
+the operator (`Unsupported`).
 Such terms work
 
 - in $H$, in every verb and on every lane, CPU and GPU;
@@ -177,8 +179,9 @@ Two limits:
 
 - Under `Symmetry(total_spin=S)` with an SU(2)-symmetric $H$, `expect` and thermal
   `observables` replace an observable that is not SU(2) invariant by its SU(2)-scalar part
-  (below). That part is computed exactly on terms of at most 5 sites; an observable with a
-  longer term raises `qed.errors.Unsupported` there.
+  (below). That part is computed exactly on terms of at most 5 sites; such an observable with
+  any longer term raises `qed.errors.Unsupported` there, even when that term is itself SU(2)
+  invariant. An SU(2)-invariant observable is used as it is, whatever its terms.
 - Symmetry discovery (`Symmetry(spatial="auto")`, `qed.find_symmetries`) builds its
   interaction graph from the terms on at most three sites and checks every candidate
   permutation against all terms. When those terms leave more than 4096 graph automorphisms
@@ -197,14 +200,15 @@ H = (qed.input.HamiltonianBuilder(lat.num_sites)
      .to_operator())
 ```
 
-`HamiltonianBuilder(num_sites)` needs `1 <= num_sites <= 63` (`ValueError`). Every term
-method and `clear()` return the builder. Arguments:
+`HamiltonianBuilder(num_sites)` needs `1 <= num_sites <= 63` (`qed.errors.InvalidRequest`, a
+`ValueError`). Every term method and `clear()` return the builder. The refusals below are
+`InvalidRequest` unless they say otherwise. Arguments:
 
 - `bonds`: an iterable of `(i, j)` pairs (tuples or lists), as `Lattice.nn_pairs()` returns
   them. `qed.input.Bond` objects are not accepted; pass `(b.i, b.j)`. A bond with `i == j` is
   skipped.
 - Sites are non-negative integers (`TypeError` for a negative or non-integer site);
-  a site `>= num_sites` raises `IndexError`.
+  a site `>= num_sites` raises `InvalidRequest`.
 - Every bond method checks the whole call before it adds anything: a refused call leaves the
   builder unchanged.
 
@@ -233,27 +237,28 @@ Details and refusals:
 
 - `xxz` adds no $S^zS^z$ record when `Jz == 0`; `xyz` adds only the records with nonzero
   coefficients. `heisenberg(bonds, J)` is `xxz(bonds, J, J)`.
-- `kitaev`: `bonds` and `bond_axis` of different lengths, or an axis outside {0, 1, 2},
-  raise `ValueError`. On `lattice.honeycomb` the colours are the bond types:
+- `kitaev`: `bonds` and `bond_axis` of different lengths, or an axis outside {0, 1, 2} on any
+  bond (a skipped self-bond included), raise `InvalidRequest`; an axis that is not an integer
+  raises `TypeError`. On `lattice.honeycomb` the colours are the bond types:
   `b.kitaev(lat.nn_pairs(), [bd.bond_type for bd in lat.nn_bonds], K)`.
-- `dm`: one 3-vector per bond (`ValueError` otherwise); the orientation of each bond matters,
+- `dm`: one 3-vector per bond (`InvalidRequest` otherwise); the orientation of each bond matters,
   and `Lattice.nn_pairs()` keeps the orientation the generator chose (below).
-- `zeeman` raises `TypeError` unless `h` is a tuple and `ValueError` unless it has 3 entries;
+- `zeeman` raises `TypeError` unless `h` is a tuple and `InvalidRequest` unless it has 3 entries;
   `zeeman_per_site` needs exactly `num_sites` vectors.
 - `ring_exchange(plaquettes, K)`: each plaquette is four distinct sites `(a, b, c, d)`
-  (`ValueError` for another length or a repeated site). $P$ is the cyclic exchange
+  (`InvalidRequest` for another length or a repeated site). $P$ is the cyclic exchange
   $a \to b \to c \to d \to a$ of the four spins -- site $b$ takes the spin of site $a$, and so
   on -- equal to $P_{ab} P_{bc} P_{cd}$ with $P_{ij} = 1/2 + 2\, \vec S_i \cdot \vec S_j$,
   constants included. It is stored as its $16 + 16$ matrix elements and becomes canonical
   terms on up to four sites. With `K == 0` it adds nothing and checks only that each
   plaquette has four non-negative integer sites.
-- `ss_ss(pairs, K)`: each entry is `((i, j), (k, l))`; a bond on one site raises `ValueError`.
+- `ss_ss(pairs, K)`: each entry is `((i, j), (k, l))`; a bond on one site raises `InvalidRequest`.
   For disjoint bonds the term is the product $(\vec S_i \cdot \vec S_j)(\vec S_k \cdot \vec S_l)$;
   for bonds that share a site it is the Hermitian part, the anticommutator over 2. The same
   bond twice gives $(\vec S_i \cdot \vec S_j)^2$, reduced exactly.
 - `pyrochlore_non_kramers(lattice, Jxx, Jyy, Jzz, include_isotropic=True)` reads the
   nearest-neighbour bonds and sublattice labels (0..3) of `lattice`, whose `num_sites` must
-  equal the builder's (`ValueError`). It adds `xxz(nn, (Jxx + Jyy)/2, Jzz)` when
+  equal the builder's (`InvalidRequest`). It adds `xxz(nn, (Jxx + Jyy)/2, Jzz)` when
   `include_isotropic`, plus
   $J_{\pm\pm} \sum_{\langle ij\rangle} (\gamma_{ij} S^-_i S^-_j + \gamma_{ij}^* S^+_i S^+_j)$ with
   $J_{\pm\pm} = (J_{xx} - J_{yy})/4$, $\gamma_{01} = \gamma_{23} = 1$,
@@ -266,7 +271,7 @@ Details and refusals:
 | member | |
 |---|---|
 | `to_operator()` | a new `qed.Operator` with the accumulated terms |
-| `emit_into(operator)` | appends them to an existing `Operator` in place (`ValueError` if `num_sites` differ); returns `None` |
+| `emit_into(operator)` | appends them to an existing `Operator` in place (`InvalidRequest` if `num_sites` differ); returns `None` |
 | `num_sites` | the number of sites |
 | `len(b)` | the number of records (`heisenberg` with `J != 0`: 3 per bond; `ring_exchange`: 32 per plaquette; `ss_ss`: 9 per disjoint pair, 18 per pair sharing a site) |
 | `l1_norm` | $\sum \lvert c\rvert$ over the records as stored (not over the canonical terms) |
@@ -304,11 +309,15 @@ A `qed.input.Lattice` has `num_sites`, `positions` (one `[x, y, z]` per site), `
 - `nnn_pairs()` and `nnnn_pairs()` are the second and third distance shells (minimum image
   on a periodic lattice), `i < j`. A lattice built by `from_neighbor_lists` knows no shells,
   and asking for one raises `InvalidRequest`.
+- `from_neighbor_lists` takes each position as an `(x, y, z)` 3-vector (`TypeError` otherwise)
+  and raises `InvalidRequest` for an edge endpoint `>= len(positions)`, an edge `(i, i)`, or a
+  non-empty `sublattice` of another length.
 - Lattices with a basis need at least 2 cells along a periodic direction.
 - `from_cluster_file`: a `positions` block of lines `x y`, `x y z` or `id x y z`, and an
   `edges` (or `bonds`) block of lines `i j`; headers are case-blind and may end in `:`; a
   block may state its length; `#` starts a comment line; anything else raises
-  `InvalidRequest` naming the line.
+  `InvalidRequest` naming the line. A file that cannot be opened, or that lists no positions,
+  also raises `InvalidRequest` (without a line number).
 
 ## `qed.dssf`: momentum-resolved spin operators
 
@@ -323,18 +332,20 @@ spec.basis = "ladder"
 spec.components = [2]                                  # S^z
 spec.momentum_points = [[math.pi / 2, 0.0, 0.0], [math.pi, 0.0, 0.0]]
 spec.num_sites = 16
-spec.positions_file = "positions.dat"                  # one "x y z" line per site
+spec.positions_file = "positions.dat"                  # one "x y z" or "id x y z" line per site
 obs = qed.dssf.build_observables(spec)
 r = qed.dynamics(H, obs.operators, omega)              # r.S[i]: obs.names[i]
 ```
 
-`OperatorSpec` fields (each type-checked when set):
+`OperatorSpec` fields (each type-checked when set: a value of the wrong type, or a negative
+`num_sites`, `unit_cell_size` or `sublattice`, raises `TypeError`; the ranges below are checked by
+`build_observables`):
 
 | field | default | meaning |
 |---|---|---|
 | `operator_type` | `"sum"` | `"sum"`, `"transverse"`, `"sublattice"`, `"experimental"`, `"transverse_experimental"` |
 | `basis` | `"ladder"` | `"ladder"`: components 0, 1, 2 are $S^+, S^-, S^z$; `"xyz"`: $S^x, S^y, S^z$ (any other string reads as `"ladder"`) |
-| `components` | `[]` | component indices in 0..2, one operator each |
+| `components` | `[]` | component indices in 0..2, one operator each (any integer is accepted when set) |
 | `momentum_points` | `[]` | 3-vectors $Q$ in absolute units (the units of the positions) |
 | `polarization` | `[1, 0, 0]` | the transverse direction $e_1$ |
 | `theta` | `0.0` | the angle of the experimental types |
@@ -361,15 +372,16 @@ along $Q \times e_1$ (along $\hat y \times e_1$ or $\hat x \times e_1$ when $Q \
 `components` and `basis` are not used by the experimental types. Operators are ordered by $Q$,
 then component, then $e_1$, $e_2$ or sublattice.
 
-The positions file has one `x y z` line per site (further columns ignored; blank lines,
-`#` lines and lines whose first field is not a number skipped) and must list exactly
-`num_sites` sites. `np.savetxt(path, np.array(lat.positions))` writes one from a `Lattice`.
-`build_observables` raises `TypeError` unless `spec` is an `OperatorSpec`, `RuntimeError` when
-the positions file cannot be opened, and `ValueError` for an unknown type, empty `components`
-(except the experimental types) or `momentum_points`, a $Q$ or polarization that is not a
-3-vector, `num_sites == 0`, a component outside 0..2, `unit_cell_size == 0` or
-`sublattice >= unit_cell_size` for `"sublattice"`, and a positions file with the wrong number
-of sites or fewer than three coordinates on a line.
+The positions file has one line per site, `x y z` or `id x y z` with the id the site's index
+counting from 0 (blank lines, `#` lines and lines whose first field is not a number skipped),
+and must list exactly `num_sites` sites. `np.savetxt(path, np.array(lat.positions))` writes one
+from a `Lattice`. `build_observables` raises `TypeError` unless `spec` is an `OperatorSpec`, and
+`qed.errors.InvalidRequest` (a `ValueError`) for an unknown type, empty `components` (except the
+experimental types) or `momentum_points`, a $Q$ or polarization that is not a 3-vector,
+`num_sites == 0`, a component outside 0..2, `unit_cell_size == 0` or
+`sublattice >= unit_cell_size` for `"sublattice"`, a positions file that cannot be opened, and a
+positions file with the wrong number of sites, a line of another column count, an id that is not
+the site's index, or a coordinate that is not a number.
 
 The phase is $e^{+iQ\cdot R_i}$. The examples build $S^a_q = N^{-1/2}\sum_j e^{-iqj} S^a_j$;
 the two differ by $Q \to -Q$.
@@ -390,8 +402,8 @@ raises `InvalidRequest`. $H$ itself must be Hermitian (to 1e-10 of its largest c
 | `qed.dynamics(H, O, omega, B=None, ...)` | correlation spectra; see [Dynamics](dynamics.md) |
 
 `expect` passes `eigs_kwargs` (`dense_max_dim`, `allow_partial`, `prune`, `window`) to
-`qed.eigs` and solves with vectors. Thermal observables need `method="exact"` or `"ftlm"`
-without `exact_states` (`InvalidRequest` otherwise); `"exact"` evaluates them through each
+`qed.eigs` and solves with vectors. Thermal observables need `method="exact"` or `"ftlm"`, and
+`exact_states=0` with either (`InvalidRequest` otherwise); `"exact"` evaluates them through each
 block's eigenvectors on the host, `"ftlm"` with the symmetric estimator
 $\sum_r \sum_{ij} e^{-(E_i + E_j)/2T} \langle r|\psi_i\rangle \langle\psi_i|O|\psi_j\rangle \langle\psi_j|r\rangle / Z$
 on each sample's Krylov basis. Correlators and structure factors are operators like any other:
@@ -435,7 +447,8 @@ In practice:
 - Under `Symmetry(total_spin=S)` with an SU(2)-symmetric $H$ (no field), a level stands for
   its $2S+1$ members and $O$ enters through its SU(2)-scalar part, its average over all spin
   rotations: $S^z_i S^z_j$ enters as $\vec S_i \cdot \vec S_j / 3$. This part is exact for
-  terms on at most 5 sites; a longer term that is not SU(2) invariant raises `Unsupported`.
+  terms on at most 5 sites; an $O$ that is not SU(2) invariant as a whole and has a term on more
+  than 5 sites raises `Unsupported` (even when that term is itself invariant).
   In a uniform field along $z$ every member is a level of its own and $O$ enters as it is.
 - To measure one partner, narrow the symmetry so that it is a level of its own (an explicit
   `sz=n`, `spin_flip="off"`, `time_reversal="off"`, `point_group=False`), or use

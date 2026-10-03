@@ -275,9 +275,9 @@ struct RepSymmetryBasisPolicy {
     }
 
     // ----- Trait surface --------------------------------------------------
-    // ``is_rep_symmetry`` selects the dedicated rep-symmetry kernel + forces
-    // the complex matrix-free path in CpuMatVecBackend (no CSR, no real-input
-    // fast path that would drop momentum phases). ``may_leave_basis`` is true
+    // ``is_rep_symmetry`` marks a representative basis, whose entries carry the
+    // sector's characters (momentum phases); it is applied by its own row walk
+    // (sector_rows.h). ``may_leave_basis`` is true
     // (off-diagonal terms reach other orbits); ``needs_orbit_walk`` is false
     // (the kernel applies H to the single representative).
     static constexpr bool is_rep_symmetry = true;
