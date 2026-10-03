@@ -6,7 +6,17 @@ another, each through a fresh workflows call that builds its own CudaBackend (an
 thread + backend per sample); there is no small-block policy, so on models whose blocks are
 ~1e2-1e4 states the GPU lane is several times slower than the CPU lane's concurrent small-block
 loop. Test: 18-site Heisenberg ring, Symmetry.auto(), FTLM and mTPQ at a fixed seed, device='gpu'
-vs device='cpu' wall time (results compared for sanity)."""
+vs device='cpu' wall time (results compared for sanity).
+
+RESTATED 2026-10-03 (P7.3/P7.4): device='gpu' is strict by owner decision (2026-09-30): every block
+runs on the device, and a block of 1e2-1e4 states is latency-bound there (each Lanczos step reads its
+scalars back), whatever the per-block setup -- the fresh CudaBackend per block is gone since P7.3
+(one per thread), and a small-block probe (dev/p74/small_blocks.py, 62678446) still reads 3.0 s on
+59 device blocks against 0.3 s on the host. The small-block policy is device='auto' (Krylov blocks
+below 2^14 on the host, dense blocks below kDeviceDenseMinDim in the host pool), which production
+uses. The test now times device='auto' against device='cpu', each the fastest of three calls; CONFIRMED
+when 'auto' is more than 2x slower."""
+
 import time
 import numpy as np
 import qed
@@ -33,19 +43,17 @@ def run(method, dev):
     return time.perf_counter() - t0, r
 
 
-run("ftlm", "cpu"); run("ftlm", "gpu")            # warm-up: symmetry discovery, CUDA context
+run("ftlm", "cpu"); run("ftlm", "auto")           # warm-up: symmetry discovery, CUDA context
 out = {}
 for m in ("ftlm", "mtpq"):
-    tc, rc = run(m, "cpu")
-    tg, rg = run(m, "gpu")
-    out[m] = (tc, tg, rg.device_blocks, rc.blocks, float(np.max(np.abs(rc.E - rg.E))))
-    print(f"{m}: cpu {tc:.2f} s, gpu {tg:.2f} s ({tg / max(tc, 1e-9):.1f}x), device_blocks {rg.device_blocks}/"
-          f"{rc.blocks}, max|E_gpu - E_cpu| {out[m][4]:.1e}")
+    (tc, rc) = min((run(m, "cpu") for _ in range(3)), key=lambda x: x[0])
+    (ta, ra) = min((run(m, "auto") for _ in range(3)), key=lambda x: x[0])
+    out[m] = (tc, ta, ra.device_blocks, rc.blocks, float(np.max(np.abs(rc.E - ra.E))))
+    print(f"{m}: cpu {tc:.2f} s, auto {ta:.2f} s ({ta / max(tc, 1e-9):.1f}x), device_blocks {ra.device_blocks}/"
+          f"{rc.blocks}, max|E_auto - E_cpu| {out[m][4]:.1e}")
 worst = max(v[1] / max(v[0], 1e-9) for v in out.values())
-if all(v[2] == 0 for v in out.values()):
-    print("REPRO: INCONCLUSIVE no block ran on the device")
-elif worst > 2.0:
-    s = "; ".join(f"{m} gpu {v[1]:.2f}s vs cpu {v[0]:.2f}s" for m, v in out.items())
-    print(f"REPRO: CONFIRMED small-block thermal slower on GPU lane by up to {worst:.1f}x ({s})")
+if worst > 2.0:
+    s = "; ".join(f"{m} auto {v[1]:.2f}s vs cpu {v[0]:.2f}s" for m, v in out.items())
+    print(f"REPRO: CONFIRMED small-block thermal slower under device='auto' by up to {worst:.1f}x ({s})")
 else:
-    print(f"REPRO: NOT_REPRODUCED GPU/CPU wall ratio at most {worst:.1f}")
+    print(f"REPRO: NOT_REPRODUCED auto/cpu wall ratio at most {worst:.1f}")
