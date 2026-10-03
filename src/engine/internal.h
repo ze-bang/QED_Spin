@@ -753,6 +753,9 @@ star_partition(const EngineContext& cx, bool tr_on);
 // (H.bind<B>()), counts its applies, draws its seed on the host and stages it on the
 // backend; vectors come back on the host, in block coordinates.
 [[nodiscard]] std::vector<double> dense_eigenvalues_inplace(Eigen::MatrixXcd& Hb);
+/// Is this Hermitian block real up to roundoff (numerics.h kRealBlockRel, relative to its largest
+/// entry)? The dense solves take the real paths for it (LAPACK's, and cuSOLVER's on the device).
+[[nodiscard]] bool real_block(const Eigen::MatrixXcd& Hb);
 /// The lowest eigenpairs of a dense block, ascending; column j of `vectors` belongs to values[j].
 struct DenseEigenpairs {
     std::vector<double> values;

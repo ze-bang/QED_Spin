@@ -96,8 +96,9 @@ struct DeviceProbe {
 }
 
 /// The lane one block runs on. In order:
-///   a. DenseBatch: the host under Cpu or without a device ('gpu' raises DeviceUnavailable),
-///      else the device (no floor, no memory check).
+///   a. DenseBatch: the host under Cpu or without a device ('gpu' raises DeviceUnavailable), and
+///      under Auto below kDeviceDenseMinDim; else the device (no memory check here: DenseBatch
+///      sizes its batches and sends a block too large for the device to the host).
 ///   b. A block the verb solves densely runs dense on the host under every device.
 ///   c. Cpu: the host Krylov lanes, before any probe ('cpu' never initialises CUDA).
 ///   d. Auto: the device when the block has a kernel, its task may run there, dim >= the
@@ -114,7 +115,7 @@ struct DeviceProbe {
                 throw ed::DeviceUnavailable(std::string(r.verb) + ": device='gpu', but no usable CUDA device is visible");
             return Lane::HostDense;
         }
-        return Lane::DeviceDense;
+        return d == Device::Auto && r.dim < kDeviceDenseMinDim ? Lane::HostDense : Lane::DeviceDense;
     }
     if (r.dense) return Lane::HostDense;
     if (d == Device::Cpu) return Lane::HostKrylov;

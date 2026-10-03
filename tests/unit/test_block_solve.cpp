@@ -253,7 +253,12 @@ TEST_CASE("place: the request's device working set is what must fit", "[place]")
 TEST_CASE("place: DenseBatch", "[place]") {
     FakeMachine::reset();
     REQUIRE(ed::place(Device::Cpu, req(Task::DenseBatch, 10), FakeMachine::probe()) == Lane::HostDense);
-    REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, 10), FakeMachine::probe()) == Lane::DeviceDense);
+    // Auto: the host pool below the measured crossover, the device from it; Gpu: the device always.
+    REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, 10), FakeMachine::probe()) == Lane::HostDense);
+    REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, ed::kDeviceDenseMinDim - 1), FakeMachine::probe())
+            == Lane::HostDense);
+    REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, ed::kDeviceDenseMinDim), FakeMachine::probe())
+            == Lane::DeviceDense);
     REQUIRE(ed::place(Device::Gpu, req(Task::DenseBatch, 10, false), FakeMachine::probe()) == Lane::DeviceDense);
     FakeMachine::reset(false);
     REQUIRE(ed::place(Device::Auto, req(Task::DenseBatch, 10), FakeMachine::probe()) == Lane::HostDense);

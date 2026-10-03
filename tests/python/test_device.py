@@ -167,6 +167,52 @@ def test_gpu_and_cpu_certify_the_same_blocks(monkeypatch):
                 assert all((b["nnz"] > 0) == (lane == "device-csr") for b in g.block_stats)
 
 
+def _ring_hopping(n, phi):
+    """XXZ ring whose hopping carries the phase exp(i phi): real at phi = 0, complex otherwise."""
+    H = qed.Operator.product(n, "zz", [0, 1], 0.7)
+    for i in range(n):
+        j = (i + 1) % n
+        if i:
+            H = H + qed.Operator.product(n, "zz", [i, j], 0.7)
+        H = H + qed.Operator.product(n, "+-", [i, j], 0.5 * np.exp(1j * phi))
+        H = H + qed.Operator.product(n, "-+", [i, j], 0.5 * np.exp(-1j * phi))
+    return H
+
+
+@gpu
+def test_dense_blocks_larger_than_a_batch_run_on_the_device():
+    # P7.4: a block larger than a batch (256 MiB of matrices) is solved by itself on the device, a
+    # real block in real arithmetic: the 15-ring's Sz = 7 sector, 6435 states (0.66 GB as a complex
+    # matrix), real hopping and then complex. Its spectrum is the union of the 15 momentum blocks
+    # solved on the host (a host solve of the whole complex block alone would take a minute).
+    n = 15
+    plain = qed.Symmetry(spatial=None, sz=7, spin_flip="off", time_reversal="off")
+    by_k = qed.Symmetry(spatial=[[(i + 1) % n for i in range(n)]], point_group=False, sz=7, spin_flip="off",
+                        time_reversal="off")
+    for phi in (0.0, 0.3):
+        H = _ring_hopping(n, phi)
+        g = qed.spectrum(H, sym=plain, device="gpu")
+        c = qed.spectrum(H, sym=by_k, device="cpu")
+        assert len(g.energies) == len(c.energies) == 6435
+        np.testing.assert_allclose(np.sort(g.energies), np.sort(c.energies), atol=1e-9)
+        assert g.placement["device_dense"] == 1 and g.placement["host_dense"] == 0, g.placement
+
+
+@gpu
+def test_auto_solves_small_dense_blocks_on_the_host():
+    # Under device='auto' a dense block below the measured crossover (kDeviceDenseMinDim = 1024) goes
+    # to the host pool and a larger one to the device; under 'gpu' every block runs on the device.
+    H = _ring_hopping(12, 0.3)   # Sz sectors of 1..924 states
+    a = qed.spectrum(H, sym=qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off"), device="auto")
+    assert a.placement["device_dense"] == 0 and a.placement["host_dense"] > 0, a.placement
+    g = qed.spectrum(H, sym=qed.Symmetry(spatial=None, spin_flip="off", time_reversal="off"), device="gpu")
+    assert g.placement["host_dense"] == 0 and g.placement["device_dense"] > 0, g.placement
+    np.testing.assert_allclose(np.sort(g.energies), np.sort(a.energies), atol=1e-10)
+    big = qed.spectrum(_ring_hopping(14, 0.3), sym=qed.Symmetry(spatial=None, sz=7, spin_flip="off",
+                                                                 time_reversal="off"), device="auto")
+    assert big.placement["device_dense"] == 1, big.placement   # 3432 states
+
+
 @gpu
 def test_small_device_blocks_are_dense_on_the_host():
     # The transitional rule: a device-bound eigs block of at most 32 states is solved densely on

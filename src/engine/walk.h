@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <exception>
+#include <future>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -163,11 +164,13 @@ inline std::uint64_t tower_states(const std::vector<Subspace>& subs, int n_sites
 
 /// Dense spectra of many blocks, materialised as the walk visits them (the walk streams stars, so
 /// the matrices are the only thing that outlives a star). place(Task::DenseBatch) chooses each
-/// entry's lane. On a device lane they are solved in batched cuSOLVER calls: a batch is packed on
-/// the host and uploaded at once, so it is solved before it outgrows a quarter of the free device
-/// memory or of the RAM the job may still allocate (cuSOLVER's workspace and the eigenvalues come
-/// on top), and never holds more than 256 MiB of matrices; a block larger than that is solved on
-/// the host, and so is a batch whose device solve fails. On the host every block is queued (up to
+/// entry's lane (under 'auto' the host below kDeviceDenseMinDim). On a device lane they are solved
+/// in batched cuSOLVER calls, a real block in real arithmetic: a batch is packed on the host and
+/// uploaded at once, so it is solved before it outgrows a quarter of the free device memory or of
+/// the RAM the job may still allocate (cuSOLVER's workspace and the eigenvalues come on top), and
+/// never holds more than 256 MiB of matrices; a block larger than that is solved by itself on the
+/// device when it fits there (fits_device_alone), else on the host, and so is a batch whose device
+/// solve fails. The last batch and the host queue are solved at once. On the host every block is queued (up to
 /// host_budget()) and the queue solved concurrently, one serial LAPACK call per thread, largest
 /// first; only a block larger than the budget is solved alone. Concurrency across blocks is the
 /// parallelism: this platform's threaded zheevd does not scale (n = 4200: 19.2 s on one thread,
@@ -187,10 +190,22 @@ public:
         return add_lazy(n, [&M] { return std::move(M); });
     }
 
-    /// Solve everything queued; afterwards spectrum(id) is valid for every entry.
+    /// Solve everything queued; afterwards spectrum(id) is valid for every entry. The device batch
+    /// and the host queue run at once (the device's host thread mostly waits on its streams).
     void solve() {
-        solve_device();
-        solve_host();
+        if (queued_.empty() || host_.empty()) {
+            solve_device();
+            solve_host();
+            return;
+        }
+        auto device = std::async(std::launch::async, [this] { solve_device(); });
+        try {
+            solve_host();
+        } catch (...) {
+            device.wait();
+            throw;
+        }
+        device.get();
     }
 
     [[nodiscard]] const std::vector<double>& spectrum(std::size_t id) const { return spectra_[id]; }
@@ -209,11 +224,16 @@ private:
         req.dim  = dim;
         req.verb = verb_;
         lanes_.push_back(ed::place(device_, req));
-        const std::uint64_t bytes = 16 * dim * dim;
+        const std::uint64_t bytes = 16 * dim * dim;   // as a complex matrix; a real one packs half
+        bool alone = false;                           // larger than a batch, solved by itself
         if (ed::on_device(lanes_.back())) {
             if (budget_ == 0) budget_ = batch_budget();
-            if (bytes > budget_) lanes_.back() = ed::Lane::HostDense;   // too large for any batch
-            else if (16 * packed_.data.size() + bytes > budget_) solve_device();
+            if (bytes > budget_) {
+                alone = fits_device_alone(dim);
+                if (!alone) lanes_.back() = ed::Lane::HostDense;   // too large for the device
+            } else if (packed_.bytes() + bytes > budget_) {
+                solve_device();
+            }
         }
         if (!ed::on_device(lanes_.back())) {
             ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host,
@@ -229,14 +249,42 @@ private:
             host_bytes_ += bytes;
             return id;
         }
+        ed::core::guard_working_set(ed::core::footprint(ed::core::Path::DenseValues, {dim}).host, "dense spectrum");
+        if (alone) solve_device();   // the batch so far first: this block goes up by itself
         const Eigen::MatrixXcd Hb = make();
-        const std::size_t nb = static_cast<std::size_t>(Hb.rows());
-        packed_.offset.push_back(packed_.data.size());
-        packed_.block_dim.push_back(ed::core::checked_narrow<int>(nb, "dense batch block"));
-        packed_.block_irrep_dim.push_back(1);
-        packed_.data.insert(packed_.data.end(), Hb.data(), Hb.data() + nb * nb);   // column-major
+        const auto nb = static_cast<std::int64_t>(Hb.rows());
+        if (real_block(Hb)) {        // column-major, real arithmetic on the device
+            const Eigen::MatrixXd R = Hb.real();
+            packed_.add_real(R.data(), nb);
+        } else {
+            packed_.add_complex(Hb.data(), nb);
+        }
         queued_.push_back(id);
+        if (alone) solve_device();
         return id;
+    }
+
+    // A block larger than a batch is solved by itself on the device when its matrix (as complex:
+    // its realness is not known before it is formed) and cuSOLVER's workspace for it fit in half
+    // the free device memory; else on the host. Not checked under ED_MEM_GUARD_OFF.
+    static bool fits_device_alone(std::uint64_t dim) {
+#ifdef WITH_CUDA
+        if (ed::core::mem_guard_off()) return true;
+        const auto free = ed::core::available_device_bytes(/*fresh=*/true);
+        if (!free) return false;
+        try {
+            const std::uint64_t need = 16 * dim * dim
+                + ed::solvers::lg_block_workspace_bytes_gpu(static_cast<std::int64_t>(dim), /*real=*/false);
+            return need <= *free / 2;
+        } catch (const std::exception& e) {
+            ED_LOG(Warn, "dense spectra: cuSOLVER's workspace query for a block of %llu states failed (%s); "
+                         "solving it on the host", static_cast<unsigned long long>(dim), e.what());
+            return false;
+        }
+#else
+        (void)dim;
+        return false;
+#endif
     }
 
     // The device batch (and its host fallback when the device solve fails).
@@ -261,9 +309,11 @@ private:
                                             ev.begin() + static_cast<long>(off + nb));
                 off += nb;
             } else {
-                Eigen::MatrixXcd Hb = Eigen::Map<const Eigen::MatrixXcd>(
-                    packed_.data.data() + packed_.offset[q], static_cast<Eigen::Index>(nb),
-                    static_cast<Eigen::Index>(nb));
+                const auto n = static_cast<Eigen::Index>(nb);
+                const double* d = packed_.data.data() + packed_.offset[q];
+                Eigen::MatrixXcd Hb = packed_.real[q]
+                    ? Eigen::MatrixXcd(Eigen::Map<const Eigen::MatrixXd>(d, n, n).cast<std::complex<double>>())
+                    : Eigen::MatrixXcd(Eigen::Map<const Eigen::MatrixXcd>(reinterpret_cast<const std::complex<double>*>(d), n, n));
                 spectra_[queued_[q]] = ed::solvers::lg_detail::dense_eigenvalues_inplace(Hb);
                 lanes_[queued_[q]] = ed::Lane::HostDense;
             }

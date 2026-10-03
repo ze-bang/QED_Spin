@@ -71,6 +71,12 @@ inline constexpr std::uint64_t kHostPoolMaxDim = std::uint64_t{1} << 16;
 /// on the host. P6.2's calibrated crossover and P7.4's measured small-block crossover retire it.
 inline constexpr std::uint64_t kDeviceDenseMaxDim = 32;
 
+/// Under device='auto' a dense block below this dimension is solved in the host pool, at or above it
+/// on the device: cuSOLVER's syevd against one serial LAPACK call (H100, job 62670841): n = 1024 11 / 13
+/// ms against 72 / 336 ms (real / complex), n = 512 5 / 6 ms against 13 / 44 ms, and the host pool runs
+/// a team of those at once. Under 'gpu' every dense block runs on the device.
+inline constexpr std::uint64_t kDeviceDenseMinDim = 1024;
+
 /// One block, as place() sees it.
 struct BlockRequest {
     Task          task = Task::Eigs;

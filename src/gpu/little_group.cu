@@ -1,13 +1,12 @@
 // =============================================================================
 // src/gpu/little_group.cu
 //
-// Batched GPU eigensolver for the little-group engine's dense blocks. See the
-// header for the two-transfer design.
+// Batched GPU eigensolver for the engine's dense blocks. See the header for the two-transfer
+// design. cuSOLVER's 64-bit generic syevd takes the data type per call, so one pool solves real
+// and complex blocks alike, and no block is limited by 32-bit indices.
 // =============================================================================
-
 #include <ed/gpu/little_group.h>
 
-#include <cuComplex.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
@@ -17,6 +16,7 @@
 #include <vector>
 
 namespace ed::solvers {
+
 namespace {
 
 #define ED_CUDA_CHECK(call)                                                    \
@@ -35,7 +35,35 @@ namespace {
                                      + std::to_string(static_cast<int>(_s)));  \
     } while (0)
 
+// syevd's device and host workspace for one n x n block of the given type (A and W may be null:
+// the query reads only the sizes).
+void workspace(cusolverDnHandle_t h, cusolverDnParams_t p, std::int64_t n, bool real, std::size_t& dev,
+               std::size_t& host) {
+    const cudaDataType t = real ? CUDA_R_64F : CUDA_C_64F;
+    ED_CUSOLVER_CHECK(cusolverDnXsyevd_bufferSize(h, p, CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER, n, t,
+                                                  nullptr, std::max<std::int64_t>(1, n), CUDA_R_64F, nullptr, t,
+                                                  &dev, &host));
+}
+
 }  // namespace
+
+std::size_t lg_block_workspace_bytes_gpu(std::int64_t n, bool real) {
+    cusolverDnHandle_t h = nullptr;
+    cusolverDnParams_t p = nullptr;
+    std::size_t dev = 0, host = 0;
+    try {
+        ED_CUSOLVER_CHECK(cusolverDnCreate(&h));
+        ED_CUSOLVER_CHECK(cusolverDnCreateParams(&p));
+        workspace(h, p, n, real, dev, host);
+    } catch (...) {
+        if (p) cusolverDnDestroyParams(p);
+        if (h) cusolverDnDestroy(h);
+        throw;
+    }
+    cusolverDnDestroyParams(p);
+    cusolverDnDestroy(h);
+    return dev + static_cast<std::size_t>(n) * sizeof(double) + sizeof(int);
+}
 
 std::vector<double>
 lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
@@ -44,27 +72,30 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
 
     std::vector<std::size_t> eig_off(nblk);
     std::size_t total_eigs = 0;
-    int maxdim = 0;
+    std::int64_t max_real = 0, max_complex = 0;
     for (std::size_t b = 0; b < nblk; ++b) {
         eig_off[b] = total_eigs;
         total_eigs += static_cast<std::size_t>(P.block_dim[b]);
-        maxdim = std::max(maxdim, P.block_dim[b]);
+        if (P.real[b]) max_real = std::max(max_real, P.block_dim[b]);
+        else           max_complex = std::max(max_complex, P.block_dim[b]);
     }
 
-    // Device resources, all null-initialised so the cleanup below is safe on
-    // any partial-init throw path (no leak of memory / handles / streams).
+    // Device resources, all null-initialised so the cleanup below is safe on any partial-init
+    // throw path (no leak of memory / handles / streams).
     const int K = std::max(1, std::min<int>(static_cast<int>(nblk), 8));
-    cuDoubleComplex* d_data = nullptr;
-    double*          d_eigs = nullptr;
-    int*             d_info = nullptr;              // per-block convergence code
+    double* d_data = nullptr;
+    double* d_eigs = nullptr;
+    int*    d_info = nullptr;                           // per-block convergence code
     std::vector<cudaStream_t>       streams(K, nullptr);
     std::vector<cusolverDnHandle_t> handles(K, nullptr);
-    std::vector<cuDoubleComplex*>   d_work(K, nullptr);
-    int n_created = 0;                              // # fully-built pool slots
-
+    std::vector<cusolverDnParams_t> params(K, nullptr);
+    std::vector<void*>              d_work(K, nullptr);
+    std::vector<std::size_t>        d_bytes(K, 0);
+    std::vector<std::vector<char>>  h_work(K);
     auto cleanup = [&]() noexcept {
-        for (int k = 0; k < n_created; ++k) {
+        for (int k = 0; k < K; ++k) {
             if (d_work[k])  cudaFree(d_work[k]);
+            if (params[k])  cusolverDnDestroyParams(params[k]);
             if (handles[k]) cusolverDnDestroy(handles[k]);
             if (streams[k]) cudaStreamDestroy(streams[k]);
         }
@@ -76,70 +107,51 @@ lg_blocks_batched_eigenvalues_gpu(const LgBlocksPacked& P) {
     std::vector<double> eigs(total_eigs);
     try {
         // --- single upload of all blocks -----------------------------------
-        ED_CUDA_CHECK(cudaMalloc(&d_data, P.data.size() * sizeof(cuDoubleComplex)));
+        ED_CUDA_CHECK(cudaMalloc(&d_data, std::max<std::size_t>(1, P.bytes())));
         ED_CUDA_CHECK(cudaMalloc(&d_eigs, total_eigs * sizeof(double)));
         ED_CUDA_CHECK(cudaMalloc(&d_info, nblk * sizeof(int)));
-        ED_CUDA_CHECK(cudaMemcpy(
-            d_data, reinterpret_cast<const cuDoubleComplex*>(P.data.data()),
-            P.data.size() * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+        ED_CUDA_CHECK(cudaMemcpy(d_data, P.data.data(), P.bytes(), cudaMemcpyHostToDevice));
 
-        // Workspace sized for the largest block (lwork is non-decreasing in n,
-        // so this upper bound is reused safely by every block on that handle).
-        int lwork_max = 1;
-        {
-            cusolverDnHandle_t h0 = nullptr;
-            ED_CUSOLVER_CHECK(cusolverDnCreate(&h0));
-            int lw = 0;
-            const cusolverStatus_t qs = cusolverDnZheevd_bufferSize(
-                h0, CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER,
-                maxdim, d_data, maxdim, d_eigs, &lw);
-            cusolverDnDestroy(h0);
-            ED_CUSOLVER_CHECK(qs);
-            lwork_max = std::max(1, lw);
-        }
-
-        // --- stream/handle pool for concurrent per-block eigensolves -------
+        // --- stream/handle pool, each slot's workspace sized for the largest block of either
+        // type (the workspace is non-decreasing in n, so the bound serves every block on it) ---
         for (int k = 0; k < K; ++k) {
             ED_CUDA_CHECK(cudaStreamCreate(&streams[k]));
             ED_CUSOLVER_CHECK(cusolverDnCreate(&handles[k]));
             ED_CUSOLVER_CHECK(cusolverDnSetStream(handles[k], streams[k]));
-            ED_CUDA_CHECK(cudaMalloc(
-                &d_work[k],
-                static_cast<std::size_t>(lwork_max) * sizeof(cuDoubleComplex)));
-            n_created = k + 1;
+            ED_CUSOLVER_CHECK(cusolverDnCreateParams(&params[k]));
+            std::size_t dev = 1, host = 1, d, h;
+            if (max_real > 0)    { workspace(handles[k], params[k], max_real, true, d, h);     dev = std::max(dev, d); host = std::max(host, h); }
+            if (max_complex > 0) { workspace(handles[k], params[k], max_complex, false, d, h); dev = std::max(dev, d); host = std::max(host, h); }
+            ED_CUDA_CHECK(cudaMalloc(&d_work[k], dev));
+            d_bytes[k] = dev;
+            h_work[k].resize(host);
         }
 
-        // Distribute blocks round-robin across the handle/stream pool. Blocks
-        // on the same stream serialise (so they may share d_work[k]); blocks
-        // on different streams overlap. d_data / d_eigs / d_info slices are
-        // disjoint.
+        // Blocks round-robin over the pool: blocks on one stream serialise (so they share its
+        // workspace); blocks on different streams overlap. The data / eigs / info slices are disjoint.
         for (std::size_t b = 0; b < nblk; ++b) {
             const int k = static_cast<int>(b % static_cast<std::size_t>(K));
-            const int n = P.block_dim[b];
-            cuDoubleComplex* A = d_data + P.offset[b];
-            ED_CUSOLVER_CHECK(cusolverDnZheevd(
-                handles[k], CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER,
-                n, A, n, d_eigs + eig_off[b], d_work[k], lwork_max,
-                d_info + static_cast<std::ptrdiff_t>(b)));
+            const std::int64_t n = P.block_dim[b];
+            const cudaDataType t = P.real[b] ? CUDA_R_64F : CUDA_C_64F;
+            ED_CUSOLVER_CHECK(cusolverDnXsyevd(
+                handles[k], params[k], CUSOLVER_EIG_MODE_NOVECTOR, CUBLAS_FILL_MODE_UPPER, n, t,
+                d_data + P.offset[b], std::max<std::int64_t>(1, n), CUDA_R_64F, d_eigs + eig_off[b], t,
+                d_work[k], d_bytes[k], h_work[k].data(), h_work[k].size(), d_info + static_cast<std::ptrdiff_t>(b)));
         }
         for (int k = 0; k < K; ++k)
             ED_CUDA_CHECK(cudaStreamSynchronize(streams[k]));
 
         // Convergence / argument check for every block.
         std::vector<int> info(nblk);
-        ED_CUDA_CHECK(cudaMemcpy(info.data(), d_info, nblk * sizeof(int),
-                                 cudaMemcpyDeviceToHost));
+        ED_CUDA_CHECK(cudaMemcpy(info.data(), d_info, nblk * sizeof(int), cudaMemcpyDeviceToHost));
         for (std::size_t b = 0; b < nblk; ++b)
             if (info[b] != 0)
-                throw std::runtime_error(
-                    "little_group_gpu: cusolverDnZheevd did not converge for "
-                    "block " + std::to_string(b) +
-                    " (info=" + std::to_string(info[b]) + ")");
+                throw std::runtime_error("little_group_gpu: syevd did not converge for block " + std::to_string(b)
+                                         + " (n = " + std::to_string(P.block_dim[b]) + ", info = "
+                                         + std::to_string(info[b]) + ")");
 
         // --- single download of all eigenvalues ----------------------------
-        ED_CUDA_CHECK(cudaMemcpy(eigs.data(), d_eigs,
-                                 total_eigs * sizeof(double),
-                                 cudaMemcpyDeviceToHost));
+        ED_CUDA_CHECK(cudaMemcpy(eigs.data(), d_eigs, total_eigs * sizeof(double), cudaMemcpyDeviceToHost));
     } catch (...) {
         cleanup();
         throw;

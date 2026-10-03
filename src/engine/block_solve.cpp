@@ -44,7 +44,7 @@ static void require_lapack_dense(std::uint64_t n) {
 
 // Is this Hermitian block real up to roundoff (numerics.h kRealBlockRel, relative to its largest
 // entry)? Real blocks (real momenta under time reversal) take LAPACK's ~2x cheaper real paths.
-static bool real_block(const Eigen::MatrixXcd& Hb) {
+bool real_block(const Eigen::MatrixXcd& Hb) {
     double max_imag = 0.0, max_abs = 0.0;
     for (Eigen::Index j = 0; j < Hb.cols(); ++j)
         for (Eigen::Index i = j; i < Hb.rows(); ++i) {
