@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-03 — 0.7.1: exact cluster momenta, pruning below the dense crossover
+
+- **`qed.input.cluster_momenta` returns exact momenta.** Each q was built from coordinates rounded
+  to 9 decimals, so 2πm/N was off by about 1e-9 whenever m/N has no 9-digit decimal (N = 12, 14,
+  18, ...). An O_q from `Family.fourier("cluster")` was then covariant only to 1e-9:
+  momentum-forbidden transitions came out at about 1e-17 instead of exactly 0, and dynamics probes
+  reached momentum sectors they cannot reach with amplitudes of about 1e-9. Other values were
+  affected at the 1e-9 level only.
+- **`qed.eigs` prunes below the dense crossover.** Every block of more than 64 states now gets the
+  40-step Lanczos estimate before it is solved. Blocks under the dense crossover (1600 states at
+  k ≤ 10) used to be diagonalised densely, all of them. Survivors are solved as before (densely
+  below the crossover, so degenerate levels stay whole). On an 18-site Heisenberg chain,
+  `eigs(H, 1)` went from 102 dense solves in 11.6 s to 35 solves in 0.54 s, with 83 blocks pruned
+  (jobs 62829170, 62831052). The T = 0 dynamics inherit it through their ground-manifold eigensolve.
+
 ## 2026-10-03 — 0.7.0: one organisation for every observable
 
 Every observable computation is now a quantity (⟨O⟩, ⟨A†B⟩, ⟨m|O|n⟩, S_AB(ω)) in a state (levels,
