@@ -132,7 +132,9 @@ def _abelian_chain(N, dz=0.3):
 
 
 def test_momentum_selection_rules_are_exact_zeros():
-    N = 8
+    # N = 12: the momenta 2 pi m / 12 are not 9-digit decimals (cluster_momenta once rounded them, and
+    # the forbidden strengths came out ~1e-17 instead of 0)
+    N = 12
     H, lat, T, sym = _abelian_chain(N)
     r = qed.eigs(H, per_block=1, sym=sym, vectors=True)
     mf = qed.Family.spins(lat, "z").fourier("cluster")
@@ -192,3 +194,33 @@ def test_transitions_are_validated():
         qed.transitions(O, (r, [7]))
     with pytest.raises(qed.errors.InvalidRequest, match="EigResult"):
         qed.transitions(O, "levels")
+
+
+def test_point_group_targets_keep_exact_momentum_zeros():
+    """Targeted final states (a momentum and a reflection character, Symmetry.select) from a separate
+    eigs call: forbidden momenta are exact zeros; the allowed line equals matrix_element on one result."""
+    from fractions import Fraction
+
+    N = 12
+    lat = qed.input.lattice.chain(N, True)
+    b = qed.input.HamiltonianBuilder(N)
+    b.heisenberg(lat.nn_pairs(), 1.0)
+    b.heisenberg(lat.nnn_pairs(), 0.2)
+    H = b.to_operator()
+    T = [(i - 1) % N for i in range(N)]
+    P = [(-i) % N for i in range(N)]
+    base = qed.Symmetry(spatial=[T, P])
+    _, residues = base.groups(H)
+    gs = qed.eigs(H, 1, sym=base, vectors=True)
+    sel = base.select(momentum={tuple(T): Fraction(1, 2)}, irrep_character={tuple(residues[0]): 1})
+    fin = qed.eigs(H, sym=sel, per_block=1, vectors=True)
+    mf = qed.Family.spins(lat, "z").fourier("cluster")
+    qpi = int(np.argmin(np.abs(np.abs(mf.q[:, 0]) - np.pi)))
+    S = qed.transitions(mf, (gs, [0]), fin).strength[0, :, 0, :]
+    assert np.all(np.delete(S, qpi, axis=1) == 0.0)
+    every = qed.eigs(H, sym=base, per_block=2, vectors=True)
+    i0 = int(np.argmin([L.energy for L in every.levels]))
+    j = next(i for i, L in enumerate(every.levels)
+             if abs(L.energy - fin.levels[0].energy) < 1e-9 and abs(every.momentum(i, [T])[0] - 0.5) < 1e-9)
+    me = every.matrix_element(mf.operators()[qpi], j, i0)
+    assert abs(abs(me) ** 2 - S[0, qpi]) < 1e-12 and S[0, qpi] > 0.1

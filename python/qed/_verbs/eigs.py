@@ -133,8 +133,9 @@ def eigs(
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises :class:`qed.errors.ConvergenceError` when a
     block cannot certify levels that may fall inside the window, unless ``allow_partial`` (then
-    ``complete`` is False). ``prune`` solves only the blocks
-    whose short Lanczos estimate lies near the window (``prune=False``: every block).
+    ``complete`` is False). ``prune`` solves only the blocks whose short Lanczos estimate lies near
+    the window -- every block of more than 64 states is estimated first, also below the dense
+    crossover (``prune=False``: every block is solved).
     ``window > 0`` also returns every block's lowest level within ``window`` above the k-th
     (the partners of a degenerate level in other blocks); ``energies`` then lists them all.
     ``dense_max_dim``: blocks up to this dimension are diagonalised densely (exact, and they

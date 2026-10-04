@@ -126,7 +126,12 @@ std::uint64_t star_bytes(const StarBuild& sb) {
     return b;
 }
 
-// The pruning estimate of a block above the dense crossover, on the lane place() chooses for
+// The smallest block that is estimated before it is solved (smaller ones are solved outright, under
+// any crossover): an 18-site Heisenberg chain has 102 blocks below the default dense crossover, and
+// solving each densely took 11.6 s against 0.5 s with the far ones pruned (job 62829170).
+constexpr std::size_t kPruneMinDim = 64;
+
+// The pruning estimate of a block above kPruneMinDim states, on the lane place() chooses for
 // it: the 40-step Ritz value less its residual bound, theta_1 - |r_1| (an unconverged estimate
 // is never trusted to prune; -inf when the estimate failed), from the tower's start under a
 // total-spin restriction (+inf when the block holds no spin-S state). A block the transitional
@@ -444,11 +449,12 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
         }
     };
 
-    // Pruning (default): every block above the dense crossover gets a short Lanczos
-    // estimate first -- an upper bound on its lowest level -- and is solved only when that
-    // estimate lies within `prune_margin` (relative) of the k-th level found so far, in order
-    // of increasing estimate. A block whose 40-step estimate is still far above its true
-    // minimum could be skipped wrongly; prune = false solves every block. Under a total-spin
+    // Pruning (default): every block above kPruneMinDim states -- below the dense crossover too --
+    // gets a short Lanczos estimate first, theta_1 - |r_1| (prune_estimate), and is solved, on
+    // whatever lane its size picks, only when that estimate lies within `prune_margin` (relative)
+    // of the k-th level found so far, in order of increasing estimate. A block whose 40-step
+    // estimate is still far above its true minimum could be skipped wrongly; prune = false solves
+    // every block. Under a total-spin
     // restriction the estimate starts inside the tower (Tower), so it bounds the tower's lowest level.
     const bool prune = o.prune && o.cut && o.per_block == 0;
     // A candidate holds its star while the stars kept fit `keep_cap` (a quarter of the RAM the job
@@ -477,8 +483,11 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
                 const std::size_t dim = bi->tag.dim;
                 if (dim == 0) continue;
                 if (s.two_S < 0) res.total_dim += dim * bi->tag.multiplicity * static_cast<std::uint64_t>(sub.mirror);
+                // Every block above kPruneMinDim states is estimated before it is solved, whatever
+                // lane solves it: below the dense crossover a survivor is still solved densely (its
+                // degenerate copies resolved), but a far block costs 40 applies instead of O(n^3).
                 const std::size_t floor_ = lowest_dense_floor(1, o.dense_max_dim, /*vectors=*/false);
-                if (!prune || dim <= std::max<std::size_t>(floor_, 2)) {
+                if (!prune || dim <= std::max<std::size_t>(std::min(floor_, kPruneMinDim), 2)) {
                     solve_block(sub, sb, bi, cx.tr, cx.k_table->seconds.load());
                     continue;
                 }

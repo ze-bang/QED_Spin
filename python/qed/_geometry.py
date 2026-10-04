@@ -158,13 +158,16 @@ def cluster_momenta(
     Minv_T = np.linalg.inv(M).T
     # q = n . (dual of the supercell) for integer n; in primitive-reciprocal coordinates x = n M^-T,
     # one class per x mod 1 (n in [0, n_cells)^d reaches every class: n_cells times a class is 0).
+    # n_cells x = n adj(M)^T (up to sign) is an integer vector: the classes are kept as those integers
+    # and x = m / n_cells is formed exactly, so an O_q is covariant to roundoff and its forbidden
+    # transitions compile to no terms (a 9-digit rounding left q off by ~1e-9).
     xs = set()
     for nvec in itertools.product(range(n_cells), repeat=d):
-        x = np.mod(np.asarray(nvec, float) @ Minv_T, 1.0)
-        xs.add(tuple(np.round(x, 9) % 1.0))
+        m = np.rint((np.asarray(nvec, float) @ Minv_T) * n_cells).astype(np.int64)
+        xs.add(tuple(int(v) % n_cells for v in m))
     if len(xs) != n_cells:
         raise InvalidRequest(f"cluster_momenta: found {len(xs)} momenta for {n_cells} cells")
-    X = np.array(sorted(xs))
+    X = np.array(sorted(xs), float) / n_cells
     Q = X @ G
     if fold == "ws":
         shifts = np.array(list(itertools.product((-1, 0, 1), repeat=d)), float) @ G

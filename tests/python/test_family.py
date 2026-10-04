@@ -185,3 +185,14 @@ def test_structure_factor_perp():
     np.testing.assert_allclose(S2.perp()[:, nz], want[:, nz], atol=1e-12)
     with pytest.raises(qed.errors.InvalidRequest, match="perp"):
         qed.correlations(b.to_operator(), qed.Family.spins(lat, "z"), states="ground").fourier("cluster").perp()
+
+
+def test_cluster_momenta_are_exact_fractions():
+    """q = 2 pi m / N to roundoff (they were rounded to 9 decimals once: 2 pi m / 12 off by ~2e-9)."""
+    for N in (12, 14, 18):
+        Q = qed.input.cluster_momenta(qed.input.lattice.chain(N, True))
+        m = Q[:, 0] * N / (2 * np.pi)
+        np.testing.assert_allclose(m, np.round(m), atol=1e-12)
+    t = qed.input.cluster_momenta(qed.input.lattice.triangular(3, 4, True))
+    S = np.asarray(qed.input.lattice.triangular(3, 4, True).supercell)
+    np.testing.assert_allclose(np.exp(1j * t @ S.T), 1.0, atol=1e-13)
