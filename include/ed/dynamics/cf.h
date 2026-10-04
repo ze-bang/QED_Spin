@@ -160,35 +160,53 @@ CfSpectralResult cf_spectral_from_vector(Backend& be, ApplyH&& apply_H, std::siz
     return R;
 }
 
-/// The cross spectral function S_AB(w) = sum_n <a|n><n|b> L_eta(w - E_n + E_shift) of two vectors
-/// of one sector (a = A|psi>, b = B|psi>; complex in general), by one Lanczos run from b: with the
-/// tridiagonal's eigenpairs (theta_k, z_k) and c_j = <V_j|a> taken as each Krylov vector V_j is
-/// formed (LanczosKernelOptions::on_vector, no basis kept), <n|b> ~ ||b|| z_0k and
-/// <a|n> ~ sum_j conj(c_j) z_jk -- the Krylov resolvent <a|(z - H)^-1|b> = ||b|| c^H (z - T)^-1 e_0
-/// in pole form. a = b gives the continued fraction's poles; the polarisation identity
-/// S_AB = (1/4) sum_k i^-k S_{A + i^k B} relates it to autocorrelations.
+/// The cross spectral functions S_{A_i B}(w) = sum_n <a_i|n><n|b> L_eta(w - E_n + E_shift) of one
+/// vector b = B|psi> and several a_i = A_i|psi> of one sector (complex in general), by ONE Lanczos run
+/// from b: with the tridiagonal's eigenpairs (theta_k, z_k) and d_ij = <a_i|V_j> taken as each Krylov
+/// vector V_j is formed (LanczosKernelOptions::on_vector, no basis kept), <n|b> ~ ||b|| z_0k and
+/// <a_i|n> ~ sum_j d_ij z_jk -- the Krylov resolvent <a_i|(z - H)^-1|b> = ||b|| d_i (z - T)^-1 e_0 in
+/// pole form. a = b gives the continued fraction's poles; the polarisation identity
+/// S_AB = (1/4) sum_k i^-k S_{A + i^k B} relates it to autocorrelations. out[i][w].
 template <typename Backend, typename ApplyH>
-std::vector<Complex> cross_spectral_from_vectors(Backend& be, ApplyH&& apply_H, std::size_t local_n,
-                                                 const Complex* b_seed, const Complex* a_vec,
-                                                 const std::vector<double>& omega_grid, const CfSpectralOptions& opts) {
-    if (local_n == 0) throw std::invalid_argument("cross_spectral_from_vectors: local_n == 0");
-    if (omega_grid.empty()) throw std::invalid_argument("cross_spectral_from_vectors: empty frequency grid");
-    std::vector<Complex> S(omega_grid.size(), Complex(0, 0));
+std::vector<std::vector<Complex>> cross_spectral_many(Backend& be, ApplyH&& apply_H, std::size_t local_n,
+                                                      const Complex* b_seed, const std::vector<const Complex*>& a_vecs,
+                                                      const std::vector<double>& omega_grid,
+                                                      const CfSpectralOptions& opts) {
+    if (local_n == 0) throw std::invalid_argument("cross_spectral_many: local_n == 0");
+    if (omega_grid.empty()) throw std::invalid_argument("cross_spectral_many: empty frequency grid");
+    const std::size_t na = a_vecs.size();
+    std::vector<std::vector<Complex>> S(na, std::vector<Complex>(omega_grid.size(), Complex(0, 0)));
+    if (na == 0) return S;
     auto b = be.make_zero_vector(local_n);
-    auto a = be.make_zero_vector(local_n);
     be.copy_from_host(b_seed, b.get(), local_n);
-    be.copy_from_host(a_vec, a.get(), local_n);
     const double b_norm = be.nrm2(b.get(), local_n);
     // scale-free: unit-vector norm
-    if (b_norm < 1e-14 || be.nrm2(a.get(), local_n) < 1e-14) return S;
+    if (b_norm < 1e-14) return S;
     be.scale(Complex(1.0 / b_norm, 0.0), b.get(), local_n);
-    std::vector<Complex> c;   // c_j = <V_j|a>
+    std::vector<typename Backend::UniqueVec> a;
+    std::vector<const Complex*> ap;
+    std::vector<std::size_t> live;   // the a_i that are not zero
+    for (std::size_t i = 0; i < na; ++i) {
+        auto v = be.make_zero_vector(local_n);
+        be.copy_from_host(a_vecs[i], v.get(), local_n);
+        // scale-free: unit-vector norm
+        if (be.nrm2(v.get(), local_n) < 1e-14) continue;
+        ap.push_back(v.get());
+        a.push_back(std::move(v));
+        live.push_back(i);
+    }
+    if (live.empty()) return S;
+    std::vector<Complex> d;   // d[j * live + i] = <a_i|V_j>
+    std::vector<Complex> col(live.size());
     ed::krylov::LanczosKernelOptions kopts;
     kopts.max_iter = opts.krylov_dim;
     kopts.reorth = ed::krylov::ReorthPolicy::None;
     kopts.keep_basis = false;
     kopts.breakdown_tol = opts.tolerance;
-    kopts.on_vector = [&](std::size_t, const Complex* v) { c.push_back(be.dot(v, a.get(), local_n)); };
+    kopts.on_vector = [&](std::size_t, const Complex* v) {
+        be.dot_many(ap.data(), ap.size(), v, local_n, col.data());
+        d.insert(d.end(), col.begin(), col.end());
+    };
     const auto kres = ed::krylov::lanczos_kernel(be, apply_H, local_n, b.get(), kopts);
     const std::size_t m = kres.alpha.size();
     if (m == 0) return S;
@@ -196,15 +214,19 @@ std::vector<Complex> cross_spectral_from_vectors(Backend& be, ApplyH&& apply_H, 
     const double E_shift = opts.energy_shift.value_or(t.values.front());
     constexpr double kInvPi = 0.3183098861837907;
     const double eta = opts.broadening;
+    const std::size_t nl = live.size();
     for (std::size_t k = 0; k < m; ++k) {
-        Complex an(0, 0);                                   // <a|n_k> ~ sum_j conj(c_j) z_jk
-        for (std::size_t j = 0; j < m; ++j) an += std::conj(c[j]) * t.z(j, k);
-        const Complex w = an * (b_norm * t.z(0, k));
-        if (std::abs(w) < 1e-300) continue;
         const double E = t.values[k] - E_shift;
-        for (std::size_t iw = 0; iw < omega_grid.size(); ++iw) {
-            const double d = omega_grid[iw] - E;
-            S[iw] += w * ((eta * kInvPi) / (d * d + eta * eta));
+        for (std::size_t l = 0; l < nl; ++l) {
+            Complex an(0, 0);   // <a|n_k> ~ sum_j <a|V_j> z_jk
+            for (std::size_t j = 0; j < m; ++j) an += d[j * nl + l] * t.z(j, k);
+            const Complex w = an * (b_norm * t.z(0, k));
+            if (std::abs(w) < 1e-300) continue;
+            auto& out = S[live[l]];
+            for (std::size_t iw = 0; iw < omega_grid.size(); ++iw) {
+                const double dw = omega_grid[iw] - E;
+                out[iw] += w * ((eta * kInvPi) / (dw * dw + eta * eta));
+            }
         }
     }
     return S;

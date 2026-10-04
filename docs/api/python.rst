@@ -73,6 +73,8 @@ Verbs
 
 .. autoclass:: qed.Transitions
 
+.. autoclass:: qed.Dynamics
+
 Families
 --------
 
@@ -410,7 +412,8 @@ Operators
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: qed.input
-   :members: HamiltonianBuilder, cluster_momenta, displacement, momentum_label
+   :members: HamiltonianBuilder, cluster_momenta, displacement, momentum_label, high_symmetry_points,
+             momentum_path
 
 .. py:currentmodule:: qed.input
 

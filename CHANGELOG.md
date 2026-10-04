@@ -1,5 +1,62 @@
 # Changelog
 
+## Unreleased — 0.7.0: one organisation for every observable
+
+Every observable computation is now a quantity (⟨O⟩, ⟨A†B⟩, ⟨m|O|n⟩, S_AB(ω)) in a state (levels,
+the ground manifold, temperatures) on an index axis (operators, a `qed.Family`, a momentum axis),
+answered in one pass. See `docs/observables.md`.
+
+Breaking changes:
+
+- **`qed.dssf` momentum sign.** The probe phase is e^{-iQ·R}/√N, the convention of the whole package
+  (it was e^{+iQ·R}): an old Q is the new −Q. Every momentum in the package now follows
+  O_q = N^{-1/2} Σ_r e^{-iq·r} O_r and S(q) = N^{-1} Σ_ab e^{+iq·(r_a − r_b)} ⟨O_a† O_b⟩.
+- **C++ kernel API.** `ed::thermal::FtlmOptions::observables` (one apply function per observable)
+  is replaced by `n_observables` + `observe` (a host sweep over each sample's φ vectors);
+  `ed::observables::cross_spectral_from_vectors` is replaced by `cross_spectral_many` (one Lanczos
+  run, many A); `ed::sectors::PairRequest` moved to `sectors.h`. The Python API is unchanged.
+- FTLM observables are the same symmetric estimator, now evaluated through each sample's φ(T)
+  vector: results differ from 0.6 at roundoff level.
+
+New:
+
+- **`qed.measure(H, requests, k=1, *, T=None, states="levels", ...)`** with the requests
+  `qed.Expect`, `qed.Correlations`, `qed.Transitions` and `qed.Dynamics`. One eigensolve (or one
+  thermal pass) and one sweep of each block's vectors answer every equal-time request. `H` may be an
+  `EigResult` with vectors.
+- **One-request verbs:** `qed.expect` (now also `states=` and `T=`), `qed.correlations` →
+  `CorrelationResult` (`C[rows, *A_index, *B_index]`, the one-point means, `ground()`,
+  `connected()`, `fourier(q)` → `StructureFactor` with `trace()` and the neutron projector
+  `perp()`), and `qed.transitions` → `TransitionResult` (multiplet-invariant line strengths and pair
+  matrices between two sets of levels, `ground()`, raw member amplitudes on request; forbidden
+  transitions are exact zeros).
+- **Families:** `qed.Family` (`spins`, `sites`, `bonds`; shape, positions, labels) and its momentum
+  transform `qed.MomentumFamily` (`family.fourier(q | "cluster")`), accepted by every verb above and
+  by `qed.dynamics` (S(q, ω) with `q` and `index` on the result). `EigResult.expect` takes families;
+  `EigResult.correlations(A, B=None)` is new.
+- **Geometry:** `Lattice.supercell`; `qed.input.cluster_momenta` (from a lattice, supercell and
+  primitive vectors, or translations with positions), `displacement`, `momentum_label`,
+  `high_symmetry_points`, `momentum_path`.
+- **Thermal measurements in every method:** `qed.thermal(..., requests=[...])` and `T=` on the verbs.
+  Exact: one sweep over each block's eigenvectors. FTLM: each sample's φ(T) from its Krylov basis.
+  **mTPQ** (refused before): the Sugiura-Shimizu canonical series, exact for operators that commute
+  with H and the standard approximation otherwise. **OFTLM** (refused before): the exact states plus
+  the samples' φ(T). Equal-time pairs `ThermalSpec::observable_pairs` in C++.
+- **`qed.eigs(per_block=m)`:** the lowest m levels of every symmetry block.
+
+Performance:
+
+- Operators are averaged over the symmetries of each level or block, and averaged operators equal up
+  to a factor are evaluated once: a symmetry orbit of pairs costs one operator, so the N² correlation
+  matrix of a translation-invariant state costs about N operators, all in one sweep.
+- FTLM observables no longer cost m operator applies per observable per sample, and need no device
+  kernel on the GPU lane.
+- T = 0 dynamics: cross pairs sharing a B share its Lanczos runs; `B="all"` over P operators costs
+  P runs per target block instead of P².
+
+Tests: `test_family.py`, `test_correlations.py`, `test_transitions.py`, `test_thermal_measure.py`,
+`test_dynamics_families.py` against dense references; a grid task `corr` (115 cells per backend).
+
 ## 2026-10-03 — 0.6.1: the capability catalogue's findings closed
 
 A source-level catalogue of 0.6.0 (every public function, parameter and refusal, each item checked

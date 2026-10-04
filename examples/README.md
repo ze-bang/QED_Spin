@@ -1,6 +1,6 @@
 # `examples/`
 
-Six short scripts; each runs in seconds:
+Seven short scripts; each runs in seconds:
 
 | script | verbs |
 |---|---|
@@ -10,6 +10,7 @@ Six short scripts; each runs in seconds:
 | [`04_symmetry.py`](04_symmetry.py) | `qed.find_symmetries`, `qed.Symmetry` options, sector selection |
 | [`05_operator_algebra.py`](05_operator_algebra.py) | `qed.Operator` algebra: products, sums, adjoints, exact symmetry checks, derived observables |
 | [`06_cross_dynamics.py`](06_cross_dynamics.py) | `qed.dynamics` cross-correlations: several probes, `B="all"` |
+| [`07_observables.py`](07_observables.py) | `qed.measure` with `qed.Family`: correlations and S(q) (cluster momenta, a zone path, the neutron projector) at T = 0 and finite T, `qed.transitions`, S(q, w) |
 
 Every verb takes `sym=` (default `qed.Symmetry.auto()`) and `device=` (`"cpu"`, `"gpu"`,
 `"auto"`). Correctness of every task x symmetry x backend combination is pinned by the

@@ -122,6 +122,7 @@ _check_environment()
 from ._verbs import (  # noqa: E402
     CorrelationResult,
     Correlations,
+    Dynamics,
     DynamicsResult,
     EigResult,
     Expect,
@@ -167,6 +168,7 @@ __all__ = [
     "MeasureResult",
     "Expect",
     "Correlations",
+    "Dynamics",
     "expect",
     "ExpectResult",
     "correlations",

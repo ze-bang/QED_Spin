@@ -141,3 +141,47 @@ def test_structure_factor_convention():
         ph = np.exp(1j * (R @ q))
         want = np.einsum("i,ij,j->", ph, C, np.conj(ph)) / N
         assert abs(sq[k] - want) < 1e-10
+
+
+def test_high_symmetry_points_and_paths():
+    tri = qed.input.high_symmetry_points(qed.input.lattice.triangular(3, 3, True))
+    assert abs(np.linalg.norm(tri["K"]) - 4 * np.pi / 3) < 1e-12
+    assert abs(np.linalg.norm(tri["M"]) - 2 * np.pi / math.sqrt(3)) < 1e-12
+    for name in ("triangular", "honeycomb", "kagome"):
+        L = getattr(qed.input.lattice, name)(2, 2, True)
+        p = qed.input.high_symmetry_points(L)
+        A2 = np.asarray(L.lattice_vectors)[:2, :2]
+        B = 2 * np.pi * np.linalg.solve(A2 @ A2.T, A2)
+        G = [i * B[0] + j * B[1] for i, j in itertools.product((-1, 0, 1), repeat=2)]   # (0, 0) included
+        d = sorted(np.linalg.norm(p["K"][:2] - g) for g in G)
+        assert abs(d[0] - d[1]) < 1e-12 and abs(d[1] - d[2]) < 1e-12   # a zone corner: three equidistant G
+    sq = qed.input.high_symmetry_points(qed.input.lattice.square(4, 4, True))
+    np.testing.assert_allclose(sq["M"], [np.pi, np.pi, 0.0])
+    py = qed.input.high_symmetry_points(qed.input.lattice.pyrochlore(2, 2, 2, True))
+    np.testing.assert_allclose(py["X"], [2 * np.pi, 0, 0])
+    q, x, ticks = qed.input.momentum_path(["G", "K", "M", "G"], n=10, lattice=qed.input.lattice.triangular(3, 3, True))
+    assert q.shape == (31, 3) and len(x) == 31 and [t[1] for t in ticks] == ["G", "K", "M", "G"]
+    assert np.all(np.diff(x) > 0) and abs(x[-1] - ticks[-1][0]) < 1e-12
+    with pytest.raises(qed.errors.InvalidRequest, match="unknown point"):
+        qed.input.momentum_path(["G", "Z"], lattice=qed.input.lattice.square(2, 2, True))
+
+
+def test_structure_factor_perp():
+    """S_perp(q) = sum_ab (delta_ab - q_a q_b / q^2) S^ab(q): (2/3) of the trace for an SU(2) singlet."""
+    N = 8
+    lat = qed.input.lattice.chain(N, True)
+    b = qed.input.HamiltonianBuilder(N)
+    b.heisenberg(lat.nn_pairs(), 1.0)
+    fam = qed.Family.spins(lat)
+    S = qed.correlations(b.to_operator(), fam, states="ground").fourier("cluster")
+    assert S.components == "xyz"
+    np.testing.assert_allclose(S.perp(), (2.0 / 3.0) * S.trace(), atol=1e-12)
+    b2 = qed.input.HamiltonianBuilder(N)
+    b2.xxz(lat.nn_pairs(), 1.0, 0.6)
+    S2 = qed.correlations(b2.to_operator(), fam, states="ground").fourier("cluster")
+    qhat = S2.q / np.where(np.linalg.norm(S2.q, axis=1) > 0, np.linalg.norm(S2.q, axis=1), 1)[:, None]
+    want = np.einsum("raaq->rq", S2.S) - np.einsum("qa,qb,rabq->rq", qhat, qhat, S2.S)
+    nz = np.linalg.norm(S2.q, axis=1) > 1e-12
+    np.testing.assert_allclose(S2.perp()[:, nz], want[:, nz], atol=1e-12)
+    with pytest.raises(qed.errors.InvalidRequest, match="perp"):
+        qed.correlations(b.to_operator(), qed.Family.spins(lat, "z"), states="ground").fourier("cluster").perp()

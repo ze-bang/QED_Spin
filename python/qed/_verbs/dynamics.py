@@ -10,14 +10,16 @@ import numpy as np
 from .. import _core, _log
 from . import _device
 from ..errors import InvalidRequest
+from ..family import Family, MomentumFamily
 from .symmetry import Symmetry
 
 
 @dataclass
 class DynamicsResult:
     """``S[..., i, :]`` is S(omega) at temperature ``T[i]``; at T = 0 ``T`` is empty and that axis has
-    one row. The leading axes are the probes' (none for one ``O``): ``[len(O)]``, or
-    ``[len(O), len(O)]`` for ``B="all"``. S is real for autocorrelations and complex once a probe
+    one row. The leading axes are the probes' (none for one ``O``): ``[len(O)]``, a family's shape
+    (a :class:`qed.MomentumFamily`: ``(*lead, n_q)``, its momenta in ``q``), or those axes twice for
+    ``B="all"``. ``index``: the family ``O`` was, if any. S is real for autocorrelations and complex once a probe
     pairs two operators. omega is measured from the ground-state energy at T = 0 and is the
     transferred energy at T > 0. ``diagnostics``: (code, message) pairs for fallbacks the run took."""
 
@@ -30,32 +32,44 @@ class DynamicsResult:
     symmetry: Symmetry = field(repr=False)
     diagnostics: list = field(default_factory=list)
     placement: dict = field(default_factory=dict)
+    q: Optional[np.ndarray] = None
+    index: object = None
+
+
+def _operators(x, what: str):
+    """(operators, index shape) of a probe operand: an Operator (no axis), a sequence, a qed.Family
+    (its shape) or a qed.MomentumFamily (its O_q, shape (*lead, n_q))."""
+    if isinstance(x, MomentumFamily):
+        return x.operators(), list(x.shape)
+    if isinstance(x, Family):
+        return list(x.ops), list(x.shape)
+    if isinstance(x, _core.Operator):
+        return [x], []
+    try:
+        ops = list(x)
+    except TypeError:
+        ops = []  # not an Operator and not iterable (a number, None)
+    if not ops or not all(isinstance(o, _core.Operator) for o in ops):
+        raise InvalidRequest(f"{what} must be a qed.Operator, a non-empty sequence of them, a qed.Family or a "
+                             "qed.MomentumFamily")
+    return ops, [len(ops)]
 
 
 def _probes(O, B):
     """The (A, B) pairs of a call, the shape of their probe axes, and whether any is a cross pair."""
-    single = isinstance(O, _core.Operator)
-    try:
-        ops = [O] if single else list(O)
-    except TypeError:
-        ops = []  # not an Operator and not iterable (a number, None)
-    if not ops or not all(isinstance(o, _core.Operator) for o in ops):
-        raise InvalidRequest("O must be a qed.Operator or a non-empty sequence of them")
+    ops, axes = _operators(O, "O")
     if B is None:
-        return [(o, None) for o in ops], ([] if single else [len(ops)]), False
+        return [(o, None) for o in ops], axes, False
     if isinstance(B, str):
         if B != "all":
             raise InvalidRequest(f"B must be None, a qed.Operator, a sequence of them or 'all', got {B!r}")
-        return [(a, b) for a in ops for b in ops], [len(ops), len(ops)], True
+        return [(a, b) for a in ops for b in ops], axes + axes, True
     if isinstance(B, _core.Operator):
-        return [(o, B) for o in ops], ([] if single else [len(ops)]), True
-    try:
-        bs = list(B)
-    except TypeError:
-        raise InvalidRequest(f"B must be None, a qed.Operator, a sequence of them or 'all', got {B!r}") from None
-    if len(bs) != len(ops) or not all(isinstance(b, _core.Operator) for b in bs):
+        return [(o, B) for o in ops], axes, True
+    bs, _ = _operators(B, "B")
+    if len(bs) != len(ops):
         raise InvalidRequest(f"B as a sequence pairs with O: {len(ops)} qed.Operator(s) expected, got {len(bs)}")
-    return list(zip(ops, bs)), ([] if single else [len(ops)]), True
+    return list(zip(ops, bs)), axes, True
 
 
 @_log.replays
@@ -78,10 +92,12 @@ def dynamics(
 ) -> DynamicsResult:
     """S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>, Lorentzian width ``eta``.
 
-    ``O`` is the probe A, or a sequence of them. ``B``: ``None`` gives each O's autocorrelation
-    (real); a qed.Operator, every <O_i^dag B>; a sequence as long as ``O``, the pairs
-    <O_i^dag B_i>; ``"all"``, every <O_i^dag O_j> (a len(O) x len(O) matrix of spectra). One call
-    shares the ground manifold (T = 0) and the source sectors (T > 0) among its probes.
+    ``O`` is the probe A, a sequence of them, a :class:`qed.Family` or a :class:`qed.MomentumFamily`
+    (``qed.Family.spins(lattice, "z").fourier("cluster")`` gives S^zz(q, omega) at every cluster
+    momentum). ``B``: ``None`` gives each O's autocorrelation (real); a qed.Operator, every
+    <O_i^dag B>; a sequence or family as long as ``O``, the pairs <O_i^dag B_i>; ``"all"``, every
+    <O_i^dag O_j> (a matrix of spectra; at T = 0 the pairs sharing a B share its Lanczos runs). One
+    call shares the ground manifold (T = 0) and the source sectors (T > 0) among its probes.
 
     ``T=None``: the ground state, averaged over a degenerate ground manifold: every level within
     ``degeneracy_tol`` times the scale of H (the sum of |c| over its terms) of E0.
@@ -135,4 +151,6 @@ def dynamics(
         symmetry=sym,
         diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
         placement=dict(r.placement),
+        q=O.q if isinstance(O, MomentumFamily) else None,
+        index=O if isinstance(O, (Family, MomentumFamily)) else None,
     )

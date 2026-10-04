@@ -91,6 +91,9 @@ order given; a temperature listed twice gets the same row twice.
 - Under `"all"`, $S_{O_j,O_i} = S_{O_i,O_j}^*$ holds at T = 0 once the Krylov runs have
   converged (the two come from runs started from different vectors; to roundoff when `krylov`
   covers every target sector), and on average over samples at T > 0.
+- At T = 0 the cross pairs that share their B share its Lanczos runs: one run from B|ψ⟩ per
+  target block projects every A (up to 32 at a time), so `"all"` over P operators costs P runs
+  per block, not P².
 - The probes of one call share the ground manifold (T = 0) and the source sectors with each
   sample's source Lanczos run (T > 0). At T > 0 each probe sums over the source sectors its
   own symmetries relate (see Symmetry), so a probe's result does not depend on the other
@@ -424,5 +427,5 @@ autocorrelations of $S^+_q$ and $S^-_q$, which the script computes separately an
 | `python/qed/_verbs/dynamics.py` | the verb: argument checks, probe pairs, result shapes, temperature order |
 | `include/ed/sectors/dynamics.h` | `ed::sectors::dynamics(H, s, probes, d)`: `DynamicsSpec`, `Probe{A, B}` (`B` null: `A`'s autocorrelation), `DynamicsCurves` with `S[probe][row][omega]` |
 | `src/engine/dynamics.cpp` | the ground manifold, target blocks, source folding, placement |
-| `include/ed/dynamics/cf.h` | `continued_fraction`, `cf_spectral_from_vector`, `cross_spectral_from_vectors` |
+| `include/ed/dynamics/cf.h` | `continued_fraction`, `cf_spectral_from_vector`, `cross_spectral_many` (one Lanczos run from B psi projects every A) |
 | `include/ed/dynamics/ftlm_dynamics.h` | `ftlm_dynamics_kernel`: one source sector against all its targets |

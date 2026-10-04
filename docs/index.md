@@ -5,7 +5,9 @@ NVIDIA GPU (CUDA). It computes:
 
 - lowest levels and eigenvectors;
 - full spectra;
-- thermodynamics: exact, FTLM, OFTLM, mTPQ, and ⟨O⟩(T);
+- thermodynamics: exact, FTLM, OFTLM and mTPQ;
+- observables in one pass: expectation values, pair correlations and structure factors, transitions
+  between levels, in levels or at temperatures, on operator families and momentum axes;
 - dynamical correlations S_AB(ω) at zero and finite temperature.
 
 Each calculation is split into the symmetry sectors of the Hamiltonian: Sz or its parity,
@@ -20,6 +22,7 @@ sites.
 architecture
 symmetry
 operators
+observables
 dynamics
 api/python
 api/cpp
@@ -30,6 +33,7 @@ api/cpp
 | {doc}`Architecture <architecture>` | the path from a Python call to the kernels, and the backends |
 | {doc}`Symmetry <symmetry>` | `qed.Symmetry`, sectors, level labels, selections, representatives |
 | {doc}`Operators <operators>` | `qed.Operator` and its algebra, `HamiltonianBuilder`, lattices, `qed.dssf` |
+| {doc}`Observables <observables>` | `qed.measure`: expectation values, correlations, transitions and dynamics on families, momenta and temperatures |
 | {doc}`Dynamics <dynamics>` | `qed.dynamics`: probes, cross-correlations, T = 0 and T > 0 |
 | {doc}`Python API <api/python>` | every public name of `qed` and its submodules |
 | {doc}`C++ API <api/cpp>` | the installed headers: `ed::sectors`, operators, placement, backends, kernels |

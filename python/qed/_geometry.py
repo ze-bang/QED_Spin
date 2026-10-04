@@ -181,3 +181,58 @@ def momentum_label(q, displacement_vector) -> float:
     """theta_T = q . d_T / 2 pi mod 1: the label ``result.momentum(i, [T])`` reports for a state of
     momentum q, T the translation with displacement d_T."""
     return float(np.mod(np.dot(np.asarray(q, float), np.asarray(displacement_vector, float)) / (2.0 * np.pi), 1.0))
+
+
+def high_symmetry_points(lattice) -> dict:
+    """The high-symmetry momenta (Cartesian, in the units of the positions) of a lattice from a
+    ``qed.input.lattice`` generator, by name: chain G, X; square G, X, M; triangular, honeycomb and
+    kagome G, M, K; pyrochlore (FCC) G, X, L, W, K, U."""
+    name = str(lattice.label).split("[")[0]
+    A = _rows(lattice.lattice_vectors)
+    if name == "pyrochlore":   # cubic constant 1 in the generator's orientation
+        tp = 2.0 * np.pi
+        return {"G": np.zeros(3), "X": tp * np.array([1.0, 0.0, 0.0]), "L": np.pi * np.ones(3),
+                "W": tp * np.array([1.0, 0.5, 0.0]), "K": tp * np.array([0.75, 0.75, 0.0]),
+                "U": tp * np.array([1.0, 0.25, 0.25])}
+    B = _dual(A)
+    if name == "chain":
+        return {"G": np.zeros(3), "X": B[0] / 2.0}
+    if name == "square":
+        return {"G": np.zeros(3), "X": B[0] / 2.0, "M": (B[0] + B[1]) / 2.0}
+    if name in ("triangular", "honeycomb", "kagome"):
+        # the zone corner: (2 b1 + b2) / 3 for primitive vectors at 60 degrees, (b1 + b2) / 3 at 120
+        K = (2.0 * B[0] + B[1]) / 3.0 if A[0] @ A[1] > 0 else (B[0] + B[1]) / 3.0
+        return {"G": np.zeros(3), "M": B[0] / 2.0, "K": K}
+    raise InvalidRequest(f"high_symmetry_points: no table for lattice {lattice.label!r}; pass the points yourself")
+
+
+def momentum_path(points, n: int = 64, lattice=None):
+    """Momenta along straight segments through ``points`` -- labels of :func:`high_symmetry_points`
+    (with ``lattice``) or (label, q) pairs -- with ``n`` points per segment. Returns ``(q, x, ticks)``:
+    q an (M, 3) array, x the distance along the path, ticks the (x, label) of every corner. S(q) on the
+    path: ``correlations(...).fourier(q)`` (any q, not only the cluster's)."""
+    if int(n) < 1:
+        raise InvalidRequest(f"momentum_path: n must be >= 1, got {n}")
+    table = high_symmetry_points(lattice) if lattice is not None else {}
+    corners = []
+    for p in points:
+        if isinstance(p, str):
+            if p not in table:
+                raise InvalidRequest(f"momentum_path: unknown point {p!r} (known: {sorted(table)})")
+            corners.append((p, np.asarray(table[p], float)))
+        else:
+            label, q = p
+            q = np.asarray(q, float).reshape(-1)
+            corners.append((str(label), np.pad(q, (0, 3 - len(q)))))
+    if len(corners) < 2:
+        raise InvalidRequest("momentum_path: at least two points")
+    qs, xs, ticks, x0 = [], [], [(0.0, corners[0][0])], 0.0
+    for (_, a), (lb, b) in zip(corners[:-1], corners[1:]):
+        t = np.linspace(0.0, 1.0, int(n), endpoint=False)
+        qs.append(a[None, :] + t[:, None] * (b - a)[None, :])
+        xs.append(x0 + t * np.linalg.norm(b - a))
+        x0 += float(np.linalg.norm(b - a))
+        ticks.append((x0, lb))
+    qs.append(corners[-1][1][None, :])
+    xs.append(np.array([x0]))
+    return np.vstack(qs), np.concatenate(xs), ticks

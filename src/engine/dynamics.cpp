@@ -515,93 +515,143 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                         stars.push_back(std::move(sb));
                     }
                 };
-                // One continued fraction (autocorrelation: ya null) or the cross pair's poles, on `op`.
-                auto continued_fraction = [&](RepSectorMatVec& op, std::size_t nb, const Complex* yb, const Complex* ya,
-                                              std::size_t p) {
-                    auto t_cf = std::chrono::steady_clock::now();
-                    // k-sector and one-dimensional group-sector RepSectorMatVecs always have a device kernel.
-                    ed::core::Shape cf_shape;
-                    cf_shape.dim = nb;
-                    cf_shape.device = true;
-                    const std::uint64_t cf_bytes = ed::core::footprint(ed::core::Path::GsTwoPass, cf_shape).device
-                                                   + (ya ? 16 * static_cast<std::uint64_t>(nb) : 0); // a cross pair's a
-                    const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb, cf_bytes));
-                    auto spectrum = [&](auto& bk, auto&& apply) {
-                        if (!ya) {
-                            const auto r = ed::observables::cf_spectral_from_vector(bk, apply, nb, yb, d.omega, cf);
-                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r.spectral_function[i];
-                        } else {
-                            const auto r =
-                                ed::observables::cross_spectral_from_vectors(bk, apply, nb, yb, ya, d.omega, cf);
-                            for (std::size_t i = 0; i < d.omega.size(); ++i) S[p][i] += r[i];
-                        }
-                    };
-                    if (ed::on_device(lane)) {
+                // An autocorrelation's continued fraction (yas empty, one probe), or the cross pairs that
+                // share yb = B|v>: one Lanczos run from yb projects every a = A|v> (at most kAPerRun at a
+                // time, which bounds the vectors held), on `op`.
+                auto spectra = [&](RepSectorMatVec& op, std::size_t nb, const Complex* yb,
+                                   const std::vector<const Complex*>& yas, const std::vector<std::size_t>& ps) {
+                    constexpr std::size_t kAPerRun = 32;
+                    const std::size_t n_runs = yas.empty() ? 1 : (yas.size() + kAPerRun - 1) / kAPerRun;
+                    for (std::size_t c0 = 0; c0 < n_runs; ++c0) {
+                        auto t_cf = std::chrono::steady_clock::now();
+                        const std::size_t lo = c0 * kAPerRun, hi = std::min(yas.size(), lo + kAPerRun);
+                        // k-sector and one-dimensional group-sector RepSectorMatVecs always have a device kernel.
+                        ed::core::Shape cf_shape;
+                        cf_shape.dim = nb;
+                        cf_shape.device = true;
+                        const std::uint64_t cf_bytes = ed::core::footprint(ed::core::Path::GsTwoPass, cf_shape).device
+                                                       + 16 * static_cast<std::uint64_t>(nb) * (hi - lo);   // the a's
+                        const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb, cf_bytes));
+                        auto spectrum = [&](auto& bk, auto&& apply) {
+                            if (yas.empty()) {
+                                const auto r = ed::observables::cf_spectral_from_vector(bk, apply, nb, yb, d.omega, cf);
+                                for (std::size_t i = 0; i < d.omega.size(); ++i)
+                                    S[ps.front()][i] += r.spectral_function[i];
+                            } else {
+                                const std::vector<const Complex*> part(yas.begin() + static_cast<std::ptrdiff_t>(lo),
+                                                                       yas.begin() + static_cast<std::ptrdiff_t>(hi));
+                                const auto r =
+                                    ed::observables::cross_spectral_many(bk, apply, nb, yb, part, d.omega, cf);
+                                for (std::size_t a = 0; a < part.size(); ++a)
+                                    for (std::size_t i = 0; i < d.omega.size(); ++i) S[ps[lo + a]][i] += r[a][i];
+                            }
+                        };
+                        if (ed::on_device(lane)) {
 #ifdef WITH_CUDA
-                        op.enable_device(true);
-                        auto& cbe = ed::thread_cuda_backend();
-                        spectrum(cbe, op.bind_cuda());
-                        ++out.device_blocks;
+                            op.enable_device(true);
+                            auto& cbe = ed::thread_cuda_backend();
+                            spectrum(cbe, op.bind_cuda());
+                            ++out.device_blocks;
 #endif
-                    } else {
-                        spectrum(be, [&op](const Complex* in, Complex* o, std::size_t nn) { op.apply(in, o, nn); });
+                        } else {
+                            spectrum(be, [&op](const Complex* in, Complex* o, std::size_t nn) { op.apply(in, o, nn); });
+                        }
+                        out.placement.add(lane);
+                        phase["continued fraction"] += clock_since(t_cf);
                     }
-                    out.placement.add(lane);
-                    phase["continued fraction"] += clock_since(t_cf);
                 };
                 const std::size_t n = rd->reps.size();
-                for (std::size_t w = 0; w < who.size(); ++w) {
-                    const std::size_t si = who[w].first, p = who[w].second;
-                    const BlockVector& v = states[si].first;
-                    // X|v> in this sector; false when X does not reach it or annihilates v here.
-                    auto carry = [&](const ed::ops::MaskedOperator& X, std::vector<Complex>& phi) {
-                        auto t_pr = std::chrono::steady_clock::now();
-                        const auto Pg = cross_program(X, *v.basis, *rd);
-                        phase["compile O"] += clock_since(t_pr);
-                        if (!Pg) return false;
-                        phi.assign(n, Complex(0, 0));
-                        auto t_sc = std::chrono::steady_clock::now();
-                        CrossSectorMatVec(Pg, v.basis, rd).apply(v.amplitudes.data(), phi.data(), n);
-                        phase["apply O"] += clock_since(t_sc);
-                        double n2 = 0.0;
-                        for (const auto& c : phi) n2 += std::norm(c);
-                        return n2 >= 1e-24;
-                    };
-                    std::vector<Complex> phi_b, phi_a;
-                    if (!carry(Bt[w], phi_b)) continue;
-                    if (pr[p].cross && !carry(At[w], phi_a)) continue;
+                // X|v> in this sector; false when X does not reach it or annihilates v here.
+                auto carry = [&](const BlockVector& v, const ed::ops::MaskedOperator& X, std::vector<Complex>& phi) {
+                    auto t_pr = std::chrono::steady_clock::now();
+                    const auto Pg = cross_program(X, *v.basis, *rd);
+                    phase["compile O"] += clock_since(t_pr);
+                    if (!Pg) return false;
+                    phi.assign(n, Complex(0, 0));
+                    auto t_sc = std::chrono::steady_clock::now();
+                    CrossSectorMatVec(Pg, v.basis, rd).apply(v.amplitudes.data(), phi.data(), n);
+                    phase["apply O"] += clock_since(t_sc);
+                    double n2 = 0.0;
+                    for (const auto& c : phi) n2 += std::norm(c);
+                    return n2 >= 1e-24;
+                };
+                // The pairs from one state with one B share B|v> and its Lanczos runs, projecting every
+                // A (a cross family costs one run per B, not one per pair); an autocorrelation runs its
+                // own continued fraction. A run lists its pairs (indices into `who`).
+                struct Run {
+                    std::size_t si;
+                    std::vector<std::size_t> ws;
+                };
+                std::vector<Run> runs;
+                {
+                    std::map<std::pair<std::size_t, const ed::ops::MaskedOperator*>, std::size_t> at;
+                    for (std::size_t w = 0; w < who.size(); ++w) {
+                        const std::size_t si = who[w].first, p = who[w].second;
+                        if (!pr[p].cross) {
+                            runs.push_back({si, {w}});
+                            continue;
+                        }
+                        const auto [it, fresh] = at.try_emplace({si, pr[p].Bc}, runs.size());
+                        if (fresh) runs.push_back({si, {}});
+                        runs[it->second].ws.push_back(w);
+                    }
+                }
+                for (const Run& run : runs) {
+                    const BlockVector& v = states[run.si].first;
+                    const bool cross = pr[who[run.ws.front()].second].cross;
+                    std::vector<Complex> phi_b;
+                    if (!carry(v, Bt[run.ws.front()], phi_b)) continue;   // one B: the same part for every pair
+                    std::vector<std::vector<Complex>> phi_a;
+                    std::vector<std::size_t> ps;
+                    for (const std::size_t w : run.ws) {
+                        if (cross) {
+                            std::vector<Complex> a;
+                            if (!carry(v, At[w], a)) continue;
+                            phi_a.push_back(std::move(a));
+                        }
+                        ps.push_back(who[w].second);
+                    }
+                    if (cross && phi_a.empty()) continue;
                     if (!counted) {
                         counted = true;
                         ++reached;
                     }
                     if (!built) build_blocks();
-                    const Complex* pa = pr[p].cross ? phi_a.data() : nullptr;
                     double n2b = 0.0;
                     for (const auto& c : phi_b) n2b += std::norm(c);
                     double kept = 0.0;
                     for (const TBlock& b : blocks) {
                         auto t_pj = std::chrono::steady_clock::now();
                         const auto yb = restrict_group_vector(*b.sec, *rd, phi_b.data());
-                        const auto ya = pa ? restrict_group_vector(*b.sec, *rd, pa) : std::vector<Complex>{};
+                        std::vector<std::vector<Complex>> ya(phi_a.size());
+                        for (std::size_t i = 0; i < phi_a.size(); ++i)
+                            ya[i] = restrict_group_vector(*b.sec, *rd, phi_a[i].data());
                         phase["project on blocks"] += clock_since(t_pj);
-                        double nb2 = 0.0, na2 = 1.0;
+                        double nb2 = 0.0;
                         for (const auto& c : yb) nb2 += std::norm(c);
-                        if (pa) {
-                            na2 = 0.0;
-                            for (const auto& c : ya) na2 += std::norm(c);
-                        }
                         kept += nb2;
                         if (rest) { // the part outside the one-dimensional blocks
                             const auto lb = lift_group_vector(*b.sec, *rd, yb.data());
                             for (std::size_t i = 0; i < n; ++i) phi_b[i] -= lb[i];
-                            if (pa) {
-                                const auto la = lift_group_vector(*b.sec, *rd, ya.data());
-                                for (std::size_t i = 0; i < n; ++i) phi_a[i] -= la[i];
+                            for (std::size_t a = 0; a < phi_a.size(); ++a) {
+                                const auto la = lift_group_vector(*b.sec, *rd, ya[a].data());
+                                for (std::size_t i = 0; i < n; ++i) phi_a[a][i] -= la[i];
                             }
                         }
                         // scale-free: squared norms against the probe image's own
-                        if (nb2 <= 1e-24 * n2b || (pa && na2 <= 1e-24 * n2b)) continue;
-                        continued_fraction(*b.H, yb.size(), yb.data(), pa ? ya.data() : nullptr, p);
+                        if (nb2 <= 1e-24 * n2b) continue;
+                        std::vector<const Complex*> yas;
+                        std::vector<std::size_t> qs;
+                        for (std::size_t a = 0; a < ya.size(); ++a) {
+                            double na2 = 0.0;
+                            for (const auto& c : ya[a]) na2 += std::norm(c);
+                            // scale-free: squared norms against the probe image's own
+                            if (na2 <= 1e-24 * n2b) continue;
+                            yas.push_back(ya[a].data());
+                            qs.push_back(ps[a]);
+                        }
+                        if (cross && yas.empty()) continue;
+                        spectra(*b.H, yb.size(), yb.data(), yas, cross ? qs : ps);
                     }
                     if (!rest) {
                         // scale-free: squared norms against the probe image's own
@@ -615,7 +665,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     // scale-free: squared norms against the probe image's own
                     if (!blocks.empty() && r2 <= 1e-24 * n2b) continue;
                     if (!Ht) Ht = std::make_shared<RepSectorMatVec>(H, rd);
-                    continued_fraction(*Ht, n, phi_b.data(), pa, p);
+                    std::vector<const Complex*> yas;
+                    for (const auto& a : phi_a) yas.push_back(a.data());
+                    spectra(*Ht, n, phi_b.data(), yas, ps);
                 }
             });
         }

@@ -46,9 +46,11 @@ def _positions_of(where, n: Optional[int] = None):
 class Family:
     """Operators ``ops`` (all on the same sites) with index ``shape`` (default ``(len(ops),)``,
     ``ops`` in C order over it) and, for the last axis, ``positions`` (an (shape[-1], 3) array or a
-    ``qed.input.Lattice``). ``labels``: optional names, one per member."""
+    ``qed.input.Lattice``). ``labels``: optional names, one per member; ``components``: the spin
+    components of the first axis (set by :meth:`spins`, read by :meth:`StructureFactor.perp`)."""
 
-    def __init__(self, ops: Sequence, *, shape: Optional[Sequence[int]] = None, positions=None, labels=None):
+    def __init__(self, ops: Sequence, *, shape: Optional[Sequence[int]] = None, positions=None, labels=None,
+                 components: Optional[str] = None):
         ops = list(ops)
         if not ops:
             raise InvalidRequest("Family: no operators")
@@ -66,6 +68,8 @@ class Family:
         self.labels = list(labels) if labels is not None else None
         if self.labels is not None and len(self.labels) != len(ops):
             raise InvalidRequest(f"Family: {len(self.labels)} labels for {len(ops)} members")
+        # the spin components of the first axis (Family.spins), e.g. "xyz"; None otherwise
+        self.components = components
 
     def __len__(self) -> int:
         return len(self.ops)
@@ -85,7 +89,8 @@ class Family:
             raise InvalidRequest(f"Family.spins: components are letters of 'xyz+-', got {components!r}")
         ops = [_core.Operator.product(n, _SPIN_LETTERS[c], [i], 1.0) for c in components for i in range(n)]
         labels = [f"S{c}_{i}" for c in components for i in range(n)]
-        return cls(ops, shape=(len(components), n), positions=lat if lat is not None else r, labels=labels)
+        return cls(ops, shape=(len(components), n), positions=lat if lat is not None else r, labels=labels,
+                   components=components)
 
     @classmethod
     def sites(cls, sites, f: Callable[[int], object]) -> "Family":

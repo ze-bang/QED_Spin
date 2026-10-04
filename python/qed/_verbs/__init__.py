@@ -6,6 +6,7 @@ from .eigs import EigResult, eigs, load_eigs
 from .measure import (
     CorrelationResult,
     Correlations,
+    Dynamics,
     Expect,
     ExpectResult,
     MeasureResult,
@@ -30,6 +31,7 @@ __all__ = [
     "MeasureResult",
     "Expect",
     "Correlations",
+    "Dynamics",
     "expect",
     "ExpectResult",
     "correlations",

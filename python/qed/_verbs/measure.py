@@ -1,12 +1,12 @@
-"""``qed.measure`` and its one-request verbs: equal-time quantities of the lowest levels of H.
+"""``qed.measure`` and its one-request verbs: quantities of the lowest levels of H or at temperatures.
 
 A measurement is (quantity) x (state) x (index axis):
 
 * quantities -- :class:`Expect` (one-point <O>), :class:`Correlations` (equal-time pairs
-  <A_a^dag B_b>) and :class:`Transitions` (<m|O|n> between levels, as multiplet-invariant line
-  strengths and pair matrices);
-* states -- ``states="levels"`` (one row per returned level) or ``"ground"`` (one row, the ground
-  manifold);
+  <A_a^dag B_b>), :class:`Transitions` (<m|O|n> between levels, as multiplet-invariant line
+  strengths and pair matrices) and :class:`Dynamics` (S_AB(omega), :func:`qed.dynamics`);
+* states -- ``states="levels"`` (one row per returned level), ``"ground"`` (one row, the ground
+  manifold) or temperatures (``T=[...]``, one row each);
 * index axes -- an operator, a sequence of operators, a :class:`qed.Family` (its index shape) or a
   :class:`qed.MomentumFamily` (a momentum axis on the family's last index).
 
@@ -31,6 +31,7 @@ __all__ = [
     "Expect",
     "Correlations",
     "Transitions",
+    "Dynamics",
     "ExpectResult",
     "CorrelationResult",
     "TransitionResult",
@@ -59,6 +60,22 @@ class Correlations:
 
     A: object
     B: object = None
+
+
+@dataclass(frozen=True)
+class Dynamics:
+    """Request: S_AB(omega) (:func:`qed.dynamics`) of ``A`` (an Operator, a sequence, a :class:`qed.Family`
+    or a :class:`qed.MomentumFamily`) and ``B`` (None: autocorrelations; ``"all"``; an Operator, a sequence
+    or family as long as A), at the measurement's temperatures (``T=None``: the ground state). ``eta``,
+    ``krylov``, ``samples``, ``seed``: as in :func:`qed.dynamics`."""
+
+    A: object
+    omega: object
+    B: object = None
+    eta: float = 0.05
+    krylov: int = 200
+    samples: int = 40
+    seed: int = 0
 
 
 @dataclass(frozen=True)
@@ -203,6 +220,28 @@ class StructureFactor:
     energies: np.ndarray
     multiplicities: np.ndarray
     rows: str = "levels"
+    components: Optional[str] = None   # the spin components of both lead axes (Family.spins)
+    T: Optional[np.ndarray] = None
+
+    def trace(self) -> np.ndarray:
+        """sum_a S^aa(q) over the shared spin components: [row, q]."""
+        if not self.components:
+            raise InvalidRequest("trace: both operands must be Family.spins families with the same components")
+        return np.einsum("raaq->rq", self.S)
+
+    def perp(self) -> np.ndarray:
+        """The neutron cross section's spin part sum_ab (delta_ab - q_a q_b / q^2) S^ab(q): [row, q], real
+        up to roundoff. Needs Family.spins operands with components "xyz"; at q = 0, where the
+        projector is undefined, the orientational average (2/3) sum_a S^aa."""
+        if self.components != "xyz":
+            raise InvalidRequest(f"perp: needs Family.spins(..., 'xyz') operands, got components {self.components!r}")
+        norm = np.linalg.norm(self.q, axis=1)
+        qhat = np.divide(self.q, norm[:, None], out=np.zeros_like(self.q), where=norm[:, None] > 1e-12)
+        proj = np.eye(3)[:, :, None] - np.einsum("qa,qb->abq", qhat, qhat)
+        out = np.einsum("abq,rabq->rq", proj, self.S)
+        zero = norm <= 1e-12
+        out[:, zero] = (2.0 / 3.0) * np.einsum("raaq->rq", self.S)[:, zero]
+        return out
 
 
 @dataclass
@@ -266,8 +305,9 @@ class CorrelationResult:
         # C[row, A_lead, a, B_lead, b] -> S[row, A_lead, B_lead, q]
         C = np.moveaxis(C, 1 + la, -1)                                  # a to the end
         S = np.einsum("...ba,qa,qb->...q", C, np.conj(mA.phases), mB.phases)
+        comps = A.components if A.components == B.components else None
         return StructureFactor(S=S, q=mA.q, energies=self.energies, multiplicities=self.multiplicities,
-                               rows=self.rows)
+                               rows=self.rows, components=comps, T=self.T)
 
 
 @dataclass
@@ -448,9 +488,11 @@ def _plan(requests: Sequence, thermal: bool = False):
             if thermal:
                 raise InvalidRequest("Transitions are between levels: measure them without T=")
             plan.append(("transitions", q))
+        elif isinstance(q, Dynamics):
+            plan.append(("dynamics", q))
         else:
             raise InvalidRequest(
-                f"measure: unknown request {type(q).__name__} (Expect, Correlations or Transitions)")
+                f"measure: unknown request {type(q).__name__} (Expect, Correlations, Transitions or Dynamics)")
     return singles, pairs, plan
 
 
@@ -462,7 +504,12 @@ def _answers(plan: list, raw: np.ndarray, singles: list, pairs: list, rows: dict
                   eigs=rows["eigs"], diagnostics=rows["diagnostics"], rows=rows["rows"], T=rows["T"])
     out = []
     for entry in plan:
-        if entry[0] == "transitions":
+        if entry[0] == "dynamics":
+            run = rows.get("dynamics")
+            if run is None:
+                raise InvalidRequest("Dynamics needs the Hamiltonian: measure H, not an EigResult")
+            out.append(run(entry[1]))
+        elif entry[0] == "transitions":
             r = rows["eigs"]
             every = list(range(len(r.levels)))
             out.append(_transitions(r, every, r, every, entry[1]))
@@ -478,8 +525,9 @@ def _answers(plan: list, raw: np.ndarray, singles: list, pairs: list, rows: dict
     return out
 
 
-def _evaluate(r, requests: Sequence) -> list:
-    """Per-level answers (rows = r.levels) to every request, from one engine sweep."""
+def _evaluate(r, requests: Sequence, dynamics=None) -> list:
+    """Per-level answers (rows = r.levels) to every request, from one engine sweep. ``dynamics``: runs a
+    Dynamics request (it needs H)."""
     if not any(L.vector >= 0 for L in r.levels):
         raise InvalidRequest("no vectors: call qed.eigs(..., vectors=True)")
     singles, pairs, plan = _plan(requests)
@@ -489,7 +537,7 @@ def _evaluate(r, requests: Sequence) -> list:
         raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
     rows = dict(energies=np.array([L.energy for L in r.levels], float),
                 multiplicities=np.array([L.multiplicity for L in r.levels], int), levels=r.levels, eigs=r,
-                diagnostics=list(r.diagnostics), rows="levels", T=None)
+                diagnostics=list(r.diagnostics), rows="levels", T=None, dynamics=dynamics)
     return _answers(plan, raw, singles, pairs, rows)
 
 
@@ -510,6 +558,17 @@ def _solve(H, k: int, sym, device: str, eigs_kwargs: dict):
     return eigs(H, k, sym=sym, vectors=True, device=device, **eigs_kwargs)
 
 
+def _dynamics_runner(H, T, sym, device: str):
+    """Runs a Dynamics request at the measurement's temperatures (its own pass: qed.dynamics)."""
+    from .dynamics import dynamics
+
+    def run(q: Dynamics):
+        return dynamics(H, q.A, q.omega, q.B, eta=q.eta, T=T, sym=sym, krylov=q.krylov, samples=q.samples,
+                        seed=q.seed, device=device)
+
+    return run
+
+
 # qed.thermal's options, read by measure(T=...); dense_max_dim is also an eigs option.
 _THERMAL_OPTIONS = ("method", "samples", "krylov", "steps", "exact_states", "seed", "dense_max_dim")
 
@@ -528,7 +587,9 @@ def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> M
                            krylov=options.get("krylov"), steps=options.get("steps"),
                            exact_states=options.get("exact_states", 0), seed=options.get("seed", 0), device=device,
                            dense_max_dim=options.get("dense_max_dim"), singles=singles, pairs=pairs)
-    results = _answers(plan, raw.T, singles, pairs, _thermal_rows(th))
+    rows = _thermal_rows(th)
+    rows["dynamics"] = _dynamics_runner(H, T, sym, device)
+    results = _answers(plan, raw.T, singles, pairs, rows)
     th.measurements = results
     return MeasureResult(results=results, energies=th.E, multiplicities=np.ones(len(th.T), int), rows="T", eigs=None,
                          diagnostics=list(th.diagnostics), T=th.T, thermal=th)
@@ -554,7 +615,7 @@ def measure(H, requests: Sequence, k: int = 1, *, T=None, states: str = "levels"
     per block and sample (exact: the eigenvectors; FTLM: each sample's phi(T); mTPQ: each step, with the
     canonical series of Sugiura and Shimizu; OFTLM: its exact states and the samples' phi(T)).
     """
-    requests = [requests] if isinstance(requests, (Expect, Correlations, Transitions)) else list(requests)
+    requests = [requests] if isinstance(requests, (Expect, Correlations, Transitions, Dynamics)) else list(requests)
     if T is not None:
         if states != "levels":
             raise InvalidRequest("states= selects levels; with T= the rows are the temperatures")
@@ -563,12 +624,20 @@ def measure(H, requests: Sequence, k: int = 1, *, T=None, states: str = "levels"
     if thermal_only:
         raise InvalidRequest(f"{thermal_only}: thermal options, used with T=")
     states = _states(states)
+    from .eigs import EigResult
+
+    runner = None if isinstance(H, EigResult) else _dynamics_runner(H, None, sym, device)
+    if requests and all(isinstance(q, Dynamics) for q in requests):   # no eigensolve needed
+        if runner is None:
+            raise InvalidRequest("Dynamics needs the Hamiltonian: measure H, not an EigResult")
+        return MeasureResult(results=[runner(q) for q in requests], energies=np.zeros(0),
+                             multiplicities=np.zeros(0, int), rows="levels", eigs=None)
     r = _solve(H, k, sym, device, options)
-    results = _evaluate(r, requests)
+    results = _evaluate(r, requests, dynamics=runner)
     energies = np.array([L.energy for L in r.levels], float)
     mult = np.array([L.multiplicity for L in r.levels], int)
-    if states == "ground":
-        results = [x.ground(degeneracy_tol) for x in results]
+    if states == "ground":   # the T = 0 dynamics already averages over the ground manifold
+        results = [x if isinstance(q, Dynamics) else x.ground(degeneracy_tol) for q, x in zip(requests, results)]
         sel, _ = _ground(energies, mult, degeneracy_tol)
         energies, mult = np.array([energies[sel].min()]), np.array([int(mult[sel].sum())])
     return MeasureResult(results=results, energies=energies, multiplicities=mult, rows=states, eigs=r,

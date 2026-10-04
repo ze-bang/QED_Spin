@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from . import _core as _core
 from ._builder import HamiltonianBuilder
-from ._geometry import cluster_momenta, displacement, momentum_label
+from ._geometry import cluster_momenta, displacement, high_symmetry_points, momentum_label, momentum_path
 from ._core.input import (  # type: ignore[attr-defined]
     Bond,
     Lattice,
@@ -72,6 +72,8 @@ __all__ = [
     "Plaquette",
     "cluster_momenta",
     "displacement",
+    "high_symmetry_points",
     "lattice",
     "momentum_label",
+    "momentum_path",
 ]
