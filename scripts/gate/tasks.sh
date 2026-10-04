@@ -6,7 +6,12 @@
 V="${VARIANT:-cuda}"
 REF="tests/python/golden/refs/${GOLDEN_REF:-api-2026-09}"
 GRID="python -u -m pytest tests/python/grid -m grid -q -rf -p no:cacheprovider"
-CTEST="ctest|ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}"
+# ctest runs up to N tests at once; each test also starts OMP_NUM_THREADS threads, which
+# env.sh sets to the job's cores. -j N with N threads each puts N^2 threads on N cores: on a
+# 32-core node four tests then hit their 180 s timeout (rorqual job 22455119), all passing
+# serially. Give each test min(4, N) threads and run N / that many at once.
+CTEST_RUN="t=\$(( SLURM_CPUS_PER_TASK < 4 ? SLURM_CPUS_PER_TASK : 4 )); OMP_NUM_THREADS=\${t} ctest --test-dir build/${V}-tests --output-on-failure -j \$(( SLURM_CPUS_PER_TASK / t ))"
+CTEST="ctest|${CTEST_RUN}"
 # The P4.1 contents (little-group, raw space group, all, selections): the CPU dynT shards split on them.
 NEWC="(_lg- or raw_spacegroup or -all- or sel_)"
 CPU_TASKS=(
@@ -83,11 +88,11 @@ CPU_TASKS+=(
   "grid_cpu_dyn0_3b_slc|${SLC} ${GRID} -k 'cpu and dyn0_3b'"
 )
 if [ "${V}" = cpu ]; then
-  CPU_TASKS+=("ctest_slc|${SLC} ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}")
+  CPU_TASKS+=("ctest_slc|export ${SLC}; ${CTEST_RUN}")
 fi
 if [ "${V}" = cuda ]; then
   GPU_TASKS+=(
-    "ctest_slc|${SLC} ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}"
+    "ctest_slc|export ${SLC}; ${CTEST_RUN}"
     "grid_gpu_levels_slc|${SLC} ${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or corr or spectrum)'"
   )
 fi

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — job environment: no nested BLAS threads, ctest without oversubscription
+
+- **`scripts/clusters/alliance.env` sets `BLIS_NUM_THREADS=1`.**
+  - AOCL's libblis-mt started its own threads inside the engine's OpenMP regions.
+  - On a 32-core Genoa node at `OMP_NUM_THREADS=32` (rorqual job 22456940, idle node):
+
+    | test | default | `BLIS_NUM_THREADS=1` |
+    |---|---|---|
+    | ctest #44 (lanes, toy blocks) | 25.9 s | 0.37 s |
+    | ctest #142 (rep sectors) | 36.4 s | 3.3 s |
+
+  - `OMP_MAX_ACTIVE_LEVELS=1` does not prevent it.
+  - A single very large dense block no longer gets threaded BLAS from this environment. Set `BLIS_NUM_THREADS` in a job that needs it.
+- **The gate's ctest task gives each test min(4, N) threads and runs N / that many at once.** Before, N tests each started N threads (`env.sh` sets `OMP_NUM_THREADS` to the job's cores). With 32 cores, tests #44, #58, #141 and #142 hit their 180 s timeout and all passed serially (rorqual jobs 22455119, 22455884).
+- **Not fixed here.** With BLAS single-threaded, #142 still takes 3.3 s at 32 OpenMP threads against 0.72 s at 4 (`OMP_WAIT_POLICY=passive`: 2.2 s). That is team overhead on tiny blocks; the engine should size its parallel regions by the work.
+
 ## 2026-10-03 — 0.7.1: exact cluster momenta, pruning below the dense crossover
 
 - **`qed.input.cluster_momenta` returns exact momenta.** Each q was built from coordinates rounded
