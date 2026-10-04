@@ -96,7 +96,7 @@ class Transitions:
 @dataclass
 class _Operand:
     ops: list
-    shape: tuple                       # index shape of the evaluated operators
+    shape: tuple  # index shape of the evaluated operators
     family: Optional[Family] = None
     momentum: Optional[MomentumFamily] = None
 
@@ -129,14 +129,15 @@ def _operand(x, what: str) -> _Operand:
         return _Operand(ops, (len(ops),))
     raise InvalidRequest(
         f"{what}: expected a qed.Operator, a sequence of them, a qed.Family or a qed.MomentumFamily, "
-        f"got {type(x).__name__}")
+        f"got {type(x).__name__}"
+    )
 
 
 def _one_point(raw: np.ndarray, op: _Operand) -> np.ndarray:
     """[rows, n_ops] values -> [rows, *index_shape]."""
     v = raw.reshape(len(raw), *op.shape)
     if op.momentum is not None:
-        v = v @ op.momentum.phases.T   # sum_r phi_qr <O_r>
+        v = v @ op.momentum.phases.T  # sum_r phi_qr <O_r>
     return v
 
 
@@ -144,9 +145,9 @@ def _pairs(raw: np.ndarray, a: _Operand, b: _Operand) -> np.ndarray:
     """[rows, n_a * n_b] values -> [rows, *a.index_shape, *b.index_shape]."""
     C = raw.reshape(len(raw), *a.shape, *b.shape)
     if b.momentum is not None:
-        C = C @ b.momentum.phases.T                       # B_q = sum_s phi_qs B_s
+        C = C @ b.momentum.phases.T  # B_q = sum_s phi_qs B_s
     if a.momentum is not None:
-        ax = len(a.shape)                                 # A's last axis (after the row axis)
+        ax = len(a.shape)  # A's last axis (after the row axis)
         C = np.moveaxis(np.tensordot(C, np.conj(a.momentum.phases), axes=([ax], [1])), -1, ax)
     return C
 
@@ -222,7 +223,7 @@ class StructureFactor:
     energies: np.ndarray
     multiplicities: np.ndarray
     rows: str = "levels"
-    components: Optional[str] = None   # the spin components of both lead axes (Family.spins)
+    components: Optional[str] = None  # the spin components of both lead axes (Family.spins)
     T: Optional[np.ndarray] = None
 
     def trace(self) -> np.ndarray:
@@ -289,7 +290,8 @@ class CorrelationResult:
         """<A_a^dag B_b> - <A_a>^* <B_b> per row (the one-point values averaged like the pairs)."""
         na, nb = self.mean_a.ndim - 1, self.mean_b.ndim - 1
         outer = np.conj(self.mean_a).reshape(*self.mean_a.shape, *([1] * nb)) * self.mean_b.reshape(
-            len(self.mean_b), *([1] * na), *self.mean_b.shape[1:])
+            len(self.mean_b), *([1] * na), *self.mean_b.shape[1:]
+        )
         return self.C - outer
 
     def fourier(self, q="cluster") -> StructureFactor:
@@ -298,18 +300,27 @@ class CorrelationResult:
         N^-1/2 e^{-i q.r}. ``q``: an (n_q, 3) array or ``"cluster"`` (from A's Lattice)."""
         A, B = self.A, self.B
         if not isinstance(A, Family) or not isinstance(B, Family):
-            raise InvalidRequest("fourier: both operands must be qed.Family objects with positions "
-                                 "(a MomentumFamily operand is already on its momentum axis)")
+            raise InvalidRequest(
+                "fourier: both operands must be qed.Family objects with positions "
+                "(a MomentumFamily operand is already on its momentum axis)"
+            )
         mA = A.fourier(q)
         mB = MomentumFamily(B, mA.q)
-        la, lb = len(A.shape) - 1, len(B.shape) - 1
+        la = len(A.shape) - 1
         C = self.C
         # C[row, A_lead, a, B_lead, b] -> S[row, A_lead, B_lead, q]
-        C = np.moveaxis(C, 1 + la, -1)                                  # a to the end
+        C = np.moveaxis(C, 1 + la, -1)  # a to the end
         S = np.einsum("...ba,qa,qb->...q", C, np.conj(mA.phases), mB.phases)
         comps = A.components if A.components == B.components else None
-        return StructureFactor(S=S, q=mA.q, energies=self.energies, multiplicities=self.multiplicities,
-                               rows=self.rows, components=comps, T=self.T)
+        return StructureFactor(
+            S=S,
+            q=mA.q,
+            energies=self.energies,
+            multiplicities=self.multiplicities,
+            rows=self.rows,
+            components=comps,
+            T=self.T,
+        )
 
 
 @dataclass
@@ -434,7 +445,7 @@ def _transitions(ri, ii: list, rf, jj: list, q: Transitions) -> TransitionResult
     na = len(a_ops)
     Aa = amps[:na]
     Bb = Aa if q.B is None else amps[na:]
-    di = np.diff(oi).astype(float)   # members of each initial level: its multiplicity
+    di = np.diff(oi).astype(float)  # members of each initial level: its multiplicity
     s = np.zeros((na, len(jj), len(ii)))
     if na:
         s = np.add.reduceat(np.add.reduceat(np.abs(Aa) ** 2, of[:-1], axis=1), oi[:-1], axis=2)
@@ -494,7 +505,8 @@ def _plan(requests: Sequence, thermal: bool = False):
             plan.append(("dynamics", q))
         else:
             raise InvalidRequest(
-                f"measure: unknown request {type(q).__name__} (Expect, Correlations, Transitions or Dynamics)")
+                f"measure: unknown request {type(q).__name__} (Expect, Correlations, Transitions or Dynamics)"
+            )
     return singles, pairs, plan
 
 
@@ -502,8 +514,15 @@ def _answers(plan: list, raw: np.ndarray, singles: list, pairs: list, rows: dict
     """The answer to every request from raw[row, x] (singles, then each pair request a-major).
     ``rows``: energies, multiplicities, levels, eigs, diagnostics, rows ("levels" | "T"), T."""
     starts = np.cumsum([len(singles)] + [len(A) * len(B) for A, B in pairs])
-    common = dict(energies=rows["energies"], multiplicities=rows["multiplicities"], levels=list(rows["levels"]),
-                  eigs=rows["eigs"], diagnostics=rows["diagnostics"], rows=rows["rows"], T=rows["T"])
+    common = dict(
+        energies=rows["energies"],
+        multiplicities=rows["multiplicities"],
+        levels=list(rows["levels"]),
+        eigs=rows["eigs"],
+        diagnostics=rows["diagnostics"],
+        rows=rows["rows"],
+        T=rows["T"],
+    )
     out = []
     for entry in plan:
         if entry[0] == "dynamics":
@@ -537,9 +556,16 @@ def _evaluate(r, requests: Sequence, dynamics=None) -> list:
     raw = np.zeros((n_levels, 0), complex)
     if singles or pairs:
         raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
-    rows = dict(energies=np.array([L.energy for L in r.levels], float),
-                multiplicities=np.array([L.multiplicity for L in r.levels], int), levels=r.levels, eigs=r,
-                diagnostics=list(r.diagnostics), rows="levels", T=None, dynamics=dynamics)
+    rows = dict(
+        energies=np.array([L.energy for L in r.levels], float),
+        multiplicities=np.array([L.multiplicity for L in r.levels], int),
+        levels=r.levels,
+        eigs=r,
+        diagnostics=list(r.diagnostics),
+        rows="levels",
+        T=None,
+        dynamics=dynamics,
+    )
     return _answers(plan, raw, singles, pairs, rows)
 
 
@@ -565,8 +591,19 @@ def _dynamics_runner(H, T, sym, device: str):
     from .dynamics import dynamics
 
     def run(q: Dynamics):
-        return dynamics(H, q.A, q.omega, q.B, eta=q.eta, T=T, sym=sym, krylov=q.krylov, samples=q.samples,
-                        seed=q.seed, device=device)
+        return dynamics(
+            H,
+            q.A,
+            q.omega,
+            q.B,
+            eta=q.eta,
+            T=T,
+            sym=sym,
+            krylov=q.krylov,
+            samples=q.samples,
+            seed=q.seed,
+            device=device,
+        )
 
     return run
 
@@ -586,12 +623,16 @@ def _measure_shared(H, requests: list, T, sym, device: str, options: dict) -> Me
     first = dyn[0]
     key = lambda q: (tuple(np.asarray(q.omega, float).ravel()), q.eta, q.krylov, q.samples, q.seed)  # noqa: E731
     if any(key(q) != key(first) for q in dyn[1:]):
-        raise InvalidRequest("measure with T=: the Dynamics requests of one pass share omega, eta, krylov, samples "
-                             "and seed (they share each sample's source Lanczos)")
+        raise InvalidRequest(
+            "measure with T=: the Dynamics requests of one pass share omega, eta, krylov, samples "
+            "and seed (they share each sample's source Lanczos)"
+        )
     for name, value in (("samples", first.samples), ("krylov", first.krylov), ("seed", first.seed)):
         if name in options and options[name] is not None and int(options[name]) != int(value):
-            raise InvalidRequest(f"measure with T= and Dynamics: {name}={options[name]} differs from the Dynamics "
-                                 f"request's {value}; the pass shares one (set it on the Dynamics request)")
+            raise InvalidRequest(
+                f"measure with T= and Dynamics: {name}={options[name]} differs from the Dynamics "
+                f"request's {value}; the pass shares one (set it on the Dynamics request)"
+            )
     for name in ("steps",):
         if options.get(name) is not None:
             raise InvalidRequest(f"{name}= is an mTPQ option; the shared pass is FTLM")
@@ -604,32 +645,66 @@ def _measure_shared(H, requests: list, T, sym, device: str, options: dict) -> Me
         layout.append((len(all_probes), len(probes), axes, cross, q))
         all_probes.extend(probes)
     sym = Symmetry.auto() if sym is None else sym
-    d, temps, rows = _spec(first.omega, first.eta, T, first.krylov, first.samples, first.seed, 1e-8, device,
-                           options.get("dense_max_dim"), True)
+    d, temps, rows = _spec(
+        first.omega,
+        first.eta,
+        T,
+        first.krylov,
+        first.samples,
+        first.seed,
+        1e-8,
+        device,
+        options.get("dense_max_dim"),
+        True,
+    )
     d.thermodynamics = True
     d.observables = list(singles)
     d.observable_pairs = [(list(A), list(B)) for A, B in pairs]
     diagnostics: list = []
     r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), all_probes, d)
     S = np.asarray(r.S, dtype=complex)
-    answers = {id(q): _result(r, S[at : at + n], q.A, axes, cross, temps, rows, sym, diagnostics)
-               for at, n, axes, cross, q in layout}
+    answers = {
+        id(q): _result(r, S[at : at + n], q.A, axes, cross, temps, rows, sym, diagnostics)
+        for at, n, axes, cross, q in layout
+    }
     beta = 1.0 / temps
     lnZ = np.asarray(r.lnZ, float)[rows]
     E = np.asarray(r.E, float)[rows]
     V = np.asarray(r.V, float)[rows]
-    th = ThermalResult(T=temps, E=E, C=beta**2 * V, entropy=lnZ + beta * E, F=-temps * lnZ, lnZ=lnZ, M=None,
-                       chi=None, O=None, method="ftlm", e0=float(r.e0), blocks=0, device_blocks=int(r.device_blocks),
-                       symmetry=sym, diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
-                       placement=dict(r.placement))
+    th = ThermalResult(
+        T=temps,
+        E=E,
+        C=beta**2 * V,
+        entropy=lnZ + beta * E,
+        F=-temps * lnZ,
+        lnZ=lnZ,
+        M=None,
+        chi=None,
+        O=None,
+        method="ftlm",
+        e0=float(r.e0),
+        blocks=0,
+        device_blocks=int(r.device_blocks),
+        symmetry=sym,
+        diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+        placement=dict(r.placement),
+    )
     n_x = len(singles) + sum(len(A) * len(B) for A, B in pairs)
     raw = np.asarray(r.O, complex).reshape(n_x, -1)[:, rows] if n_x else np.zeros((0, len(temps)), complex)
     rows_info = _thermal_rows(th)
     rows_info["dynamics"] = lambda q: answers[id(q)]
     results = _answers(plan, raw.T, singles, pairs, rows_info)
     th.measurements = results
-    return MeasureResult(results=results, energies=th.E, multiplicities=np.ones(len(th.T), int), rows="T", eigs=None,
-                         diagnostics=list(th.diagnostics), T=th.T, thermal=th)
+    return MeasureResult(
+        results=results,
+        energies=th.E,
+        multiplicities=np.ones(len(th.T), int),
+        rows="T",
+        eigs=None,
+        diagnostics=list(th.diagnostics),
+        T=th.T,
+        thermal=th,
+    )
 
 
 def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> MeasureResult:
@@ -644,21 +719,50 @@ def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> M
     if any(isinstance(q, Dynamics) for q in requests) and str(options.get("method", "ftlm")).lower() == "ftlm":
         return _measure_shared(H, requests, T, sym, device, options)
     singles, pairs, plan = _plan(requests, thermal=True)
-    th, raw = _thermal_run(H, T, method=options.get("method", "ftlm"), sym=sym, samples=options.get("samples", 40),
-                           krylov=options.get("krylov"), steps=options.get("steps"),
-                           exact_states=options.get("exact_states", 0), seed=options.get("seed", 0), device=device,
-                           dense_max_dim=options.get("dense_max_dim"), singles=singles, pairs=pairs)
+    th, raw = _thermal_run(
+        H,
+        T,
+        method=options.get("method", "ftlm"),
+        sym=sym,
+        samples=options.get("samples", 40),
+        krylov=options.get("krylov"),
+        steps=options.get("steps"),
+        exact_states=options.get("exact_states", 0),
+        seed=options.get("seed", 0),
+        device=device,
+        dense_max_dim=options.get("dense_max_dim"),
+        singles=singles,
+        pairs=pairs,
+    )
     rows = _thermal_rows(th)
     rows["dynamics"] = _dynamics_runner(H, T, sym, device)
     results = _answers(plan, raw.T, singles, pairs, rows)
     th.measurements = results
-    return MeasureResult(results=results, energies=th.E, multiplicities=np.ones(len(th.T), int), rows="T", eigs=None,
-                         diagnostics=list(th.diagnostics), T=th.T, thermal=th)
+    return MeasureResult(
+        results=results,
+        energies=th.E,
+        multiplicities=np.ones(len(th.T), int),
+        rows="T",
+        eigs=None,
+        diagnostics=list(th.diagnostics),
+        T=th.T,
+        thermal=th,
+    )
 
 
 @_log.replays
-def measure(H, requests: Sequence, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8,
-            sym=None, device: str = "cpu", **options) -> MeasureResult:
+def measure(
+    H,
+    requests: Sequence,
+    k: int = 1,
+    *,
+    T=None,
+    states: str = "levels",
+    degeneracy_tol: float = 1e-8,
+    sym=None,
+    device: str = "cpu",
+    **options,
+) -> MeasureResult:
     """Every request (:class:`Expect`, :class:`Correlations`, :class:`Transitions`) from one pass.
 
     Without ``T``: in the lowest levels of ``H`` from one eigensolve, the equal-time requests sharing
@@ -688,26 +792,42 @@ def measure(H, requests: Sequence, k: int = 1, *, T=None, states: str = "levels"
     from .eigs import EigResult
 
     runner = None if isinstance(H, EigResult) else _dynamics_runner(H, None, sym, device)
-    if requests and all(isinstance(q, Dynamics) for q in requests):   # no eigensolve needed
+    if requests and all(isinstance(q, Dynamics) for q in requests):  # no eigensolve needed
         if runner is None:
             raise InvalidRequest("Dynamics needs the Hamiltonian: measure H, not an EigResult")
-        return MeasureResult(results=[runner(q) for q in requests], energies=np.zeros(0),
-                             multiplicities=np.zeros(0, int), rows="levels", eigs=None)
+        return MeasureResult(
+            results=[runner(q) for q in requests],
+            energies=np.zeros(0),
+            multiplicities=np.zeros(0, int),
+            rows="levels",
+            eigs=None,
+        )
     r = _solve(H, k, sym, device, options)
     results = _evaluate(r, requests, dynamics=runner)
     energies = np.array([L.energy for L in r.levels], float)
     mult = np.array([L.multiplicity for L in r.levels], int)
-    if states == "ground":   # the T = 0 dynamics already averages over the ground manifold
+    if states == "ground":  # the T = 0 dynamics already averages over the ground manifold
         results = [x if isinstance(q, Dynamics) else x.ground(degeneracy_tol) for q, x in zip(requests, results)]
         sel, _ = _ground(energies, mult, degeneracy_tol)
         energies, mult = np.array([energies[sel].min()]), np.array([int(mult[sel].sum())])
-    return MeasureResult(results=results, energies=energies, multiplicities=mult, rows=states, eigs=r,
-                         diagnostics=list(r.diagnostics))
+    return MeasureResult(
+        results=results, energies=energies, multiplicities=mult, rows=states, eigs=r, diagnostics=list(r.diagnostics)
+    )
 
 
 # ---- the one-request verbs ---------------------------------------------------------------------
-def expect(H, ops, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8, sym=None,
-           device: str = "cpu", **options) -> ExpectResult:
+def expect(
+    H,
+    ops,
+    k: int = 1,
+    *,
+    T=None,
+    states: str = "levels",
+    degeneracy_tol: float = 1e-8,
+    sym=None,
+    device: str = "cpu",
+    **options,
+) -> ExpectResult:
     """<O> for every operator in ``ops`` (an Operator, a sequence, a :class:`qed.Family` or a
     :class:`qed.MomentumFamily`) in each of the lowest levels of ``H``, or at the temperatures ``T``:
     :func:`measure` with one :class:`Expect` request.
@@ -718,19 +838,32 @@ def expect(H, ops, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol
     2S + 1 Sz members, so an operator that is not SU(2) invariant contributes its SU(2)-scalar part
     (its average over all spin rotations); in a uniform field each member is a level of its own.
     """
-    return measure(H, [Expect(ops)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym, device=device,
-                   **options)[0]
+    return measure(
+        H, [Expect(ops)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym, device=device, **options
+    )[0]
 
 
-def correlations(H, A, B=None, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8,
-                 sym=None, device: str = "cpu", **options) -> CorrelationResult:
+def correlations(
+    H,
+    A,
+    B=None,
+    k: int = 1,
+    *,
+    T=None,
+    states: str = "levels",
+    degeneracy_tol: float = 1e-8,
+    sym=None,
+    device: str = "cpu",
+    **options,
+) -> CorrelationResult:
     """<A_a^dag B_b> for every pair (``B=None``: B = A) in each of the lowest levels of ``H``, or at
     the temperatures ``T``: :func:`measure` with one :class:`Correlations` request. ``A`` and ``B``: an
     Operator, a sequence, a :class:`qed.Family` (e.g. ``qed.Family.spins(lattice)``) or a
     :class:`qed.MomentumFamily`; the result's :meth:`CorrelationResult.fourier` gives the structure
     factor."""
-    return measure(H, [Correlations(A, B)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym,
-                   device=device, **options)[0]
+    return measure(
+        H, [Correlations(A, B)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym, device=device, **options
+    )[0]
 
 
 @_log.replays

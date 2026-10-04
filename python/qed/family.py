@@ -49,8 +49,15 @@ class Family:
     ``qed.input.Lattice``). ``labels``: optional names, one per member; ``components``: the spin
     components of the first axis (set by :meth:`spins`, read by :meth:`StructureFactor.perp`)."""
 
-    def __init__(self, ops: Sequence, *, shape: Optional[Sequence[int]] = None, positions=None, labels=None,
-                 components: Optional[str] = None):
+    def __init__(
+        self,
+        ops: Sequence,
+        *,
+        shape: Optional[Sequence[int]] = None,
+        positions=None,
+        labels=None,
+        components: Optional[str] = None,
+    ):
         ops = list(ops)
         if not ops:
             raise InvalidRequest("Family: no operators")
@@ -89,8 +96,13 @@ class Family:
             raise InvalidRequest(f"Family.spins: components are letters of 'xyz+-', got {components!r}")
         ops = [_core.Operator.product(n, _SPIN_LETTERS[c], [i], 1.0) for c in components for i in range(n)]
         labels = [f"S{c}_{i}" for c in components for i in range(n)]
-        return cls(ops, shape=(len(components), n), positions=lat if lat is not None else r, labels=labels,
-                   components=components)
+        return cls(
+            ops,
+            shape=(len(components), n),
+            positions=lat if lat is not None else r,
+            labels=labels,
+            components=components,
+        )
 
     @classmethod
     def sites(cls, sites, f: Callable[[int], object]) -> "Family":
@@ -123,8 +135,10 @@ class Family:
             if q != "cluster":
                 raise InvalidRequest(f"Family.fourier: q is an array or 'cluster', got {q!r}")
             if self.lattice is None:
-                raise InvalidRequest("Family.fourier('cluster') needs a family built from a qed.input.Lattice; "
-                                     "pass q explicitly (qed.input.cluster_momenta)")
+                raise InvalidRequest(
+                    "Family.fourier('cluster') needs a family built from a qed.input.Lattice; "
+                    "pass q explicitly (qed.input.cluster_momenta)"
+                )
             q = _geometry.cluster_momenta(self.lattice)
         return MomentumFamily(self, q)
 

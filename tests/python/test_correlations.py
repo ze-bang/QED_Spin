@@ -71,10 +71,12 @@ def _check_clusters(res, E, W, A_ops, B_ops, N, atol=1e-9):
             want = np.einsum("adm,bdm->ab", X.conj(), Y)
             got = sum(res.multiplicities[i] * C[i] for i in rows)
             np.testing.assert_allclose(got, want, atol=atol)
-            np.testing.assert_allclose(sum(res.multiplicities[i] * ma[i] for i in rows),
-                                       np.einsum("dm,adm->a", Wc.conj(), X), atol=atol)
-            np.testing.assert_allclose(sum(res.multiplicities[i] * mb[i] for i in rows),
-                                       np.einsum("dm,bdm->b", Wc.conj(), Y), atol=atol)
+            np.testing.assert_allclose(
+                sum(res.multiplicities[i] * ma[i] for i in rows), np.einsum("dm,adm->a", Wc.conj(), X), atol=atol
+            )
+            np.testing.assert_allclose(
+                sum(res.multiplicities[i] * mb[i] for i in rows), np.einsum("dm,bdm->b", Wc.conj(), Y), atol=atol
+            )
             checked += rows
         lo = hi
     return checked
@@ -97,7 +99,7 @@ def test_pairs_match_the_dense_oracle(name, H, sym, spin):
     s = qed.Symmetry.none() if sym == "none" else (qed.Symmetry(**sym) if sym else None)
     r = qed.eigs(H, 6, sym=s, vectors=True)
     E, W = _eigbasis(H, N, spin)
-    spins = qed.Family.spins(N, "+-z")   # ladder components: pairs that change S^z are exact zeros
+    spins = qed.Family.spins(N, "+-z")  # ladder components: pairs that change S^z are exact zeros
     c = r.correlations(spins)
     assert c.C.shape == (len(r.levels), 3, N, 3, N)
     assert _check_clusters(c, E, W, spins.ops, spins.ops, N)
@@ -124,16 +126,16 @@ def test_irreps_of_dimension_two():
     c = r.correlations(fam)
     E, W = _eigbasis(H, 9)
     rows = _check_clusters(c, E, W, fam.ops, fam.ops, 9)
-    assert any(r.levels[i].irrep_dim > 1 for i in rows)   # a 2-dim irrep level was compared
+    assert any(r.levels[i].irrep_dim > 1 for i in rows)  # a 2-dim irrep level was compared
 
 
 def test_sum_rules_hermiticity_and_su2_isotropy():
     N = 10
     c = qed.correlations(_ring(N, dz=0.3), qed.Family.spins(N), k=3)
-    C = c.C   # [rows, a, i, b, j], Cartesian
+    C = c.C  # [rows, a, i, b, j], Cartesian
     for row in range(C.shape[0]):
         tot = sum(C[row, a, :, a, :] for a in range(3))
-        np.testing.assert_allclose(np.diag(tot).real, 0.75, atol=1e-12)   # S_i . S_i = 3/4
+        np.testing.assert_allclose(np.diag(tot).real, 0.75, atol=1e-12)  # S_i . S_i = 3/4
     np.testing.assert_allclose(np.conj(C), np.transpose(C, (0, 3, 4, 1, 2)), atol=1e-12)
     # Under a total-spin restriction a level is a whole multiplet: <S_i^a S_j^b> = delta_ab <S_i.S_j>/3.
     g = qed.correlations(_ring(8), qed.Family.spins(8), k=2, sym=qed.Symmetry(total_spin=0)).C
@@ -159,8 +161,9 @@ def test_measure_is_one_pass_over_every_request():
     # The means come with the pairs, and connected() subtracts them.
     np.testing.assert_allclose(m[1].mean_a, m[0].values, atol=1e-13)
     conn = m[1].connected()
-    np.testing.assert_allclose(conn, m[1].C - np.conj(m[0].values)[:, :, :, None, None] * m[0].values[:, None, None],
-                               atol=1e-13)
+    np.testing.assert_allclose(
+        conn, m[1].C - np.conj(m[0].values)[:, :, :, None, None] * m[0].values[:, None, None], atol=1e-13
+    )
     # states="ground" and reusing an EigResult.
     g = qed.measure(r, [qed.Correlations(fam)], states="ground")
     assert g.rows == "ground" and g[0].C.shape == (1, 1, N, 1, N)
@@ -177,7 +180,7 @@ def test_momentum_operands_and_the_structure_factor():
     N = 8
     lat = qed.input.lattice.chain(N, True)
     b = qed.input.HamiltonianBuilder(N)
-    b.heisenberg(lat.nn_pairs(), 1.0).dm(lat.nn_pairs(), [(0.0, 0.0, 0.3)] * N)   # chiral: S(q) != S(-q)
+    b.heisenberg(lat.nn_pairs(), 1.0).dm(lat.nn_pairs(), [(0.0, 0.0, 0.3)] * N)  # chiral: S(q) != S(-q)
     H = b.to_operator()
     r = qed.eigs(H, 2, vectors=True)
     fam = qed.Family.spins(lat, "+z")
@@ -185,11 +188,11 @@ def test_momentum_operands_and_the_structure_factor():
     c = r.correlations(fam)
     S = c.fourier("cluster")
     assert S.S.shape == (len(r.levels), 2, 2, N)
-    cq = r.correlations(mf)               # (rows, 2, n_q, 2, n_q): the full q, q' matrix
+    cq = r.correlations(mf)  # (rows, 2, n_q, 2, n_q): the full q, q' matrix
     assert cq.C.shape == (len(r.levels), 2, N, 2, N)
     np.testing.assert_allclose(np.einsum("raqbq->rabq", cq.C), S.S, atol=1e-12)
     # Against <O_q^dag O_q> of the operators the algebra builds.
-    Oq = mf.operators()                   # C order over (component, q)
+    Oq = mf.operators()  # C order over (component, q)
     want = np.asarray(r.expect([O.adjoint() @ O for O in Oq])).reshape(len(r.levels), 2, N)
     np.testing.assert_allclose(np.einsum("raaq->raq", S.S), want, atol=1e-12)
     # <O_q> = sum_r phi_qr <O_r>, and it vanishes off q = 0 in a translation-invariant level.

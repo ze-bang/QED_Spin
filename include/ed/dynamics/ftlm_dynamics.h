@@ -246,14 +246,14 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             tg.B(r.get(), phi.get(), dim_dst);
             const double nphi = bk.nrm2(phi.get(), dim_dst);
             // scale-free: unit-vector norm
-            if (nphi < 1e-14) continue;                               // B annihilates |r>: no spectral weight here
+            if (nphi < 1e-14) continue; // B annihilates |r>: no spectral weight here
             bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
             auto ks = lanczos(Hds[tt], phi.get(), dim_dst, false);
             if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) continue;
             const std::size_t mS = ks.alpha.size();
             ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
             const std::vector<double> ritzS = std::move(ts.values);
-            const std::vector<double> VS = std::move(ts.vectors);   // VS[j * mS + b]
+            const std::vector<double> VS = std::move(ts.vectors); // VS[j * mS + b]
 
             // W[a + b mH] = <A v_a | w_b>, one row a at a time: A v_a into one target-sized scratch
             // vector, then its overlaps with the target basis (dot_many gives <w_b | A v_a>).
@@ -270,7 +270,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
                     for (std::size_t b = 0; b < mS; ++b) W[a + b * mH] = std::conj(row[b]);
                 }
             }
-            std::vector<Complex> Tm(mH * mS, Complex(0, 0));     // Tm[i mS + b] = sum_a VH[i,a] W[a,b]
+            std::vector<Complex> Tm(mH * mS, Complex(0, 0)); // Tm[i mS + b] = sum_a VH[i,a] W[a,b]
             for (std::size_t i = 0; i < mH; ++i)
                 for (std::size_t b = 0; b < mS; ++b) {
                     Complex acc(0, 0);
@@ -362,7 +362,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             const double T = temperatures[it];
             const double f = std::exp(-(1.0 / T) * (smp.smin - E_min));
             R.Z[T] += f * smp.Z[it];
-            if (opts.moments) {   // about E_min: x - E_min = (x - smin) + d
+            if (opts.moments) { // about E_min: x - E_min = (x - smin) + d
                 const double d = smp.smin - E_min;
                 R.E1[T] += f * (smp.E1[it] + d * smp.Z[it]);
                 R.E2[T] += f * (smp.E2[it] + 2.0 * d * smp.E1[it] + d * d * smp.Z[it]);
@@ -394,4 +394,4 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
     return R;
 }
 
-}  // namespace ed::observables
+} // namespace ed::observables

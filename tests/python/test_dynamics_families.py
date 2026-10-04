@@ -43,8 +43,11 @@ def test_momentum_family_probes_and_the_sum_rule():
 def test_all_pairs_share_runs_and_equal_separate_pairs():
     N = 10
     H, lat = _chain(N, jzz=0.7, dz=0.2)
-    ops = [qed.Operator.product(N, "z", [0], 1.0), qed.Operator.product(N, "z", [1], 1.0),
-           qed.Operator.product(N, "zz", [0, 2], 1.0)]
+    ops = [
+        qed.Operator.product(N, "z", [0], 1.0),
+        qed.Operator.product(N, "z", [1], 1.0),
+        qed.Operator.product(N, "zz", [0, 2], 1.0),
+    ]
     omega = np.linspace(-0.5, 5.0, 301)
     d = qed.dynamics(H, ops, omega, B="all", eta=0.1, krylov=150)
     assert d.S.shape == (3, 3, 1, len(omega))
@@ -67,8 +70,9 @@ def test_dynamics_requests_in_measure():
     only = qed.measure(H, [qed.Dynamics(mf, omega, eta=0.1)])
     assert only.eigs is None
     np.testing.assert_allclose(only[0].S, m[0].S, atol=1e-12)
-    th = qed.measure(H, [qed.Dynamics(mf, omega, eta=0.1, samples=8, krylov=40, seed=2), qed.Expect(mf)],
-                     T=[1.0], method="exact")
+    th = qed.measure(
+        H, [qed.Dynamics(mf, omega, eta=0.1, samples=8, krylov=40, seed=2), qed.Expect(mf)], T=[1.0], method="exact"
+    )
     assert th[0].S.shape == (1, N, 1, len(omega)) and np.allclose(th[0].T, [1.0])
     with pytest.raises(qed.errors.InvalidRequest, match="Hamiltonian"):
         qed.measure(qed.eigs(H, 1, vectors=True), [qed.Dynamics(mf, omega)])
@@ -93,7 +97,7 @@ def test_finite_temperature_dynamics_shares_the_thermal_pass():
     ex = qed.thermal(H, temps, method="exact")
     np.testing.assert_allclose(m.thermal.E, ex.E, rtol=0.03, atol=0.02)
     np.testing.assert_allclose(m.thermal.lnZ, ex.lnZ, rtol=0.02)
-    np.testing.assert_allclose(m[2].values[:, 0].real, ex.E, rtol=0.03, atol=0.02)   # <H> through phi
+    np.testing.assert_allclose(m[2].values[:, 0].real, ex.E, rtol=0.03, atol=0.02)  # <H> through phi
     exc = qed.correlations(H, fam, T=temps, method="exact")
     assert np.max(np.abs(m[1].C - exc.C)) / np.max(np.abs(exc.C)) < 0.05
     # other methods keep two passes; mismatched Dynamics requests and OFTLM are refused
@@ -103,6 +107,6 @@ def test_finite_temperature_dynamics_shares_the_thermal_pass():
         qed.measure(H, [dyn, qed.Dynamics(mf, omega, eta=0.2)], T=temps)
     with pytest.raises(qed.errors.InvalidRequest, match="exact_states"):
         qed.measure(H, [dyn], T=temps, exact_states=4)
-    H0, _ = _chain(N)   # SU(2)-symmetric, so total_spin resolves; the shared pass refuses it
+    H0, _ = _chain(N)  # SU(2)-symmetric, so total_spin resolves; the shared pass refuses it
     with pytest.raises(qed.errors.Unsupported, match="total-spin"):
         qed.measure(H0, [dyn], T=temps, sym=qed.Symmetry(total_spin=0))

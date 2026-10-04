@@ -249,7 +249,7 @@ def _phases(Q, positions, norm: float) -> List[complex]:
         dot = 0.0
         for d in range(3):
             dot += Q[d] * r[d]
-        out.append(complex(norm * math.cos(dot), -norm * math.sin(dot)))   # e^{-i Q.R} (qed._geometry)
+        out.append(complex(norm * math.cos(dot), -norm * math.sin(dot)))  # e^{-i Q.R} (qed._geometry)
     return out
 
 
@@ -265,7 +265,7 @@ def _transverse_phases(Q, v, positions) -> List[complex]:
         for d in range(3):
             vz += v[d] * z[d]
         w = norm * vz
-        out.append(complex(w * math.cos(dot), -w * math.sin(dot)))   # e^{-i Q.R}
+        out.append(complex(w * math.cos(dot), -w * math.sin(dot)))  # e^{-i Q.R}
     return out
 
 

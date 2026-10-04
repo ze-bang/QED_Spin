@@ -71,9 +71,8 @@ struct TransitionAmplitudes {
 /// momenta (O_q maps k to k - q) or the two S^z sectors is an exact zero, not computed. Levels of a
 /// total-spin restriction raise ed::Unsupported (their S^z members are not in the result).
 [[nodiscard]] TransitionAmplitudes transition_amplitudes(const EigsResult& ri, const Spec& si,
-                                                         const std::vector<std::size_t>& initial,
-                                                         const EigsResult& rf, const Spec& sf,
-                                                         const std::vector<std::size_t>& final,
+                                                         const std::vector<std::size_t>& initial, const EigsResult& rf,
+                                                         const Spec& sf, const std::vector<std::size_t>& final,
                                                          const std::vector<const ::Operator*>& ops);
 
 /// The evaluator behind expect() and evaluate(): out[level][x] = the multiplet average of the

@@ -539,7 +539,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                         cf_shape.dim = nb;
                         cf_shape.device = true;
                         const std::uint64_t cf_bytes = ed::core::footprint(ed::core::Path::GsTwoPass, cf_shape).device
-                                                       + 16 * static_cast<std::uint64_t>(nb) * (hi - lo);   // the a's
+                                                       + 16 * static_cast<std::uint64_t>(nb) * (hi - lo); // the a's
                         const ed::Lane lane = ed::place(d.device, dynamics_request(ed::Task::DynamicsCf, nb, cf_bytes));
                         auto spectrum = [&](auto& bk, auto&& apply) {
                             if (yas.empty()) {
@@ -609,7 +609,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     const BlockVector& v = states[run.si].first;
                     const bool cross = pr[who[run.ws.front()].second].cross;
                     std::vector<Complex> phi_b;
-                    if (!carry(v, Bt[run.ws.front()], phi_b)) continue;   // one B: the same part for every pair
+                    if (!carry(v, Bt[run.ws.front()], phi_b)) continue; // one B: the same part for every pair
                     std::vector<std::vector<Complex>> phi_a;
                     std::vector<std::size_t> ps;
                     for (const std::size_t w : run.ws) {
@@ -675,6 +675,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
                     if (!blocks.empty() && r2 <= 1e-24 * n2b) continue;
                     if (!Ht) Ht = std::make_shared<RepSectorMatVec>(H, rd);
                     std::vector<const Complex*> yas;
+                    yas.reserve(phi_a.size());
                     for (const auto& a : phi_a) yas.push_back(a.data());
                     spectra(*Ht, n, phi_b.data(), yas, ps);
                 }
@@ -720,7 +721,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         std::map<double, double> Z;
         double emin = 0.0;
         std::vector<Use> use; // per probe
-        double th = 0.0;      // its weight in the thermal pass (DynamicsSpec::thermodynamics)
+        double th = 0.0; // its weight in the thermal pass (DynamicsSpec::thermodynamics)
         std::map<double, double> E1, E2;
         std::map<double, std::vector<Complex>> O;
     };
@@ -735,8 +736,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         const Target* src = nullptr;
         Subspace sub;
         std::vector<Use> use; // per probe
-        double th = 0.0;      // the thermal pass's weight
-        std::shared_ptr<const detail::SectorObservables> obs;   // its observables in this source
+        double th = 0.0; // the thermal pass's weight
+        std::shared_ptr<const detail::SectorObservables> obs; // its observables in this source
         // Each target sector a probe reaches: A and B as rows of it (the same program for an
         // autocorrelation).
         struct Reach {
@@ -921,7 +922,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             fo.min_weight = ed::numerics::kRoundoffWeight;
         }
         fo.moments = j.th > 0.0;
-        if (j.obs) {   // every equal-time operator from one host sweep over each sample's phi_T
+        if (j.obs) { // every equal-time operator from one host sweep over each sample's phi_T
             fo.n_observables = j.obs->n_operators();
             fo.observe = [o = j.obs](const std::vector<const Complex*>& phis) { return o->folded(phis); };
         }
@@ -1050,7 +1051,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             j.th = th_use(sub, k);
             if (j.th == 0.0 && std::all_of(j.use.begin(), j.use.end(), [](const Use& x) { return x.z == 0.0; }))
                 continue;
-            if (j.th > 0.0 && th_avg) {   // the thermal pass's operators, compiled for this sector
+            if (j.th > 0.0 && th_avg) { // the thermal pass's operators, compiled for this sector
                 using detail::Keep;
                 const Keep keep = sub.n_up >= 0 ? Keep::Zero : (sub.sz_parity >= 0 ? Keep::Even : Keep::All);
                 auto& ops = th_ops[{flip_ok, static_cast<int>(keep), static_cast<int>(Antiunitary::None)}];
@@ -1247,7 +1248,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             out.V[it] = std::max(m2 - m1 * m1, 0.0);
             for (std::size_t x = 0; x < nX; ++x) out.O[x][it] = o[x] / z;
         }
-        out.e0 = ref;   // the lowest weighted source Ritz value: an upper bound on E0
+        out.e0 = ref; // the lowest weighted source Ritz value: an upper bound on E0
     }
     report();
     return out;

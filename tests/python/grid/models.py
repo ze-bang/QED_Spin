@@ -402,9 +402,9 @@ class Oracle:
         E, W = self.eigbasis(sel)
         n = int(np.searchsorted(E, emax + 1e-7, side="right"))
         while n < len(E) and E[n] - E[n - 1] <= tol:
-            n += 1   # finish the cluster at the edge
+            n += 1  # finish the cluster at the edge
         W = W[:, :n]
-        X = np.stack([sparse(t, self.m.N) @ W for t in op_terms])   # (ops, dim, n)
+        X = np.stack([sparse(t, self.m.N) @ W for t in op_terms])  # (ops, dim, n)
         out, a = [], 0
         for b in range(1, n + 1):
             if b == n or E[b] - E[a] > tol:

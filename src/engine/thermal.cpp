@@ -90,8 +90,7 @@ struct ExactBlock {
     std::vector<double> levels;
     std::vector<std::vector<Complex>> q;   // per observable, per level
 };
-ExactBlock exact_block(const ed::LinearOperator& mv, const detail::BlockOp* bop,
-                       const detail::SectorObservables* obs) {
+ExactBlock exact_block(const ed::LinearOperator& mv, const detail::BlockOp* bop, const detail::SectorObservables* obs) {
     ExactBlock x;
     const Tower* tower = bop ? bop->tower.get() : nullptr;
     Eigen::MatrixXcd Q;
@@ -137,7 +136,7 @@ ed::BlockRequest sampled_request(const ed::LinearOperator& op, const ThermalSpec
     one.krylov = std::max<std::size_t>(t.krylov, 4);
     one.tower = tower != nullptr;
     one.device = true;
-    req.device_bytes = ed::core::footprint(mtpq        ? Path::Mtpq
+    req.device_bytes = ed::core::footprint(mtpq       ? Path::Mtpq
                                            : with_obs ? Path::FtlmSampleKept
                                                       : Path::FtlmSample,
                                            one)
@@ -260,7 +259,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t, co
             ko.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(op.norm_bound());
             ko.betas = beta;
             ko.random_seed = seed;
-            if (obs) {   // the exact states' values and each sample's phi vectors, one sweep each
+            if (obs) { // the exact states' values and each sample's phi vectors, one sweep each
                 ko.n_observables = obs->n_operators();
                 ko.observe = [obs](const std::vector<const Complex*>& phis) { return obs->folded(phis); };
             }
@@ -290,7 +289,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t, co
                     }
                     run.batch_width = w;
                     run.scale = op.norm_bound();
-                    if (obs) {   // every observable from one host sweep per step
+                    if (obs) { // every observable from one host sweep per step
                         run.n_observables = obs->n_operators();
                         run.observe = [obs](const std::vector<const Complex*>& v,
                                             const std::vector<std::pair<int, int>>& pairs) {
@@ -308,7 +307,7 @@ BlockThermo sampled_block(const ed::LinearOperator& op, const ThermalSpec& t, co
                 ko.random_seed = seed;
                 ko.seed_transform = seed_transform;
                 if (tower) ko.min_weight = ed::numerics::kRoundoffWeight; // drop the roundoff copies outside the tower
-                if (obs) {   // every observable from one host sweep over each sample's phi vectors
+                if (obs) { // every observable from one host sweep over each sample's phi vectors
                     ko.n_observables = obs->n_operators();
                     ko.observe = [obs](const std::vector<const Complex*>& phis) { return obs->folded(phis); };
                 }
@@ -374,9 +373,7 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
     const std::size_t n_obs = xs.size();
     std::optional<detail::Averager> avg;
     std::map<std::tuple<bool, int, int>, std::shared_ptr<const detail::AveragedOperators>> averaged;
-    if (n_obs > 0) {
-        avg.emplace(s, n_sites, subs.front().members > 1);
-    }
+    if (n_obs > 0) { avg.emplace(s, n_sites, subs.front().members > 1); }
 
     // Sampling one spin tower: every multiplet has one member at each Sz from S down to -S, and
     // S+ commutes with the lattice symmetries, so a block's tower dimension (at any of those Sz)
@@ -477,9 +474,8 @@ ThermalCurves thermal(const ::Operator& H, const Spec& s, const ThermalSpec& t) 
                     // concurrent pool (audit P4-thermal-09: 'auto' ran them one after another).
                     const bool host =
                         bi->tag.dim < ed::kHostPoolMaxDim
-                        && !ed::on_device(
-                            ed::place(t.device, sampled_request(mv, t, tower_sampling ? &bop : nullptr, obs != nullptr,
-                                                                bi->tag)));
+                        && !ed::on_device(ed::place(t.device, sampled_request(mv, t, tower_sampling ? &bop : nullptr,
+                                                                              obs != nullptr, bi->tag)));
                     if (host) {
                         deferred.push_back({blocks.size(), bop, seed, tower_dim, obs, bi->tag});
                     } else {

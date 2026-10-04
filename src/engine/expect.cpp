@@ -60,8 +60,7 @@ struct Unique {
 
 // f(i) for every i < n on the thread team; the first exception is rethrown after the loop (an
 // exception must not leave an OpenMP region).
-template <class F>
-void parallel_for(std::size_t n, F&& f) {
+template <class F> void parallel_for(std::size_t n, F&& f) {
     std::exception_ptr failure;
 #pragma omp parallel for schedule(dynamic, 16)
     for (std::ptrdiff_t x = 0; x < static_cast<std::ptrdiff_t>(n); ++x) {
@@ -245,6 +244,7 @@ std::vector<std::vector<Complex>> averaged_values(const EigsResult& r, const Spe
         const detail::SectorObservables so(
             ops, r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis);
         std::vector<const Complex*> vecs;
+        vecs.reserve(g.levels.size());
         for (const std::size_t li : g.levels)
             vecs.push_back(r.vectors[static_cast<std::size_t>(r.levels[li].vector)].amplitudes.data());
         const auto v = so.values(vecs);

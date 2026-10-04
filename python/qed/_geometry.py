@@ -126,8 +126,8 @@ def cluster_momenta(
                         nxt.append(h)
             frontier = nxt
         Rb = _hnf_basis(relations)
-        L = Rb @ D            # supercell vectors in Cartesian coordinates
-        A = D                 # the primitive lattice: the generators' displacements
+        L = Rb @ D  # supercell vectors in Cartesian coordinates
+        A = D  # the primitive lattice: the generators' displacements
         # Generators may be dependent (e.g. T1, T2, T1 T2): reduce A to a basis of its span.
         if np.linalg.matrix_rank(A, tol=1e-6) < len(A):
             raise InvalidRequest("cluster_momenta: pass independent translation generators")
@@ -142,19 +142,21 @@ def cluster_momenta(
         L = _rows(supercell)
         A = _rows(primitive)[: len(L)]
         if len(L) == 0:
-            raise InvalidRequest("cluster_momenta: the lattice has no supercell (open boundaries, or built from "
-                                 "an adjacency list without one)")
+            raise InvalidRequest(
+                "cluster_momenta: the lattice has no supercell (open boundaries, or built from "
+                "an adjacency list without one)"
+            )
     d = len(L)
     if len(A) != d:
         raise InvalidRequest("cluster_momenta: as many primitive vectors as supercell vectors are needed")
-    M = L @ np.linalg.pinv(A)                      # the supercell in primitive coordinates
+    M = L @ np.linalg.pinv(A)  # the supercell in primitive coordinates
     if not np.allclose(M, np.round(M), atol=1e-6):
         raise InvalidRequest(
             "cluster_momenta: the supercell vectors are not integer combinations of the primitive ones"
         )
     M = np.round(M)
     n_cells = int(round(abs(np.linalg.det(M))))
-    G = _dual(A)                                   # primitive reciprocal vectors
+    G = _dual(A)  # primitive reciprocal vectors
     Minv_T = np.linalg.inv(M).T
     # q = n . (dual of the supercell) for integer n; in primitive-reciprocal coordinates x = n M^-T,
     # one class per x mod 1 (n in [0, n_cells)^d reaches every class: n_cells times a class is 0).
@@ -192,11 +194,16 @@ def high_symmetry_points(lattice) -> dict:
     kagome G, M, K; pyrochlore (FCC) G, X, L, W, K, U."""
     name = str(lattice.label).split("[")[0]
     A = _rows(lattice.lattice_vectors)
-    if name == "pyrochlore":   # cubic constant 1 in the generator's orientation
+    if name == "pyrochlore":  # cubic constant 1 in the generator's orientation
         tp = 2.0 * np.pi
-        return {"G": np.zeros(3), "X": tp * np.array([1.0, 0.0, 0.0]), "L": np.pi * np.ones(3),
-                "W": tp * np.array([1.0, 0.5, 0.0]), "K": tp * np.array([0.75, 0.75, 0.0]),
-                "U": tp * np.array([1.0, 0.25, 0.25])}
+        return {
+            "G": np.zeros(3),
+            "X": tp * np.array([1.0, 0.0, 0.0]),
+            "L": np.pi * np.ones(3),
+            "W": tp * np.array([1.0, 0.5, 0.0]),
+            "K": tp * np.array([0.75, 0.75, 0.0]),
+            "U": tp * np.array([1.0, 0.25, 0.25]),
+        }
     B = _dual(A)
     if name == "chain":
         return {"G": np.zeros(3), "X": B[0] / 2.0}

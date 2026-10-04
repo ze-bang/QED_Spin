@@ -645,9 +645,8 @@ private:
 
 /// The operators of a measurement: the canonical singles, then A_a^dag B_b (B_b acts first) for each
 /// pair request, a-major -- the products exact in the spin-1/2 algebra.
-[[nodiscard]] std::vector<ed::ops::MaskedOperator> requested_operators(const std::vector<const ::Operator*>& singles,
-                                                                       const std::vector<PairRequest>& pairs,
-                                                                       int n_sites);
+[[nodiscard]] std::vector<ed::ops::MaskedOperator>
+requested_operators(const std::vector<const ::Operator*>& singles, const std::vector<PairRequest>& pairs, int n_sites);
 
 /// The co-group character table of block `irrep` of a star, as (elements, characters): a group
 /// sector's row; for the plain block of a trivial co-group the trivial irrep (the identity, character

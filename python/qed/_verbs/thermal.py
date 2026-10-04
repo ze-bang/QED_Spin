@@ -99,23 +99,43 @@ def thermal(
 
     singles, pairs, plan = _plan([] if requests is None else list(requests), thermal=True)
     ops = [] if observables is None else list(observables)
-    r, raw = _thermal_run(H, T, method=method, sym=sym, samples=samples, krylov=krylov, steps=steps,
-                          exact_states=exact_states, seed=seed, device=device, dense_max_dim=dense_max_dim,
-                          singles=ops + singles, pairs=pairs)
+    r, raw = _thermal_run(
+        H,
+        T,
+        method=method,
+        sym=sym,
+        samples=samples,
+        krylov=krylov,
+        steps=steps,
+        exact_states=exact_states,
+        seed=seed,
+        device=device,
+        dense_max_dim=dense_max_dim,
+        singles=ops + singles,
+        pairs=pairs,
+    )
     r.O = raw[: len(ops)] if ops else None
     if plan:
-        r.measurements = _answers(plan, raw[len(ops):].T, singles, pairs, _thermal_rows(r))
+        r.measurements = _answers(plan, raw[len(ops) :].T, singles, pairs, _thermal_rows(r))
     return r
 
 
 def _thermal_rows(r: ThermalResult) -> dict:
     """The row description of answers at temperatures (measure._answers)."""
-    return dict(energies=r.E, multiplicities=np.ones(len(r.T), int), levels=[], eigs=None,
-                diagnostics=list(r.diagnostics), rows="T", T=r.T)
+    return dict(
+        energies=r.E,
+        multiplicities=np.ones(len(r.T), int),
+        levels=[],
+        eigs=None,
+        diagnostics=list(r.diagnostics),
+        rows="T",
+        T=r.T,
+    )
 
 
-def _thermal_run(H, T, *, method, sym, samples, krylov, steps, exact_states, seed, device, dense_max_dim, singles,
-                 pairs):
+def _thermal_run(
+    H, T, *, method, sym, samples, krylov, steps, exact_states, seed, device, dense_max_dim, singles, pairs
+):
     """One thermal pass: (ThermalResult without O, raw <X>(T) as [singles ++ pairs, len(T)])."""
     key = str(method).lower()
     if key not in _METHODS:

@@ -46,8 +46,12 @@ def _thermal_dense(H, ops, N, temps):
 @pytest.mark.parametrize("name", ["chain auto", "dm theta", "xxz field", "none"])
 def test_exact_correlations_match_the_dense_trace(name):
     N = 8
-    H = {"chain auto": _ring(N), "dm theta": _ring(N, dz=0.4), "xxz field": _ring(N, jzz=0.6, hz=0.3),
-         "none": _ring(N, dz=0.4)}[name]
+    H = {
+        "chain auto": _ring(N),
+        "dm theta": _ring(N, dz=0.4),
+        "xxz field": _ring(N, jzz=0.6, hz=0.3),
+        "none": _ring(N, dz=0.4),
+    }[name]
     sym = qed.Symmetry.none() if name == "none" else None
     fam = qed.Family.spins(N, "+-z")
     c = qed.correlations(H, fam, T=TEMPS, method="exact", sym=sym)
@@ -56,8 +60,7 @@ def test_exact_correlations_match_the_dense_trace(name):
     pairs = [a.adjoint() @ b for a in fam.ops for b in fam.ops]
     want = _thermal_dense(H, pairs, N, TEMPS).T.reshape(len(TEMPS), 3, N, 3, N)
     np.testing.assert_allclose(c.C, want, atol=1e-10)
-    np.testing.assert_allclose(c.mean_a, _thermal_dense(H, fam.ops, N, TEMPS).T.reshape(len(TEMPS), 3, N),
-                               atol=1e-10)
+    np.testing.assert_allclose(c.mean_a, _thermal_dense(H, fam.ops, N, TEMPS).T.reshape(len(TEMPS), 3, N), atol=1e-10)
     with pytest.raises(qed.errors.InvalidRequest, match="ground"):
         c.ground()
 
@@ -83,8 +86,11 @@ def test_ftlm_measurements_agree_with_exact_and_with_thermal():
     N = 10
     H = _ring(N, dz=0.3)
     fam = qed.Family.spins(N, "z")
-    bond = [qed.Operator.product(N, "zz", [0, 1], 1.0) + 0.5 * qed.Operator.product(N, "+-", [0, 1], 1.0)
-            + 0.5 * qed.Operator.product(N, "-+", [0, 1], 1.0)]
+    bond = [
+        qed.Operator.product(N, "zz", [0, 1], 1.0)
+        + 0.5 * qed.Operator.product(N, "+-", [0, 1], 1.0)
+        + 0.5 * qed.Operator.product(N, "-+", [0, 1], 1.0)
+    ]
     opts = dict(method="ftlm", samples=60, krylov=60, seed=11, dense_max_dim=0)
     m = qed.measure(H, [qed.Correlations(fam), qed.Expect(bond)], T=[1.0, 2.0], **opts)
     assert m.rows == "T" and m.thermal is not None and m.eigs is None
@@ -126,12 +132,15 @@ def test_mtpq_measurements_agree_with_exact():
     sz = qed.Operator.product(N, "z", [0], 1.0)
     for i in range(1, N):
         sz = sz + qed.Operator.product(N, "z", [i], 1.0)
-    bond = [qed.Operator.product(N, "zz", [0, 1], 1.0) + qed.Operator.product(N, "+-", [0, 1], 0.5)
-            + qed.Operator.product(N, "-+", [0, 1], 0.5)]
+    bond = [
+        qed.Operator.product(N, "zz", [0, 1], 1.0)
+        + qed.Operator.product(N, "+-", [0, 1], 0.5)
+        + qed.Operator.product(N, "-+", [0, 1], 0.5)
+    ]
     temps = [1.0, 2.0]
     m = qed.measure(H, [qed.Expect([H, sz] + bond)], T=temps, method="mtpq", samples=40, seed=5, dense_max_dim=0)
     ex = qed.measure(H, [qed.Expect([H, sz] + bond)], T=temps, method="exact")
-    np.testing.assert_allclose(m[0].values[:, 0].real, m.thermal.E, rtol=1e-6)   # <H> is the canonical E
+    np.testing.assert_allclose(m[0].values[:, 0].real, m.thermal.E, rtol=1e-6)  # <H> is the canonical E
     rel = np.abs(m[0].values - ex[0].values) / np.maximum(np.abs(ex[0].values), 0.1)
     assert np.max(rel) < 0.05, rel
 
@@ -147,4 +156,4 @@ def test_oftlm_measurements_agree_with_exact():
     ex = qed.correlations(H, fam, T=temps, method="exact")
     err = np.max(np.abs(m.C - ex.C), axis=(1, 2, 3, 4)) / np.max(np.abs(ex.C))
     assert np.all(err < 0.05), err
-    assert err[0] < 0.01, err   # T = 0.2: dominated by the exact states
+    assert err[0] < 0.01, err  # T = 0.2: dominated by the exact states

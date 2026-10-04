@@ -192,7 +192,8 @@ Lattice build(const Cells& C, bool pbc, std::string label) {
         for (int k = 0; k < C.dims; ++k)
             for (int x = 0; x < 3; ++x)
                 L.supercell[static_cast<std::size_t>(k)][static_cast<std::size_t>(x)] =
-                    static_cast<double>(C.n[static_cast<std::size_t>(k)]) * C.a[static_cast<std::size_t>(k)][static_cast<std::size_t>(x)];
+                    static_cast<double>(C.n[static_cast<std::size_t>(k)])
+                    * C.a[static_cast<std::size_t>(k)][static_cast<std::size_t>(x)];
     for (const auto& c : cells)
         for (int u = 0; u < static_cast<int>(C.basis.size()); ++u) {
             L.positions.push_back(lay.position(c, u));

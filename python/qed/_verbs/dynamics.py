@@ -50,8 +50,9 @@ def _operators(x, what: str):
     except TypeError:
         ops = []  # not an Operator and not iterable (a number, None)
     if not ops or not all(isinstance(o, _core.Operator) for o in ops):
-        raise InvalidRequest(f"{what} must be a qed.Operator, a non-empty sequence of them, a qed.Family or a "
-                             "qed.MomentumFamily")
+        raise InvalidRequest(
+            f"{what} must be a qed.Operator, a non-empty sequence of them, a qed.Family or a " "qed.MomentumFamily"
+        )
     return ops, [len(ops)]
 
 

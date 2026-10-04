@@ -69,7 +69,7 @@ def _check_against_dense(t, H, A_ops, B_ops, N):
             rj = rows(t.final_energies, t.final_multiplicities, EJ, j1 - j0)
             if rj is None:
                 continue
-            MA = np.array([W[:, j0:j1].conj().T @ M @ W[:, i0:i1] for M in A])   # (a, J, I)
+            MA = np.array([W[:, j0:j1].conj().T @ M @ W[:, i0:i1] for M in A])  # (a, J, I)
             got = sum(t.initial_multiplicities[i] * S[i, j] for i in ri for j in rj)
             np.testing.assert_allclose(got, np.sum(np.abs(MA) ** 2, axis=(1, 2)), atol=1e-9)
             if T is not None:
@@ -108,8 +108,8 @@ def test_completeness_over_every_level():
     the equal-time correlations, level by level."""
     N = 6
     H = _ring(N, dz=0.3)
-    r = qed.eigs(H, per_block=64, vectors=True)    # every level of every block
-    assert sum(int(L.multiplicity) for L in r.levels) == 2 ** N
+    r = qed.eigs(H, per_block=64, vectors=True)  # every level of every block
+    assert sum(int(L.multiplicity) for L in r.levels) == 2**N
     A = qed.Family.spins(N, "z+")
     t = qed.transitions(A, r, pairs=True)
     want = np.asarray(r.expect([o.adjoint() @ o for o in A.ops])).reshape(len(r.levels), *A.shape)
@@ -144,7 +144,7 @@ def test_momentum_selection_rules_are_exact_zeros():
     tq = np.array([qed.input.momentum_label(q, d) for q in mf.q])
     allowed = np.abs(((th[:, None, None] - tq[None, None, :] - th[None, :, None]) + 0.5) % 1.0 - 0.5) < 1e-9
     S = t.strength[:, :, 0, :]
-    assert np.all(S[~allowed] == 0.0)        # not computed: exactly zero
+    assert np.all(S[~allowed] == 0.0)  # not computed: exactly zero
     assert np.any(S[allowed] > 1e-6)
 
 
@@ -156,7 +156,7 @@ def test_raw_amplitudes_are_matrix_elements_between_the_solvers_vectors():
     t = qed.transitions(ops, r, raw=True)
     for i in range(len(r.levels)):
         for j in range(len(r.levels)):
-            amp = t.amplitudes(i, j)            # (ops, d_j, d_i)
+            amp = t.amplitudes(i, j)  # (ops, d_j, d_i)
             for a, O in enumerate(ops):
                 assert abs(amp[a, 0, 0] - r.matrix_element(O, j, i)) < 1e-12
     with pytest.raises(qed.errors.InvalidRequest, match="raw=True"):
@@ -220,7 +220,10 @@ def test_point_group_targets_keep_exact_momentum_zeros():
     assert np.all(np.delete(S, qpi, axis=1) == 0.0)
     every = qed.eigs(H, sym=base, per_block=2, vectors=True)
     i0 = int(np.argmin([L.energy for L in every.levels]))
-    j = next(i for i, L in enumerate(every.levels)
-             if abs(L.energy - fin.levels[0].energy) < 1e-9 and abs(every.momentum(i, [T])[0] - 0.5) < 1e-9)
+    j = next(
+        i
+        for i, L in enumerate(every.levels)
+        if abs(L.energy - fin.levels[0].energy) < 1e-9 and abs(every.momentum(i, [T])[0] - 0.5) < 1e-9
+    )
     me = every.matrix_element(mf.operators()[qpi], j, i0)
     assert abs(abs(me) ** 2 - S[0, qpi]) < 1e-12 and S[0, qpi] > 0.1

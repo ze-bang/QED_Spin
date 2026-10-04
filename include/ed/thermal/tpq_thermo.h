@@ -149,11 +149,12 @@ inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& 
  *
  * @return out[o][t] for every observable and beta
  */
-inline std::vector<std::vector<std::complex<double>>> mtpq_canonical_observables(
-    const std::vector<std::vector<double>>& sample_energies, const std::vector<std::vector<double>>& sample_log_norms,
-    const std::vector<std::vector<std::vector<std::complex<double>>>>& diag,
-    const std::vector<std::vector<std::vector<std::complex<double>>>>& cross, std::size_t n_obs, double L,
-    const std::vector<double>& betas) {
+inline std::vector<std::vector<std::complex<double>>>
+mtpq_canonical_observables(const std::vector<std::vector<double>>& sample_energies,
+                           const std::vector<std::vector<double>>& sample_log_norms,
+                           const std::vector<std::vector<std::vector<std::complex<double>>>>& diag,
+                           const std::vector<std::vector<std::vector<std::complex<double>>>>& cross, std::size_t n_obs,
+                           double L, const std::vector<double>& betas) {
     using C = std::complex<double>;
     const std::size_t nT = betas.size(), R = sample_energies.size();
     std::vector<std::vector<C>> out(n_obs, std::vector<C>(nT, C(0.0, 0.0)));

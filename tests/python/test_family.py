@@ -28,7 +28,7 @@ def test_generators_record_their_supercell():
     assert np.allclose(np.asarray(qed.input.lattice.square(4, 3, False).supercell), 0.0)
     py = qed.input.lattice.pyrochlore(2, 2, 3, True)
     sc, lv = np.asarray(py.supercell), np.asarray(py.lattice_vectors)
-    np.testing.assert_allclose(sc, np.diag([2, 2, 3]) @ lv)   # in the order of lattice_vectors
+    np.testing.assert_allclose(sc, np.diag([2, 2, 3]) @ lv)  # in the order of lattice_vectors
 
 
 @pytest.mark.parametrize(
@@ -46,9 +46,9 @@ def test_cluster_momenta_count_and_quantisation(lat, n):
     Q = qed.input.cluster_momenta(L)
     assert Q.shape == (n, 3)
     S = np.asarray(L.supercell)
-    phases = np.exp(1j * Q @ S.T)   # q . s in 2 pi Z for every supercell vector
+    phases = np.exp(1j * Q @ S.T)  # q . s in 2 pi Z for every supercell vector
     np.testing.assert_allclose(phases, 1.0, atol=1e-9)
-    assert len(_reduced(Q, L.lattice_vectors)) == n   # distinct modulo the reciprocal lattice
+    assert len(_reduced(Q, L.lattice_vectors)) == n  # distinct modulo the reciprocal lattice
 
 
 def test_chain_and_square_momenta_are_the_textbook_grids():
@@ -57,11 +57,11 @@ def test_chain_and_square_momenta_are_the_textbook_grids():
     Qs = qed.input.cluster_momenta(qed.input.lattice.square(4, 4, True))
     got = {(round(x * 4 / (2 * np.pi)) % 4, round(y * 4 / (2 * np.pi)) % 4) for x, y, _ in Qs}
     assert got == set(itertools.product(range(4), range(4)))
-    assert np.max(np.abs(Qs)) <= np.pi + 1e-9   # the Wigner-Seitz cell of the square lattice
+    assert np.max(np.abs(Qs)) <= np.pi + 1e-9  # the Wigner-Seitz cell of the square lattice
 
 
 def test_translations_route_agrees_with_the_supercell_on_a_tilted_cluster():
-    t = TriangularTorus(((3, 2), (-2, 2)))   # 10 sites, tilted
+    t = TriangularTorus(((3, 2), (-2, 2)))  # 10 sites, tilted
     T1 = t.T1[0] * A1 + t.T1[1] * A2
     T2 = t.T2[0] * A1 + t.T2[1] * A2
     # A compact cluster: each site at its shortest periodic image (the displacement of a translation
@@ -79,7 +79,7 @@ def test_momentum_labels_match_the_engine():
     N = 8
     lat = qed.input.lattice.chain(N, True)
     b = qed.input.HamiltonianBuilder(N)
-    b.heisenberg(lat.nn_pairs(), 1.0).dm(lat.nn_pairs(), [(0.0, 0.0, 0.4)] * N)   # no inversion: k != -k
+    b.heisenberg(lat.nn_pairs(), 1.0).dm(lat.nn_pairs(), [(0.0, 0.0, 0.4)] * N)  # no inversion: k != -k
     T = [(i - 1) % N for i in range(N)]
     r = qed.eigs(b.to_operator(), 6, sym=qed.Symmetry(spatial=[T], point_group=False))
     d = qed.input.displacement(T, lat.positions)
@@ -103,7 +103,7 @@ def test_family_shapes_positions_and_validation():
     with pytest.raises(qed.errors.InvalidRequest):
         qed.Family.spins(4, "w")
     with pytest.raises(qed.errors.InvalidRequest):
-        qed.Family.spins(4).fourier("cluster")   # no positions
+        qed.Family.spins(4).fourier("cluster")  # no positions
 
 
 def test_fourier_operators_are_dssf_s_in_the_shared_convention(tmp_path):
@@ -152,9 +152,9 @@ def test_high_symmetry_points_and_paths():
         p = qed.input.high_symmetry_points(L)
         A2 = np.asarray(L.lattice_vectors)[:2, :2]
         B = 2 * np.pi * np.linalg.solve(A2 @ A2.T, A2)
-        G = [i * B[0] + j * B[1] for i, j in itertools.product((-1, 0, 1), repeat=2)]   # (0, 0) included
+        G = [i * B[0] + j * B[1] for i, j in itertools.product((-1, 0, 1), repeat=2)]  # (0, 0) included
         d = sorted(np.linalg.norm(p["K"][:2] - g) for g in G)
-        assert abs(d[0] - d[1]) < 1e-12 and abs(d[1] - d[2]) < 1e-12   # a zone corner: three equidistant G
+        assert abs(d[0] - d[1]) < 1e-12 and abs(d[1] - d[2]) < 1e-12  # a zone corner: three equidistant G
     sq = qed.input.high_symmetry_points(qed.input.lattice.square(4, 4, True))
     np.testing.assert_allclose(sq["M"], [np.pi, np.pi, 0.0])
     py = qed.input.high_symmetry_points(qed.input.lattice.pyrochlore(2, 2, 2, True))

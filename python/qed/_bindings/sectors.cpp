@@ -696,7 +696,7 @@ void bind_sectors(py::module_& m) {
             sec::EigsOptions o;
             o.k = k;
             o.per_block = per_block;
-            o.cut = per_block <= 0;   // per_block: every block's lowest rows, no window across blocks
+            o.cut = per_block <= 0; // per_block: every block's lowest rows, no window across blocks
             o.vectors = vectors;
             o.dense_max_dim = dense_max_dim;
             o.allow_partial = allow_partial;
