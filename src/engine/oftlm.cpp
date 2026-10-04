@@ -30,10 +30,13 @@ using ComplexVector = std::vector<Complex>;
 namespace {
 
 // One random sample's Lanczos spectrum: Ritz values eps~_j and weights
-// w_j = |<r~|psi_j>|^2 (r~ normalized). Shared e_min shift is applied at combine.
+// w_j = |<r~|psi_j>|^2 (r~ normalized). Shared e_min shift is applied at combine. With observables,
+// obs[t][o] = <phi_t|O_o|phi_t> about `ref` (the sample's lowest kept Ritz value).
 struct SampleSpectrum {
     std::vector<double> ritz;
     std::vector<double> weights;
+    double ref = 0.0;
+    std::vector<std::vector<Complex>> obs;
 };
 
 }  // namespace
@@ -46,6 +49,8 @@ Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Compl
     const std::size_t nT = opts.betas.size();
     const std::size_t R = std::max<std::size_t>(opts.num_samples, 1);
     const std::size_t M = std::max<std::size_t>(opts.krylov_dim, 2);
+    const std::size_t n_obs = opts.n_observables;
+    if (n_obs > 0 && !opts.observe) throw std::invalid_argument("oftlm: n_observables > 0 without observe");
 
     // seed == 0 == NONDETERMINISTIC (random_device), as for FTLM, so
     // independent default runs draw independent samples; explicit seeds
@@ -100,22 +105,69 @@ Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Compl
         // 013186) runs the stochastic samples bare -- ghost Ritz duplicates
         // redistribute the sample weight but leave the trace estimator
         // consistent. The run stops early when ||w|| <= opts.breakdown_tol.
+        // With observables the basis is kept and fully reorthogonalised (phi is built from it).
         ed::krylov::LanczosKernelOptions lopts;
         lopts.max_iter = static_cast<std::size_t>(std::min<std::uint64_t>(N, M));
-        lopts.reorth = ed::krylov::ReorthPolicy::None;
-        lopts.keep_basis = false;
+        lopts.reorth = n_obs > 0 ? ed::krylov::ReorthPolicy::FullCGS2 : ed::krylov::ReorthPolicy::None;
+        lopts.keep_basis = n_obs > 0;
         lopts.breakdown_tol = opts.breakdown_tol;
         auto lres = ed::krylov::lanczos_kernel(be, apply_H, static_cast<std::size_t>(N), v.get(), lopts);
 
         ed::krylov::TridiagEig t = ed::krylov::tridiag_eig(lres.alpha, lres.beta, lres.alpha.size(), /*vectors=*/true);
         SampleSpectrum sp;
         const std::vector<double> w = t.weights();
-        for (std::size_t j = 0; j < w.size(); ++j)
+        for (std::size_t j = 0; j < w.size(); ++j) {
             if (!(w[j] < opts.min_weight)) {   // a roundoff copy outside the seed's subspace: dropped
                 sp.weights.push_back(w[j]);
                 sp.ritz.push_back(t.values[j]);
+            } else {
+                t.vectors[j * t.m] = 0.0;   // and without weight in phi
             }
-        if (!sp.ritz.empty()) samples.push_back(std::move(sp));
+        }
+        if (sp.ritz.empty()) continue;
+        if (n_obs > 0) {
+            const std::size_t m = t.m;
+            if (lres.basis.size() < m) continue;   // the basis was not kept: the sample is dropped
+            // phi_t = sum_a c_a v_a, c_a = sum_j g_j Y[j m + a], g_j = e^{-beta (eps_j - ref) / 2} Y[j m]
+            // (FtlmOptions::observe), a few temperatures at a time.
+            constexpr std::size_t kPhiChunk = 4;
+            const std::size_t width = std::min(kPhiChunk, nT);
+            sp.ref = sp.ritz.front();
+            std::vector<const Complex*> V(m);
+            for (std::size_t a = 0; a < m; ++a) V[a] = lres.basis[a];
+            auto phi = be.make_zero_vector(N);
+            std::vector<ComplexVector> host(width, ComplexVector(N));
+            std::vector<Complex> c(m);
+            sp.obs.assign(nT, {});
+            for (std::size_t t0 = 0; t0 < nT; t0 += width) {
+                const std::size_t nc = std::min(width, nT - t0);
+                std::vector<const Complex*> ptrs(nc);
+                for (std::size_t i = 0; i < nc; ++i) {
+                    const double beta = opts.betas[t0 + i];
+                    std::fill(c.begin(), c.end(), Complex(0, 0));
+                    for (std::size_t j = 0; j < m; ++j) {
+                        const double g = std::exp(-0.5 * beta * (t.values[j] - sp.ref)) * t.vectors[j * m];
+                        for (std::size_t a = 0; a < m; ++a) c[a] += g * t.vectors[j * m + a];
+                    }
+                    be.scale(Complex(0, 0), phi.get(), N);
+                    be.axpy_many(c.data(), V.data(), m, phi.get(), N);
+                    be.copy_to_host(phi.get(), host[i].data(), N);
+                    ptrs[i] = host[i].data();
+                }
+                auto vals = opts.observe(ptrs);
+                if (vals.size() != nc) throw std::logic_error("oftlm: observe returned the wrong count");
+                for (std::size_t i = 0; i < nc; ++i) sp.obs[t0 + i] = std::move(vals[i]);
+            }
+        }
+        samples.push_back(std::move(sp));
+    }
+    // The exact states' own values, one sweep for all of them.
+    std::vector<std::vector<Complex>> exact_obs;
+    if (n_obs > 0 && Nv > 0) {
+        std::vector<const Complex*> ptrs;
+        ptrs.reserve(Nv);
+        for (const auto& x : exact_vecs) ptrs.push_back(x.data());
+        exact_obs = opts.observe(ptrs);
     }
 
     const std::size_t R_eff = samples.size();
@@ -142,6 +194,7 @@ Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Compl
     out.lnZ.assign(nT, 0.0);
     out.E.assign(nT, 0.0);
     out.V.assign(nT, 0.0);
+    out.O.assign(n_obs, std::vector<Complex>(nT, Complex(0, 0)));
 
     for (std::size_t t = 0; t < nT; ++t) {
         const double beta = opts.betas[t];
@@ -169,6 +222,14 @@ Curves oftlm(const ed::matvec::Backend& be, const std::function<void(const Compl
         Z += pref * Zr;
         EZ += pref * EZr;
         E2Z += pref * E2Zr;
+
+        // Observables: the exact states' diagonal and each sample's phi value, against the same Z.
+        for (std::size_t o = 0; o < n_obs && Z > 1e-300; ++o) {
+            Complex num(0, 0);
+            for (std::size_t i = 0; i < Nv; ++i) num += std::exp(-beta * (exact_eigs[i] - e_min)) * exact_obs[i].at(o);
+            for (const auto& sp : samples) num += pref * std::exp(-beta * (sp.ref - e_min)) * sp.obs[t].at(o);
+            out.O[o][t] = num / Z;
+        }
 
         if (Z > 1e-300) {
             const double dE = EZ / Z;

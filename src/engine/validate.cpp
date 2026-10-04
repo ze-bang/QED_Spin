@@ -90,7 +90,12 @@ void validate_thermal_spec(const ThermalSpec& t, int n_sites) {
         if (t.method == ThermalSpec::Method::FTLM && t.krylov < 2)
             refuse("thermal", "krylov must be >= 2 (a Lanczos run of depth 1 has no tridiagonal)");
     }
-    for (std::size_t i = 0; i < t.observables.size(); ++i) validate_observable(t.observables[i], n_sites, "thermal", i);
+    std::size_t index = 0;
+    for (const ::Operator* O : t.observables) validate_observable(O, n_sites, "thermal", index++);
+    for (const auto& p : t.observable_pairs) {
+        for (const ::Operator* O : p.A) validate_observable(O, n_sites, "thermal", index++);
+        for (const ::Operator* O : p.B) validate_observable(O, n_sites, "thermal", index++);
+    }
 }
 
 void validate_dynamics_spec(const DynamicsSpec& d) {

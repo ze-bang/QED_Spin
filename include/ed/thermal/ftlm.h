@@ -80,11 +80,14 @@ struct FtlmOptions {
     /// such a copy would still dominate Z at low enough T.
     double min_weight = 0.0;
 
-    /// Static observables: each applies O to a backend vector (in, out, n). The kernel also
-    /// returns <O>(T) = sum_r sum_ij e^{-beta (e_i + e_j) / 2} <r|psi_i><psi_i|O|psi_j><psi_j|r> / Z
-    /// (the symmetric, low-temperature Lanczos form), from the Krylov basis of each sample: it is
-    /// kept and fully reorthogonalised, and O is applied once to each of its vectors.
-    std::vector<std::function<void(const Complex*, Complex*, std::size_t)>> observables;
+    /// Static observables (`n_observables` > 0): <O>(T) = sum_r <phi_r|O|phi_r> / sum_r <phi_r|phi_r>
+    /// with phi_r(beta) = sum_j e^{-beta (e_j - e_r) / 2} <psi_j|r> psi_j (the symmetric,
+    /// low-temperature Lanczos form; e_r the sample's lowest weighted Ritz value). The Krylov basis is
+    /// kept and fully reorthogonalised; the kernel forms phi for a few temperatures at a time, copies
+    /// them to the host and calls `observe`, which returns out[i][o] = <phi_i|O_o|phi_i> for every
+    /// vector i and observable o. It may be called from several threads at once (batched samples).
+    std::size_t n_observables = 0;
+    std::function<std::vector<std::vector<Complex>>(const std::vector<const Complex*>&)> observe;
 
     /// Device multi-vector H (LinearOperator::bind_cuda_multi). On a CUDA run it lets up to
     /// `batch_width` samples advance in lockstep, each H apply serving all of them in one
@@ -134,6 +137,12 @@ struct OftlmOptions {
     double breakdown_tol = 1e-10; ///< a random sample's run stops at beta <= this (energy units)
     std::vector<double> betas;         ///< inverse-temperature grid (strictly positive)
     std::uint64_t random_seed = 0;
+    /// Static observables (FtlmOptions::observe): the exact states' own <psi_i|O|psi_i>, plus the
+    /// random part's phi vectors, from a kept and fully reorthogonalised Krylov basis per sample;
+    /// <O>(T) = [sum_i e^{-beta eps_i} <psi_i|O|psi_i> + (D - N_V)/R sum_r <phi_r|O|phi_r>] / Z.
+    std::size_t n_observables = 0;
+    std::function<std::vector<std::vector<std::complex<double>>>(const std::vector<const std::complex<double>*>&)>
+        observe;
 };
 
 /// OFTLM on one block on backend `be` -- the host's or a device's (src/engine/oftlm.cpp). apply_H:
@@ -289,11 +298,13 @@ FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t l
 
     // One sample: its Ritz data and thermodynamics, and each observable in its Ritz basis.
     // Samples are independent; they are combined below in sample order, however they were run.
-    const std::size_t n_obs = opts.observables.size();
+    const std::size_t n_obs = opts.n_observables;
+    if (n_obs > 0 && !opts.observe) throw std::invalid_argument("ftlm_kernel: n_observables > 0 without observe");
     struct Sample {
         bool ok = false;
         std::vector<double> ritz, weights, Y;                  // Y[i m + a]: Ritz vector i
-        std::vector<std::vector<Complex>> A;                  // A[o][i + j m] = <psi_i|O_o|psi_j>
+        std::vector<double> oz;                               // oz[t] = <phi_t|phi_t>, about mom.e_min
+        std::vector<std::vector<Complex>> obs;                // obs[t][o] = <phi_t|O_o|phi_t>, likewise
         detail::SampleMoments mom;
     };
     auto sample = [&](const auto& be, auto&& apply, std::size_t s) {
@@ -348,36 +359,48 @@ FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t l
                 out.ritz = std::move(t.values);
                 if (n_obs > 0) out.Y = std::move(t.vectors);
             }
-            // Observables in the Ritz basis, A_ij = <psi_i|O|psi_j> = (Y^T B Y)_ij with
-            // B_ab = <v_a|O|v_b> from one O apply per Krylov vector.
+            // ---- 4. Host-side Boltzmann moments of this sample ----
+            if (!out.ritz.empty()) out.mom = detail::sample_moments(out.ritz, out.weights, betas);
+            // Observables: phi_t = sum_a c_a v_a with c_a = sum_j g_j Y[j m + a], g_j =
+            // e^{-beta_t (e_j - e_r) / 2} <psi_j|r> (<psi_j|r> = Y[j m], real), so that
+            // <phi_t|O|phi_t> = sum_ij g_i g_j <psi_i|O|psi_j>, measured on the host by `observe` for
+            // kPhiChunk temperatures at a time.
             const std::size_t m = out.ritz.size();
             if (n_obs > 0 && m > 0) {
                 if (k.basis.size() < m) {
                     out.ritz.clear();
                 } else {
+                    constexpr std::size_t kPhiChunk = 4;
+                    const std::size_t nT = betas.size(), width = std::min(kPhiChunk, nT);
                     std::vector<const Complex*> V(m);
                     for (std::size_t a = 0; a < m; ++a) V[a] = k.basis[a];
-                    auto w = be.make_zero_vector(local_n);
-                    std::vector<Complex> B(m * m), col(m), T1(m * m);
-                    out.A.assign(n_obs, std::vector<Complex>(m * m));
-                    for (std::size_t o = 0; o < n_obs; ++o) {
-                        for (std::size_t b = 0; b < m; ++b) {
-                            opts.observables[o](V[b], w.get(), local_n);
-                            be.dot_many(V.data(), m, w.get(), local_n, col.data());
-                            for (std::size_t a = 0; a < m; ++a) B[a + b * m] = col[a];
-                        }
-                        for (std::size_t i = 0; i < m; ++i)
-                            for (std::size_t b = 0; b < m; ++b) {
-                                Complex acc(0, 0);
-                                for (std::size_t a = 0; a < m; ++a) acc += out.Y[i * m + a] * B[a + b * m];
-                                T1[i + b * m] = acc;
-                            }
-                        for (std::size_t i = 0; i < m; ++i)
+                    auto phi = be.make_zero_vector(local_n);
+                    std::vector<std::vector<Complex>> host(width, std::vector<Complex>(local_n));
+                    std::vector<Complex> c(m);
+                    out.oz.assign(nT, 0.0);
+                    out.obs.assign(nT, {});
+                    const double e_r = out.mom.e_min;
+                    for (std::size_t t0 = 0; t0 < nT; t0 += width) {
+                        const std::size_t nc = std::min(width, nT - t0);
+                        std::vector<const Complex*> ptrs(nc);
+                        for (std::size_t i = 0; i < nc; ++i) {
+                            const double beta = betas[t0 + i];
+                            std::fill(c.begin(), c.end(), Complex(0, 0));
+                            double z = 0.0;
                             for (std::size_t j = 0; j < m; ++j) {
-                                Complex acc(0, 0);
-                                for (std::size_t b = 0; b < m; ++b) acc += T1[i + b * m] * out.Y[j * m + b];
-                                out.A[o][i + j * m] = acc;
+                                const double g = std::exp(-0.5 * beta * (out.ritz[j] - e_r)) * out.Y[j * m];
+                                z += g * g;
+                                for (std::size_t a = 0; a < m; ++a) c[a] += g * out.Y[j * m + a];
                             }
+                            out.oz[t0 + i] = z;
+                            be.scale(Complex(0, 0), phi.get(), local_n);
+                            be.axpy_many(c.data(), V.data(), m, phi.get(), local_n);
+                            be.copy_to_host(phi.get(), host[i].data(), local_n);
+                            ptrs[i] = host[i].data();
+                        }
+                        auto vals = opts.observe(ptrs);
+                        if (vals.size() != nc) throw std::logic_error("ftlm_kernel: observe returned the wrong count");
+                        for (std::size_t i = 0; i < nc; ++i) out.obs[t0 + i] = std::move(vals[i]);
                     }
                 }
             }
@@ -387,8 +410,6 @@ FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t l
             ED_LOG(Warn, "FTLM: sample %zu has no Ritz values; dropped", static_cast<std::size_t>(s));
             return out;
         }
-        // ---- 4. Host-side Boltzmann moments of this sample ----
-        out.mom = detail::sample_moments(out.ritz, out.weights, betas);
         out.ok = true;
         return out;
     };
@@ -398,7 +419,7 @@ FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t l
 #ifdef WITH_CUDA
     if constexpr (std::is_same_v<Backend, ed::matvec::CudaBackend>) {
         // Up to batch_width samples in lockstep, each on its own thread and backend, sharing
-        // every H apply (one multi-vector launch). The observables are applied per sample.
+        // every H apply (one multi-vector launch). The observables are measured per sample.
         if (opts.batch_matvec && opts.batch_width > 1 && opts.num_samples > 1) {
             batched = true;
             for (std::size_t s0 = 0; s0 < opts.num_samples; s0 += opts.batch_width) {
@@ -419,45 +440,24 @@ FtlmResult ftlm_kernel(const Backend& backend, MatvecFn&& apply_H, std::size_t l
     std::vector<detail::SampleMoments> moments;
     moments.reserve(opts.num_samples);
     double ground_state_estimate = std::numeric_limits<double>::infinity();
-    // Observable sums over all samples, against the running lowest Ritz value obs_ref.
-    std::vector<double> obs_z;
-    std::vector<std::vector<Complex>> obs_num;
-    double obs_ref = 0.0;
+    // Observable sums over all samples, each sample's (about its own e_min) rescaled to the lowest:
+    // the symmetric (low-temperature Lanczos) estimator sum_ij e^{-beta (e_i + e_j) / 2}
+    // <r|psi_i><psi_i|O|psi_j><psi_j|r>, exact for the lowest state already at one sample, where the
+    // one-sided FTLM form sum_i e^{-beta e_i} <r|psi_i><psi_i|O|r> fluctuates at low T.
+    double obs_ref = std::numeric_limits<double>::infinity();
+    if (n_obs > 0)
+        for (const auto& smp : samples)
+            if (smp.ok) obs_ref = std::min(obs_ref, smp.mom.e_min);
+    std::vector<double> obs_z(n_obs > 0 ? betas.size() : 0, 0.0);
+    std::vector<std::vector<Complex>> obs_num(n_obs, std::vector<Complex>(betas.size(), Complex(0, 0)));
     for (auto& smp : samples) {
         if (!smp.ok) continue;
-        const auto& ritz_values = smp.ritz;
-        if (n_obs > 0) {
-            const std::size_t m = ritz_values.size();
-            // Symmetric (low-temperature Lanczos) estimator: sum_ij e^{-beta (e_i + e_j) / 2}
-            // <r|psi_i> A_ij <psi_j|r>, exact for the lowest state already at one sample, where
-            // the one-sided FTLM form sum_i e^{-beta e_i} <r|psi_i><psi_i|O|r> fluctuates at low T.
-            const double smin = smp.mom.e_min;   // the lowest Ritz value with weight
-            if (obs_z.empty()) {
-                obs_z.assign(betas.size(), 0.0);
-                obs_num.assign(n_obs, std::vector<Complex>(betas.size(), Complex(0, 0)));
-                obs_ref = smin;
-            } else if (smin < obs_ref) {
-                for (std::size_t t = 0; t < betas.size(); ++t) {
-                    const double f = std::exp(-betas[t] * (obs_ref - smin));
-                    obs_z[t] *= f;
-                    for (auto& row : obs_num) row[t] *= f;
-                }
-                obs_ref = smin;
-            }
-            std::vector<double> g(m);                           // e^{-beta (e_i - ref) / 2} c_i
+        if (n_obs > 0)
             for (std::size_t t = 0; t < betas.size(); ++t) {
-                for (std::size_t i = 0; i < m; ++i) {
-                    g[i] = std::exp(-0.5 * betas[t] * (ritz_values[i] - obs_ref)) * smp.Y[i * m];
-                    obs_z[t] += g[i] * g[i];
-                }
-                for (std::size_t o = 0; o < n_obs; ++o) {
-                    Complex acc(0, 0);
-                    for (std::size_t j = 0; j < m; ++j)
-                        for (std::size_t i = 0; i < m; ++i) acc += g[i] * smp.A[o][i + j * m] * g[j];
-                    obs_num[o][t] += acc;
-                }
+                const double f = std::exp(-betas[t] * (smp.mom.e_min - obs_ref));
+                obs_z[t] += f * smp.oz[t];
+                for (std::size_t o = 0; o < n_obs; ++o) obs_num[o][t] += f * smp.obs[t].at(o);
             }
-        }
         ground_state_estimate = std::min(ground_state_estimate, smp.mom.e_min);
         moments.push_back(std::move(smp.mom));
     }

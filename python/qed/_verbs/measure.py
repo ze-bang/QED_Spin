@@ -149,11 +149,17 @@ def _reduce(x: np.ndarray, sel, w) -> np.ndarray:
     return np.tensordot(w, x[sel], axes=1)[None]
 
 
+def _level_rows(rows: str) -> None:
+    if rows != "levels":
+        raise InvalidRequest(f"ground() combines levels; these rows are {rows!r}")
+
+
 # ---- results -----------------------------------------------------------------------------------
 @dataclass
 class ExpectResult:
-    """One row per level (``levels``, not repeated by multiplicity), or one row for the ground
-    manifold (``rows == "ground"``).
+    """One row per level (``levels``, not repeated by multiplicity), one row for the ground manifold
+    (``rows == "ground"``), or one row per temperature (``rows == "T"``: <O>(T), ``T`` the temperatures,
+    ``energies`` the thermal energy E(T)).
 
     ``values[i, ...]`` is <O> in row i averaged over the level's symmetry multiplet, so
     ``multiplicities[i] * values[i, a]`` is the level's contribution to Tr(P_E O_a). The index axes
@@ -170,10 +176,12 @@ class ExpectResult:
     diagnostics: list = field(default_factory=list)
     rows: str = "levels"
     index: object = None
+    T: Optional[np.ndarray] = None
 
     def ground(self, degeneracy_tol: float = 1e-8) -> "ExpectResult":
         """One row: the levels within ``degeneracy_tol`` max(1, |E0|) of the lowest, averaged with
         their multiplicities."""
+        _level_rows(self.rows)
         sel, w = _ground(self.energies, self.multiplicities, degeneracy_tol)
         return replace(
             self,
@@ -200,7 +208,8 @@ class StructureFactor:
 @dataclass
 class CorrelationResult:
     """<A_a^dag B_b> per row: ``C[row, *A_index, *B_index]`` (B_b acts first). A row is a level
-    (``rows == "levels"``) or the ground manifold (``"ground"``), averaged over the symmetry
+    (``rows == "levels"``) or the ground manifold (``"ground"``), or a temperature (``"T"``: thermal
+    averages, ``T`` the temperatures), averaged over the symmetry
     multiplet as :class:`ExpectResult` averages A_a^dag B_b -- so it does not depend on which partner
     the solver returned. Pairs the level's sector cannot hold (an S^z change in a fixed-S^z sector)
     are exactly 0. ``mean_a`` and ``mean_b`` are the one-point values <A_a> and <B_b> per row, from
@@ -217,10 +226,12 @@ class CorrelationResult:
     rows: str = "levels"
     A: object = None
     B: object = None
+    T: Optional[np.ndarray] = None
 
     def ground(self, degeneracy_tol: float = 1e-8) -> "CorrelationResult":
         """One row: the levels within ``degeneracy_tol`` max(1, |E0|) of the lowest, averaged with
         their multiplicities (the ground manifold's average)."""
+        _level_rows(self.rows)
         sel, w = _ground(self.energies, self.multiplicities, degeneracy_tol)
         return replace(
             self,
@@ -321,7 +332,8 @@ class TransitionResult:
 @dataclass
 class MeasureResult(Sequence):
     """The answers of :func:`measure`, one per request in order (``result[i]``); ``energies``,
-    ``multiplicities`` and ``rows`` describe the rows they share, ``eigs`` the eigensolve."""
+    ``multiplicities`` and ``rows`` describe the rows they share (levels, the ground manifold, or the
+    temperatures ``T``), ``eigs`` the eigensolve, ``thermal`` the thermodynamics of a run with T."""
 
     results: list
     energies: np.ndarray
@@ -329,6 +341,8 @@ class MeasureResult(Sequence):
     rows: str
     eigs: object
     diagnostics: list = field(default_factory=list)
+    T: Optional[np.ndarray] = None
+    thermal: object = None
 
     def __getitem__(self, i):
         return self.results[i]
@@ -412,10 +426,8 @@ def _transitions(ri, ii: list, rf, jj: list, q: Transitions) -> TransitionResult
     )
 
 
-def _evaluate(r, requests: Sequence) -> list:
-    """Per-level answers (rows = r.levels) to every request, from one engine sweep."""
-    if not any(L.vector >= 0 for L in r.levels):
-        raise InvalidRequest("no vectors: call qed.eigs(..., vectors=True)")
+def _plan(requests: Sequence, thermal: bool = False):
+    """(singles, pairs, plan): the operators every request needs, in one list for one pass."""
     singles: list = []
     pairs: list = []
     plan = []
@@ -433,36 +445,52 @@ def _evaluate(r, requests: Sequence) -> list:
                 singles.extend(b.ops)
             pairs.append((a.ops, b.ops))
         elif isinstance(q, Transitions):
+            if thermal:
+                raise InvalidRequest("Transitions are between levels: measure them without T=")
             plan.append(("transitions", q))
         else:
             raise InvalidRequest(
                 f"measure: unknown request {type(q).__name__} (Expect, Correlations or Transitions)")
-    n_levels = len(r.levels)
-    raw = np.zeros((n_levels, 0), complex)
-    if singles or pairs:
-        raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
+    return singles, pairs, plan
+
+
+def _answers(plan: list, raw: np.ndarray, singles: list, pairs: list, rows: dict) -> list:
+    """The answer to every request from raw[row, x] (singles, then each pair request a-major).
+    ``rows``: energies, multiplicities, levels, eigs, diagnostics, rows ("levels" | "T"), T."""
     starts = np.cumsum([len(singles)] + [len(A) * len(B) for A, B in pairs])
-    energies = np.array([L.energy for L in r.levels], float)
-    mult = np.array([L.multiplicity for L in r.levels], int)
-    diags = list(r.diagnostics)
+    common = dict(energies=rows["energies"], multiplicities=rows["multiplicities"], levels=list(rows["levels"]),
+                  eigs=rows["eigs"], diagnostics=rows["diagnostics"], rows=rows["rows"], T=rows["T"])
     out = []
-    every = list(range(n_levels))
     for entry in plan:
         if entry[0] == "transitions":
+            r = rows["eigs"]
+            every = list(range(len(r.levels)))
             out.append(_transitions(r, every, r, every, entry[1]))
         elif entry[0] == "expect":
             _, op, at = entry
-            vals = _one_point(raw[:, at : at + len(op.ops)], op)
-            out.append(ExpectResult(energies=energies, multiplicities=mult, values=vals, levels=list(r.levels),
-                                    eigs=r, diagnostics=diags, index=op.source))
+            out.append(ExpectResult(values=_one_point(raw[:, at : at + len(op.ops)], op), index=op.source, **common))
         else:
             _, (a, b), at, p = entry
             mean_a = _one_point(raw[:, at : at + len(a.ops)], a)
             mean_b = mean_a if b is a else _one_point(raw[:, at + len(a.ops) : at + len(a.ops) + len(b.ops)], b)
             C = _pairs(raw[:, starts[p] : starts[p + 1]], a, b)
-            out.append(CorrelationResult(C=C, energies=energies, multiplicities=mult, mean_a=mean_a, mean_b=mean_b,
-                                         levels=list(r.levels), eigs=r, diagnostics=diags, A=a.source, B=b.source))
+            out.append(CorrelationResult(C=C, mean_a=mean_a, mean_b=mean_b, A=a.source, B=b.source, **common))
     return out
+
+
+def _evaluate(r, requests: Sequence) -> list:
+    """Per-level answers (rows = r.levels) to every request, from one engine sweep."""
+    if not any(L.vector >= 0 for L in r.levels):
+        raise InvalidRequest("no vectors: call qed.eigs(..., vectors=True)")
+    singles, pairs, plan = _plan(requests)
+    n_levels = len(r.levels)
+    raw = np.zeros((n_levels, 0), complex)
+    if singles or pairs:
+        raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
+    rows = dict(energies=np.array([L.energy for L in r.levels], float),
+                multiplicities=np.array([L.multiplicity for L in r.levels], int), levels=r.levels, eigs=r,
+                diagnostics=list(r.diagnostics), rows="levels", T=None)
+    return _answers(plan, raw, singles, pairs, rows)
 
 
 def _states(states: str) -> str:
@@ -482,21 +510,60 @@ def _solve(H, k: int, sym, device: str, eigs_kwargs: dict):
     return eigs(H, k, sym=sym, vectors=True, device=device, **eigs_kwargs)
 
 
-@_log.replays
-def measure(H, requests: Sequence, k: int = 1, *, states: str = "levels", degeneracy_tol: float = 1e-8,
-            sym=None, device: str = "cpu", **eigs_kwargs) -> MeasureResult:
-    """Every request (:class:`Expect`, :class:`Correlations`, :class:`Transitions`) in the lowest levels
-    of ``H`` from one eigensolve; the equal-time requests share one sweep of each level's basis.
+# qed.thermal's options, read by measure(T=...); dense_max_dim is also an eigs option.
+_THERMAL_OPTIONS = ("method", "samples", "krylov", "steps", "exact_states", "seed", "dense_max_dim")
 
-    ``H``: the Hamiltonian (solved with :func:`qed.eigs` with vectors; ``k``, ``sym``, ``device`` and
-    ``eigs_kwargs`` pass through) or an :class:`EigResult` with vectors to reuse.
-    ``states="levels"``: one row per returned level; ``"ground"``: one row, the levels within
-    ``degeneracy_tol`` max(1, |E0|) of the lowest averaged with their multiplicities (partners in
-    other blocks are among them only if the solve returned them: raise ``k`` or pass ``window=``).
+
+def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> MeasureResult:
+    from .eigs import EigResult
+    from .thermal import _thermal_rows, _thermal_run
+
+    if isinstance(H, EigResult):
+        raise InvalidRequest("measure with T= needs the Hamiltonian, not an EigResult")
+    unknown = sorted(set(options) - set(_THERMAL_OPTIONS))
+    if unknown:
+        raise InvalidRequest(f"measure with T=: unknown option(s) {unknown}; the thermal ones are {_THERMAL_OPTIONS}")
+    singles, pairs, plan = _plan(requests, thermal=True)
+    th, raw = _thermal_run(H, T, method=options.get("method", "ftlm"), sym=sym, samples=options.get("samples", 40),
+                           krylov=options.get("krylov"), steps=options.get("steps"),
+                           exact_states=options.get("exact_states", 0), seed=options.get("seed", 0), device=device,
+                           dense_max_dim=options.get("dense_max_dim"), singles=singles, pairs=pairs)
+    results = _answers(plan, raw.T, singles, pairs, _thermal_rows(th))
+    th.measurements = results
+    return MeasureResult(results=results, energies=th.E, multiplicities=np.ones(len(th.T), int), rows="T", eigs=None,
+                         diagnostics=list(th.diagnostics), T=th.T, thermal=th)
+
+
+@_log.replays
+def measure(H, requests: Sequence, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8,
+            sym=None, device: str = "cpu", **options) -> MeasureResult:
+    """Every request (:class:`Expect`, :class:`Correlations`, :class:`Transitions`) from one pass.
+
+    Without ``T``: in the lowest levels of ``H`` from one eigensolve, the equal-time requests sharing
+    one sweep of each level's basis. ``H`` is the Hamiltonian (solved with :func:`qed.eigs` with
+    vectors; ``k``, ``sym``, ``device`` and the eigs ``options`` pass through) or an
+    :class:`EigResult` with vectors to reuse. ``states="levels"``: one row per returned level;
+    ``"ground"``: one row, the levels within ``degeneracy_tol`` max(1, |E0|) of the lowest averaged
+    with their multiplicities (partners in other blocks are among them only if the solve returned
+    them: raise ``k`` or pass ``window=``).
+
+    With ``T`` (temperatures): one thermal pass over every symmetry block (:func:`qed.thermal`'s
+    ``method``, ``samples``, ``krylov``, ``steps``, ``exact_states``, ``seed`` and ``dense_max_dim`` in
+    ``options``) gives every equal-time request <X>(T) = Tr(e^{-H/T} X) / Z, one row per temperature,
+    and the thermodynamics in ``thermal``. Every operator of every request is measured in one sweep
+    per block and sample (exact: the eigenvectors; FTLM: each sample's phi(T); mTPQ: each step, with the
+    canonical series of Sugiura and Shimizu; OFTLM: its exact states and the samples' phi(T)).
     """
-    states = _states(states)
     requests = [requests] if isinstance(requests, (Expect, Correlations, Transitions)) else list(requests)
-    r = _solve(H, k, sym, device, eigs_kwargs)
+    if T is not None:
+        if states != "levels":
+            raise InvalidRequest("states= selects levels; with T= the rows are the temperatures")
+        return _measure_thermal(H, requests, T, sym, device, options)
+    thermal_only = sorted(set(options) & (set(_THERMAL_OPTIONS) - {"dense_max_dim"}))
+    if thermal_only:
+        raise InvalidRequest(f"{thermal_only}: thermal options, used with T=")
+    states = _states(states)
+    r = _solve(H, k, sym, device, options)
     results = _evaluate(r, requests)
     energies = np.array([L.energy for L in r.levels], float)
     mult = np.array([L.multiplicity for L in r.levels], int)
@@ -509,30 +576,31 @@ def measure(H, requests: Sequence, k: int = 1, *, states: str = "levels", degene
 
 
 # ---- the one-request verbs ---------------------------------------------------------------------
-def expect(H, ops, k: int = 1, *, states: str = "levels", degeneracy_tol: float = 1e-8, sym=None,
-           device: str = "cpu", **eigs_kwargs) -> ExpectResult:
+def expect(H, ops, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8, sym=None,
+           device: str = "cpu", **options) -> ExpectResult:
     """<O> for every operator in ``ops`` (an Operator, a sequence, a :class:`qed.Family` or a
-    :class:`qed.MomentumFamily`) in each of the lowest levels of ``H``: :func:`measure` with one
-    :class:`Expect` request.
+    :class:`qed.MomentumFamily`) in each of the lowest levels of ``H``, or at the temperatures ``T``:
+    :func:`measure` with one :class:`Expect` request.
 
-    The value is averaged over the level's symmetry multiplet -- the quantity that does not depend
-    on which partner the solver returned; for a non-degenerate level it is just <psi|O|psi>. With a
-    total-spin restriction and an SU(2)-symmetric H the multiplet includes its 2S + 1 Sz members, so
-    an operator that is not SU(2) invariant contributes its SU(2)-scalar part (its average over all
-    spin rotations); in a uniform field each member is a level of its own.
+    The value in a level is averaged over the level's symmetry multiplet -- the quantity that does
+    not depend on which partner the solver returned; for a non-degenerate level it is just
+    <psi|O|psi>. With a total-spin restriction and an SU(2)-symmetric H the multiplet includes its
+    2S + 1 Sz members, so an operator that is not SU(2) invariant contributes its SU(2)-scalar part
+    (its average over all spin rotations); in a uniform field each member is a level of its own.
     """
-    return measure(H, [Expect(ops)], k, states=states, degeneracy_tol=degeneracy_tol, sym=sym, device=device,
-                   **eigs_kwargs)[0]
+    return measure(H, [Expect(ops)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym, device=device,
+                   **options)[0]
 
 
-def correlations(H, A, B=None, k: int = 1, *, states: str = "levels", degeneracy_tol: float = 1e-8, sym=None,
-                 device: str = "cpu", **eigs_kwargs) -> CorrelationResult:
-    """<A_a^dag B_b> for every pair (``B=None``: B = A) in each of the lowest levels of ``H``:
-    :func:`measure` with one :class:`Correlations` request. ``A`` and ``B``: an Operator, a sequence, a
-    :class:`qed.Family` (e.g. ``qed.Family.spins(lattice)``) or a :class:`qed.MomentumFamily`; the
-    result's :meth:`CorrelationResult.fourier` gives the structure factor."""
-    return measure(H, [Correlations(A, B)], k, states=states, degeneracy_tol=degeneracy_tol, sym=sym,
-                   device=device, **eigs_kwargs)[0]
+def correlations(H, A, B=None, k: int = 1, *, T=None, states: str = "levels", degeneracy_tol: float = 1e-8,
+                 sym=None, device: str = "cpu", **options) -> CorrelationResult:
+    """<A_a^dag B_b> for every pair (``B=None``: B = A) in each of the lowest levels of ``H``, or at
+    the temperatures ``T``: :func:`measure` with one :class:`Correlations` request. ``A`` and ``B``: an
+    Operator, a sequence, a :class:`qed.Family` (e.g. ``qed.Family.spins(lattice)``) or a
+    :class:`qed.MomentumFamily`; the result's :meth:`CorrelationResult.fourier` gives the structure
+    factor."""
+    return measure(H, [Correlations(A, B)], k, T=T, states=states, degeneracy_tol=degeneracy_tol, sym=sym,
+                   device=device, **options)[0]
 
 
 @_log.replays

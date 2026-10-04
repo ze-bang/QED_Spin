@@ -567,11 +567,10 @@ using Keep = ed::ops::SzKeep;
 
 /// O averaged over the symmetry group of a Spec (and the spin flip), without the terms whose
 /// S^z change `keep` excludes, mapped by the antiunitary `image` (K or Theta: A O A^-1, for a
-/// partner A|v>, <A v|O|A v> = conj <v|A^-1 O A|v>); built once per
-/// (operator, flip, keep, image), as canonical terms (average) or as the row program a sector
-/// matvec walks (program). An operator averaged over the symmetries a block uses is block
-/// diagonal and has the same trace against any function of H over an ensemble those
-/// symmetries preserve.
+/// partner A|v>, <A v|O|A v> = conj <v|A^-1 O A|v>), as canonical terms (average_of;
+/// average_operators() forms and deduplicates many). An operator averaged over the symmetries a
+/// block uses is block diagonal and has the same trace against any function of H over an ensemble
+/// those symmetries preserve.
 class Averager {
 public:
     // Where a level stands for a whole multiplet (`multiplets`: total spin with an SU(2)-symmetric
@@ -594,42 +593,61 @@ public:
         if (image != Antiunitary::None) a = a.image(image == Antiunitary::Theta ? Map::Theta : Map::K);
         return a;
     }
-    const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep,
-                                           Antiunitary image = Antiunitary::None) {
-        auto& slot = averages_[{&O, flip, static_cast<int>(keep), static_cast<int>(image)}];
-        if (!slot) slot = std::make_shared<const ed::ops::MaskedOperator>(average_of(O.canonical(), flip, keep, image));
-        return *slot;
-    }
-    std::shared_ptr<const ed::ops::MaskedProgram> program(const ::Operator& O, bool flip, Keep keep,
-                                                          Antiunitary image = Antiunitary::None) {
-        auto& slot = programs_[{&O, flip, static_cast<int>(keep), static_cast<int>(image)}];
-        if (!slot)
-            slot = std::make_shared<const ed::ops::MaskedProgram>(
-                ed::ops::compile_operator(average(O, flip, keep, image).dagger()));
-        return slot;
-    }
 
 private:
-    using Key = std::tuple<const ::Operator*, bool, int, int>;
     bool su2_ = false;
     std::vector<Perm> G_;
-    std::map<Key, std::shared_ptr<const ed::ops::MaskedOperator>> averages_;
-    std::map<Key, std::shared_ptr<const ed::ops::MaskedProgram>> programs_;
 };
 
-/// A block-diagonal (averaged) operator, given by its row program, restricted to block `bi` of
-/// star `sb`, in the basis the block's H acts on; with `device` it may bind to a CUDA backend. Its
-/// reduced CSR takes from the block's `budget` after H's.
-inline std::shared_ptr<const ed::LinearOperator>
-block_observable(const std::shared_ptr<const ed::ops::MaskedProgram>& A, const ed::solvers::lg_detail::StarBuild& sb,
-                 const std::shared_ptr<ed::solvers::BlockData>& bi, bool device,
-                 const std::shared_ptr<ed::planner::CsrBudget>& budget = nullptr) {
-    using namespace ed::solvers::lg_detail;
-    auto rep = std::make_shared<RepSectorMatVec>(A, bi->gop ? bi->gsec : sb.hk->rep_data_ptr());
-    rep->set_csr_budget(budget);
-    if (device) rep->enable_device(true);
-    return rep;
-}
+/// Operators averaged for one (flip, keep, antiunitary image) and deduplicated: each input is
+/// factor * unique[index] (index kNone: its average vanished). Operators in one symmetry orbit
+/// average to the same operator, so the pairs of a family collapse to about one per orbit. With an
+/// image, slot[n_x + x] describes the image of input x.
+struct AveragedOperators {
+    static constexpr std::size_t kNone = ~std::size_t{0};
+    std::size_t n_x = 0;
+    bool images = false;
+    std::vector<std::pair<std::size_t, Complex>> slot;
+    std::vector<ed::ops::MaskedOperator> unique;
+};
+[[nodiscard]] std::shared_ptr<const AveragedOperators> average_operators(const Averager& avg,
+                                                                         const std::vector<ed::ops::MaskedOperator>& xs,
+                                                                         bool flip, Keep keep, Antiunitary image);
+
+/// AveragedOperators compiled for one sector basis (one program for every unique operator; a sector
+/// of an irrep of dimension > 1 applies each as H is applied there), read in any vectors of it.
+class SectorObservables {
+public:
+    SectorObservables(std::shared_ptr<const AveragedOperators> ops,
+                      std::shared_ptr<const ed::symmetry::RepSectorData> basis);
+    struct Values {
+        std::vector<std::vector<Complex>> direct, image;   // [vector][operator]; image empty without one
+    };
+    /// <v|Xbar|v> for every vector of the basis (and <v|Xbar^A|v> when the operators carry an image).
+    [[nodiscard]] Values values(const std::vector<const Complex*>& vecs) const;
+    /// <vecs[bra]|Xbar|vecs[ket]> for every (bra, ket) pair, likewise ([pair][operator]).
+    [[nodiscard]] Values values(const std::vector<const Complex*>& vecs,
+                                const std::vector<std::pair<int, int>>& pairs) const;
+    /// direct, or (direct + conj(image)) / 2 when the operators carry an image (a folded block):
+    /// <A u|O|A w> = conj <u|A^-1 O A|w> for the antiunitary partner A.
+    [[nodiscard]] std::vector<std::vector<Complex>> folded(const std::vector<const Complex*>& vecs) const;
+    [[nodiscard]] std::vector<std::vector<Complex>> folded(const std::vector<const Complex*>& vecs,
+                                                           const std::vector<std::pair<int, int>>& pairs) const;
+    [[nodiscard]] std::size_t n_operators() const noexcept { return ops_->n_x; }
+
+private:
+    std::shared_ptr<const AveragedOperators> ops_;
+    std::shared_ptr<const ed::symmetry::RepSectorData> basis_;
+    std::shared_ptr<const ed::ops::MaskedProgram> prog_;                              // d = 1
+    std::vector<std::unique_ptr<ed::solvers::lg_detail::RepSectorMatVec>> mv_;    // d > 1
+    mutable std::mutex mv_mutex_;   // the d > 1 applies share scratch
+};
+
+/// The operators of a measurement: the canonical singles, then A_a^dag B_b (B_b acts first) for each
+/// pair request, a-major -- the products exact in the spin-1/2 algebra.
+[[nodiscard]] std::vector<ed::ops::MaskedOperator> requested_operators(const std::vector<const ::Operator*>& singles,
+                                                                       const std::vector<PairRequest>& pairs,
+                                                                       int n_sites);
 
 /// The co-group character table of block `irrep` of a star, as (elements, characters): a group
 /// sector's row; for the plain block of a trivial co-group the trivial irrep (the identity, character

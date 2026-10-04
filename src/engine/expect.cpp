@@ -26,16 +26,14 @@ namespace {
 
 using ed::ops::MaskedOperator;
 
-// Deduplicated averaged operators: each distinct one once, each input as (index, factor) with
-// input = factor * unique[index] (kNone: the average vanished). Operators in one orbit of the
-// group average to the same operator, so a family's pairs collapse to one per orbit here.
+// The deduplication of AveragedOperators: a key from the terms that matter, then a proportionality
+// check against the operators already kept under that key.
 struct Unique {
-    static constexpr std::size_t kNone = ~std::size_t{0};
-    std::vector<MaskedOperator> ops;
+    std::vector<MaskedOperator>& ops;
     std::map<std::vector<std::uint64_t>, std::vector<std::size_t>> by_shape;   // term keys -> candidates
 
     std::pair<std::size_t, Complex> add(MaskedOperator a) {
-        if (a.empty()) return {kNone, Complex(0.0, 0.0)};
+        if (a.empty()) return {detail::AveragedOperators::kNone, Complex(0.0, 0.0)};
         // The shape ignores roundoff-level terms (a cancellation left at 1e-17 in one member of
         // an orbit and exactly 0 in another), and the factor comes from the largest term.
         const auto terms = a.terms(ed::numerics::kAveragedTermRel * a.max_abs());
@@ -60,16 +58,162 @@ struct Unique {
     }
 };
 
+// f(i) for every i < n on the thread team; the first exception is rethrown after the loop (an
+// exception must not leave an OpenMP region).
+template <class F>
+void parallel_for(std::size_t n, F&& f) {
+    std::exception_ptr failure;
+#pragma omp parallel for schedule(dynamic, 16)
+    for (std::ptrdiff_t x = 0; x < static_cast<std::ptrdiff_t>(n); ++x) {
+        try {
+            f(static_cast<std::size_t>(x));
+        } catch (...) {
+#pragma omp critical(qed_expect_failure)
+            if (!failure) failure = std::current_exception();
+        }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
 }  // namespace
+
+namespace detail {
+
+std::shared_ptr<const AveragedOperators> average_operators(const Averager& avg, const std::vector<MaskedOperator>& xs,
+                                                           bool flip, Keep keep, Antiunitary image) {
+    auto out = std::make_shared<AveragedOperators>();
+    out->n_x = xs.size();
+    out->images = image != Antiunitary::None;
+    if (xs.empty()) return out;
+    const std::size_t n = out->images ? 2 * xs.size() : xs.size();
+    std::vector<MaskedOperator> averaged(n, MaskedOperator(xs.front().n_sites()));
+    parallel_for(n, [&](std::size_t i) {
+        averaged[i] = avg.average_of(xs[i % out->n_x], flip, keep, i < out->n_x ? Antiunitary::None : image);
+    });
+    Unique uniq{out->unique, {}};
+    out->slot.reserve(n);
+    for (auto& a : averaged) out->slot.push_back(uniq.add(std::move(a)));
+    ED_LOG(Info, "[measure] %zu operator(s), %zu after averaging (flip %d, keep %d, image %d)", n, out->unique.size(),
+           static_cast<int>(flip), static_cast<int>(keep), static_cast<int>(image));
+    return out;
+}
+
+SectorObservables::SectorObservables(std::shared_ptr<const AveragedOperators> ops,
+                                     std::shared_ptr<const ed::symmetry::RepSectorData> basis)
+    : ops_(std::move(ops)), basis_(std::move(basis)) {
+    if (ops_->unique.empty()) return;
+    if (basis_->irrep_dim > 1) {
+        // A sector of an irrep of dimension > 1: each averaged operator acts within it as H does
+        // (rep_sector.h), so <v|Xbar|v> comes from one apply per vector and unique operator.
+        mv_.reserve(ops_->unique.size());
+        for (const auto& u : ops_->unique)
+            mv_.push_back(std::make_unique<RepSectorMatVec>(
+                std::make_shared<const ed::ops::MaskedProgram>(ed::ops::compile_operator(u.dagger())), basis_));
+    } else {
+        ed::ops::CompileOptions copt;
+        copt.project = false;   // already invariant under the sector's group
+        prog_ = std::make_shared<const ed::ops::MaskedProgram>(
+            ed::ops::compile_program(ops_->unique, *basis_, *basis_, copt));
+    }
+}
+
+SectorObservables::Values SectorObservables::values(const std::vector<const Complex*>& vecs) const {
+    std::vector<std::pair<int, int>> diag;
+    diag.reserve(vecs.size());
+    for (std::size_t i = 0; i < vecs.size(); ++i) diag.emplace_back(static_cast<int>(i), static_cast<int>(i));
+    return values(vecs, diag);
+}
+
+SectorObservables::Values SectorObservables::values(const std::vector<const Complex*>& vecs,
+                                                    const std::vector<std::pair<int, int>>& pairs) const {
+    const std::size_t np = pairs.size(), width = ops_->unique.size(), nx = ops_->n_x;
+    const std::size_t n = basis_->states();
+    // vals[pair][u] = <bra| unique[u] |ket>: one sweep for every operator and pair.
+    std::vector<std::vector<Complex>> vals(np, std::vector<Complex>(width, Complex(0.0, 0.0)));
+    if (width > 0 && np > 0) {
+        if (!mv_.empty()) {
+            const std::lock_guard<std::mutex> lock(mv_mutex_);
+            std::vector<Complex> w(n);
+            for (std::size_t u = 0; u < width; ++u)
+                for (std::size_t p = 0; p < np; ++p) {
+                    const Complex* bra = vecs.at(static_cast<std::size_t>(pairs[p].first));
+                    mv_[u]->apply(vecs.at(static_cast<std::size_t>(pairs[p].second)), w.data(), n);
+                    Complex acc(0.0, 0.0);
+                    for (std::size_t k = 0; k < n; ++k) acc += std::conj(bra[k]) * w[k];
+                    vals[p][u] = acc;
+                }
+        } else {
+            std::vector<ed::ops::RepVectorView> views;
+            views.reserve(vecs.size());
+            for (const Complex* v : vecs) views.push_back({v, n});
+            const auto me = ed::ops::rep_matrix_elements(*basis_, *basis_, *prog_, views, views, pairs);
+            for (std::size_t p = 0; p < np; ++p)
+                for (std::size_t u = 0; u < width; ++u) vals[p][u] = me[p * width + u];
+        }
+    }
+    auto value = [&](std::size_t p, std::size_t sl) {
+        const auto& [u, f] = ops_->slot[sl];
+        return u == AveragedOperators::kNone ? Complex(0.0, 0.0) : f * vals[p][u];
+    };
+    Values out;
+    out.direct.assign(np, std::vector<Complex>(nx));
+    if (ops_->images) out.image.assign(np, std::vector<Complex>(nx));
+    for (std::size_t p = 0; p < np; ++p)
+        for (std::size_t x = 0; x < nx; ++x) {
+            out.direct[p][x] = value(p, x);
+            if (ops_->images) out.image[p][x] = value(p, nx + x);
+        }
+    return out;
+}
+
+std::vector<std::vector<Complex>> SectorObservables::folded(const std::vector<const Complex*>& vecs) const {
+    std::vector<std::pair<int, int>> diag;
+    diag.reserve(vecs.size());
+    for (std::size_t i = 0; i < vecs.size(); ++i) diag.emplace_back(static_cast<int>(i), static_cast<int>(i));
+    return folded(vecs, diag);
+}
+
+std::vector<std::vector<Complex>> SectorObservables::folded(const std::vector<const Complex*>& vecs,
+                                                            const std::vector<std::pair<int, int>>& pairs) const {
+    Values v = values(vecs, pairs);
+    if (ops_->images)
+        for (std::size_t p = 0; p < v.direct.size(); ++p)
+            for (std::size_t x = 0; x < v.direct[p].size(); ++x)
+                v.direct[p][x] = 0.5 * (v.direct[p][x] + std::conj(v.image[p][x]));
+    return std::move(v.direct);
+}
+
+std::vector<MaskedOperator> requested_operators(const std::vector<const ::Operator*>& singles,
+                                                const std::vector<PairRequest>& pairs, int n_sites) {
+    std::size_t total = singles.size();
+    for (const auto& p : pairs) total += p.A.size() * p.B.size();
+    std::vector<MaskedOperator> xs(total, MaskedOperator(n_sites));
+    for (std::size_t i = 0; i < singles.size(); ++i) xs[i] = singles[i]->canonical();
+    std::size_t at = singles.size();
+    for (const auto& p : pairs) {
+        std::vector<MaskedOperator> Ad;
+        Ad.reserve(p.A.size());
+        for (const ::Operator* a : p.A) Ad.push_back(a->canonical().dagger());
+        std::vector<MaskedOperator> Bc;
+        Bc.reserve(p.B.size());
+        for (const ::Operator* b : p.B) Bc.push_back(b->canonical());
+        const std::size_t nb = Bc.size();
+        parallel_for(Ad.size() * nb, [&](std::size_t i) { xs[at + i] = Ad[i / nb] * Bc[i % nb]; });
+        at += Ad.size() * nb;
+    }
+    return xs;
+}
+
+}  // namespace detail
 
 std::vector<std::vector<Complex>> averaged_values(const EigsResult& r, const Spec& s,
                                                   const std::vector<MaskedOperator>& xs) {
     // Every level's vector lives in its own sector basis; the operators averaged over the
     // symmetry group (and the flip where the level folds or projects by it) are invariant, so
-    // <v|Xbar|v> is one rep_matrix_elements sweep per (basis, flip, keep) over all of them --
-    // and their antiunitary images, for a folded level: <K v|A|K v> = conj(<v|A^K|v>) -- and all
-    // the levels sharing them. The averages are deduplicated first: the members of one orbit
-    // cost one operator.
+    // <v|Xbar|v> is one sweep per (basis, flip, keep) over all of them -- and their antiunitary
+    // images, for a folded level: <K v|A|K v> = conj(<v|A^K|v>) -- and all the levels sharing them.
+    // The averages are formed once per (flip, keep, image) and deduplicated: the members of one
+    // orbit cost one operator.
     const int n_sites = r.n_sites;
     const detail::Averager avg(s, n_sites, s.two_S >= 0 && !r.levels.empty() && detail::members(r.levels.front()) > 1);
     const std::size_t n_x = xs.size();
@@ -92,79 +236,22 @@ std::vector<std::vector<Complex>> averaged_values(const EigsResult& r, const Spe
         g.levels.push_back(li);
         if (L.fold != Antiunitary::None) g.image = L.fold;
     }
-    for (const auto& entry : groups) {
-        const auto& key = entry.first;
-        const Group& g = entry.second;   // a plain reference: it is used inside OpenMP regions
-        const auto& basis_ptr = r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis;
-        const auto& basis = *basis_ptr;
+    std::map<std::tuple<bool, int, int>, std::shared_ptr<const detail::AveragedOperators>> averaged;
+    for (const auto& [key, g] : groups) {
         const bool flip = std::get<1>(key);
         const auto keep = static_cast<Keep>(std::get<2>(key));
-        const bool images = g.image != Antiunitary::None;
-        // Average every operator (and its antiunitary image) in parallel, then deduplicate in order.
-        std::vector<MaskedOperator> averaged(images ? 2 * n_x : n_x, MaskedOperator(n_sites));
-        std::exception_ptr failure;
-#pragma omp parallel for schedule(dynamic, 16)
-        for (std::ptrdiff_t x = 0; x < static_cast<std::ptrdiff_t>(averaged.size()); ++x) {
-            const auto i = static_cast<std::size_t>(x);
-            try {
-                averaged[i] = avg.average_of(xs[i % n_x], flip, keep, i < n_x ? Antiunitary::None : g.image);
-            } catch (...) {
-#pragma omp critical(qed_expect_failure)
-                if (!failure) failure = std::current_exception();
-            }
-        }
-        if (failure) std::rethrow_exception(failure);
-        Unique uniq;
-        std::vector<std::pair<std::size_t, Complex>> slot;
-        slot.reserve(averaged.size());
-        for (auto& a : averaged) slot.push_back(uniq.add(std::move(a)));
-        const std::size_t width = uniq.ops.size();
-        ED_LOG(Info, "[expect] %zu level(s) in a sector of dim %zu: %zu operator(s), %zu after averaging",
-               g.levels.size(), basis.states(), averaged.size(), width);
-        // vals[level i of the group][u] = <v_i| unique[u] |v_i>
-        std::vector<std::vector<Complex>> vals(g.levels.size(), std::vector<Complex>(width, Complex(0.0, 0.0)));
-        if (width > 0 && basis.irrep_dim > 1) {
-            // A sector of an irrep of dimension > 1: each averaged operator acts within it as H does
-            // (rep_sector.h), so <v|Xbar|v> comes from one apply per level and unique operator.
-            const std::size_t n = basis.states();
-            std::vector<Complex> w(n);
-            for (std::size_t u = 0; u < width; ++u) {
-                const RepSectorMatVec op(std::make_shared<const ed::ops::MaskedProgram>(
-                                             ed::ops::compile_operator(uniq.ops[u].dagger())),
-                                         basis_ptr);
-                for (std::size_t i = 0; i < g.levels.size(); ++i) {
-                    const auto& v = r.vectors[static_cast<std::size_t>(r.levels[g.levels[i]].vector)].amplitudes;
-                    op.apply(v.data(), w.data(), n);
-                    Complex acc(0.0, 0.0);
-                    for (std::size_t k = 0; k < n; ++k) acc += std::conj(v[k]) * w[k];
-                    vals[i][u] = acc;
-                }
-            }
-        } else if (width > 0) {
-            ed::ops::CompileOptions copt;
-            copt.project = false;   // already invariant under the sector's group
-            const auto prog = ed::ops::compile_program(uniq.ops, basis, basis, copt);
-            std::vector<ed::ops::RepVectorView> vecs;
-            std::vector<std::pair<int, int>> pairs;
-            for (std::size_t i = 0; i < g.levels.size(); ++i) {
-                const auto& amp = r.vectors[static_cast<std::size_t>(r.levels[g.levels[i]].vector)].amplitudes;
-                vecs.push_back({amp.data(), amp.size()});
-                pairs.emplace_back(static_cast<int>(i), static_cast<int>(i));
-            }
-            const auto me = ed::ops::rep_matrix_elements(basis, basis, prog, vecs, vecs, pairs);
-            for (std::size_t i = 0; i < g.levels.size(); ++i)
-                for (std::size_t u = 0; u < width; ++u) vals[i][u] = me[i * width + u];
-        }
-        auto value = [&](std::size_t i, std::size_t sl) {
-            const auto& [u, f] = slot[sl];
-            return u == Unique::kNone ? Complex(0.0, 0.0) : f * vals[i][u];
-        };
+        auto& ops = averaged[{flip, static_cast<int>(keep), static_cast<int>(g.image)}];
+        if (!ops) ops = detail::average_operators(avg, xs, flip, keep, g.image);
+        const detail::SectorObservables so(
+            ops, r.vectors[static_cast<std::size_t>(r.levels[g.levels.front()].vector)].basis);
+        std::vector<const Complex*> vecs;
+        for (const std::size_t li : g.levels)
+            vecs.push_back(r.vectors[static_cast<std::size_t>(r.levels[li].vector)].amplitudes.data());
+        const auto v = so.values(vecs);
         for (std::size_t i = 0; i < g.levels.size(); ++i) {
-            const Level& L = r.levels[g.levels[i]];
-            for (std::size_t x = 0; x < n_x; ++x) {
-                const Complex a = value(i, x);
-                out[g.levels[i]][x] = L.fold != Antiunitary::None ? 0.5 * (a + std::conj(value(i, n_x + x))) : a;
-            }
+            const bool fold = r.levels[g.levels[i]].fold != Antiunitary::None;
+            for (std::size_t x = 0; x < n_x; ++x)
+                out[g.levels[i]][x] = fold ? 0.5 * (v.direct[i][x] + std::conj(v.image[i][x])) : v.direct[i][x];
         }
     }
     return out;
@@ -175,10 +262,7 @@ std::vector<std::vector<Complex>> expect(const EigsResult& r, const Spec& s,
     detail::validate_environment("expect");
     for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], r.n_sites, "expect", i);
     ed::parallel::pin_omp_threads_once();   // ED_NUMA_PIN_THREADS, as every verb
-    std::vector<MaskedOperator> xs;
-    xs.reserve(ops.size());
-    for (const ::Operator* O : ops) xs.push_back(O->canonical());
-    return averaged_values(r, s, xs);
+    return averaged_values(r, s, detail::requested_operators(ops, {}, r.n_sites));
 }
 
 std::vector<std::vector<Complex>> evaluate(const EigsResult& r, const Spec& s,
@@ -192,36 +276,7 @@ std::vector<std::vector<Complex>> evaluate(const EigsResult& r, const Spec& s,
         for (const ::Operator* O : p.B) detail::validate_observable(O, r.n_sites, "evaluate", index++);
     }
     ed::parallel::pin_omp_threads_once();
-    std::size_t total = singles.size();
-    for (const auto& p : pair_requests) total += p.A.size() * p.B.size();
-    std::vector<MaskedOperator> xs(total, MaskedOperator(r.n_sites));
-    for (std::size_t i = 0; i < singles.size(); ++i) xs[i] = singles[i]->canonical();
-    // The products A_a^dag B_b (B_b acts first), exact in the spin-1/2 algebra.
-    std::size_t at = singles.size();
-    for (const auto& p : pair_requests) {
-        std::vector<MaskedOperator> Ad;
-        Ad.reserve(p.A.size());
-        for (const ::Operator* a : p.A) Ad.push_back(a->canonical().dagger());
-        std::vector<MaskedOperator> Bc;
-        Bc.reserve(p.B.size());
-        for (const ::Operator* b : p.B) Bc.push_back(b->canonical());
-        const std::size_t nb = Bc.size();
-        const auto n_pairs = static_cast<std::ptrdiff_t>(Ad.size() * nb);
-        std::exception_ptr failure;
-#pragma omp parallel for schedule(dynamic, 16)
-        for (std::ptrdiff_t x = 0; x < n_pairs; ++x) {
-            const auto i = static_cast<std::size_t>(x);
-            try {
-                xs[at + i] = Ad[i / nb] * Bc[i % nb];
-            } catch (...) {
-#pragma omp critical(qed_expect_failure)
-                if (!failure) failure = std::current_exception();
-            }
-        }
-        if (failure) std::rethrow_exception(failure);
-        at += Ad.size() * nb;
-    }
-    return averaged_values(r, s, xs);
+    return averaged_values(r, s, detail::requested_operators(singles, pair_requests, r.n_sites));
 }
 
 Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {

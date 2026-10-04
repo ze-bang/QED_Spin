@@ -35,18 +35,21 @@ struct ThermalSpec {
     std::uint64_t dense_max_dim = 512;  ///< FTLM / mTPQ diagonalise blocks up to this dimension; 0: always sample
     std::uint64_t seed = 0;     ///< 0 = draw one
     Device device = Device::Cpu;
-    /// Static observables <O>(T) (method Exact or FTLM, with exact_states = 0). Each O is
+    /// Static observables <O>(T) (every method). Each O is
     /// averaged over the symmetries every block uses, so it may break them. Under a spin
     /// restriction with an SU(2)-symmetric H an O that is not SU(2) invariant enters through its
     /// SU(2)-scalar part (a term on more than 5 sites then raises ed::Unsupported); in a uniform
     /// field O enters as it is. Exact runs diagonalise these blocks on the host.
     std::vector<const ::Operator*> observables;
+    /// Equal-time pairs <A_a^dag B_b>(T) for each request, a-major, after the observables in
+    /// ThermalCurves::O; the products are formed exactly and measured as observables are.
+    std::vector<PairRequest> observable_pairs;
 };
 
 struct ThermalCurves {
     std::vector<double> T, lnZ, E, C, S, F;
     std::vector<double> M, chi;          ///< empty unless H conserves Sz
-    std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables
+    std::vector<std::vector<Complex>> O; ///< <O>(T) per ThermalSpec::observables, then per observable_pairs pair
     /// The lowest energy resolved: exact, the ground state; FTLM, the lowest weighted Ritz value of
     /// any sample (an upper bound on E0, usually close); OFTLM, the lowest certified eigenvalue;
     /// mTPQ, the spectral-bounds Lanczos estimate (an upper bound).

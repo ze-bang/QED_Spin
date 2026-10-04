@@ -80,6 +80,12 @@ using Antiunitary = ed::solvers::Antiunitary;
 using Complex = std::complex<double>;
 using Perm = std::vector<int>;
 
+/// Two operator lists whose pair values <A_a^dag B_b> a measurement returns (B_b acts first).
+struct PairRequest {
+    std::vector<const ::Operator*> A;
+    std::vector<const ::Operator*> B;
+};
+
 /// Where the blocks run (ed::Device, include/ed/core/device.h). place() (select_backend.h)
 /// decides each block: Cpu never touches CUDA; Gpu runs every Krylov solve and every dense batch
 /// on the device or raises (DeviceUnsupported for a block without a device kernel, ResourceLimit

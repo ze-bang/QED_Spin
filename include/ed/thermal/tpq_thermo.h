@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -132,6 +133,79 @@ inline MtpqThermo mtpq_canonical_thermo(const std::vector<std::vector<double>>& 
         c.lnZ[t] = lnD - beta * L + lnS[0];
         c.E[t] = L - a;
         c.V[t] = var;
+    }
+    return out;
+}
+
+/**
+ * Canonical <O>(beta) from mTPQ trajectories and the observables' values along them (Sugiura and
+ * Shimizu): <beta|O|beta> = sum_j beta^j nu_j / j! with nu_{2k} = Q_k m_k and nu_{2k+1} = Q_k n_{k+1} c_k,
+ * where m_k = <psi_k|O|psi_k> and c_k = (<psi_k|O|psi_k+1> + <psi_k+1|O|psi_k>) / 2: the j-th power of
+ * (L - H) split as evenly as it goes on both sides of O, exact for an O that commutes with H (the
+ * standard approximation otherwise, accurate where the series is sharply peaked: large systems).
+ * Normalised by the same series of O = 1 (nu_j = mu_j), both truncated at j = 2K and averaged over
+ * the samples first. Each term is weighted relative to mu_j (the H moments), so signed values never
+ * enter a logarithm: o_{2k} = m_k, o_{2k+1} = n_{k+1} c_k / (L - E_k).
+ *
+ * @return out[o][t] for every observable and beta
+ */
+inline std::vector<std::vector<std::complex<double>>> mtpq_canonical_observables(
+    const std::vector<std::vector<double>>& sample_energies, const std::vector<std::vector<double>>& sample_log_norms,
+    const std::vector<std::vector<std::vector<std::complex<double>>>>& diag,
+    const std::vector<std::vector<std::vector<std::complex<double>>>>& cross, std::size_t n_obs, double L,
+    const std::vector<double>& betas) {
+    using C = std::complex<double>;
+    const std::size_t nT = betas.size(), R = sample_energies.size();
+    std::vector<std::vector<C>> out(n_obs, std::vector<C>(nT, C(0.0, 0.0)));
+    if (n_obs == 0 || R == 0) return out;
+    // Per sample: ln mu_j (j = 0..2K) and the ratio o_j[o].
+    std::vector<std::vector<double>> ln_mu(R);
+    std::vector<std::vector<const std::vector<C>*>> num(R);
+    std::vector<std::vector<double>> odd_factor(R);   // n_{k+1} / (L - E_k), for o_{2k+1}
+    std::size_t j_max = 0;
+    for (std::size_t r = 0; r < R; ++r) {
+        const auto& E = sample_energies[r];
+        const auto& n = sample_log_norms[r];
+        const std::size_t K = n.size();
+        if (diag.at(r).size() != K + 1 || cross.at(r).size() != K)
+            throw std::invalid_argument("mtpq_canonical_observables: a sample's observable values do not match "
+                                        "its steps");
+        auto& m = ln_mu[r];
+        m.resize(2 * K + 1);
+        num[r].resize(2 * K + 1);
+        odd_factor[r].assign(2 * K + 1, 1.0);
+        double lnQ = 0.0;
+        for (std::size_t k = 0; k <= K; ++k) {
+            if (k > 0) lnQ += 2.0 * n[k - 1];
+            m[2 * k] = lnQ;
+            num[r][2 * k] = &diag[r][k];
+            if (k < K) {
+                m[2 * k + 1] = lnQ + std::log(L - E[k]);
+                num[r][2 * k + 1] = &cross[r][k];
+                odd_factor[r][2 * k + 1] = std::exp(n[k]) / (L - E[k]);
+            }
+        }
+        j_max = std::max(j_max, m.size());
+    }
+    std::vector<double> ln_fact(j_max + 1, 0.0);
+    for (std::size_t j = 1; j <= j_max; ++j) ln_fact[j] = ln_fact[j - 1] + std::log(static_cast<double>(j));
+    for (std::size_t t = 0; t < nT; ++t) {
+        const double ln_beta = std::log(betas[t]);
+        double w_max = -std::numeric_limits<double>::infinity();
+        for (std::size_t r = 0; r < R; ++r)
+            for (std::size_t j = 0; j < ln_mu[r].size(); ++j)
+                w_max = std::max(w_max, static_cast<double>(j) * ln_beta + ln_mu[r][j] - ln_fact[j]);
+        double den = 0.0;
+        std::vector<C> acc(n_obs, C(0.0, 0.0));
+        for (std::size_t r = 0; r < R; ++r)
+            for (std::size_t j = 0; j < ln_mu[r].size(); ++j) {
+                const double w = std::exp(static_cast<double>(j) * ln_beta + ln_mu[r][j] - ln_fact[j] - w_max);
+                den += w;
+                const double f = w * odd_factor[r][j];
+                const auto& v = *num[r][j];
+                for (std::size_t o = 0; o < n_obs; ++o) acc[o] += f * v.at(o);
+            }
+        for (std::size_t o = 0; o < n_obs; ++o) out[o][t] = acc[o] / den;
     }
     return out;
 }

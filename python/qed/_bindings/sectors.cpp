@@ -565,7 +565,20 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("dense_max_dim", &sec::ThermalSpec::dense_max_dim)
         .def_readwrite("seed", &sec::ThermalSpec::seed)
         .def_readwrite("device", &sec::ThermalSpec::device)
-        .def_readwrite("observables", &sec::ThermalSpec::observables);
+        .def_readwrite("observables", &sec::ThermalSpec::observables)
+        .def_property(
+            "observable_pairs",
+            [](const sec::ThermalSpec& t) {
+                py::list out;
+                for (const auto& p : t.observable_pairs) out.append(py::make_tuple(p.A, p.B));
+                return out;
+            },
+            [](sec::ThermalSpec& t,
+               const std::vector<std::pair<std::vector<const ::Operator*>, std::vector<const ::Operator*>>>& pairs) {
+                t.observable_pairs.clear();
+                for (const auto& [A, B] : pairs) t.observable_pairs.push_back({A, B});
+            },
+            "Equal-time pair requests [(A, B), ...]: <A_a^dag B_b>(T) after the observables in O, a-major.");
 
     py::class_<sec::ThermalCurves>(s, "ThermalCurves")
         .def_readonly("T", &sec::ThermalCurves::T)

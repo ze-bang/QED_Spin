@@ -60,6 +60,15 @@ struct MtpqOptions {
     /// share each H apply (see FtlmOptions::batch_matvec).
     ed::LinearOperator::MultiMatvecFn batch_matvec;
     std::size_t batch_width = 8;
+
+    /// Static observables (`n_observables` > 0): at step k the kernel hands psi_k and psi_{k+1} (host
+    /// copies) to `observe`, which returns out[p][o] = <vecs[bra]|O_o|vecs[ket]> for the (bra, ket)
+    /// pairs it is given: (0, 0), (0, 1), (1, 0); after the last step psi_K alone with (0, 0). It may be
+    /// called from several threads at once (batched samples).
+    std::size_t n_observables = 0;
+    std::function<std::vector<std::vector<Complex>>(const std::vector<const Complex*>&,
+                                                    const std::vector<std::pair<int, int>>&)>
+        observe;
 };
 
 struct MtpqResult {
@@ -72,6 +81,9 @@ struct MtpqResult {
     /// (j <= 2K + 1) the canonical estimator of tpq_thermo.h sums.
     std::vector<std::vector<double>> sample_energies;
     std::vector<std::vector<double>> sample_log_norms;
+    /// With observables, per sample: sample_diag[s][k][o] = <psi_k|O_o|psi_k> (k = 0..K) and
+    /// sample_cross[s][k][o] = (<psi_k|O_o|psi_k+1> + <psi_k+1|O_o|psi_k>) / 2 (k = 0..K-1).
+    std::vector<std::vector<std::vector<Complex>>> sample_diag, sample_cross;
 };
 
 template <typename Backend, typename MatvecFn>
@@ -88,7 +100,10 @@ MtpqResult mtpq_kernel(Backend& backend, MatvecFn&& apply_H, std::size_t local_n
     // they were run.
     struct Sample {
         std::vector<double> Es, log_norms;
+        std::vector<std::vector<Complex>> diag, cross;
     };
+    const std::size_t n_obs = opts.n_observables;
+    if (n_obs > 0 && !opts.observe) throw std::invalid_argument("mtpq_kernel: n_observables > 0 without observe");
     auto sample = [&](auto& be, auto&& apply_H, std::size_t s) {
         std::mt19937 gen = sample_engine(base_seed, s);
         std::vector<Complex> host_seed = gaussian_vector(local_n, gen);
@@ -129,6 +144,22 @@ MtpqResult mtpq_kernel(Backend& backend, MatvecFn&& apply_H, std::size_t local_n
             out_s.Es.push_back(E);
         };
         energy(0);
+        // Observables at every step: psi_{k-1} (in hpsi after the swap) and psi_k, on the host.
+        constexpr bool on_host = ed::matvec::is_cpu_backend_v<std::decay_t<decltype(be)>>;
+        std::vector<Complex> h0, h1;   // host copies of device vectors
+        if (n_obs > 0 && !on_host) {
+            h0.resize(local_n);
+            h1.resize(local_n);
+        }
+        auto host_view = [&](const Complex* v, std::vector<Complex>& h) -> const Complex* {
+            if constexpr (on_host) {
+                (void)h;
+                return v;
+            } else {
+                be.copy_to_host(v, h.data(), local_n);
+                return h.data();
+            }
+        };
         std::size_t interval = opts.scrub_every, next_scrub = opts.scrub_every;
         for (std::size_t k = 1; k <= opts.max_iter; ++k) {
             ed::core::poll_interrupt();
@@ -161,7 +192,19 @@ MtpqResult mtpq_kernel(Backend& backend, MatvecFn&& apply_H, std::size_t local_n
                 }
                 next_scrub = k + interval;
             }
+            if (n_obs > 0) {
+                const std::vector<const Complex*> v{host_view(hpsi.get(), h0), host_view(psi.get(), h1)};
+                auto vals = opts.observe(v, {{0, 0}, {0, 1}, {1, 0}});
+                std::vector<Complex> cross(n_obs);
+                for (std::size_t o = 0; o < n_obs; ++o) cross[o] = 0.5 * (vals.at(1)[o] + vals.at(2)[o]);
+                out_s.diag.push_back(std::move(vals[0]));
+                out_s.cross.push_back(std::move(cross));
+            }
             energy(k);
+        }
+        if (n_obs > 0) {
+            auto vals = opts.observe({host_view(psi.get(), h1)}, {{0, 0}});
+            out_s.diag.push_back(std::move(vals.at(0)));
         }
         return out_s;
     };
@@ -191,6 +234,10 @@ MtpqResult mtpq_kernel(Backend& backend, MatvecFn&& apply_H, std::size_t local_n
         out.energies.push_back(smp.Es.back());
         out.sample_energies.push_back(std::move(smp.Es));
         out.sample_log_norms.push_back(std::move(smp.log_norms));
+        if (n_obs > 0) {
+            out.sample_diag.push_back(std::move(smp.diag));
+            out.sample_cross.push_back(std::move(smp.cross));
+        }
     }
     return out;
 }
@@ -209,6 +256,8 @@ struct MtpqRun {
     ed::LinearOperator::MultiMatvecFn batch_matvec;   ///< device: samples share each H apply
     std::size_t batch_width = 8;                     ///< device: samples in lockstep at most
     double scale = 0.0;   ///< s_H (LinearOperator::norm_bound()), floors the shift margin; 0: unknown
+    std::size_t n_observables = 0;   ///< MtpqOptions::observe; Curves::O comes back per observable
+    decltype(MtpqOptions::observe) observe;
 };
 
 /// The canonical mTPQ curves (ln Z, E, V) of an n-dimensional block at `betas`. Recipe:
@@ -237,6 +286,8 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
     kopts.scrub_every = run.scrub_every;
     kopts.batch_matvec = run.batch_matvec;
     kopts.batch_width = run.batch_width;
+    kopts.n_observables = run.n_observables;
+    kopts.observe = run.observe;
 
     double e_min_est = 0.0, e_max_est = 0.0;
     {
@@ -279,6 +330,9 @@ Curves mtpq(Backend& be, MatvecFn&& H, std::size_t n, const std::vector<double>&
             mtpq_canonical_thermo(kres.sample_energies, kres.sample_log_norms, L, betas, static_cast<double>(n));
         if (mt.unconverged.empty()) {
             mt.curves.e_min = e_min_est;   // the spectral-bounds Lanczos: an upper bound on the block's E0
+            if (run.n_observables > 0)
+                mt.curves.O = mtpq_canonical_observables(kres.sample_energies, kres.sample_log_norms, kres.sample_diag,
+                                                         kres.sample_cross, run.n_observables, L, betas);
             return std::move(mt.curves);
         }
         // Too cold for the trajectory. An auto-sized run had underestimated the spectral range:

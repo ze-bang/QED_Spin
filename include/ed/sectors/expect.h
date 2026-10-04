@@ -46,12 +46,6 @@ namespace ed::sectors {
 /// non-finite coefficient, or a level without a vector, throws ed::InvalidRequest.
 [[nodiscard]] Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j);
 
-/// Two operator lists whose pair values <A_a^dag B_b> evaluate() returns.
-struct PairRequest {
-    std::vector<const ::Operator*> A;
-    std::vector<const ::Operator*> B;
-};
-
 /// Many quantities from one sweep: out[level] lists <X> for every X in `singles`, then, for each
 /// pair request in order, <A_a^dag B_b> (B_b acts first) at a * B.size() + b -- each multiplet-
 /// averaged as expect() averages it. Each level must carry a vector.

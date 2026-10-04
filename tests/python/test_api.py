@@ -500,15 +500,6 @@ def test_saved_eigs_keep_the_level_labels(tmp_path):
         assert s.irrep_characters(i) == r.irrep_characters(i)
 
 
-def test_thermal_observables_need_exact_or_ftlm():
-    H = _ring(6)
-    bond = qed.input.HamiltonianBuilder(6).heisenberg([(0, 1)], J=1.0).to_operator()
-    with pytest.raises(ValueError, match="observables"):
-        qed.thermal(H, [1.0], method="mtpq", observables=[bond])
-    with pytest.raises(ValueError, match="observables"):
-        qed.thermal(H, [1.0], method="ftlm", exact_states=4, observables=[bond])
-
-
 def test_group_sectors_are_built_without_the_momentum_sector(caplog, monkeypatch):
     # D_12 ring at every Sz (flip at half filling): stars with a co-group take the group-sector
     # path, which sizes the momentum sector by Burnside instead of building it; a declined star
