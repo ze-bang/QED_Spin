@@ -23,7 +23,9 @@ New:
 - **`qed.measure(H, requests, k=1, *, T=None, states="levels", ...)`** with the requests
   `qed.Expect`, `qed.Correlations`, `qed.Transitions` and `qed.Dynamics`. One eigensolve (or one
   thermal pass) and one sweep of each block's vectors answer every equal-time request. `H` may be an
-  `EigResult` with vectors.
+  `EigResult` with vectors. At T > 0 under FTLM, `Dynamics` requests share that pass: each sample's
+  source Lanczos run gives the dynamics, the thermodynamics and the equal-time values
+  (`DynamicsSpec::thermodynamics` in C++).
 - **One-request verbs:** `qed.expect` (now also `states=` and `T=`), `qed.correlations` →
   `CorrelationResult` (`C[rows, *A_index, *B_index]`, the one-point means, `ground()`,
   `connected()`, `fourier(q)` → `StructureFactor` with `trace()` and the neutron projector

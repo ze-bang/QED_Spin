@@ -110,5 +110,12 @@ chosen: the solver's vector first, then its symmetry images.
 `qed.dynamics(H, family.fourier("cluster"), omega)` gives S(q, ω) at every cluster momentum,
 with the result's `q` and `index` set. With `B="all"`, the cross pairs that share a B share its
 Lanczos runs at T = 0: one run per B and target block projects every A, so P operators cost P
-runs, not P². `qed.Dynamics(A, omega, ...)` is the request form inside `qed.measure`; it runs its
-own dynamics pass at the measurement's temperatures.
+runs, not P². `qed.Dynamics(A, omega, ...)` is the request form inside `qed.measure`.
+
+**One finite-temperature pass.** With `T=[...]` and the default FTLM method, a measurement that
+holds `Dynamics` requests runs ONE pass: each sample's source Lanczos run in every source sector
+gives the dynamics, the thermodynamics (`MeasureResult.thermal`) and every equal-time request
+(through the sample's φ(T)), so nothing is sampled twice. The `Dynamics` requests of one pass
+share `omega`, `eta`, `krylov`, `samples` and `seed`. Under `method="exact"` or `"mtpq"` the
+dynamics run their own pass. The shared pass is not available under a total-spin restriction or
+with `exact_states > 0`.

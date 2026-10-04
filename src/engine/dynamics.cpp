@@ -292,6 +292,15 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         detail::validate_observable(probes[p].A, n_sites, "dynamics", p);
         if (probes[p].B) detail::validate_observable(probes[p].B, n_sites, "dynamics", p);
     }
+    if (d.thermodynamics) {
+        if (d.temperatures.empty()) throw ed::InvalidRequest("dynamics: the thermal pass needs temperatures");
+        std::size_t index = 0;
+        for (const ::Operator* O : d.observables) detail::validate_observable(O, n_sites, "dynamics", index++);
+        for (const auto& pq : d.observable_pairs) {
+            for (const ::Operator* O : pq.A) detail::validate_observable(O, n_sites, "dynamics", index++);
+            for (const ::Operator* O : pq.B) detail::validate_observable(O, n_sites, "dynamics", index++);
+        }
+    }
     detail::validate_dynamics_spec(d);
     // One row per temperature: the accumulators are keyed by its value, so each must be distinct.
     const std::set<double> distinct(d.temperatures.begin(), d.temperatures.end());
@@ -686,6 +695,19 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
     const std::size_t nT = d.temperatures.size(), nW = d.omega.size();
     const auto t_all = std::chrono::steady_clock::now();
     const std::uint64_t seed0 = d.seed ? d.seed : std::random_device{}();
+    // The thermal pass (DynamicsSpec::thermodynamics): Z, the energy moments and every requested
+    // equal-time operator from the same source runs. The operators are averaged over the whole group
+    // of the folded Spec (and the flip where the pass folds by it), so each momentum sector measures
+    // them and a folded source stands for its whole orbit.
+    const bool thermo = d.thermodynamics;
+    if (thermo && s.two_S >= 0)
+        throw ed::Unsupported("dynamics: the thermal pass is not shared under a total-spin restriction");
+    const std::vector<ed::ops::MaskedOperator> th_xs =
+        thermo ? detail::requested_operators(d.observables, d.observable_pairs, n_sites)
+               : std::vector<ed::ops::MaskedOperator>{};
+    std::optional<detail::Averager> th_avg;
+    if (!th_xs.empty()) th_avg.emplace(s, n_sites, false);
+    std::map<std::tuple<bool, int, int>, std::shared_ptr<const detail::AveragedOperators>> th_ops;
     // What a source sector counts for in one probe's sums: the weight of its Z and of its S (zero:
     // the probe does not use it -- its symmetries count the source through another one).
     struct Use {
@@ -698,6 +720,9 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         std::map<double, double> Z;
         double emin = 0.0;
         std::vector<Use> use; // per probe
+        double th = 0.0;      // its weight in the thermal pass (DynamicsSpec::thermodynamics)
+        std::map<double, double> E1, E2;
+        std::map<double, std::vector<Complex>> O;
     };
 
     // Every source sector is a momentum sector of one subspace -- the same objects the targets
@@ -710,6 +735,8 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         const Target* src = nullptr;
         Subspace sub;
         std::vector<Use> use; // per probe
+        double th = 0.0;      // the thermal pass's weight
+        std::shared_ptr<const detail::SectorObservables> obs;   // its observables in this source
         // Each target sector a probe reaches: A and B as rows of it (the same program for an
         // autocorrelation).
         struct Reach {
@@ -826,6 +853,36 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         }
         return out;
     };
+    // The thermal pass follows every symmetry (Z and the group-averaged operators are invariant under
+    // all of them): one momentum of each orbit of every residue, its flip mirror folded where H has it.
+    std::vector<int> th_orbit;
+    std::vector<std::uint64_t> th_size;
+    if (thermo && pg_ok) {
+        th_orbit.resize(static_cast<std::size_t>(pcx.n_irr_raw));
+        std::iota(th_orbit.begin(), th_orbit.end(), 0);
+        auto root = [&th_orbit](int k) {
+            while (th_orbit[static_cast<std::size_t>(k)] != k) k = th_orbit[static_cast<std::size_t>(k)];
+            return k;
+        };
+        for (std::size_t r = 0; r < pcx.residues.size(); ++r)
+            for (int k = 0; k < pcx.n_irr_raw; ++k) {
+                const int a = root(k), b = root(pcx.irrep_map[r][static_cast<std::size_t>(k)]);
+                if (a != b) th_orbit[static_cast<std::size_t>(std::max(a, b))] = std::min(a, b);
+            }
+        th_size.assign(static_cast<std::size_t>(pcx.n_irr_raw), 0);
+        for (int k = 0; k < pcx.n_irr_raw; ++k)
+            ++th_size[static_cast<std::size_t>(th_orbit[static_cast<std::size_t>(k)] = root(k))];
+    }
+    auto th_use = [&](const Subspace& sub, int k) -> double {
+        if (!thermo) return 0.0;
+        double w = 1.0;
+        if (!th_orbit.empty()) {
+            if (th_orbit[static_cast<std::size_t>(k)] != k) return 0.0;
+            w = static_cast<double>(th_size[static_cast<std::size_t>(k)]);
+        }
+        if (flip_ok && 2 * sub.n_up > n_sites) return 0.0;
+        return flip_ok && 2 * sub.n_up < n_sites ? 2.0 * w : w;
+    };
     // When every probe follows the flip, the subspaces above N/2 hold no source.
     if (std::all_of(mirror.begin(), mirror.end(), [](const auto& m) { return m.has_value(); }))
         source_subs.erase(std::remove_if(source_subs.begin(), source_subs.end(),
@@ -863,6 +920,11 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             fo.trace_dim = j.tower_dim;
             fo.min_weight = ed::numerics::kRoundoffWeight;
         }
+        fo.moments = j.th > 0.0;
+        if (j.obs) {   // every equal-time operator from one host sweep over each sample's phi_T
+            fo.n_observables = j.obs->n_operators();
+            fo.observe = [o = j.obs](const std::vector<const Complex*>& phis) { return o->folded(phis); };
+        }
         return fo;
     };
     // The working set of one sample from a job's source to its largest target (core/footprint.h).
@@ -883,6 +945,10 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         src.Z = r.Z;
         src.emin = r.E_min;
         src.use = j.use;
+        src.th = j.th;
+        src.E1 = r.E1;
+        src.E2 = r.E2;
+        src.O = r.O;
         for (std::size_t q = 0; q < j.reaches.size(); ++q) {
             auto& sp = src.S[j.reaches[q].probe];
             for (double T : d.temperatures)
@@ -981,7 +1047,16 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
             const int k = momentum_index(*src.rd);
             Job j;
             j.use = uses(sub, k);
-            if (std::all_of(j.use.begin(), j.use.end(), [](const Use& x) { return x.z == 0.0; })) continue;
+            j.th = th_use(sub, k);
+            if (j.th == 0.0 && std::all_of(j.use.begin(), j.use.end(), [](const Use& x) { return x.z == 0.0; }))
+                continue;
+            if (j.th > 0.0 && th_avg) {   // the thermal pass's operators, compiled for this sector
+                using detail::Keep;
+                const Keep keep = sub.n_up >= 0 ? Keep::Zero : (sub.sz_parity >= 0 ? Keep::Even : Keep::All);
+                auto& ops = th_ops[{flip_ok, static_cast<int>(keep), static_cast<int>(Antiunitary::None)}];
+                if (!ops) ops = detail::average_operators(*th_avg, th_xs, flip_ok, keep, Antiunitary::None);
+                j.obs = std::make_shared<const detail::SectorObservables>(ops, src.rd);
+            }
             j.src = &src;
             j.sub = sub;
             j.key = (static_cast<std::uint64_t>(sub.n_up + 1) * 3 + static_cast<std::uint64_t>(sub.sz_parity + 1))
@@ -1140,6 +1215,39 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         }
         for (std::size_t p = 0; p < P; ++p)
             for (auto& x : out.S[p][it]) x /= Z[p];
+    }
+    if (thermo) {
+        // The thermal pass: every source with its fold weight, about the common reference.
+        const std::size_t nX = th_xs.size();
+        double ref = std::numeric_limits<double>::infinity();
+        for (const auto& s2 : sources)
+            if (s2.th > 0.0) ref = std::min(ref, s2.emin);
+        out.lnZ.assign(nT, 0.0);
+        out.E.assign(nT, 0.0);
+        out.V.assign(nT, 0.0);
+        out.O.assign(nX, std::vector<Complex>(nT, Complex(0, 0)));
+        for (std::size_t it = 0; it < nT; ++it) {
+            const double T = d.temperatures[it], beta = 1.0 / T;
+            double z = 0.0, e1 = 0.0, e2 = 0.0;
+            std::vector<Complex> o(nX, Complex(0, 0));
+            for (const auto& s2 : sources) {
+                if (s2.th == 0.0) continue;
+                const double dd = s2.emin - ref, w = s2.th * std::exp(-beta * dd);
+                const double Zs = s2.Z.at(T), E1s = s2.E1.at(T), E2s = s2.E2.at(T);
+                z += w * Zs;
+                e1 += w * (E1s + dd * Zs);
+                e2 += w * (E2s + 2.0 * dd * E1s + dd * dd * Zs);
+                for (std::size_t x = 0; x < nX; ++x) o[x] += w * s2.O.at(T).at(x);
+            }
+            if (!(z > 0.0))
+                throw std::runtime_error("dynamics: the thermal pass has no weight at T = " + std::to_string(T));
+            const double m1 = e1 / z, m2 = e2 / z;
+            out.lnZ[it] = std::log(z) - beta * ref;
+            out.E[it] = ref + m1;
+            out.V[it] = std::max(m2 - m1 * m1, 0.0);
+            for (std::size_t x = 0; x < nX; ++x) out.O[x][it] = o[x] / z;
+        }
+        out.e0 = ref;   // the lowest weighted source Ritz value: an upper bound on E0
     }
     report();
     return out;

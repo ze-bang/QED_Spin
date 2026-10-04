@@ -43,6 +43,13 @@ struct DynamicsSpec {
     int dense_max_dim = -1;   ///< T = 0: the ground-manifold eigensolve's crossover (EigsOptions)
     bool prune = true; ///< T = 0: the ground-manifold eigensolve prunes blocks (EigsOptions)
     Device device = Device::Cpu;   ///< continued fractions (T = 0) / FTLM (T > 0) on a GPU
+    /// T > 0: the thermal pass from the same source Lanczos runs -- the thermodynamics (lnZ, E, V) and
+    /// <X>(T) for every observable and every pair A_a^dag B_b of the requests (the symmetric FTLM
+    /// estimator through each sample's phi_T), over every source sector the symmetries of H fold.
+    /// Not under a total-spin restriction (ed::Unsupported).
+    bool thermodynamics = false;
+    std::vector<const ::Operator*> observables;
+    std::vector<PairRequest> observable_pairs;
 };
 
 /// One correlation: S_AB(omega) = sum_m p_m <m|A^dag delta(omega - H + E_m) B|m>; B null: A's
@@ -58,8 +65,12 @@ struct DynamicsCurves {
     /// [probe][row][omega]: one row per temperature (one row at T = 0). An autocorrelation's
     /// imaginary part is zero up to roundoff.
     std::vector<std::vector<std::vector<Complex>>> S;
-    double e0 = 0.0;
+    double e0 = 0.0;   ///< T = 0: the ground energy; T > 0 with thermodynamics: the lowest weighted source Ritz value
     int ground_manifold = 0;   ///< T = 0: levels averaged over
+    /// With DynamicsSpec::thermodynamics: per temperature, ln Z, E and Var(H), and <X>(T) per observable
+    /// then per pair (O[x][T]).
+    std::vector<double> lnZ, E, V;
+    std::vector<std::vector<Complex>> O;
     std::size_t target_sectors = 0;    ///< sectors the probes reached
     std::size_t device_blocks = 0;    ///< continued fractions / FTLM sources run on a GPU
     Placement placement;

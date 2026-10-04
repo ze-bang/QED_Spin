@@ -73,6 +73,14 @@ struct FtlmCrossIrrepOptions {
     /// and share each H apply. A and B must then be safe to apply from several threads at once.
     std::function<void(const Complex* const*, Complex* const*, std::size_t, std::size_t)> batch_src;
     std::size_t batch_width = 8;
+    /// The thermal pass from the same source runs: `moments` adds E1, E2 (the energy moments about
+    /// E_min) beside Z; `n_observables` > 0 adds <phi_T|O|phi_T> for every observable, phi_T =
+    /// sum_i e^{-(E_i - E_min) / 2T} <psi_i|r> psi_i built from the (then fully reorthogonalised)
+    /// source basis, a few temperatures at a time, measured on the host by `observe`
+    /// (ed::thermal::FtlmOptions::observe; called from several threads in lockstep runs).
+    bool moments = false;
+    std::size_t n_observables = 0;
+    std::function<std::vector<std::vector<Complex>>(const std::vector<const Complex*>&)> observe;
 };
 
 /// One target sector of a source: H there, A and B from the source as rows of it (callables over
@@ -88,6 +96,8 @@ struct FtlmDynamicsTarget {
 /// weighted source Ritz value over the samples). The caller sums S and Z over source sectors.
 struct FtlmDynamicsResult {
     std::map<double, double> Z;
+    std::map<double, double> E1, E2;                        ///< with moments: the energy moments about E_min
+    std::map<double, std::vector<Complex>> O;                ///< with observables: per temperature, per observable
     std::vector<std::map<double, std::vector<Complex>>> S;   ///< per target
     double E_min = 0.0;
     std::size_t samples_done = 0;
@@ -118,6 +128,8 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         bool ok = false;
         double smin = 0.0;
         std::vector<double> Z;                                   // [T]
+        std::vector<double> E1, E2;                              // [T], about smin (moments)
+        std::vector<std::vector<Complex>> O;                     // [T][observable], about smin
         std::vector<std::vector<Complex>> S;                     // [target][T * nW + w]
     };
     auto sample = [&](auto& bk, auto&& Hs, auto&& Hds, std::size_t s) {
@@ -130,10 +142,11 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         // and a device run of the same samples equal to roundoff -- without it their roundoff grows to
         // 1e-6..1e-5 (gate 39d45991, grid GPU-vs-CPU dynT cells), harmless next to sampling but it would
         // blind the device-consistency checks.
-        auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n) {
+        // Observables need the source basis orthonormal (phi is built from it): full CGS2 there.
+        auto lanczos = [&](auto&& H, const Complex* v0, std::size_t n, bool full) {
             ed::krylov::LanczosKernelOptions lo;
             lo.max_iter = std::min(n, opts.krylov_dim);
-            lo.reorth = n > std::max<std::size_t>(4 * opts.krylov_dim, kLocalReorthMinDim)
+            lo.reorth = !full && n > std::max<std::size_t>(4 * opts.krylov_dim, kLocalReorthMinDim)
                             ? ed::krylov::ReorthPolicy::LocalDGKS3
                             : ed::krylov::ReorthPolicy::FullCGS2;
             lo.keep_basis = true;
@@ -155,7 +168,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         bk.copy_from_host(r_host.data(), r.get(), dim_src);
 
         // ---- the source: Ritz values e_i, first components c_i, the reference ---------------
-        auto kh = lanczos(Hs, r.get(), dim_src);
+        auto kh = lanczos(Hs, r.get(), dim_src, opts.n_observables > 0);
         if (kh.alpha.empty() || kh.basis.size() < kh.alpha.size()) return out;
         const std::size_t mH = kh.alpha.size();
         ed::krylov::TridiagEig th = ed::krylov::tridiag_eig(kh.alpha, kh.beta, mH, /*vectors=*/true);
@@ -180,6 +193,48 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
                 out.Z[it] += c[i] * c[i] * wt[it * mH + i];
             }
         }
+        // ---- the thermal pass from the same run: energy moments, observables through phi_T ----
+        if (opts.moments) {
+            out.E1.assign(nT, 0.0);
+            out.E2.assign(nT, 0.0);
+            for (std::size_t it = 0; it < nT; ++it)
+                for (std::size_t i = 0; i < mH; ++i) {
+                    const double x = ritz[i] - out.smin, b = c[i] * c[i] * wt[it * mH + i];
+                    out.E1[it] += x * b;
+                    out.E2[it] += x * x * b;
+                }
+        }
+        if (opts.n_observables > 0) {
+            // phi_T = sum_a q_a v_a, q_a = sum_i g_i VH[i mH + a], g_i = e^{-(e_i - smin) / 2T} c_i, so that
+            // <phi_T|O|phi_T> = sum_ij g_i g_j <psi_i|O|psi_j> and <phi_T|phi_T> = Z_s[T].
+            constexpr std::size_t kPhiChunk = 4;
+            const std::size_t width = std::min(kPhiChunk, nT);
+            std::vector<const Complex*> V(mH);
+            for (std::size_t a = 0; a < mH; ++a) V[a] = kh.basis[a];
+            auto ph = bk.make_zero_vector(dim_src);
+            std::vector<std::vector<Complex>> host(width, std::vector<Complex>(dim_src));
+            std::vector<Complex> q(mH);
+            out.O.assign(nT, {});
+            for (std::size_t t0 = 0; t0 < nT; t0 += width) {
+                const std::size_t nc = std::min(width, nT - t0);
+                std::vector<const Complex*> ptrs(nc);
+                for (std::size_t k = 0; k < nc; ++k) {
+                    std::fill(q.begin(), q.end(), Complex(0, 0));
+                    for (std::size_t i = 0; i < mH; ++i) {
+                        const double g = std::sqrt(wt[(t0 + k) * mH + i]) * c[i];
+                        if (g == 0.0) continue;
+                        for (std::size_t a = 0; a < mH; ++a) q[a] += g * VH[i * mH + a];
+                    }
+                    bk.fill_zero(ph.get(), dim_src);
+                    bk.axpy_many(q.data(), V.data(), mH, ph.get(), dim_src);
+                    bk.copy_to_host(ph.get(), host[k].data(), dim_src);
+                    ptrs[k] = host[k].data();
+                }
+                auto vals = opts.observe(ptrs);
+                if (vals.size() != nc) throw std::logic_error("ftlm_dynamics_kernel: observe returned the wrong count");
+                for (std::size_t k = 0; k < nc; ++k) out.O[t0 + k] = std::move(vals[k]);
+            }
+        }
         out.ok = true;
         out.S.assign(nt, std::vector<Complex>(nT * nW, Complex(0, 0)));
 
@@ -193,7 +248,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             // scale-free: unit-vector norm
             if (nphi < 1e-14) continue;                               // B annihilates |r>: no spectral weight here
             bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
-            auto ks = lanczos(Hds[tt], phi.get(), dim_dst);
+            auto ks = lanczos(Hds[tt], phi.get(), dim_dst, false);
             if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) continue;
             const std::size_t mS = ks.alpha.size();
             ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
@@ -293,9 +348,12 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
     double E_min = std::numeric_limits<double>::infinity();
     for (const Sample& smp : samples)
         if (smp.ok) E_min = std::min(E_min, smp.smin);
+    const std::size_t n_obs = opts.n_observables;
     for (std::size_t it = 0; it < nT; ++it) {
         const double T = temperatures[it];
         R.Z[T] = 0.0;
+        if (opts.moments) R.E1[T] = R.E2[T] = 0.0;
+        if (n_obs > 0) R.O[T].assign(n_obs, Complex(0, 0));
         for (auto& St : R.S) St[T].assign(nW, Complex(0, 0));
     }
     for (const Sample& smp : samples) {
@@ -304,6 +362,12 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             const double T = temperatures[it];
             const double f = std::exp(-(1.0 / T) * (smp.smin - E_min));
             R.Z[T] += f * smp.Z[it];
+            if (opts.moments) {   // about E_min: x - E_min = (x - smin) + d
+                const double d = smp.smin - E_min;
+                R.E1[T] += f * (smp.E1[it] + d * smp.Z[it]);
+                R.E2[T] += f * (smp.E2[it] + 2.0 * d * smp.E1[it] + d * d * smp.Z[it]);
+            }
+            for (std::size_t o = 0; o < n_obs; ++o) R.O[T][o] += f * smp.O[it].at(o);
             for (std::size_t tt = 0; tt < nt; ++tt) {
                 auto& St = R.S[tt][T];
                 for (std::size_t iw = 0; iw < nW; ++iw) St[iw] += f * smp.S[tt][it * nW + iw];
@@ -316,6 +380,12 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         const double scale = static_cast<double>(tr) / static_cast<double>(R.samples_done);
         for (double T : temperatures) {
             R.Z[T] *= scale;
+            if (opts.moments) {
+                R.E1[T] *= scale;
+                R.E2[T] *= scale;
+            }
+            if (n_obs > 0)
+                for (auto& v : R.O[T]) v *= scale;
             for (auto& St : R.S)
                 for (auto& v : St[T]) v *= scale;
         }

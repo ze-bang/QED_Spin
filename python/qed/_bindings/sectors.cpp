@@ -616,13 +616,32 @@ void bind_sectors(py::module_& m) {
         .def_readwrite("degeneracy_tol", &sec::DynamicsSpec::degeneracy_tol)
         .def_readwrite("dense_max_dim", &sec::DynamicsSpec::dense_max_dim)
         .def_readwrite("prune", &sec::DynamicsSpec::prune)
-        .def_readwrite("device", &sec::DynamicsSpec::device);
+        .def_readwrite("device", &sec::DynamicsSpec::device)
+        .def_readwrite("thermodynamics", &sec::DynamicsSpec::thermodynamics)
+        .def_readwrite("observables", &sec::DynamicsSpec::observables)
+        .def_property(
+            "observable_pairs",
+            [](const sec::DynamicsSpec& d) {
+                py::list out;
+                for (const auto& p : d.observable_pairs) out.append(py::make_tuple(p.A, p.B));
+                return out;
+            },
+            [](sec::DynamicsSpec& d,
+               const std::vector<std::pair<std::vector<const ::Operator*>, std::vector<const ::Operator*>>>& pairs) {
+                d.observable_pairs.clear();
+                for (const auto& [A, B] : pairs) d.observable_pairs.push_back({A, B});
+            },
+            "T > 0 thermal pass: equal-time pair requests [(A, B), ...], after the observables in O.");
 
     py::class_<sec::DynamicsCurves>(s, "DynamicsCurves")
         .def_readonly("omega", &sec::DynamicsCurves::omega)
         .def_readonly("S", &sec::DynamicsCurves::S)
         .def_readonly("e0", &sec::DynamicsCurves::e0)
         .def_readonly("ground_manifold", &sec::DynamicsCurves::ground_manifold)
+        .def_readonly("lnZ", &sec::DynamicsCurves::lnZ)
+        .def_readonly("E", &sec::DynamicsCurves::E)
+        .def_readonly("V", &sec::DynamicsCurves::V)
+        .def_readonly("O", &sec::DynamicsCurves::O)
         .def_readonly("device_blocks", &sec::DynamicsCurves::device_blocks)
         .def_property_readonly("placement", [](const sec::DynamicsCurves& r) { return placement_to_py(r.placement); })
         .def_readonly("diagnostics", &sec::DynamicsCurves::diagnostics);

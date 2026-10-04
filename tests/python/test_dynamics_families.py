@@ -72,3 +72,37 @@ def test_dynamics_requests_in_measure():
     assert th[0].S.shape == (1, N, 1, len(omega)) and np.allclose(th[0].T, [1.0])
     with pytest.raises(qed.errors.InvalidRequest, match="Hamiltonian"):
         qed.measure(qed.eigs(H, 1, vectors=True), [qed.Dynamics(mf, omega)])
+
+
+def test_finite_temperature_dynamics_shares_the_thermal_pass():
+    """measure(T=..., Dynamics, ...) under FTLM: one pass -- the dynamics' source Lanczos runs also give
+    the thermodynamics and every equal-time request."""
+    N = 10
+    H, lat = _chain(N, dz=0.2)
+    fam = qed.Family.spins(lat, "z")
+    mf = fam.fourier("cluster")
+    omega = np.linspace(-1.0, 5.0, 61)
+    temps = [0.5, 1.0, 2.0]
+    dyn = qed.Dynamics(mf, omega, eta=0.1, samples=40, krylov=60, seed=4)
+    m = qed.measure(H, [dyn, qed.Correlations(fam), qed.Expect([H])], T=temps)
+    assert m.rows == "T" and m.thermal is not None
+    # the dynamics are the standalone call's (same seeds, same sources)
+    d = qed.dynamics(H, mf, omega, eta=0.1, T=temps, samples=40, krylov=60, seed=4)
+    np.testing.assert_allclose(m[0].S, d.S, atol=1e-12)
+    # thermodynamics and equal-time values against exact, at sampling accuracy
+    ex = qed.thermal(H, temps, method="exact")
+    np.testing.assert_allclose(m.thermal.E, ex.E, rtol=0.03, atol=0.02)
+    np.testing.assert_allclose(m.thermal.lnZ, ex.lnZ, rtol=0.02)
+    np.testing.assert_allclose(m[2].values[:, 0].real, ex.E, rtol=0.03, atol=0.02)   # <H> through phi
+    exc = qed.correlations(H, fam, T=temps, method="exact")
+    assert np.max(np.abs(m[1].C - exc.C)) / np.max(np.abs(exc.C)) < 0.05
+    # other methods keep two passes; mismatched Dynamics requests and OFTLM are refused
+    two = qed.measure(H, [dyn, qed.Expect([H])], T=temps, method="exact")
+    np.testing.assert_allclose(two[1].values[:, 0].real, ex.E, atol=1e-10)
+    with pytest.raises(qed.errors.InvalidRequest, match="share omega"):
+        qed.measure(H, [dyn, qed.Dynamics(mf, omega, eta=0.2)], T=temps)
+    with pytest.raises(qed.errors.InvalidRequest, match="exact_states"):
+        qed.measure(H, [dyn], T=temps, exact_states=4)
+    H0, _ = _chain(N)   # SU(2)-symmetric, so total_spin resolves; the shared pass refuses it
+    with pytest.raises(qed.errors.Unsupported, match="total-spin"):
+        qed.measure(H0, [dyn], T=temps, sym=qed.Symmetry(total_spin=0))

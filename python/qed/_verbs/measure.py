@@ -67,7 +67,9 @@ class Dynamics:
     """Request: S_AB(omega) (:func:`qed.dynamics`) of ``A`` (an Operator, a sequence, a :class:`qed.Family`
     or a :class:`qed.MomentumFamily`) and ``B`` (None: autocorrelations; ``"all"``; an Operator, a sequence
     or family as long as A), at the measurement's temperatures (``T=None``: the ground state). ``eta``,
-    ``krylov``, ``samples``, ``seed``: as in :func:`qed.dynamics`."""
+    ``krylov``, ``samples``, ``seed``: as in :func:`qed.dynamics`. At T > 0 under FTLM the dynamics,
+    the thermodynamics and every equal-time request of the measurement share one pass (each sample's
+    source Lanczos run)."""
 
     A: object
     omega: object
@@ -573,6 +575,63 @@ def _dynamics_runner(H, T, sym, device: str):
 _THERMAL_OPTIONS = ("method", "samples", "krylov", "steps", "exact_states", "seed", "dense_max_dim")
 
 
+def _measure_shared(H, requests: list, T, sym, device: str, options: dict) -> MeasureResult:
+    """T > 0 with Dynamics under FTLM: ONE pass -- the dynamics' source Lanczos runs also give the
+    thermodynamics and every equal-time request (DynamicsSpec::thermodynamics)."""
+    from .dynamics import _probes, _result, _spec
+    from .symmetry import Symmetry
+    from .thermal import ThermalResult, _thermal_rows
+
+    dyn = [q for q in requests if isinstance(q, Dynamics)]
+    first = dyn[0]
+    key = lambda q: (tuple(np.asarray(q.omega, float).ravel()), q.eta, q.krylov, q.samples, q.seed)  # noqa: E731
+    if any(key(q) != key(first) for q in dyn[1:]):
+        raise InvalidRequest("measure with T=: the Dynamics requests of one pass share omega, eta, krylov, samples "
+                             "and seed (they share each sample's source Lanczos)")
+    for name, value in (("samples", first.samples), ("krylov", first.krylov), ("seed", first.seed)):
+        if name in options and options[name] is not None and int(options[name]) != int(value):
+            raise InvalidRequest(f"measure with T= and Dynamics: {name}={options[name]} differs from the Dynamics "
+                                 f"request's {value}; the pass shares one (set it on the Dynamics request)")
+    for name in ("steps",):
+        if options.get(name) is not None:
+            raise InvalidRequest(f"{name}= is an mTPQ option; the shared pass is FTLM")
+    if int(options.get("exact_states", 0)) != 0:
+        raise InvalidRequest("exact_states > 0 (OFTLM) is not shared with dynamics; measure Dynamics separately")
+    singles, pairs, plan = _plan(requests, thermal=True)
+    all_probes, layout = [], []
+    for q in dyn:
+        probes, axes, cross = _probes(q.A, q.B)
+        layout.append((len(all_probes), len(probes), axes, cross, q))
+        all_probes.extend(probes)
+    sym = Symmetry.auto() if sym is None else sym
+    d, temps, rows = _spec(first.omega, first.eta, T, first.krylov, first.samples, first.seed, 1e-8, device,
+                           options.get("dense_max_dim"), True)
+    d.thermodynamics = True
+    d.observables = list(singles)
+    d.observable_pairs = [(list(A), list(B)) for A, B in pairs]
+    diagnostics: list = []
+    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), all_probes, d)
+    S = np.asarray(r.S, dtype=complex)
+    answers = {id(q): _result(r, S[at : at + n], q.A, axes, cross, temps, rows, sym, diagnostics)
+               for at, n, axes, cross, q in layout}
+    beta = 1.0 / temps
+    lnZ = np.asarray(r.lnZ, float)[rows]
+    E = np.asarray(r.E, float)[rows]
+    V = np.asarray(r.V, float)[rows]
+    th = ThermalResult(T=temps, E=E, C=beta**2 * V, entropy=lnZ + beta * E, F=-temps * lnZ, lnZ=lnZ, M=None,
+                       chi=None, O=None, method="ftlm", e0=float(r.e0), blocks=0, device_blocks=int(r.device_blocks),
+                       symmetry=sym, diagnostics=diagnostics + [tuple(x) for x in r.diagnostics],
+                       placement=dict(r.placement))
+    n_x = len(singles) + sum(len(A) * len(B) for A, B in pairs)
+    raw = np.asarray(r.O, complex).reshape(n_x, -1)[:, rows] if n_x else np.zeros((0, len(temps)), complex)
+    rows_info = _thermal_rows(th)
+    rows_info["dynamics"] = lambda q: answers[id(q)]
+    results = _answers(plan, raw.T, singles, pairs, rows_info)
+    th.measurements = results
+    return MeasureResult(results=results, energies=th.E, multiplicities=np.ones(len(th.T), int), rows="T", eigs=None,
+                         diagnostics=list(th.diagnostics), T=th.T, thermal=th)
+
+
 def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> MeasureResult:
     from .eigs import EigResult
     from .thermal import _thermal_rows, _thermal_run
@@ -582,6 +641,8 @@ def _measure_thermal(H, requests: list, T, sym, device: str, options: dict) -> M
     unknown = sorted(set(options) - set(_THERMAL_OPTIONS))
     if unknown:
         raise InvalidRequest(f"measure with T=: unknown option(s) {unknown}; the thermal ones are {_THERMAL_OPTIONS}")
+    if any(isinstance(q, Dynamics) for q in requests) and str(options.get("method", "ftlm")).lower() == "ftlm":
+        return _measure_shared(H, requests, T, sym, device, options)
     singles, pairs, plan = _plan(requests, thermal=True)
     th, raw = _thermal_run(H, T, method=options.get("method", "ftlm"), sym=sym, samples=options.get("samples", 40),
                            krylov=options.get("krylov"), steps=options.get("steps"),

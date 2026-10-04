@@ -116,6 +116,14 @@ def dynamics(
         raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
     probes, axes, cross = _probes(O, B)
     sym = Symmetry.auto() if sym is None else sym
+    d, temps, rows = _spec(omega, eta, T, krylov, samples, seed, degeneracy_tol, device, dense_max_dim, prune)
+    diagnostics: list = []
+    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), probes, d)
+    return _result(r, np.asarray(r.S, dtype=complex), O, axes, cross, temps, rows, sym, diagnostics)
+
+
+def _spec(omega, eta, T, krylov, samples, seed, degeneracy_tol, device, dense_max_dim, prune):
+    """(DynamicsSpec, the caller's temperatures, the row of each in the distinct ones)."""
     d = _core.sectors.DynamicsSpec()
     d.omega = [float(w) for w in omega]
     d.eta = float(eta)
@@ -133,11 +141,13 @@ def dynamics(
     d.dense_max_dim = -1 if dense_max_dim is None else int(dense_max_dim)
     d.prune = bool(prune)
     d.device = _device.resolve(device)
-    diagnostics: list = []
-    r = _core.sectors.dynamics(H, sym.resolve(H, diagnostics), probes, d)
-    S = np.asarray(r.S, dtype=complex)  # [probe, row, omega]
+    return d, temps, rows.reshape(-1)
+
+
+def _result(r, S, O, axes, cross, temps, rows, sym, diagnostics) -> DynamicsResult:
+    """A DynamicsResult from the engine's curves and the [probe, row, omega] block of S that is O's."""
     if len(temps):  # the caller's temperatures, in the caller's order
-        S = S[:, rows.reshape(-1), :]
+        S = S[:, rows, :]
     if not cross:
         S = S.real
     S = S.reshape(tuple(axes) + S.shape[1:])
