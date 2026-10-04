@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.7.0: one organisation for every observable
+## 2026-10-03 — 0.7.0: one organisation for every observable
 
 Every observable computation is now a quantity (⟨O⟩, ⟨A†B⟩, ⟨m|O|n⟩, S_AB(ω)) in a state (levels,
 the ground manifold, temperatures) on an index axis (operators, a `qed.Family`, a momentum axis),
@@ -55,6 +55,12 @@ Performance:
   kernel on the GPU lane.
 - T = 0 dynamics: cross pairs sharing a B share its Lanczos runs; `B="all"` over P operators costs
   P runs per target block instead of P².
+- Measured against 0.6.1 on one node, 32 threads (job 62823987; values equal to roundoff):
+  - all 3600 ⟨S_i^a S_j^b⟩ of a 20-site triangular ground state: 0.085 s → 0.020 s;
+  - FTLM ⟨S^z_i S^z_j⟩(T) for every pair of a 16-site triangular cluster, 4 temperatures:
+    12.9 s → 0.35 s (37×);
+  - T = 0 `B="all"` over 8 operators, 18-site chain: 15.4 s → 11.2 s. The spectral part is about
+    6.8 s → 1.8 s; the rest is the ground-manifold eigensolve, which is unchanged (job 62826892).
 
 Tests: `test_family.py`, `test_correlations.py`, `test_transitions.py`, `test_thermal_measure.py`,
 `test_dynamics_families.py` against dense references; a grid task `corr` (115 cells per backend).
