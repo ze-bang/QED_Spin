@@ -3,7 +3,17 @@ every symmetry block of H through one engine."""
 
 from .dynamics import DynamicsResult, dynamics
 from .eigs import EigResult, eigs, load_eigs
-from .expect import ExpectResult, expect
+from .measure import (
+    CorrelationResult,
+    Correlations,
+    Expect,
+    ExpectResult,
+    MeasureResult,
+    StructureFactor,
+    correlations,
+    expect,
+    measure,
+)
 from .spectrum import SpectrumResult, spectrum
 from .symmetry import Symmetry
 from .thermal import ThermalResult, thermal
@@ -13,8 +23,15 @@ __all__ = [
     "eigs",
     "EigResult",
     "load_eigs",
+    "measure",
+    "MeasureResult",
+    "Expect",
+    "Correlations",
     "expect",
     "ExpectResult",
+    "correlations",
+    "CorrelationResult",
+    "StructureFactor",
     "spectrum",
     "SpectrumResult",
     "thermal",

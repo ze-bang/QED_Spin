@@ -499,12 +499,30 @@ void bind_sectors(py::module_& m) {
             "The level's degenerate multiplet expanded into Sz sector n_up (n_up < 0: full space); "
             "at most max_vectors of its vectors when that is > 0.")
         .def(
-            "expect",
-            [](const sec::EigsResult& r, const sec::Spec& spec, const std::vector<const ::Operator*>& ops) {
-                py::gil_scoped_release nogil;
-                return sec::expect(r, spec, ops);
+            "evaluate",
+            [](const sec::EigsResult& r, const sec::Spec& spec, const std::vector<const ::Operator*>& singles,
+               const std::vector<std::pair<std::vector<const ::Operator*>, std::vector<const ::Operator*>>>& pairs) {
+                std::vector<sec::PairRequest> reqs;
+                reqs.reserve(pairs.size());
+                std::size_t width = singles.size();
+                for (const auto& [A, B] : pairs) {
+                    reqs.push_back({A, B});
+                    width += A.size() * B.size();
+                }
+                std::vector<std::vector<sec::Complex>> c;
+                {
+                    py::gil_scoped_release nogil;
+                    c = sec::evaluate(r, spec, singles, reqs);
+                }
+                py::array_t<std::complex<double>> out(
+                    {static_cast<py::ssize_t>(c.size()), static_cast<py::ssize_t>(width)});
+                auto* dst = out.mutable_data();
+                for (const auto& level : c) dst = std::copy(level.begin(), level.end(), dst);
+                return out;
             },
-            py::arg("spec"), py::arg("ops"), "<O> per level averaged over its symmetry multiplet: [level][op].")
+            py::arg("spec"), py::arg("singles"), py::arg("pairs"),
+            "One multiplet-averaged sweep per level: complex array [level, x] listing <X> for X in singles, "
+            "then <A_a^dag B_b> at a * len(B) + b for each (A, B) in pairs.")
         .def(
             "matrix_element",
             [](const sec::EigsResult& r, const ::Operator& O, std::size_t i, std::size_t j) {
@@ -619,9 +637,11 @@ void bind_sectors(py::module_& m) {
     s.def(
         "eigs",
         [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors, int dense_max_dim, bool allow_partial,
-           sec::Device device, bool prune, double window) {
+           sec::Device device, bool prune, double window, int per_block) {
             sec::EigsOptions o;
             o.k = k;
+            o.per_block = per_block;
+            o.cut = per_block <= 0;   // per_block: every block's lowest rows, no window across blocks
             o.vectors = vectors;
             o.dense_max_dim = dense_max_dim;
             o.allow_partial = allow_partial;
@@ -633,5 +653,7 @@ void bind_sectors(py::module_& m) {
         },
         py::arg("H"), py::arg("spec"), py::arg("k") = 1, py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
         py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu, py::arg("prune") = true,
-        py::arg("window") = 0.0, "Lowest k eigenvalues (with multiplicity) over every symmetry block of H.");
+        py::arg("window") = 0.0, py::arg("per_block") = 0,
+        "Lowest k eigenvalues (with multiplicity) over every symmetry block of H; per_block > 0: the lowest "
+        "per_block levels of every block instead.");
 }

@@ -8,8 +8,9 @@ block by block on the CPU or a GPU:
 * :func:`spectrum` -- every eigenvalue;
 * :func:`thermal` -- thermodynamics: exact, FTLM (``exact_states`` for OFTLM) or mTPQ;
 * :func:`dynamics` -- S(omega) at T = 0 or finite T;
-* :func:`expect` -- expectation values in the lowest levels (and
-  :meth:`EigResult.matrix_element` between them).
+* :func:`measure` -- equal-time quantities of the lowest levels in one pass: one-point values
+  (:func:`expect`) and pair correlations (:func:`correlations`) of operators or
+  :class:`Family` index axes, with :meth:`EigResult.matrix_element` between levels.
 
 Operators come from :class:`qed.input.HamiltonianBuilder` or :class:`qed.Operator`.
 
@@ -40,6 +41,7 @@ from . import _core as _core
 from ._core import OP_SMINUS, OP_SPLUS, OP_SZ, Operator, has_cuda_build
 
 from . import errors  # qed.errors: QEDError and the classes the engine raises
+from .family import Family, MomentumFamily
 from ._log import configure_from_env as _configure_log_from_env
 from ._log import get_log_level, set_log_level
 
@@ -118,16 +120,23 @@ def _check_environment() -> None:
 _check_environment()
 
 from ._verbs import (  # noqa: E402
+    CorrelationResult,
+    Correlations,
     DynamicsResult,
     EigResult,
+    Expect,
     ExpectResult,
+    MeasureResult,
     SpectrumResult,
+    StructureFactor,
     Symmetry,
     ThermalResult,
+    correlations,
     dynamics,
     eigs,
     expect,
     load_eigs,
+    measure,
     spectrum,
     thermal,
 )
@@ -136,6 +145,8 @@ __version__: Final[str] = _core.__version__  # pyproject.toml's version, compile
 
 __all__ = [
     "Operator",
+    "Family",
+    "MomentumFamily",
     "OP_SPLUS",
     "OP_SMINUS",
     "OP_SZ",
@@ -149,8 +160,15 @@ __all__ = [
     "ThermalResult",
     "dynamics",
     "DynamicsResult",
+    "measure",
+    "MeasureResult",
+    "Expect",
+    "Correlations",
     "expect",
     "ExpectResult",
+    "correlations",
+    "CorrelationResult",
+    "StructureFactor",
     "find_symmetries",
     "Symmetries",
     "has_cuda_build",

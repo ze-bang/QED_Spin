@@ -33,12 +33,14 @@ S1 = qed.dynamics(H, Sz_pi, w, eta=0.05, T=[0.5])   # T > 0: finite-temperature 
 
 | Call | Result |
 |---|---|
-| `qed.eigs(H, k=1, *, sym=None, vectors=False, dense_max_dim=None, allow_partial=False, device="cpu", prune=True, window=0.0)` | `EigResult`. `energies` holds the lowest `k` energies, each repeated by its multiplicity (with `window > 0`, also every block's lowest level within `window` above the k-th). `levels` has one entry per block eigenvalue with its quantum numbers. Methods: `vectors(basis="full", n_up=None)`, `expect(ops)` and `matrix_element(O, i, j)` (these need `vectors=True`); `momentum(i, translations)`, `irrep_characters(i)`, `save(path)` |
+| `qed.eigs(H, k=1, *, sym=None, vectors=False, dense_max_dim=None, allow_partial=False, device="cpu", prune=True, window=0.0, per_block=None)` | `EigResult`. `energies` holds the lowest `k` energies, each repeated by its multiplicity (with `window > 0`, also every block's lowest level within `window` above the k-th; with `per_block=m`, the lowest `m` levels of every block instead). `levels` has one entry per block eigenvalue with its quantum numbers. Methods: `vectors(basis="full", n_up=None)`, `expect(ops)`, `correlations(A, B=None)` and `matrix_element(O, i, j)` (these need `vectors=True`); `momentum(i, translations)`, `irrep_characters(i)`, `save(path)` |
 | `qed.load_eigs(path)` | the `EigResult` that `save` wrote to an `.npz` file. Vectors, `expect` and `matrix_element` work without H. A file of format 1 (written by qed < 0.6, when a set bit meant spin down) is refused |
 | `qed.spectrum(H, *, sym=None, device="cpu")` | `SpectrumResult`: every eigenvalue, from a dense diagonalisation of each block |
 | `qed.thermal(H, T, *, method="ftlm", sym=None, samples=40, krylov=None, steps=None, exact_states=0, seed=0, device="cpu", observables=None, dense_max_dim=None)` | `ThermalResult`: `E`, `C`, `entropy`, `F` and `lnZ` per temperature. `M` and `chi` are filled when H conserves Sz and `sym` decomposes by it. `O` holds ⟨O⟩(T) for each of `observables` |
 | `qed.dynamics(H, O, omega, B=None, *, eta=0.05, T=None, sym=None, krylov=200, samples=40, seed=0, degeneracy_tol=1e-8, device="cpu", dense_max_dim=None, prune=True)` | `DynamicsResult`: $S_{AB}(\omega)$ at T = 0 or at the temperatures `T` |
-| `qed.expect(H, ops, k=1, *, sym=None, device="cpu", **eigs_kwargs)` | `ExpectResult`: ⟨O⟩ in each of the lowest levels, averaged over the level's symmetry multiplet |
+| `qed.measure(H, requests, k=1, *, states="levels", sym=None, device="cpu", **eigs_kwargs)` | `MeasureResult`: one answer per request (`qed.Expect(ops)`, `qed.Correlations(A, B=None)`) from one eigensolve and one sweep; operands are operators, sequences, `qed.Family` index axes or their momentum transforms |
+| `qed.expect(H, ops, k=1, *, states="levels", ...)` | `ExpectResult`: ⟨O⟩ in each of the lowest levels (or the ground manifold), averaged over the level's symmetry multiplet |
+| `qed.correlations(H, A, B=None, k=1, *, states="levels", ...)` | `CorrelationResult`: ⟨A_a† B_b⟩ for every pair, with `connected()` and `fourier(q)` (the structure factor) |
 
 - **`thermal` methods.**
   - `"exact"` takes every block's full spectrum.

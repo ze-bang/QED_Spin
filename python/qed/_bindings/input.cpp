@@ -107,6 +107,10 @@ void bind_input(py::module_& parent) {
             periodic lattice), i < j. ``nnn_pairs()`` / ``nnnn_pairs()``
             raise for a lattice built from an adjacency list.
         lattice_vectors : list of three [x, y, z] lists
+        supercell : list of three [x, y, z] lists
+            The periodic cluster's translation vectors (n_k a_k per periodic
+            direction; zeros for an open lattice or one built from an adjacency
+            list, where it may be set by hand). qed.input.cluster_momenta reads it.
         pbc : bool
         label : str
     )pbdoc")
@@ -118,6 +122,7 @@ void bind_input(py::module_& parent) {
         .def_readwrite("nnn_bonds", &Lattice::nnn_bonds)
         .def_readwrite("nnnn_bonds", &Lattice::nnnn_bonds)
         .def_readwrite("lattice_vectors", &Lattice::lattice_vectors)
+        .def_readwrite("supercell", &Lattice::supercell)
         .def_readwrite("pbc", &Lattice::pbc)
         .def_readwrite("label", &Lattice::label)
         .def("nn_pairs", &Lattice::nn_pairs)

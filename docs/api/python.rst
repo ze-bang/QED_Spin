@@ -8,7 +8,10 @@ Python API reference (``qed``)
 ``import qed`` provides:
 
 * five verbs over one symmetry description: :func:`eigs`, :func:`spectrum`, :func:`thermal`,
-  :func:`dynamics` and :func:`expect`;
+  :func:`dynamics` and :func:`measure` (with its one-request forms :func:`expect` and
+  :func:`correlations`);
+* operator families, the index axes of a measurement: :class:`Family` and its momentum transform
+  :class:`MomentumFamily`;
 * the operator type :class:`Operator`, with the builders of :mod:`qed.input` and
   :mod:`qed.dssf`;
 * symmetry discovery: :func:`find_symmetries`, and the permutation helpers of
@@ -56,7 +59,24 @@ Verbs
 
 .. autofunction:: qed.dynamics
 
+.. autofunction:: qed.measure
+
+.. autoclass:: qed.Expect
+
+.. autoclass:: qed.Correlations
+
 .. autofunction:: qed.expect
+
+.. autofunction:: qed.correlations
+
+Families
+--------
+
+.. autoclass:: qed.Family
+   :members: spins, sites, bonds, fourier
+
+.. autoclass:: qed.MomentumFamily
+   :members: operators
 
 Results
 -------
@@ -71,7 +91,7 @@ Every result carries ``diagnostics``, a list of ``(code, message)`` pairs for th
 the run took.
 
 .. autoclass:: qed.EigResult
-   :members: vectors, expect, matrix_element, save, momentum, irrep_characters
+   :members: vectors, expect, correlations, matrix_element, save, momentum, irrep_characters
 
 .. autoclass:: qed.SpectrumResult
    :members: momentum, irrep_characters
@@ -80,7 +100,15 @@ the run took.
 
 .. autoclass:: qed.DynamicsResult
 
+.. autoclass:: qed.MeasureResult
+
 .. autoclass:: qed.ExpectResult
+   :members: ground
+
+.. autoclass:: qed.CorrelationResult
+   :members: ground, connected, fourier
+
+.. autoclass:: qed.StructureFactor
 
 .. py:currentmodule:: qed._core.sectors
 
@@ -375,7 +403,7 @@ Operators
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: qed.input
-   :members: HamiltonianBuilder
+   :members: HamiltonianBuilder, cluster_momenta, displacement, momentum_label
 
 .. py:currentmodule:: qed.input
 
@@ -424,6 +452,11 @@ The lattice types are bound from ``ed::input`` (``include/ed/input/``).
       The second and third distance shells (minimum image on a periodic lattice), i < j.
 
    .. py:attribute:: lattice_vectors
+   .. py:attribute:: supercell
+
+      The periodic cluster's translation vectors, one ``[x, y, z]`` per lattice vector (n_k a_k
+      along each periodic direction k, zero otherwise): :func:`cluster_momenta` reads them.
+
    .. py:attribute:: pbc
    .. py:attribute:: label
 

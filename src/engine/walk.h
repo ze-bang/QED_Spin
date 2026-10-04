@@ -583,16 +583,21 @@ public:
         gens.insert(gens.end(), s.residues.begin(), s.residues.end());
         G_ = close_group(gens, n_sites);
     }
+    /// The average of a canonical operator: the SU(2)-scalar part (multiplets), the S^z changes
+    /// `keep` allows, the group average with the flip, then the antiunitary image. Pure (no cache),
+    /// so many operators may be averaged in parallel.
+    [[nodiscard]] ed::ops::MaskedOperator average_of(const ed::ops::MaskedOperator& O, bool flip, Keep keep,
+                                                     Antiunitary image = Antiunitary::None) const {
+        const ed::ops::MaskedOperator src = su2_ ? ed::ops::su2_scalar_part(O) : O;
+        ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(src, keep), G_, flip);
+        using Map = ed::ops::MaskedOperator::Map;
+        if (image != Antiunitary::None) a = a.image(image == Antiunitary::Theta ? Map::Theta : Map::K);
+        return a;
+    }
     const ed::ops::MaskedOperator& average(const ::Operator& O, bool flip, Keep keep,
                                            Antiunitary image = Antiunitary::None) {
         auto& slot = averages_[{&O, flip, static_cast<int>(keep), static_cast<int>(image)}];
-        if (!slot) {
-            const ed::ops::MaskedOperator src = su2_ ? ed::ops::su2_scalar_part(O.canonical()) : O.canonical();
-            ed::ops::MaskedOperator a = ed::ops::group_average(ed::ops::keep_sz_changes(src, keep), G_, flip);
-            using Map = ed::ops::MaskedOperator::Map;
-            if (image != Antiunitary::None) a = a.image(image == Antiunitary::Theta ? Map::Theta : Map::K);
-            slot = std::make_shared<const ed::ops::MaskedOperator>(std::move(a));
-        }
+        if (!slot) slot = std::make_shared<const ed::ops::MaskedOperator>(average_of(O.canonical(), flip, keep, image));
         return *slot;
     }
     std::shared_ptr<const ed::ops::MaskedProgram> program(const ::Operator& O, bool flip, Keep keep,

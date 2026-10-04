@@ -20,7 +20,8 @@ ordering; feed them to :func:`qed.dynamics`.
     obs = qed.dssf.build_observables(spec)
     S = qed.dynamics(H, obs.operators[0], np.linspace(-2, 2, 200)).S[0]
 
-Operator types (``R_i`` from ``positions_file``, ``phi_i = e^{i Q.R_i} / sqrt(N)``):
+Operator types (``R_i`` from ``positions_file``, ``phi_i = e^{-i Q.R_i} / sqrt(N)``, the package's
+convention: qed.Family.fourier, qed._geometry):
 
 * ``"sum"``: ``sum_i phi_i S^a_i`` per component ``a``; name ``{C}_q_Qx{Qx}_Qy{Qy}_Qz{Qz}``.
 * ``"transverse"``: ``sum_i phi_i (e.z_{i mod 4}) S^a_i`` for the two transverse directions
@@ -248,7 +249,7 @@ def _phases(Q, positions, norm: float) -> List[complex]:
         dot = 0.0
         for d in range(3):
             dot += Q[d] * r[d]
-        out.append(complex(norm * math.cos(dot), norm * math.sin(dot)))
+        out.append(complex(norm * math.cos(dot), -norm * math.sin(dot)))   # e^{-i Q.R} (qed._geometry)
     return out
 
 
@@ -264,7 +265,7 @@ def _transverse_phases(Q, v, positions) -> List[complex]:
         for d in range(3):
             vz += v[d] * z[d]
         w = norm * vz
-        out.append(complex(w * math.cos(dot), w * math.sin(dot)))
+        out.append(complex(w * math.cos(dot), -w * math.sin(dot)))   # e^{-i Q.R}
     return out
 
 

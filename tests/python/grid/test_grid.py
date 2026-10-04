@@ -85,6 +85,7 @@ TASKS = [
     "labels",
     "scale",
     "expect",
+    "corr",
     "spectrum",
     "th_exact",
     "th_ftlm",
@@ -502,6 +503,33 @@ def _run(task, content, mname, device, monkeypatch):
                 me_worst = max(me_worst, abs(got - np.vdot(vi, Od @ vj)))
         err = max(worst, me_worst)
         return err < 1e-7, err, f"{checked} clusters, matrix elements {me_worst:.1e}"
+
+    if task == "corr":
+        # Per degenerate cluster, sum of multiplicity x <A_a^dag A_b> must be Tr(P_E A_a^dag A_b)
+        # for any partner choice, and the one-point values likewise. The family breaks translations,
+        # changes Sz (S+, S-), holds a two-site member and one odd under complex conjugation.
+        fam = [
+            [(1.0, (("z", 0),))],
+            [(1.0, (("+", 0),))],
+            [(1.0, (("-", 1),))],
+            [(1.0, (("z", 0), ("z", 2)))],
+            [(0.5j, (("+", 0), ("-", 1))), (-0.5j, (("-", 0), ("+", 1)))],
+        ]
+        rows = api.correlations(m, H, content, device, [Model("obs", m.N, t, [], (), []).operator() for t in fam], k=4)
+        worst, checked = 0.0, 0
+        for E, dim, T, t in orc.cluster_pair_traces(sel, fam, max(e for e, _, _, _ in rows)):
+            mine = [(mult, C, ma) for e, mult, C, ma in rows if abs(e - E) < 1e-7]
+            if sum(mult for mult, _, _ in mine) != dim:
+                continue  # cluster cut by the k window
+            worst = max(
+                worst,
+                float(np.max(np.abs(sum(mult * C for mult, C, _ in mine) - T))),
+                float(np.max(np.abs(sum(mult * ma for mult, _, ma in mine) - t))),
+            )
+            checked += 1
+        if not checked:
+            return False, math.inf, "no complete cluster"
+        return worst < 1e-7, worst, f"{checked} clusters x {len(fam)}^2 pairs"
 
     if task == "spectrum":
         got = api.spectrum(m, H, content, device)

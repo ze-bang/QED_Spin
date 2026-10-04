@@ -383,8 +383,9 @@ experimental types) or `momentum_points`, a $Q$ or polarization that is not a 3-
 positions file with the wrong number of sites, a line of another column count, an id that is not
 the site's index, or a coordinate that is not a number.
 
-The phase is $e^{+iQ\cdot R_i}$. The examples build $S^a_q = N^{-1/2}\sum_j e^{-iqj} S^a_j$;
-the two differ by $Q \to -Q$.
+The phase is $e^{-iQ\cdot R_i}/\sqrt{N}$, the package's convention (as in `qed.Family.fourier` and the
+examples' $S^a_q = N^{-1/2}\sum_j e^{-iqj} S^a_j$). Before 0.7.0 dssf used $e^{+iQ\cdot R_i}$: an old
+$Q$ is the new $-Q$.
 
 ## Operators as observables
 
@@ -395,8 +396,10 @@ raises `InvalidRequest`. $H$ itself must be Hermitian (to 1e-10 of its largest c
 
 | call | returns |
 |---|---|
-| `qed.expect(H, ops, k=1, *, sym=None, device="cpu", **eigs_kwargs)` | `ExpectResult`: `energies`, `multiplicities`, `values` (complex, `[len(levels), len(ops)]`), `levels`, `eigs`, `diagnostics` |
-| `EigResult.expect(ops)` | the same `values` from an existing `qed.eigs(..., vectors=True)` result, also after `qed.load_eigs` |
+| `qed.measure(H, requests, k=1, *, states="levels", degeneracy_tol=1e-8, sym=None, device="cpu", **eigs_kwargs)` | `MeasureResult`: one answer per request (`qed.Expect(ops)`, `qed.Correlations(A, B=None)`), all from one eigensolve and one sweep of each level's basis; `H` may be an `EigResult` with vectors |
+| `qed.expect(H, ops, k=1, *, states="levels", ...)` | `ExpectResult`: `energies`, `multiplicities`, `values` (complex, `[rows, *index]`), `levels`, `eigs`, `diagnostics`, `rows`, `index`; `ground()` |
+| `qed.correlations(H, A, B=None, k=1, *, states="levels", ...)` | `CorrelationResult`: `C[rows, *A_index, *B_index]` $=\langle A_a^\dagger B_b\rangle$, the one-point values `mean_a`, `mean_b`; `ground()`, `connected()`, `fourier(q)` (the structure factor, `StructureFactor.S[rows, *A_lead, *B_lead, q]`) |
+| `EigResult.expect(ops)`, `EigResult.correlations(A, B=None)` | the same from an existing `qed.eigs(..., vectors=True)` result, also after `qed.load_eigs` |
 | `EigResult.matrix_element(O, i, j)` | $\langle v_i \rvert O \lvert v_j\rangle$ between the vectors of `levels[i]` and `levels[j]` |
 | `qed.thermal(H, T, observables=[...], method=...)` | `ThermalResult.O`: $\langle O\rangle(T) = \mathrm{Tr}(e^{-H/T} O)/Z$, complex, `[len(observables), len(T)]` |
 | `qed.dynamics(H, O, omega, B=None, ...)` | correlation spectra; see [Dynamics](dynamics.md) |
@@ -406,12 +409,19 @@ raises `InvalidRequest`. $H$ itself must be Hermitian (to 1e-10 of its largest c
 `exact_states=0` with either (`InvalidRequest` otherwise); `"exact"` evaluates them through each
 block's eigenvectors on the host, `"ftlm"` with the symmetric estimator
 $\sum_r \sum_{ij} e^{-(E_i + E_j)/2T} \langle r|\psi_i\rangle \langle\psi_i|O|\psi_j\rangle \langle\psi_j|r\rangle / Z$
-on each sample's Krylov basis. Correlators and structure factors are operators like any other:
+on each sample's Krylov basis.
+
+`ops`, `A` and `B` are a `qed.Operator`, a sequence of them, a `qed.Family` (an index axis: its
+shape, e.g. `(3, N)` for `qed.Family.spins(lattice)`) or a `qed.MomentumFamily` (`family.fourier(q)`:
+a momentum axis on the family's last index, $O_q = N^{-1/2}\sum_r e^{-iq\cdot r} O_r$). Pairs are
+formed exactly with the operator algebra, and pairs related by a symmetry are evaluated once:
 
 ```python
-P, ZERO = qed.Operator.product, qed.Operator(N)
-Sq = sum((P(N, "z", [j], cmath.exp(-1j * q * j) / math.sqrt(N)) for j in range(N)), ZERO)
-r = qed.expect(H, [Sq.adjoint() @ Sq], 1)                 # static S^zz(q) in the ground level
+lat = qed.input.lattice.chain(N, True)
+spins = qed.Family.spins(lat)                              # S_i^a, shape (3, N)
+c = qed.correlations(H, spins)                             # C[row, a, i, b, j] = <S_i^a S_j^b>
+S = c.fourier("cluster")                                   # S^ab(q) at the cluster's momenta
+m = qed.measure(H, [qed.Expect(spins), qed.Correlations(spins)], states="ground")   # one pass
 ```
 
 ### What "O need not share any symmetry of H" means

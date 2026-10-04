@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional
 
 import numpy as np
 
@@ -78,15 +78,24 @@ class EigResult(Labelled):
         return out
 
     @_log.replays
-    def expect(self, ops: Sequence) -> np.ndarray:
-        """<O> in each entry of ``levels``, averaged over the level's symmetry multiplet:
-        a complex array [len(levels), len(ops)]. Needs ``vectors=True``."""
-        single = not isinstance(ops, (list, tuple))
-        ops = [ops] if single else list(ops)
-        vals = np.asarray(self._raw.expect(self._spec, ops), complex)
-        return vals.reshape(len(self.levels), len(ops))
+    def expect(self, ops) -> np.ndarray:
+        """<O> in each entry of ``levels``, averaged over the level's symmetry multiplet: a complex
+        array [len(levels), *index], the index axes those of ``ops`` -- (len(ops),) for an Operator or
+        a sequence, the shape of a :class:`qed.Family` or the momentum shape of a
+        :class:`qed.MomentumFamily`. Needs ``vectors=True``."""
+        from .measure import Expect, _evaluate
+
+        return _evaluate(self, [Expect(ops)])[0].values
 
     @_log.replays
+    def correlations(self, A, B=None):
+        """<A_a^dag B_b> in each entry of ``levels`` for every pair (``B=None``: B = A), averaged as
+        :meth:`expect` averages A_a^dag B_b: a :class:`qed.CorrelationResult`. All pairs come from one
+        sweep of each level's basis, a symmetry orbit of pairs evaluated once."""
+        from .measure import Correlations, _evaluate
+
+        return _evaluate(self, [Correlations(A, B)])[0]
+
     def matrix_element(self, O, i: int, j: int) -> complex:
         """<v_i| O |v_j> between the vectors of ``levels[i]`` and ``levels[j]`` -- the
         partners the solver returned, from which each level's multiplet is expanded.
@@ -118,6 +127,7 @@ def eigs(
     device: str = "cpu",
     prune: bool = True,
     window: float = 0.0,
+    per_block: Optional[int] = None,
 ) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
 
@@ -132,7 +142,14 @@ def eigs(
     or the certified ground-state vector with ``vectors``, for one owed level; thick-restart
     Krylov-Schur for several); ``None``
     picks it from ``k`` (1600 for ``k <= 10``), 0 sends every block above dimension 2 to Krylov.
+    ``per_block=m``: the lowest ``m`` levels of EVERY symmetry block instead of the lowest ``k``
+    overall (``k`` and ``window`` are then not used; nothing is pruned) -- the excited states of each
+    sector, e.g. for transitions between them.
     """
+    if per_block is not None and int(per_block) < 1:
+        raise InvalidRequest(f"per_block must be >= 1 or None, got {per_block}")
+    if per_block is not None and window > 0:
+        raise InvalidRequest("per_block and window exclude each other: per_block returns every block's levels")
     if dense_max_dim is not None and int(dense_max_dim) < 0:
         raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
     sym = Symmetry.auto() if sym is None else sym
@@ -148,12 +165,14 @@ def eigs(
         device=_device.resolve(device),
         prune=bool(prune),
         window=float(window),
+        per_block=0 if per_block is None else int(per_block),
     )
-    rows = int(k) if window <= 0 else sum(int(L.multiplicity) for L in raw.levels)
+    every = window > 0 or per_block is not None
+    rows = sum(int(L.multiplicity) for L in raw.levels) if every else int(k)
     return EigResult(
         energies=np.asarray(raw.energies(rows), float),
         levels=list(raw.levels),
-        k=int(k),
+        k=rows if per_block is not None else int(k),
         symmetry=sym,
         complete=bool(raw.complete),
         device_blocks=int(raw.device_blocks),

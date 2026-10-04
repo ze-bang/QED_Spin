@@ -7,6 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 from qed import Symmetry
+from qed import correlations as _correlations
 from qed import dynamics as _dynamics
 from qed import eigs as _eigs
 from qed import expect as _expect
@@ -187,6 +188,15 @@ def expect(m, H, content, device, ops, k):
     )
     _on_device(device, r.eigs)
     return [(float(e), int(mu), v) for e, mu, v in zip(r.energies, r.multiplicities, r.values)]
+
+
+def correlations(m, H, content, device, A, k):
+    """[(energy, multiplicity, C[a, b] = <A_a^dag A_b>, <A_a>)] for the levels of the lowest-k window."""
+    r = _correlations(
+        H, A, k=k, sym=_sym(m, content), device=device, prune=_prune(device), dense_max_dim=_dense_max_dim(device)
+    )
+    _on_device(device, r.eigs)
+    return [(float(e), int(mu), C, ma) for e, mu, C, ma in zip(r.energies, r.multiplicities, r.C, r.mean_a)]
 
 
 def matrix_elements(m, H, content, device, O, k):

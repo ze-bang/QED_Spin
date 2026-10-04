@@ -188,6 +188,11 @@ Lattice build(const Cells& C, bool pbc, std::string label) {
     L.pbc = pbc;
     L.label = std::move(label);
     L.lattice_vectors = C.a;
+    if (pbc)
+        for (int k = 0; k < C.dims; ++k)
+            for (int x = 0; x < 3; ++x)
+                L.supercell[static_cast<std::size_t>(k)][static_cast<std::size_t>(x)] =
+                    static_cast<double>(C.n[static_cast<std::size_t>(k)]) * C.a[static_cast<std::size_t>(k)][static_cast<std::size_t>(x)];
     for (const auto& c : cells)
         for (int u = 0; u < static_cast<int>(C.basis.size()); ++u) {
             L.positions.push_back(lay.position(c, u));
@@ -334,6 +339,7 @@ Lattice pyrochlore(std::size_t Lx, std::size_t Ly, std::size_t Lz, bool pbc) {
                {0, 3, {-1, 0, 0}}, {1, 2, {0, -1, 1}}, {1, 3, {-1, 0, 1}}, {2, 3, {-1, 1, 0}}};
     Lattice L = build(C, pbc, size_label("pyrochlore", {Lx, Ly, Lz}, pbc));
     L.lattice_vectors = {a0, a1, a2};
+    L.supercell = {L.supercell[2], L.supercell[1], L.supercell[0]};   // in the order of lattice_vectors
     return L;
 }
 

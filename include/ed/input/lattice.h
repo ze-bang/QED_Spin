@@ -62,6 +62,12 @@ struct Lattice {
     // Lattice basis vectors (`{a1, a2, a3}`); unused entries are zeroed out.
     std::array<Position, 3> lattice_vectors{};
 
+    // The periodic cluster's translation vectors, n_k a_k for each periodic direction k (the
+    // superlattice whose translations map the cluster onto itself); zero for an open lattice, an
+    // unused direction, or a lattice built from an adjacency list (set it by hand there). The
+    // allowed momenta q satisfy q . supercell[k] in 2 pi Z.
+    std::array<Position, 3> supercell{};
+
     // True iff the lattice was generated with periodic boundary conditions.
     bool pbc = false;
 

@@ -13,7 +13,7 @@ CPU_TASKS=(
   "pytest|python -u -m pytest tests/python -q -rf -p no:cacheprovider"
   "golden_cpu|CUDA_VISIBLE_DEVICES= python -u tests/python/golden/golden.py compare --device cpu --ref ${REF}/cpu.json.gz"
   "examples|for ex in examples/[0-9]*.py; do python -u \"\${ex}\" || exit 1; done"
-  "grid_cpu_levels|${GRID} -k 'cpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+  "grid_cpu_levels|${GRID} -k 'cpu and (eigs or vectors or labels or scale or expect or corr or spectrum)'"
   "grid_cpu_thermal|${GRID} -k 'cpu and th_'"
   "grid_cpu_dyn0_zz|${GRID} -k 'cpu and dyn0_zz'"
   "grid_cpu_dyn0_pm|${GRID} -k 'cpu and dyn0_pm'"
@@ -33,7 +33,7 @@ else
     "${CTEST}"
     "pytest_gpu|python -u -m pytest tests/python/test_device.py tests/python/test_sublattice.py -q -rf -p no:cacheprovider"
     "golden_gpu|ED_SYM_LG_GPU=1 python -u tests/python/golden/golden.py compare --device gpu --ref ${REF}/gpu.json.gz"
-    "grid_gpu_levels|${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+    "grid_gpu_levels|${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or corr or spectrum)'"
     "grid_gpu_exact_ftlm|${GRID} -k 'gpu and (th_exact or th_ftlm or th_Oexact)'"
     "grid_gpu_mtpq|${GRID} -k 'gpu and (th_mtpq or th_Oftlm)'"
     "grid_gpu_dyn0_zz|${GRID} -k 'gpu and dyn0_zz'"
@@ -76,7 +76,7 @@ fi
 SLC="ED_SYM_SUBLATTICE=1"
 CPU_TASKS+=(
   "pytest_slc|${SLC} python -u -m pytest tests/python -q -rf -p no:cacheprovider"
-  "grid_cpu_levels_slc|${SLC} ${GRID} -k 'cpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+  "grid_cpu_levels_slc|${SLC} ${GRID} -k 'cpu and (eigs or vectors or labels or scale or expect or corr or spectrum)'"
   "grid_cpu_thermal_slc|${SLC} ${GRID} -k 'cpu and th_'"
   "grid_cpu_dyn0_zz_slc|${SLC} ${GRID} -k 'cpu and dyn0_zz'"
   "grid_cpu_dyn0_pm_slc|${SLC} ${GRID} -k 'cpu and dyn0_pm'"
@@ -88,6 +88,6 @@ fi
 if [ "${V}" = cuda ]; then
   GPU_TASKS+=(
     "ctest_slc|${SLC} ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_CPUS_PER_TASK}"
-    "grid_gpu_levels_slc|${SLC} ${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or spectrum)'"
+    "grid_gpu_levels_slc|${SLC} ${GRID} -k 'gpu and (eigs or vectors or labels or scale or expect or corr or spectrum)'"
   )
 fi

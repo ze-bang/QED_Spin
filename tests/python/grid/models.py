@@ -396,6 +396,25 @@ class Oracle:
         W[idx] = V
         return E, W
 
+    def cluster_pair_traces(self, sel, op_terms, emax, tol=1e-8):
+        """[(E, dim, Tr(P_E A_a^dag A_b), Tr(P_E A_a))] over the degenerate clusters of H inside the
+        selection up to energy emax (only those columns of the eigenbasis are touched)."""
+        E, W = self.eigbasis(sel)
+        n = int(np.searchsorted(E, emax + 1e-7, side="right"))
+        while n < len(E) and E[n] - E[n - 1] <= tol:
+            n += 1   # finish the cluster at the edge
+        W = W[:, :n]
+        X = np.stack([sparse(t, self.m.N) @ W for t in op_terms])   # (ops, dim, n)
+        out, a = [], 0
+        for b in range(1, n + 1):
+            if b == n or E[b] - E[a] > tol:
+                Xc = X[:, :, a:b]
+                T = np.einsum("adm,bdm->ab", Xc.conj(), Xc)
+                t = np.einsum("dm,adm->a", W[:, a:b].conj(), Xc)
+                out.append((float(E[a]), b - a, T, t))
+                a = b
+        return out
+
     def thermal_expect(self, sel, obs_list, T):
         """<O>(T) = Tr(e^{-H/T} O) / Z over the selection, one row per operator."""
         E, W = self.eigbasis(sel)
