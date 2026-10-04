@@ -70,6 +70,21 @@ def _labels_of(m):
     return pop if m.u1 else (pop % 2 if m.parity else np.zeros_like(pop))
 
 
+def _terms_key(terms):
+    return tuple((complex(c), tuple(ops)) for c, ops in terms)
+
+
+def _init_key(init):
+    """A hashable key for an initial ensemble (see Oracle.lehmann): an eigbasis tuple by identity
+    (eigbasis is lru_cached, one object per selection; the memo holds it, so the id stays its
+    own), a basis mask by its bytes."""
+    if init is None:
+        return None
+    if isinstance(init, tuple):
+        return ("basis", id(init))
+    return ("mask", np.asarray(init, bool).tobytes())
+
+
 @functools.lru_cache(maxsize=None)
 def oracle(name):
     m = MODELS[name]
@@ -85,6 +100,11 @@ class Oracle:
         self.m, self.H, self.E, self.V = m, H, E, V
         dim = 1 << m.N
         self.pop = np.array([bin(s).count("1") for s in range(dim)])
+        # A dynamics reference depends on (probe, T, initial ensemble) only, which most symmetry
+        # contents share: its small results are memoised (_memoised), and the last pole set is
+        # kept, since a cell asks for the same poles in lehmann and in its sum rule.
+        self._memo = {}
+        self._poles = None
 
     # -- spectra --------------------------------------------------------
     def block(self, mask):
@@ -308,32 +328,58 @@ class Oracle:
         return {k: np.array(v) for k, v in out.items()}
 
     # -- dynamics --------------------------------------------------------
+    def _memoised(self, key, init, compute):
+        if key not in self._memo:
+            self._memo[key] = (compute(), init)  # init held: an eigbasis key is its id
+        return self._memo[key][0]
+
     def lehmann(self, obs_terms, omega, eta, T=None, deg_tol=1e-8, init=None):
         """S(omega) = sum_m p_m sum_n |<n|O|m>|^2 L(omega - E_n + E_m), with p_m the ground
         manifold (T=0) or Boltzmann weights over the initial states; ``init`` (a basis mask)
         restricts the initial states to the eigenstates of H inside that block, or is the
         (E, W) eigenbasis of the initial states itself (a spin tower, from ``eigbasis``)."""
-        pos, wt = self.lehmann_poles(obs_terms, T, deg_tol, init)
-        om = np.asarray(omega)[:, None]
-        S = np.zeros(len(omega))
-        for a in range(0, len(pos), 1 << 16):  # chunks: 161 x 2^16 doubles at a time
-            p, w = pos[None, a : a + (1 << 16)], wt[None, a : a + (1 << 16)]
-            S += (w * eta / math.pi / ((om - p) ** 2 + eta**2)).sum(axis=1)
-        return S
+        omega = np.asarray(omega, float)
+
+        def compute():
+            pos, wt = self.lehmann_poles(obs_terms, T, deg_tol, init)
+            om = omega[:, None]
+            S = np.zeros(len(omega))
+            for a in range(0, len(pos), 1 << 16):  # chunks: 161 x 2^16 doubles at a time
+                p, w = pos[None, a : a + (1 << 16)], wt[None, a : a + (1 << 16)]
+                S += (w * eta / math.pi / ((om - p) ** 2 + eta**2)).sum(axis=1)
+            return S
+
+        key = ("S", _terms_key(obs_terms), omega.tobytes(), eta, T, deg_tol, _init_key(init))
+        return self._memoised(key, init, compute).copy()
+
+    def weight_inside(self, obs_terms, lo, hi, eta, T=None, deg_tol=1e-8, init=None):
+        """sum over the poles of their weight times the fraction of their Lorentzian (width eta)
+        inside [lo, hi]; ``init`` as in lehmann."""
+
+        def compute():
+            pos, wt = self.lehmann_poles(obs_terms, T, deg_tol, init)
+            inside = (np.arctan((hi - pos) / eta) - np.arctan((lo - pos) / eta)) / math.pi
+            return float(np.sum(wt * inside))
+
+        key = ("inside", _terms_key(obs_terms), lo, hi, eta, T, deg_tol, _init_key(init))
+        return self._memoised(key, init, compute)
 
     def lehmann_poles(self, obs_terms, T=None, deg_tol=1e-8, init=None):
         """(positions, weights) of the poles of S(omega): weight p_m |<n|O|m>|^2 at E_n - E_m
         (T > 0) or E_n - E_0 averaged over the ground manifold (T = 0); ``init`` as in lehmann."""
-        O = dense(obs_terms, self.m.N)
-        E, V = self.E, self.V
-        Eb, Vi, p = self._initial(T, deg_tol, init)
-        W = np.abs(V.conj().T @ O @ Vi) ** 2  # |<n|O|m>|^2, m over initial states
-        live = np.flatnonzero(p > 1e-14)
-        ref = np.full(len(live), Eb[0]) if (T is None or T == 0) else Eb[live]
-        pos = (E[:, None] - ref[None, :]).ravel()
-        wt = (W[:, live] * p[None, live]).ravel()
-        keep = wt > 1e-15 * wt.sum()  # symmetry zeros (roundoff); negligible to the sum
-        return pos[keep], wt[keep]
+        key = (_terms_key(obs_terms), T, deg_tol, _init_key(init))
+        if self._poles is None or self._poles[0] != key:
+            Eb, Vi, p = self._initial(T, deg_tol, init)
+            live = np.flatnonzero(p > 1e-14)
+            # |<n|O|m>|^2 over the initial states that carry weight (at T = 0 the ground
+            # manifold): O applied sparse, then one product with V^dagger
+            W = np.abs(self.V.conj().T @ (sparse(obs_terms, self.m.N) @ Vi[:, live])) ** 2
+            ref = np.full(len(live), Eb[0]) if (T is None or T == 0) else Eb[live]
+            pos = (self.E[:, None] - ref[None, :]).ravel()
+            wt = (W * p[None, live]).ravel()
+            keep = wt > 1e-15 * wt.sum()  # symmetry zeros (roundoff); negligible to the sum
+            self._poles = (key, pos[keep], wt[keep], init)  # init held: an eigbasis key is its id
+        return self._poles[1], self._poles[2]
 
     def _initial(self, T, deg_tol, init):
         """(E_m, |m> columns, p_m) of the initial ensemble."""
@@ -354,10 +400,15 @@ class Oracle:
 
     def norm_weight(self, obs_terms, T=None, deg_tol=1e-8, init=None):
         """<O^dagger O> in the initial ensemble, sum_m p_m ||O|m>||^2 (no eigenbasis of H)."""
-        Eb, Vi, p = self._initial(T, deg_tol, init)
-        live = np.flatnonzero(p > 1e-14)
-        OV = sparse(obs_terms, self.m.N) @ Vi[:, live]
-        return float((p[live] * np.sum(np.abs(OV) ** 2, axis=0)).sum())
+
+        def compute():
+            Eb, Vi, p = self._initial(T, deg_tol, init)
+            live = np.flatnonzero(p > 1e-14)
+            OV = sparse(obs_terms, self.m.N) @ Vi[:, live]
+            return float((p[live] * np.sum(np.abs(OV) ** 2, axis=0)).sum())
+
+        key = ("norm", _terms_key(obs_terms), T, deg_tol, _init_key(init))
+        return self._memoised(key, init, compute)
 
     def rayleigh(self, vec):
         """(Rayleigh energy, residual ||Hv - Ev||) of a normalised vector."""

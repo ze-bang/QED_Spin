@@ -299,9 +299,7 @@ def _sum_rule(orc, terms, got, T, init):
     total = orc.norm_weight(terms, T, init=init)
     if total < 1e-12:
         return 0.0
-    pos, wt = orc.lehmann_poles(terms, T, init=init)
-    inside = (np.arctan((OMEGA[-1] - pos) / ETA) - np.arctan((OMEGA[0] - pos) / ETA)) / math.pi
-    tail = total - float(np.sum(wt * inside))
+    tail = total - orc.weight_inside(terms, OMEGA[0], OMEGA[-1], ETA, T, init=init)
     return abs(float(np.trapezoid(got, OMEGA)) + tail - total) / total
 
 
