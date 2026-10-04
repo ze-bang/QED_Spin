@@ -136,7 +136,9 @@ def cluster_momenta(
             supercell = lattice.supercell if supercell is None else supercell
             primitive = lattice.lattice_vectors if primitive is None else primitive
         if supercell is None or primitive is None:
-            raise InvalidRequest("cluster_momenta: give a periodic lattice, supercell and primitive vectors, or translations")
+            raise InvalidRequest(
+                "cluster_momenta: give a periodic lattice, supercell and primitive vectors, or translations"
+            )
         L = _rows(supercell)
         A = _rows(primitive)[: len(L)]
         if len(L) == 0:
@@ -147,7 +149,9 @@ def cluster_momenta(
         raise InvalidRequest("cluster_momenta: as many primitive vectors as supercell vectors are needed")
     M = L @ np.linalg.pinv(A)                      # the supercell in primitive coordinates
     if not np.allclose(M, np.round(M), atol=1e-6):
-        raise InvalidRequest("cluster_momenta: the supercell vectors are not integer combinations of the primitive ones")
+        raise InvalidRequest(
+            "cluster_momenta: the supercell vectors are not integer combinations of the primitive ones"
+        )
     M = np.round(M)
     n_cells = int(round(abs(np.linalg.det(M))))
     G = _dual(A)                                   # primitive reciprocal vectors
@@ -164,7 +168,12 @@ def cluster_momenta(
     Q = X @ G
     if fold == "ws":
         shifts = np.array(list(itertools.product((-1, 0, 1), repeat=d)), float) @ G
-        Q = np.array([min((q + s for s in shifts), key=lambda v: (round(float(v @ v), 9), tuple(np.round(-v, 9)))) for q in Q])
+
+        # the shortest image; ties go to the image with the larger components (a fixed choice)
+        def shortest(q):
+            return min((q + s for s in shifts), key=lambda v: (round(float(v @ v), 9), tuple(np.round(-v, 9))))
+
+        Q = np.array([shortest(q) for q in Q])
     return Q
 
 

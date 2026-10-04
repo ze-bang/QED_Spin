@@ -2,8 +2,9 @@
 
 A measurement is (quantity) x (state) x (index axis):
 
-* quantities -- :class:`Expect` (one-point <O>) and :class:`Correlations` (equal-time pairs
-  <A_a^dag B_b>);
+* quantities -- :class:`Expect` (one-point <O>), :class:`Correlations` (equal-time pairs
+  <A_a^dag B_b>) and :class:`Transitions` (<m|O|n> between levels, as multiplet-invariant line
+  strengths and pair matrices);
 * states -- ``states="levels"`` (one row per returned level) or ``"ground"`` (one row, the ground
   manifold);
 * index axes -- an operator, a sequence of operators, a :class:`qed.Family` (its index shape) or a
@@ -29,13 +30,16 @@ from ..family import Family, MomentumFamily
 __all__ = [
     "Expect",
     "Correlations",
+    "Transitions",
     "ExpectResult",
     "CorrelationResult",
+    "TransitionResult",
     "StructureFactor",
     "MeasureResult",
     "measure",
     "expect",
     "correlations",
+    "transitions",
 ]
 
 
@@ -55,6 +59,18 @@ class Correlations:
 
     A: object
     B: object = None
+
+
+@dataclass(frozen=True)
+class Transitions:
+    """Request: transitions from every measured level to every measured level -- the line strengths
+    of ``A`` and, with ``B`` or ``pairs=True`` (B = A), the pair matrices T_ab. ``raw=True`` keeps the
+    member-resolved amplitudes (:meth:`TransitionResult.amplitudes`)."""
+
+    A: object
+    B: object = None
+    pairs: bool = False
+    raw: bool = False
 
 
 # ---- operands: what the engine evaluates and the index axes of the answer ----------------------
@@ -244,6 +260,65 @@ class CorrelationResult:
 
 
 @dataclass
+class TransitionResult:
+    """Transitions from initial level i to final level j (``initial_levels``, ``final_levels``), with
+    ``omega[i, j] = E_j - E_i``. Sums over the members of the multiplets, which do not depend on the
+    partners the solver returned:
+
+    * ``strength[i, j, *A_index]`` = (1/d_i) sum_{n' in i, m' in j} |<m'|A_a|n'>|^2, averaged over the
+      initial multiplet and summed over the final: the pole weight of A at omega in the T = 0
+      dynamics from level i;
+    * ``T[i, j, *A_index, *B_index]`` = (1/d_i) sum conj(<m'|A_a|n'>) <m'|B_b|n'> (with pairs): summed
+      over a complete set of final levels it is <A_a^dag B_b> in level i.
+
+    Transitions a selection rule forbids (momentum: O_q takes k to k - q; S^z) are exact zeros.
+    :meth:`amplitudes` returns the member-resolved <m'|A_a|n'> when the request kept them (``raw``);
+    those depend on the members chosen (the solver's vector first, then its symmetry images)."""
+
+    omega: np.ndarray
+    strength: np.ndarray
+    T: Optional[np.ndarray]
+    initial_energies: np.ndarray
+    final_energies: np.ndarray
+    initial_multiplicities: np.ndarray
+    final_multiplicities: np.ndarray
+    initial_levels: list
+    final_levels: list
+    A: object = None
+    B: object = None
+    rows: str = "levels"
+    _amplitudes: Optional[np.ndarray] = field(default=None, repr=False)
+    _offsets: tuple = field(default=(), repr=False)
+    _a_shape: tuple = field(default=(), repr=False)
+
+    def amplitudes(self, i: int, j: int) -> np.ndarray:
+        """<m'|A_a|n'> for the members n' of initial level i and m' of final level j: a complex array
+        [*A_index, d_j, d_i] (requires ``raw=True``)."""
+        if self._amplitudes is None:
+            raise InvalidRequest("amplitudes: request them with raw=True (and not after ground())")
+        oi, of = self._offsets
+        blk = self._amplitudes[:, of[j] : of[j + 1], oi[i] : oi[i + 1]]
+        return blk.reshape(*self._a_shape, *blk.shape[1:])
+
+    def ground(self, degeneracy_tol: float = 1e-8) -> "TransitionResult":
+        """One initial row: the initial levels within ``degeneracy_tol`` max(1, |E0|) of the lowest,
+        averaged with their multiplicities (transitions out of the ground manifold)."""
+        sel, w = _ground(self.initial_energies, self.initial_multiplicities, degeneracy_tol)
+        e0 = float(self.initial_energies[sel].min())
+        return replace(
+            self,
+            omega=(self.final_energies - e0)[None],
+            strength=_reduce(self.strength, sel, w),
+            T=None if self.T is None else _reduce(self.T, sel, w),
+            initial_energies=np.array([e0]),
+            initial_multiplicities=np.array([int(self.initial_multiplicities[sel].sum())]),
+            initial_levels=[self.initial_levels[i] for i in sel],
+            rows="ground",
+            _amplitudes=None,
+        )
+
+
+@dataclass
 class MeasureResult(Sequence):
     """The answers of :func:`measure`, one per request in order (``result[i]``); ``energies``,
     ``multiplicities`` and ``rows`` describe the rows they share, ``eigs`` the eigensolve."""
@@ -263,6 +338,80 @@ class MeasureResult(Sequence):
 
 
 # ---- the evaluation ----------------------------------------------------------------------------
+def _level_set(x, what: str):
+    """(EigResult, level indices) from an EigResult (every level) or (EigResult, indices)."""
+    from .eigs import EigResult
+
+    if isinstance(x, EigResult):
+        return x, list(range(len(x.levels)))
+    if isinstance(x, tuple) and len(x) == 2 and isinstance(x[0], EigResult):
+        r, idx = x
+        idx = [int(i) for i in (idx if isinstance(idx, (list, tuple, range, np.ndarray)) else [idx])]
+        for i in idx:
+            if not 0 <= i < len(r.levels):
+                raise IndexError(f"{what}: level {i} of a result with {len(r.levels)} levels")
+        return r, idx
+    raise InvalidRequest(f"{what}: an EigResult or (EigResult, level indices), got {type(x).__name__}")
+
+
+def _transition_ops(x, what: str):
+    """(operators, index shape, source). A momentum family enters as its O_q, so the selection rules
+    of the lambda projection give exact zeros."""
+    if isinstance(x, MomentumFamily):
+        return x.operators(), x.shape, x
+    op = _operand(x, what)
+    return op.ops, op.shape, op.source
+
+
+def _transitions(ri, ii: list, rf, jj: list, q: Transitions) -> TransitionResult:
+    for r in (ri, rf):
+        if not any(L.vector >= 0 for L in r.levels):
+            raise InvalidRequest("no vectors: call qed.eigs(..., vectors=True)")
+    a_ops, a_shape, a_src = _transition_ops(q.A, "Transitions A")
+    with_pairs = bool(q.pairs) or q.B is not None
+    b_ops, b_shape, b_src = (a_ops, a_shape, a_src) if q.B is None else _transition_ops(q.B, "Transitions B")
+    ops = list(a_ops) + ([] if q.B is None else list(b_ops))
+    d = _core.sectors.transition_amplitudes(ri._raw, ri._spec, ii, rf._raw, rf._spec, jj, ops)
+    amps = np.asarray(d["amplitudes"], complex)
+    oi = np.asarray(d["initial_offsets"], int)
+    of = np.asarray(d["final_offsets"], int)
+    na = len(a_ops)
+    Aa = amps[:na]
+    Bb = Aa if q.B is None else amps[na:]
+    di = np.diff(oi).astype(float)   # members of each initial level: its multiplicity
+    s = np.zeros((na, len(jj), len(ii)))
+    if na:
+        s = np.add.reduceat(np.add.reduceat(np.abs(Aa) ** 2, of[:-1], axis=1), oi[:-1], axis=2)
+    strength = (s / di).transpose(2, 1, 0).reshape(len(ii), len(jj), *a_shape)
+    T = None
+    if with_pairs:
+        T = np.empty((len(ii), len(jj), na, len(b_ops)), complex)
+        for i in range(len(ii)):
+            for j in range(len(jj)):
+                bA = Aa[:, of[j] : of[j + 1], oi[i] : oi[i + 1]]
+                bB = Bb[:, of[j] : of[j + 1], oi[i] : oi[i + 1]]
+                T[i, j] = np.einsum("amn,bmn->ab", bA.conj(), bB) / di[i]
+        T = T.reshape(len(ii), len(jj), *a_shape, *b_shape)
+    Ei = np.array([ri.levels[i].energy for i in ii], float)
+    Ef = np.array([rf.levels[j].energy for j in jj], float)
+    return TransitionResult(
+        omega=Ef[None, :] - Ei[:, None],
+        strength=strength,
+        T=T,
+        initial_energies=Ei,
+        final_energies=Ef,
+        initial_multiplicities=np.array([ri.levels[i].multiplicity for i in ii], int),
+        final_multiplicities=np.array([rf.levels[j].multiplicity for j in jj], int),
+        initial_levels=[ri.levels[i] for i in ii],
+        final_levels=[rf.levels[j] for j in jj],
+        A=a_src,
+        B=b_src if with_pairs else None,
+        _amplitudes=Aa if q.raw else None,
+        _offsets=(oi, of),
+        _a_shape=tuple(a_shape),
+    )
+
+
 def _evaluate(r, requests: Sequence) -> list:
     """Per-level answers (rows = r.levels) to every request, from one engine sweep."""
     if not any(L.vector >= 0 for L in r.levels):
@@ -283,17 +432,25 @@ def _evaluate(r, requests: Sequence) -> list:
             if q.B is not None:
                 singles.extend(b.ops)
             pairs.append((a.ops, b.ops))
+        elif isinstance(q, Transitions):
+            plan.append(("transitions", q))
         else:
-            raise InvalidRequest(f"measure: unknown request {type(q).__name__} (Expect or Correlations)")
+            raise InvalidRequest(
+                f"measure: unknown request {type(q).__name__} (Expect, Correlations or Transitions)")
     n_levels = len(r.levels)
-    raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
+    raw = np.zeros((n_levels, 0), complex)
+    if singles or pairs:
+        raw = np.asarray(r._raw.evaluate(r._spec, singles, pairs), complex).reshape(n_levels, -1)
     starts = np.cumsum([len(singles)] + [len(A) * len(B) for A, B in pairs])
     energies = np.array([L.energy for L in r.levels], float)
     mult = np.array([L.multiplicity for L in r.levels], int)
     diags = list(r.diagnostics)
     out = []
+    every = list(range(n_levels))
     for entry in plan:
-        if entry[0] == "expect":
+        if entry[0] == "transitions":
+            out.append(_transitions(r, every, r, every, entry[1]))
+        elif entry[0] == "expect":
             _, op, at = entry
             vals = _one_point(raw[:, at : at + len(op.ops)], op)
             out.append(ExpectResult(energies=energies, multiplicities=mult, values=vals, levels=list(r.levels),
@@ -328,8 +485,8 @@ def _solve(H, k: int, sym, device: str, eigs_kwargs: dict):
 @_log.replays
 def measure(H, requests: Sequence, k: int = 1, *, states: str = "levels", degeneracy_tol: float = 1e-8,
             sym=None, device: str = "cpu", **eigs_kwargs) -> MeasureResult:
-    """Every request (:class:`Expect`, :class:`Correlations`) in the lowest levels of ``H`` from one
-    eigensolve and one sweep of each level's basis.
+    """Every request (:class:`Expect`, :class:`Correlations`, :class:`Transitions`) in the lowest levels
+    of ``H`` from one eigensolve; the equal-time requests share one sweep of each level's basis.
 
     ``H``: the Hamiltonian (solved with :func:`qed.eigs` with vectors; ``k``, ``sym``, ``device`` and
     ``eigs_kwargs`` pass through) or an :class:`EigResult` with vectors to reuse.
@@ -338,7 +495,7 @@ def measure(H, requests: Sequence, k: int = 1, *, states: str = "levels", degene
     other blocks are among them only if the solve returned them: raise ``k`` or pass ``window=``).
     """
     states = _states(states)
-    requests = [requests] if isinstance(requests, (Expect, Correlations)) else list(requests)
+    requests = [requests] if isinstance(requests, (Expect, Correlations, Transitions)) else list(requests)
     r = _solve(H, k, sym, device, eigs_kwargs)
     results = _evaluate(r, requests)
     energies = np.array([L.energy for L in r.levels], float)
@@ -376,3 +533,17 @@ def correlations(H, A, B=None, k: int = 1, *, states: str = "levels", degeneracy
     result's :meth:`CorrelationResult.fourier` gives the structure factor."""
     return measure(H, [Correlations(A, B)], k, states=states, degeneracy_tol=degeneracy_tol, sym=sym,
                    device=device, **eigs_kwargs)[0]
+
+
+@_log.replays
+def transitions(A, initial, final=None, *, B=None, pairs: bool = False, raw: bool = False) -> TransitionResult:
+    """Transitions <m|A|n> from the ``initial`` levels to the ``final`` levels (``final=None``: the
+    initial ones), each an :class:`EigResult` with vectors or ``(EigResult, level indices)``; the two
+    may come from different, targeted eigs calls over one spatial symmetry (e.g. the ground state and
+    ``qed.eigs(H, per_block=4, vectors=True)``). Returns a :class:`TransitionResult`: line strengths
+    of every member of ``A`` and, with ``B`` or ``pairs=True``, the pair matrices
+    T_ab = (1/d_n) sum <n'|A_a^dag|m'><m'|B_b|n'>. ``A`` and ``B``: an Operator, a sequence, a
+    :class:`qed.Family` or a :class:`qed.MomentumFamily`."""
+    ri, ii = _level_set(initial, "transitions initial")
+    rf, jj = (ri, ii) if final is None else _level_set(final, "transitions final")
+    return _transitions(ri, ii, rf, jj, Transitions(A, B, pairs, raw))

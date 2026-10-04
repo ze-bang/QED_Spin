@@ -41,6 +41,7 @@ S1 = qed.dynamics(H, Sz_pi, w, eta=0.05, T=[0.5])   # T > 0: finite-temperature 
 | `qed.measure(H, requests, k=1, *, states="levels", sym=None, device="cpu", **eigs_kwargs)` | `MeasureResult`: one answer per request (`qed.Expect(ops)`, `qed.Correlations(A, B=None)`) from one eigensolve and one sweep; operands are operators, sequences, `qed.Family` index axes or their momentum transforms |
 | `qed.expect(H, ops, k=1, *, states="levels", ...)` | `ExpectResult`: ⟨O⟩ in each of the lowest levels (or the ground manifold), averaged over the level's symmetry multiplet |
 | `qed.correlations(H, A, B=None, k=1, *, states="levels", ...)` | `CorrelationResult`: ⟨A_a† B_b⟩ for every pair, with `connected()` and `fourier(q)` (the structure factor) |
+| `qed.transitions(A, initial, final=None, *, B=None, pairs=False, raw=False)` | `TransitionResult`: ⟨m\|A\|n⟩ between two sets of levels (e.g. the ground state and `eigs(per_block=m)`) as line strengths and pair matrices summed over the multiplets; forbidden transitions are exact zeros |
 
 - **`thermal` methods.**
   - `"exact"` takes every block's full spectrum.

@@ -10,9 +10,12 @@ from .measure import (
     ExpectResult,
     MeasureResult,
     StructureFactor,
+    TransitionResult,
+    Transitions,
     correlations,
     expect,
     measure,
+    transitions,
 )
 from .spectrum import SpectrumResult, spectrum
 from .symmetry import Symmetry
@@ -32,6 +35,9 @@ __all__ = [
     "correlations",
     "CorrelationResult",
     "StructureFactor",
+    "transitions",
+    "Transitions",
+    "TransitionResult",
     "spectrum",
     "SpectrumResult",
     "thermal",

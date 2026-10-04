@@ -32,6 +32,9 @@ inline constexpr double kClusterRel = 1e-8;
 inline constexpr double kRoundoffWeight = 1e-20;
 /// A dense block is real when max |Im H_ij| <= this * max |H_ij|.
 inline constexpr double kRealBlockRel = 32.0 * kEps;
+/// A group-averaged operator's term below this * its largest coefficient is roundoff of a cancellation;
+/// it does not enter the key that matches operators equal up to a factor (expect's deduplication).
+inline constexpr double kAveragedTermRel = 1e-13;
 
 /// s_H from LinearOperator::norm_bound(): the bound itself, or 1 when it is unknown (0).
 [[nodiscard]] inline double scale_or_one(double bound) noexcept { return bound > 0.0 ? bound : 1.0; }

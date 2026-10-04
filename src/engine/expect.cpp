@@ -10,9 +10,11 @@
 #include <ed/parallel/numa.h>   // pin_omp_threads_once
 #include <ed/sectors/expect.h>
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <map>
+#include <stdexcept>
 #include <tuple>
 
 namespace ed::sectors {
@@ -36,7 +38,7 @@ struct Unique {
         if (a.empty()) return {kNone, Complex(0.0, 0.0)};
         // The shape ignores roundoff-level terms (a cancellation left at 1e-17 in one member of
         // an orbit and exactly 0 in another), and the factor comes from the largest term.
-        const auto terms = a.terms(1e-13 * a.max_abs());
+        const auto terms = a.terms(ed::numerics::kAveragedTermRel * a.max_abs());
         std::vector<std::uint64_t> shape;
         shape.reserve(3 * terms.size());
         std::size_t top = 0;
@@ -48,7 +50,7 @@ struct Unique {
         }
         auto& cands = by_shape[shape];
         for (const std::size_t c : cands) {
-            const auto ref = ops[c].terms(1e-13 * ops[c].max_abs());
+            const auto ref = ops[c].terms(ed::numerics::kAveragedTermRel * ops[c].max_abs());
             const Complex f = terms[top].coeff / ref[top].coeff;
             if (a.equals(ops[c].scaled(f))) return {c, f};
         }
@@ -117,8 +119,8 @@ std::vector<std::vector<Complex>> averaged_values(const EigsResult& r, const Spe
         slot.reserve(averaged.size());
         for (auto& a : averaged) slot.push_back(uniq.add(std::move(a)));
         const std::size_t width = uniq.ops.size();
-        ED_LOG(Info, "[expect] %zu level(s) in a sector of dim %zu: %zu operator(s), %zu after averaging", g.levels.size(),
-               basis.states(), averaged.size(), width);
+        ED_LOG(Info, "[expect] %zu level(s) in a sector of dim %zu: %zu operator(s), %zu after averaging",
+               g.levels.size(), basis.states(), averaged.size(), width);
         // vals[level i of the group][u] = <v_i| unique[u] |v_i>
         std::vector<std::vector<Complex>> vals(g.levels.size(), std::vector<Complex>(width, Complex(0.0, 0.0)));
         if (width > 0 && basis.irrep_dim > 1) {
@@ -249,5 +251,85 @@ Complex matrix_element(const EigsResult& r, const ::Operator& O, std::size_t i, 
                                          bra.amplitudes);
 }
 
+TransitionAmplitudes transition_amplitudes(const EigsResult& ri, const Spec& si,
+                                           const std::vector<std::size_t>& initial, const EigsResult& rf,
+                                           const Spec& sf, const std::vector<std::size_t>& final,
+                                           const std::vector<const ::Operator*>& ops) {
+    detail::validate_environment("transitions");
+    const int n_sites = ri.n_sites;
+    if (rf.n_sites != n_sites)
+        throw ed::InvalidRequest("transitions: the initial levels are on " + std::to_string(n_sites)
+                                 + " sites, the final ones on " + std::to_string(rf.n_sites));
+    for (std::size_t i = 0; i < ops.size(); ++i) detail::validate_observable(ops[i], n_sites, "transitions", i);
+    if (si.two_S >= 0 || sf.two_S >= 0)
+        throw ed::Unsupported("transitions: levels of a total-spin restriction (their Sz members are not "
+                              "in the result); solve without total_spin");
+    ed::parallel::pin_omp_threads_once();
+    // Both multiplets go into momentum sectors of one abelian group, where one program per
+    // (source, target) sector pair carries every operator.
+    auto sorted_group = [&](const Spec& s) {
+        auto g = detail::abelian_or_identity(s, n_sites);
+        std::sort(g.begin(), g.end());
+        return g;
+    };
+    const auto A = sorted_group(si);
+    if (A != sorted_group(sf))
+        throw ed::InvalidRequest("transitions: the initial and final levels were solved over different "
+                                 "abelian groups (use one spatial symmetry for both)");
+    const ::Operator zero(static_cast<std::uint64_t>(n_sites), 0.5f);   // the sectors need no H
+    detail::MemberSectors ms{zero, A, n_sites, {}};
+    TransitionAmplitudes out;
+    auto expand = [&](const EigsResult& r, const Spec& s, const std::vector<std::size_t>& idx,
+                      std::vector<std::size_t>& offsets, std::vector<detail::Member>& members) {
+        offsets.push_back(0);
+        for (const std::size_t i : idx) {
+            if (i >= r.levels.size()) throw std::out_of_range("transitions: level index");
+            const Level& L = r.levels[i];
+            if (L.vector < 0) throw ed::InvalidRequest("transitions: a level has no vector (solve with vectors)");
+            auto m = detail::members_of(L, r.vectors[static_cast<std::size_t>(L.vector)], L.multiplicity, s, ms);
+            for (auto& x : m) members.push_back(std::move(x));
+            offsets.push_back(members.size());
+        }
+    };
+    std::vector<detail::Member> mi, mf;
+    expand(ri, si, initial, out.initial_offsets, mi);
+    expand(rf, sf, final, out.final_offsets, mf);
+    const std::size_t n_ops = ops.size(), ni = mi.size(), nf = mf.size();
+    out.n_ops = n_ops;
+    out.amplitudes.assign(n_ops * nf * ni, Complex(0.0, 0.0));   // [op][final member][initial member]
+    std::vector<MaskedOperator> xs;
+    xs.reserve(n_ops);
+    for (const ::Operator* O : ops) xs.push_back(O->canonical());
+    // Members by sector.
+    std::map<const void*, std::vector<std::size_t>> src, tgt;
+    for (std::size_t n = 0; n < ni; ++n) src[mi[n].v.basis.get()].push_back(n);
+    for (std::size_t m = 0; m < nf; ++m) tgt[mf[m].v.basis.get()].push_back(m);
+    for (const auto& [sp, kets_idx] : src) {
+        const auto& sb = *mi[kets_idx.front()].v.basis;
+        for (const auto& [tp, bras_idx] : tgt) {
+            const auto& tb = *mf[bras_idx.front()].v.basis;
+            // The lambda projection keeps what connects the two momenta (O_q maps k to k - q) and the
+            // S^z change between their subspaces; a program with no term is an exact zero.
+            const auto prog = ed::ops::compile_program(xs, sb, tb);
+            if (prog.n_groups() == 0) continue;
+            std::vector<ed::ops::RepVectorView> kets, bras;
+            for (const std::size_t n : kets_idx) kets.push_back({mi[n].v.amplitudes.data(), mi[n].v.amplitudes.size()});
+            for (const std::size_t m : bras_idx) bras.push_back({mf[m].v.amplitudes.data(), mf[m].v.amplitudes.size()});
+            std::vector<std::pair<int, int>> pairs;   // (bra, ket)
+            for (std::size_t b = 0; b < bras_idx.size(); ++b)
+                for (std::size_t k = 0; k < kets_idx.size(); ++k)
+                    pairs.emplace_back(static_cast<int>(b), static_cast<int>(k));
+            const auto me = ed::ops::rep_matrix_elements(sb, tb, prog, kets, bras, pairs);
+            for (std::size_t p = 0; p < pairs.size(); ++p) {
+                const std::size_t m = bras_idx[static_cast<std::size_t>(pairs[p].first)];
+                const std::size_t n = kets_idx[static_cast<std::size_t>(pairs[p].second)];
+                for (std::size_t o = 0; o < n_ops; ++o) out.amplitudes[(o * nf + m) * ni + n] = me[p * n_ops + o];
+            }
+        }
+    }
+    out.n_initial = ni;
+    out.n_final = nf;
+    return out;
+}
 
 }  // namespace ed::sectors

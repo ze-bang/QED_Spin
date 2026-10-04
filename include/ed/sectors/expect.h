@@ -20,6 +20,9 @@
 // matrix_element(): <v_i| O |v_j> between two returned vectors -- the partners the solver
 // chose. O is arbitrary: it may change Sz and break every symmetry.
 //
+// transition_amplitudes(): <m'|O|n'> between every member of two sets of levels' multiplets, for
+// many operators at once -- the raw material of line strengths and transition pair matrices.
+//
 // evaluate(): <X> for operators and <A_a^dag B_b> for every pair of operator lists, averaged as
 // expect() averages them, from one sweep. The products are formed exactly in the spin-1/2
 // algebra, and the averaged operators are deduplicated before the sweep: pairs related by a
@@ -55,6 +58,29 @@ struct PairRequest {
 [[nodiscard]] std::vector<std::vector<Complex>> evaluate(const EigsResult& r, const Spec& s,
                                                          const std::vector<const ::Operator*>& singles,
                                                          const std::vector<PairRequest>& pair_requests);
+
+/// <m'|O|n'> for every operator O, every member n' of the multiplets of the `initial` levels of `ri`
+/// and every member m' of the `final` levels of `rf`. amplitudes[(o * n_final + m) * n_initial + n];
+/// level l's members are offsets[l] .. offsets[l + 1] - 1. The members of a multiplet (the
+/// solver's vector first, then its images, orthonormalised) are a gauge choice; sums over them, such
+/// as line strengths, are not.
+struct TransitionAmplitudes {
+    std::size_t n_ops = 0, n_initial = 0, n_final = 0;
+    std::vector<std::size_t> initial_offsets, final_offsets;
+    std::vector<Complex> amplitudes;
+};
+
+/// The amplitudes between two sets of levels, each from an eigs result with vectors; both results
+/// must use one abelian group (their momentum sectors are where the multiplets are expanded) and
+/// may come from different, targeted calls. Each multiplet goes into momentum sectors, and one
+/// program per (source, target) sector pair carries every operator: what cannot connect the two
+/// momenta (O_q maps k to k - q) or the two S^z sectors is an exact zero, not computed. Levels of a
+/// total-spin restriction raise ed::Unsupported (their S^z members are not in the result).
+[[nodiscard]] TransitionAmplitudes transition_amplitudes(const EigsResult& ri, const Spec& si,
+                                                         const std::vector<std::size_t>& initial,
+                                                         const EigsResult& rf, const Spec& sf,
+                                                         const std::vector<std::size_t>& final,
+                                                         const std::vector<const ::Operator*>& ops);
 
 /// The evaluator behind expect() and evaluate(): out[level][x] = the multiplet average of the
 /// canonical operator xs[x] in each level.

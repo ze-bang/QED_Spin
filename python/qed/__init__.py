@@ -131,6 +131,8 @@ from ._verbs import (  # noqa: E402
     StructureFactor,
     Symmetry,
     ThermalResult,
+    TransitionResult,
+    Transitions,
     correlations,
     dynamics,
     eigs,
@@ -139,6 +141,7 @@ from ._verbs import (  # noqa: E402
     measure,
     spectrum,
     thermal,
+    transitions,
 )
 
 __version__: Final[str] = _core.__version__  # pyproject.toml's version, compiled into _core
@@ -169,6 +172,9 @@ __all__ = [
     "correlations",
     "CorrelationResult",
     "StructureFactor",
+    "transitions",
+    "Transitions",
+    "TransitionResult",
     "find_symmetries",
     "Symmetries",
     "has_cuda_build",

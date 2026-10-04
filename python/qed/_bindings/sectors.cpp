@@ -635,6 +635,29 @@ void bind_sectors(py::module_& m) {
     s.def("eigs_from_arrays", &eigs_from_arrays, py::arg("arrays"),
           "(result, spec) from eigs_to_arrays output (qed.load_eigs); result.n_sites is restored.");
     s.def(
+        "transition_amplitudes",
+        [](const sec::EigsResult& ri, const sec::Spec& si, const std::vector<std::size_t>& initial,
+           const sec::EigsResult& rf, const sec::Spec& sf, const std::vector<std::size_t>& final,
+           const std::vector<const ::Operator*>& ops) {
+            sec::TransitionAmplitudes t;
+            {
+                py::gil_scoped_release nogil;
+                t = sec::transition_amplitudes(ri, si, initial, rf, sf, final, ops);
+            }
+            py::array_t<std::complex<double>> a({static_cast<py::ssize_t>(t.n_ops), static_cast<py::ssize_t>(t.n_final),
+                                                 static_cast<py::ssize_t>(t.n_initial)});
+            std::copy(t.amplitudes.begin(), t.amplitudes.end(), a.mutable_data());
+            py::dict d;
+            d["amplitudes"] = a;
+            d["initial_offsets"] = t.initial_offsets;
+            d["final_offsets"] = t.final_offsets;
+            return d;
+        },
+        py::arg("initial_result"), py::arg("initial_spec"), py::arg("initial"), py::arg("final_result"),
+        py::arg("final_spec"), py::arg("final"), py::arg("ops"),
+        "<m'|O|n'> over the members of the initial and final levels' multiplets: a dict with amplitudes "
+        "[op, final member, initial member] and the members' offsets per level.");
+    s.def(
         "eigs",
         [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors, int dense_max_dim, bool allow_partial,
            sec::Device device, bool prune, double window, int per_block) {

@@ -69,6 +69,10 @@ Verbs
 
 .. autofunction:: qed.correlations
 
+.. autofunction:: qed.transitions
+
+.. autoclass:: qed.Transitions
+
 Families
 --------
 
@@ -109,6 +113,9 @@ the run took.
    :members: ground, connected, fourier
 
 .. autoclass:: qed.StructureFactor
+
+.. autoclass:: qed.TransitionResult
+   :members: amplitudes, ground
 
 .. py:currentmodule:: qed._core.sectors
 
