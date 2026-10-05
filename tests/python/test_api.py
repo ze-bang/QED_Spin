@@ -713,6 +713,25 @@ def test_krylov_blocks_with_few_distinct_levels_find_every_copy(scale):
     np.testing.assert_allclose(np.asarray(r.energies), np.sort(diag)[:12], atol=1e-9 * scale)
 
 
+def test_eigs_max_iter_is_each_blocks_krylov_budget():
+    # A 3432-state Sz block of the 14-site ring, k = 4: above the dense crossover, so Krylov-Schur.
+    # A starved budget must end uncertified (ConvergenceError, or an incomplete window under
+    # allow_partial); a generous one must equal the dense levels; None keeps the defaults.
+    H = _heisenberg_ring(14)
+    sym = qed.Symmetry(spatial=None, sz=7, spin_flip="off", time_reversal="off")
+    ref = qed.eigs(H, 4, sym=sym, dense_max_dim=5000)
+    with pytest.raises(qed.errors.ConvergenceError):
+        qed.eigs(H, 4, sym=sym, max_iter=30)
+    assert not qed.eigs(H, 4, sym=sym, max_iter=30, allow_partial=True).complete
+    big = qed.eigs(H, 4, sym=sym, max_iter=20000)
+    assert big.complete
+    np.testing.assert_allclose(np.asarray(big.energies), np.asarray(ref.energies), atol=1e-9)
+    np.testing.assert_allclose(np.asarray(qed.eigs(H, 4, sym=sym).energies), np.asarray(ref.energies), atol=1e-9)
+    for bad in (0, -3, True):
+        with pytest.raises(qed.errors.InvalidRequest):
+            qed.eigs(H, 4, sym=sym, max_iter=bad)
+
+
 def test_a_block_smaller_than_k_returns_its_whole_spectrum():
     # One 6-dim block with three doubly degenerate levels and k = 7 (audit F-B-2: raised that the
     # block could not certify its levels).

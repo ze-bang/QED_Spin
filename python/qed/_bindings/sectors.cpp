@@ -692,9 +692,10 @@ void bind_sectors(py::module_& m) {
     s.def(
         "eigs",
         [](const ::Operator& H, const sec::Spec& spec, int k, bool vectors, int dense_max_dim, bool allow_partial,
-           sec::Device device, bool prune, double window, int per_block) {
+           sec::Device device, bool prune, double window, int per_block, std::uint64_t max_iter) {
             sec::EigsOptions o;
             o.k = k;
+            o.max_iter = max_iter;
             o.per_block = per_block;
             o.cut = per_block <= 0; // per_block: every block's lowest rows, no window across blocks
             o.vectors = vectors;
@@ -708,7 +709,7 @@ void bind_sectors(py::module_& m) {
         },
         py::arg("H"), py::arg("spec"), py::arg("k") = 1, py::arg("vectors") = false, py::arg("dense_max_dim") = -1,
         py::arg("allow_partial") = false, py::arg("device") = sec::Device::Cpu, py::arg("prune") = true,
-        py::arg("window") = 0.0, py::arg("per_block") = 0,
+        py::arg("window") = 0.0, py::arg("per_block") = 0, py::arg("max_iter") = 0,
         "Lowest k eigenvalues (with multiplicity) over every symmetry block of H; per_block > 0: the lowest "
-        "per_block levels of every block instead.");
+        "per_block levels of every block instead. max_iter > 0: each block's Krylov iteration budget.");
 }

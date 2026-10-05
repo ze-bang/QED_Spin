@@ -399,8 +399,10 @@ EigsResult eigs(const ::Operator& H, const Spec& s, const EigsOptions& o) {
             lane == ed::Lane::HostDense
                 ? (tower ? solve_block_dense_tower(mv, *tower, w, o.vectors) : solve_block_dense(mv, w, o.vectors))
                 : ed::with_backend(lane, mv, [&](auto& be) {
-                      if (tower) return solve_block_tower(be, mv, *tower, w, o.vectors, 0, o.device == Device::Gpu);
-                      return o.vectors ? solve_block_eigenpairs(be, mv, w) : solve_block_lowest(be, mv, w);
+                      if (tower)
+                          return solve_block_tower(be, mv, *tower, w, o.vectors, o.max_iter, o.device == Device::Gpu);
+                      return o.vectors ? solve_block_eigenpairs(be, mv, w, o.max_iter)
+                                       : solve_block_lowest(be, mv, w, o.max_iter);
                   });
         ev = std::move(sol.values);
         vv = std::move(sol.vectors);

@@ -128,8 +128,13 @@ def eigs(
     prune: bool = True,
     window: float = 0.0,
     per_block: Optional[int] = None,
+    max_iter: Optional[int] = None,
 ) -> EigResult:
     """The lowest ``k`` eigenvalues of ``H`` (with multiplicity), resolved by symmetry.
+
+    ``max_iter``: the iteration budget (matrix-vector products) of each block's Krylov solve;
+    ``None`` keeps the defaults (max(200 m, 2000) for m levels of a block, max(40, 400) for one).
+    Raise it when nearly degenerate low levels leave blocks uncertified (the ConvergenceError says so).
 
     ``sym`` defaults to :meth:`Symmetry.auto`. Raises :class:`qed.errors.ConvergenceError` when a
     block cannot certify levels that may fall inside the window, unless ``allow_partial`` (then
@@ -153,6 +158,8 @@ def eigs(
         raise InvalidRequest("per_block and window exclude each other: per_block returns every block's levels")
     if dense_max_dim is not None and int(dense_max_dim) < 0:
         raise InvalidRequest(f"dense_max_dim must be >= 0 or None, got {dense_max_dim}")
+    if max_iter is not None and (isinstance(max_iter, bool) or int(max_iter) < 1):
+        raise InvalidRequest(f"max_iter must be >= 1 or None, got {max_iter}")
     sym = Symmetry.auto() if sym is None else sym
     diagnostics: list = []
     spec = sym.resolve(H, diagnostics)
@@ -167,6 +174,7 @@ def eigs(
         prune=bool(prune),
         window=float(window),
         per_block=0 if per_block is None else int(per_block),
+        max_iter=0 if max_iter is None else int(max_iter),
     )
     every = window > 0 or per_block is not None
     rows = sum(int(L.multiplicity) for L in raw.levels) if every else int(k)

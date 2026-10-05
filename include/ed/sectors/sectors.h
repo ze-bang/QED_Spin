@@ -168,6 +168,10 @@ struct EigsOptions {
     /// a block that could hold one. Each block still contributes only its quota of rows, so
     /// this finds the partners of a level in OTHER blocks (e.g. a degenerate ground state).
     double window = 0.0;
+    /// Iteration budget (matrix-vector products) of each block's Krylov solve; 0 keeps the lane
+    /// defaults (several levels: max(200k, 2000); one level: the scan's max(40k, 400)). Raise it
+    /// for blocks whose low levels are nearly degenerate (they otherwise end uncertified).
+    std::uint64_t max_iter = 0;
 };
 
 /// Where the solves of a verb ran: a Krylov or a dense solve, on the device or the host, one
