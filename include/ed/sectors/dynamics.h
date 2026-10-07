@@ -34,6 +34,9 @@ namespace ed::sectors {
 struct DynamicsSpec {
     std::vector<double> omega;
     double eta = 0.05;
+    /// T > 0: accumulate four unbroadened pole moments in S: QFI (tanh), positive-frequency
+    /// QFI, tanh-squared QFI, and spectral weight. omega must have four placeholder entries.
+    bool qfi_moments = false;
     std::vector<double> temperatures;          ///< empty = T = 0
     std::size_t krylov = 200;
     std::size_t samples = 40;   ///< T > 0: random vectors per source sector

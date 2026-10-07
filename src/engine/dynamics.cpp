@@ -915,6 +915,7 @@ DynamicsCurves dynamics(const ::Operator& H, const Spec& s, const std::vector<Pr
         fo.breakdown_tol = ed::numerics::kBreakdownRel * ed::numerics::scale_or_one(H.norm_bound());
         fo.num_samples = d.samples;
         fo.broadening = d.eta;
+        fo.qfi_moments = d.qfi_moments;
         fo.random_seed = ed::thermal::block_seed(seed0, j.key);
         if (const auto p = j.tower) {
             fo.seed_transform = [p](Complex* v, std::size_t n) { p->project(v, n); };

@@ -8,6 +8,7 @@ block by block on the CPU or a GPU:
 * :func:`spectrum` -- every eigenvalue;
 * :func:`thermal` -- thermodynamics: exact, FTLM (``exact_states`` for OFTLM) or mTPQ;
 * :func:`dynamics` -- S(omega) at T = 0 or finite T;
+* :func:`qfi` -- thermal QFI directly from energy-resolved Lanczos poles;
 * :func:`measure` -- equal-time quantities of the lowest levels in one pass: one-point values
   (:func:`expect`) and pair correlations (:func:`correlations`) of operators or
   :class:`Family` index axes, with :meth:`EigResult.matrix_element` between levels.
@@ -128,6 +129,7 @@ from ._verbs import (  # noqa: E402
     Expect,
     ExpectResult,
     MeasureResult,
+    QFIResult,
     SpectrumResult,
     StructureFactor,
     Symmetry,
@@ -140,6 +142,7 @@ from ._verbs import (  # noqa: E402
     expect,
     load_eigs,
     measure,
+    qfi,
     spectrum,
     thermal,
     transitions,
@@ -164,6 +167,8 @@ __all__ = [
     "ThermalResult",
     "dynamics",
     "DynamicsResult",
+    "qfi",
+    "QFIResult",
     "measure",
     "MeasureResult",
     "Expect",

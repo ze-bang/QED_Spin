@@ -56,6 +56,8 @@ struct FtlmCrossIrrepOptions {
     double breakdown_tol = 0.0;
     std::size_t num_samples = 30;
     double broadening = 0.05;
+    /// Four unbroadened pole moments instead of a frequency grid (see DynamicsSpec).
+    bool qfi_moments = false;
     /// Base seed: sample s starts from gaussian_vector(dim_src, sample_engine(random_seed, s))
     /// (0 draws one).
     std::uint64_t random_seed = 0;
@@ -117,6 +119,8 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         if (t.dim == 0) throw std::invalid_argument("ftlm_dynamics_kernel: empty target sector");
     if (temperatures.empty() || omega.empty() || opts.num_samples == 0)
         throw std::invalid_argument("ftlm_dynamics_kernel: no temperatures, frequencies or samples");
+    if (opts.qfi_moments && omega.size() != 4)
+        throw std::invalid_argument("ftlm_dynamics_kernel: QFI needs four moment slots");
     constexpr double kInvPi = 0.3183098861837907;
     const std::size_t nW = omega.size(), nT = temperatures.size(), nt = targets.size();
     const double eta = opts.broadening;
@@ -168,7 +172,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
         bk.copy_from_host(r_host.data(), r.get(), dim_src);
 
         // ---- the source: Ritz values e_i, first components c_i, the reference ---------------
-        auto kh = lanczos(Hs, r.get(), dim_src, opts.n_observables > 0);
+        auto kh = lanczos(Hs, r.get(), dim_src, opts.n_observables > 0 || opts.qfi_moments);
         if (kh.alpha.empty() || kh.basis.size() < kh.alpha.size()) return out;
         const std::size_t mH = kh.alpha.size();
         ed::krylov::TridiagEig th = ed::krylov::tridiag_eig(kh.alpha, kh.beta, mH, /*vectors=*/true);
@@ -248,7 +252,7 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
             // scale-free: unit-vector norm
             if (nphi < 1e-14) continue; // B annihilates |r>: no spectral weight here
             bk.scale(Complex(1.0 / nphi, 0.0), phi.get(), dim_dst);
-            auto ks = lanczos(Hds[tt], phi.get(), dim_dst, false);
+            auto ks = lanczos(Hds[tt], phi.get(), dim_dst, opts.qfi_moments);
             if (ks.alpha.empty() || ks.basis.size() < ks.alpha.size()) continue;
             const std::size_t mS = ks.alpha.size();
             ed::krylov::TridiagEig ts = ed::krylov::tridiag_eig(ks.alpha, ks.beta, mS, /*vectors=*/true);
@@ -294,6 +298,17 @@ FtlmDynamicsResult ftlm_dynamics_kernel(Backend& be, HSrc&& H_src, std::size_t d
                         const Complex w_ij = c[i] * obar * (nphi * VS[j * mS]);
                         if (std::abs(w_ij) < 1e-300) continue;
                         const double E_ij = ritzS[j] - ritz[i];
+                        if (opts.qfi_moments) {
+                            for (std::size_t it = 0; it < nT; ++it) {
+                                const double x = E_ij / temperatures[it], t = std::tanh(0.5 * x);
+                                const Complex w = wt[it * mH + i] * w_ij;
+                                acc[it * nW] += 4.0 * w * t;
+                                if (x > 0.0) acc[it * nW + 1] += 4.0 * w * t * (-std::expm1(-x));
+                                acc[it * nW + 2] += 4.0 * w * t * t;
+                                acc[it * nW + 3] += w;
+                            }
+                            continue;
+                        }
                         for (std::size_t iw = 0; iw < nW; ++iw) {
                             const double d = omega[iw] - E_ij;
                             si[iw] += w_ij * ((eta * kInvPi) / (d * d + eta * eta));

@@ -10,6 +10,7 @@ CTEST="ctest|ctest --test-dir build/${V}-tests --output-on-failure -j \${SLURM_C
 # The P4.1 contents (little-group, raw space group, all, selections): the CPU dynT shards split on them.
 NEWC="(_lg- or raw_spacegroup or -all- or sel_)"
 CPU_TASKS=(
+  "grid_cpu_qfi|${GRID} -k 'qfi_grid and cpu'"
   "pytest|python -u -m pytest tests/python -q -rf -p no:cacheprovider"
   "golden_cpu|CUDA_VISIBLE_DEVICES= python -u tests/python/golden/golden.py compare --device cpu --ref ${REF}/cpu.json.gz"
   "examples|for ex in examples/[0-9]*.py; do python -u \"\${ex}\" || exit 1; done"
@@ -30,6 +31,7 @@ if [ "${V}" = cpu ]; then
   CPU_TASKS+=("${CTEST}")
 else
   GPU_TASKS=(
+    "grid_gpu_qfi|${GRID} -k 'qfi_grid and gpu'"
     "${CTEST}"
     "pytest_gpu|python -u -m pytest tests/python/test_device.py tests/python/test_sublattice.py -q -rf -p no:cacheprovider"
     "golden_gpu|ED_SYM_LG_GPU=1 python -u tests/python/golden/golden.py compare --device gpu --ref ${REF}/gpu.json.gz"

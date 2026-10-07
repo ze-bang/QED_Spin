@@ -7,8 +7,8 @@ Python API reference (``qed``)
 
 ``import qed`` provides:
 
-* five verbs over one symmetry description: :func:`eigs`, :func:`spectrum`, :func:`thermal`,
-  :func:`dynamics` and :func:`measure` (with its one-request forms :func:`expect` and
+* verbs over one symmetry description: :func:`eigs`, :func:`spectrum`, :func:`thermal`,
+  :func:`dynamics`, :func:`qfi` and :func:`measure` (with its one-request forms :func:`expect` and
   :func:`correlations`);
 * operator families, the index axes of a measurement: :class:`Family` and its momentum transform
   :class:`MomentumFamily`;
@@ -56,6 +56,11 @@ Verbs
 .. autofunction:: qed.spectrum
 
 .. autofunction:: qed.thermal
+
+.. autofunction:: qed.qfi
+
+.. autoclass:: qed.QFIResult
+   :members:
 
 .. autofunction:: qed.dynamics
 

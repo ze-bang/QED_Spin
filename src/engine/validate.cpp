@@ -99,6 +99,8 @@ void validate_thermal_spec(const ThermalSpec& t, int n_sites) {
 }
 
 void validate_dynamics_spec(const DynamicsSpec& d) {
+    if (d.qfi_moments && (d.temperatures.empty() || d.omega.size() != 4))
+        refuse("dynamics", "QFI moments require positive temperatures and four moment slots");
     if (d.omega.empty()) refuse("dynamics", "empty frequency grid");
     for (double w : d.omega)
         if (!std::isfinite(w)) refuse("dynamics", "the frequency grid has a non-finite entry " + num(w));

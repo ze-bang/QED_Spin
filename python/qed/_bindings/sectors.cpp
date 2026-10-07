@@ -609,6 +609,7 @@ void bind_sectors(py::module_& m) {
         .def(py::init<>())
         .def_readwrite("omega", &sec::DynamicsSpec::omega)
         .def_readwrite("eta", &sec::DynamicsSpec::eta)
+        .def_readwrite("qfi_moments", &sec::DynamicsSpec::qfi_moments)
         .def_readwrite("temperatures", &sec::DynamicsSpec::temperatures)
         .def_readwrite("krylov", &sec::DynamicsSpec::krylov)
         .def_readwrite("samples", &sec::DynamicsSpec::samples)

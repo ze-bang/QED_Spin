@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `qed.qfi` evaluates thermal QFI directly at the energy-resolved FTLM poles, without
+  a frequency grid or artificial broadening. Hermitian generators, full ensembles,
+  full Krylov reorthogonalisation, three equivalent QFI estimators, static weights,
+  and thermodynamics from the same source runs are supported.
+- C++: `DynamicsSpec::qfi_moments` and `FtlmCrossIrrepOptions::qfi_moments` select
+  direct pole moments; the existing spectral path is unchanged.
+
 ## 2026-10-03 — 0.7.1: exact cluster momenta, pruning below the dense crossover
 
 - **`qed.input.cluster_momenta` returns exact momenta.** Each q was built from coordinates rounded

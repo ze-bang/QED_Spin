@@ -24,6 +24,7 @@ symmetry
 operators
 observables
 dynamics
+qfi
 api/python
 api/cpp
 ```

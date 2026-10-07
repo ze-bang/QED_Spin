@@ -18,6 +18,7 @@ from .measure import (
     measure,
     transitions,
 )
+from .qfi import QFIResult, qfi
 from .spectrum import SpectrumResult, spectrum
 from .symmetry import Symmetry
 from .thermal import ThermalResult, thermal
@@ -46,4 +47,6 @@ __all__ = [
     "ThermalResult",
     "dynamics",
     "DynamicsResult",
+    "qfi",
+    "QFIResult",
 ]
